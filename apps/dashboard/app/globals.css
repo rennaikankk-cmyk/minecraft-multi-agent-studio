@@ -26,6 +26,7 @@ body {
 }
 
 button { font: inherit; }
+input { font: inherit; }
 
 .shell { width: min(1180px, calc(100% - 40px)); margin: 0 auto; padding-bottom: 42px; }
 
@@ -149,6 +150,124 @@ button { font: inherit; }
 .warningPanel ul { margin: 10px 0 0; padding-left: 20px; color: var(--muted); line-height: 1.65; }
 .loadingPanel { color: var(--muted); }
 
+.botSection { margin: 0 0 48px; scroll-margin-top: 20px; }
+.botHeading { align-items: center; }
+.botToolbar { display: flex; align-items: center; gap: 10px; }
+.sourceNotice { margin: -3px 0 16px; color: var(--muted); font-size: 12px; line-height: 1.65; }
+.sourceBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.sourceBadge i { width: 7px; height: 7px; border-radius: 50%; background: #596760; }
+.sourceBadge.ready { color: var(--green); border-color: rgba(110,231,162,.24); background: rgba(110,231,162,.07); }
+.sourceBadge.ready i { background: var(--green); box-shadow: 0 0 10px rgba(110,231,162,.75); }
+.sourceBadge.error { color: var(--red); border-color: rgba(255,133,125,.25); background: rgba(255,133,125,.06); }
+.sourceBadge.error i { background: var(--red); }
+
+.botMetricGrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 13px; }
+.botMetric {
+  min-height: 98px;
+  padding: 17px 19px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: rgba(255,255,255,.024);
+}
+.botMetric span { color: var(--muted); font-size: 11px; }
+.botMetric strong { display: block; margin-top: 10px; font-size: 28px; }
+.botMetric.online strong { color: var(--green); }
+.botMetric.stale strong { color: var(--amber); }
+.botMetric.offline strong { color: #87948e; }
+
+.botGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
+.botCard, .emptyBotPanel {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: linear-gradient(145deg, rgba(20,29,25,.96), rgba(12,17,15,.96));
+  box-shadow: 0 16px 50px rgba(0,0,0,.16);
+}
+.botCard { padding: 21px; }
+.botCard header { display: flex; align-items: start; justify-content: space-between; gap: 14px; }
+.botCard header span, .dialogEyebrow {
+  color: var(--green);
+  font: 700 10px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
+  letter-spacing: .16em;
+}
+.botCard h4 { margin: 5px 0 0; font-size: 19px; }
+.botState {
+  padding: 5px 9px;
+  border-radius: 999px;
+  color: var(--muted);
+  background: rgba(255,255,255,.05);
+  font-size: 11px;
+  font-style: normal;
+}
+.botState.online { color: var(--green); background: rgba(110,231,162,.1); }
+.botState.stale, .botState.connecting { color: var(--amber); background: rgba(244,197,107,.1); }
+.botState.error { color: var(--red); background: rgba(255,133,125,.1); }
+.botFacts { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; margin: 18px 0; }
+.botFacts div { min-width: 0; padding: 11px 0; border-top: 1px solid var(--line); }
+.botFacts div.wide { grid-column: 1 / -1; }
+.botFacts dt { color: var(--muted); font-size: 10px; }
+.botFacts dd { margin: 5px 0 0; overflow-wrap: anywhere; font-size: 13px; line-height: 1.45; }
+.botCardFooter { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.botCardFooter small { color: var(--muted); font-size: 10px; }
+.stopButton, .secondaryButton, .dangerButton {
+  border-radius: 9px;
+  cursor: pointer;
+  transition: border-color .15s ease, opacity .15s ease;
+}
+.stopButton { padding: 8px 11px; border: 1px solid rgba(255,133,125,.25); color: var(--red); background: rgba(255,133,125,.06); font-size: 11px; }
+.stopButton:disabled, .secondaryButton:disabled, .dangerButton:disabled { cursor: not-allowed; opacity: .42; }
+.emptyBotPanel { display: grid; gap: 7px; padding: 24px; }
+.emptyBotPanel span { color: var(--muted); line-height: 1.6; }
+.freshnessLine { display: flex; justify-content: space-between; gap: 16px; margin-top: 12px; color: #65736d; font: 10px ui-monospace, SFMono-Regular, Consolas, monospace; }
+.stopResult { margin-top: 13px; padding: 13px 16px; border: 1px solid var(--line); border-radius: 11px; font-size: 13px; }
+.stopResult.completed { color: var(--green); border-color: rgba(110,231,162,.25); background: rgba(110,231,162,.06); }
+.stopResult.failed { color: var(--red); border-color: rgba(255,133,125,.25); background: rgba(255,133,125,.06); }
+
+.dialogBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(3,7,5,.78);
+  backdrop-filter: blur(8px);
+}
+.confirmDialog {
+  width: min(460px, 100%);
+  padding: 25px;
+  border: 1px solid rgba(255,133,125,.25);
+  border-radius: 17px;
+  background: #101614;
+  box-shadow: 0 26px 90px rgba(0,0,0,.45);
+}
+.confirmDialog h4 { margin: 9px 0 11px; font-size: 22px; }
+.confirmDialog p { margin: 0 0 18px; color: var(--muted); line-height: 1.65; }
+.confirmDialog label { display: block; margin-bottom: 7px; font-size: 12px; }
+.confirmDialog input {
+  width: 100%;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  outline: none;
+  color: var(--text);
+  background: #090e0c;
+}
+.confirmDialog input:focus { border-color: rgba(110,231,162,.55); }
+.dialogActions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 20px; }
+.secondaryButton, .dangerButton { padding: 10px 14px; }
+.secondaryButton { border: 1px solid var(--line); color: var(--text); background: rgba(255,255,255,.035); }
+.dangerButton { border: 1px solid rgba(255,133,125,.35); color: #130504; background: var(--red); font-weight: 700; }
+
 .serviceHeading { margin-top: 44px; }
 .serviceGrid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
 .serviceGrid article { display: flex; align-items: center; gap: 11px; min-height: 76px; padding: 15px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.022); }
@@ -166,6 +285,7 @@ footer { display: flex; justify-content: space-between; gap: 20px; margin-top: 3
   .metricCard.wide { grid-column: 1 / -1; }
   .panelGrid { grid-template-columns: 1fr; }
   .serviceGrid { grid-template-columns: repeat(2, 1fr); }
+  .botGrid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 560px) {
@@ -179,5 +299,13 @@ footer { display: flex; justify-content: space-between; gap: 20px; margin-top: 3
   .hero h2 { font-size: 38px; }
   .metricGrid, .serviceGrid { grid-template-columns: 1fr; }
   .sectionHeading { align-items: start; gap: 12px; flex-direction: column; }
+  .botToolbar { width: 100%; justify-content: space-between; }
+  .botMetricGrid { grid-template-columns: 1fr 1fr; }
+  .botFacts { grid-template-columns: 1fr; }
+  .botFacts div.wide { grid-column: auto; }
+  .botCardFooter, .freshnessLine { align-items: start; flex-direction: column; }
+  .stopButton { width: 100%; }
+  .dialogActions { flex-direction: column-reverse; }
+  .secondaryButton, .dangerButton { width: 100%; }
   footer { flex-direction: column; }
 }

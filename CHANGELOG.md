@@ -2,6 +2,32 @@
 
 所有重要变更记录在此文件。项目采用语义化版本思路，当前处于早期开发阶段。
 
+## [0.6.0] - 2026-07-20
+
+### 新增
+
+- Dashboard 新增真实 Bot 状态区域和 Zustand Store，展示在线、离线、失联、血量、饥饿、位置、任务和 Minecraft 版本。
+- 新增 Next.js 服务端 Control API 代理，浏览器无需接触长期令牌。
+- Control API 新增受 `bot.stop` 权限保护的优雅停止 POST，并返回脱敏后的真实停止结果。
+- 新增确认弹窗、本地确认码 SHA-256 校验、同源动作校验和确认尝试限流。
+- 新增 Dashboard 服务端代理与 Store 单元测试，以及 5 个 Playwright 浏览器场景。
+
+### 安全
+
+- Dashboard 数据源固定为本机回环 Control API，拒绝公网 URL、重定向、无效协议和超出 100 个 Bot 的响应。
+- 后端不可用时清空在线状态，不保留旧状态或回退到模拟 Bot。
+- 未注入 StopController 时明确返回 `CONTROL_UNAVAILABLE`，不会假报停止完成。
+- Playwright 测试夹具与生产运行时隔离。
+
+### 依赖
+
+- 新增 Zustand 5.0.14（MIT）和 Playwright Test 1.61.1（Apache-2.0），来源、精确版本和完整性哈希已记录并锁定。
+
+### 当前限制
+
+- 独立 Control API 尚无跨进程 Bot 遥测与停止传输入口，因此单独启动时会显示真实空列表，停止控制明确不可用。
+- Dashboard 当前使用 3 秒服务端轮询；浏览器不会直接使用需要长期令牌的 WebSocket。
+
 ## [0.5.1] - 2026-07-20
 
 ### 新增

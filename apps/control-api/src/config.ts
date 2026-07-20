@@ -5,6 +5,7 @@ import type { ApiPrincipalConfig } from "./auth.js";
 const PERMISSIONS = new Set<ControlApiPermission>([
   "bot.read",
   "bot.position.read",
+  "bot.stop",
 ]);
 
 export type ControlApiRuntimeConfig = Readonly<{

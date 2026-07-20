@@ -2,22 +2,23 @@
 
 面向 Minecraft Java 版多智能体机器人的硬件无关控制平台。
 
-当前已完成项目基线、真实环境检测、版本化 Bot 状态协议、单 Bot 隔离联机验收、Minecraft 版本自适应、Coordinator 注册表和只读 Control API：
+当前已完成项目基线、真实环境检测、版本化 Bot 状态协议、单 Bot 隔离联机验收、Minecraft 版本自适应、Coordinator 注册表、Control API 和真实状态 Dashboard：
 
 - 自动检测当前 CPU、内存、操作系统和 GPU 探测状态。
 - 检测 Node.js、Java、Docker 和 Git 是否可用。
 - 识别标准、Docker、便携和网吧运行模式。
 - 通过真实 API 在响应式前端展示检测结果。
-- 明确标记 Dashboard Bot 数据和 Local AI Hub 尚未接入。
+- Dashboard 通过服务端代理读取 Control API，显示真实在线、离线、失联和后端不可用状态。
 - 定义并测试 Bot 状态、心跳、断线和安全停止协议 v1。
 - 实现只允许隔离测试服的单 Bot Mineflayer Runtime。
 - 已在仅绑定本机回环地址的 Minecraft 1.21.8 服务端验证连接、停止、断线和有限重连。
 - Coordinator 使用真实遥测维护在线、失联和离线状态，并拒绝重复、乱序及旧进程心跳。
 - 安全停止要求可信授权、幂等命令 ID、审计、超时和 Runtime 确认结果。
-- Control API 提供认证只读列表、详情和 WebSocket 实时状态流。
+- Control API 提供认证列表、详情、WebSocket 状态流和受权优雅停止入口。
+- 安全停止要求弹窗二次确认、本地确认码、`bot.stop` 权限和 Runtime 真实确认结果。
 - Bot 可对批准的隔离服务器自动探测 Minecraft 版本，并上报真实兼容状态。
 
-当前不会自动连接 Minecraft，不会调用模型，也不会显示模拟 Bot。
+当前不会自动连接 Minecraft，不会调用模型，也不会显示模拟 Bot。Dashboard 后端断开时会清空 Bot 列表并明确显示错误。
 
 仅在显式设置隔离测试服配置并执行 `pnpm bot:start` 时才会尝试连接 Minecraft。
 
@@ -119,10 +120,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-isolated-m
 
 - 注册表、停止命令缓存和审计记录当前保存在进程内存中，进程重启后 Bot 必须重新上报。
 - Coordinator 与 Bot Runtime 的协议边界和进程内集成测试已经完成。
-- WebSocket/API、用户认证、Dashboard 实时状态和持久化审计仍为“待接入”。
+- Control API 与 Dashboard 状态读取已接入；跨进程 Bot 遥测、停止传输、用户登录和持久化审计仍为“待接入”。
 - 当前不提供连接正式 Minecraft 服务器的入口。
 
-## 启动只读 Control API
+## 启动 Control API
 
 Control API 当前只允许监听本机。首先在 PowerShell 中生成一次随机令牌及其 SHA-256；明文令牌只交给客户端，不写进 `.env` 或代码：
 
@@ -141,9 +142,9 @@ $token
 
 ```powershell
 $principal = @(@{
-  subject = 'local-viewer'
+  subject = 'local-dashboard'
   tokenSha256 = $tokenHash
-  permissions = @('bot.read', 'bot.position.read')
+  permissions = @('bot.read', 'bot.position.read', 'bot.stop')
 })
 $env:CONTROL_API_AUTH_JSON = ConvertTo-Json -InputObject $principal -Compress
 pnpm api:start
@@ -153,9 +154,49 @@ pnpm api:start
 
 - `GET http://127.0.0.1:3210/v1/bots`
 - `GET http://127.0.0.1:3210/v1/bots/{botId}`
+- `POST http://127.0.0.1:3210/v1/bots/{botId}/stop`
 - `WS ws://127.0.0.1:3210/v1/bots/stream`
 
-HTTP 使用 `Authorization: Bearer <明文令牌>`。浏览器 WebSocket 使用子协议 `minecraft-studio.v1` 和 `auth.<明文令牌的 base64url>`。当前独立 API 进程没有跨进程遥测入口，因此未共享 Coordinator 注册表时会返回真实空列表，不会创建模拟 Bot。
+HTTP 使用 `Authorization: Bearer <明文令牌>`。浏览器 WebSocket 使用子协议 `minecraft-studio.v1` 和 `auth.<明文令牌的 base64url>`。停止 POST 固定为优雅停止并要求 `bot.stop`；未注入 StopController 时返回 `CONTROL_UNAVAILABLE`。
+
+当前独立 API 进程没有跨进程遥测与停止传输入口，因此未共享 Coordinator 注册表时会返回真实空列表，不会创建模拟 Bot，也不会伪造停止成功。
+
+## 接入 Dashboard 真实 Bot 状态
+
+保持 Control API 运行，在另一个 PowerShell 窗口把上一步生成的明文 `$token` 只写入 Dashboard 服务端环境变量：
+
+```powershell
+$env:DASHBOARD_CONTROL_API_URL='http://127.0.0.1:3210'
+$env:DASHBOARD_CONTROL_API_TOKEN='<上一步输出的明文令牌>'
+```
+
+如需显示安全停止按钮，再选择一个至少 6 位的本地确认码，并只保存它的 SHA-256：
+
+```powershell
+$confirmationCode = Read-Host '设置本地停止确认码'
+$sha = [Security.Cryptography.SHA256]::Create()
+$hashBytes = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($confirmationCode))
+$env:DASHBOARD_STOP_CONFIRMATION_SHA256 = ($hashBytes | ForEach-Object { $_.ToString('x2') }) -join ''
+```
+
+然后启动：
+
+```powershell
+pnpm dev
+```
+
+Dashboard 每 3 秒读取一次本机 Control API。长期令牌不会发送到浏览器；确认码明文只用于一次同源停止请求，不写入日志或 Store。若 Control API 未运行、令牌错误或响应无效，页面显示错误并清空在线 Bot。
+
+## Dashboard 浏览器验收
+
+先准备 Playwright 支持的浏览器。当前 Windows 本机验收复用已安装 Edge，不需要下载浏览器：
+
+```powershell
+$env:PLAYWRIGHT_BROWSER_CHANNEL='msedge'
+pnpm test:e2e
+```
+
+测试夹具仅位于 `apps/dashboard/e2e`，覆盖在线、离线、失联、后端不可用和安全停止流程，不会作为运行时数据源。
 
 ## 安全说明
 

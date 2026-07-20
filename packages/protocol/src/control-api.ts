@@ -13,6 +13,7 @@ const timestampSchema = z.string().datetime({ offset: true });
 export const controlApiPermissionSchema = z.enum([
   "bot.read",
   "bot.position.read",
+  "bot.stop",
 ]);
 
 export const publicBotSummaryV1Schema = z
@@ -94,6 +95,10 @@ export const controlApiErrorCodeSchema = z.enum([
   "ROUTE_NOT_FOUND",
   "METHOD_NOT_ALLOWED",
   "UNSUPPORTED_SCHEMA_VERSION",
+  "BOT_NOT_STOPPABLE",
+  "CONTROL_UNAVAILABLE",
+  "STOP_TIMEOUT",
+  "STOP_FAILED",
   "INTERNAL_ERROR",
 ]);
 
@@ -142,6 +147,29 @@ export const botStreamEventV1Schema = z
   })
   .strict();
 
+export const stopBotHttpRequestV1Schema = z
+  .object({
+    schemaVersion: z.literal("1.0"),
+    requestId: z.string().uuid(),
+    confirmation: z.literal("confirmed"),
+  })
+  .strict();
+
+export const stopBotHttpResponseV1Schema = z
+  .object({
+    schemaVersion: z.literal("1.0"),
+    requestId: z.string().uuid(),
+    data: z
+      .object({
+        botId: identifierSchema,
+        commandId: z.string().uuid(),
+        outcome: z.enum(["completed", "rejected", "failed"]),
+        errorCode: z.string().trim().min(1).max(100).nullable(),
+      })
+      .strict(),
+  })
+  .strict();
+
 export type ControlApiPermission = z.infer<typeof controlApiPermissionSchema>;
 export type PublicBotSummaryV1 = z.infer<typeof publicBotSummaryV1Schema>;
 export type PublicBotDetailV1 = z.infer<typeof publicBotDetailV1Schema>;
@@ -151,3 +179,5 @@ export type ControlApiErrorCode = z.infer<typeof controlApiErrorCodeSchema>;
 export type ControlApiErrorV1 = z.infer<typeof controlApiErrorV1Schema>;
 export type BotStreamSnapshotV1 = z.infer<typeof botStreamSnapshotV1Schema>;
 export type BotStreamEventV1 = z.infer<typeof botStreamEventV1Schema>;
+export type StopBotHttpRequestV1 = z.infer<typeof stopBotHttpRequestV1Schema>;
+export type StopBotHttpResponseV1 = z.infer<typeof stopBotHttpResponseV1Schema>;

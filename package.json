@@ -18,6 +18,7 @@
     "smoke": "node scripts/smoke-test.mjs",
     "typecheck": "pnpm --filter @minecraft-studio/protocol typecheck && pnpm --filter @minecraft-studio/environment typecheck && pnpm --filter @minecraft-studio/coordinator typecheck && pnpm --filter @minecraft-studio/control-api typecheck && pnpm --filter @minecraft-studio/bot-runtime typecheck && pnpm --filter @minecraft-studio/dashboard typecheck",
     "test": "pnpm build:control-plane && pnpm --filter @minecraft-studio/protocol test && pnpm --filter @minecraft-studio/environment test && pnpm --filter @minecraft-studio/coordinator test && pnpm --filter @minecraft-studio/control-api test && pnpm --filter @minecraft-studio/bot-runtime test && pnpm --filter @minecraft-studio/dashboard test",
+    "test:e2e": "pnpm --filter @minecraft-studio/dashboard test:e2e",
     "check": "pnpm typecheck && pnpm test && pnpm build"
   },
   "devDependencies": {

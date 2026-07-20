@@ -6,6 +6,11 @@ import {
   botStreamEventV1Schema,
   botStreamSnapshotV1Schema,
   controlApiErrorV1Schema,
+  dashboardApiErrorV1Schema,
+  dashboardBotListResponseV1Schema,
+  dashboardStopRequestV1Schema,
+  stopBotHttpRequestV1Schema,
+  stopBotHttpResponseV1Schema,
 } from "../src/index.js";
 
 const UUID = "11111111-1111-4111-8111-111111111111";
@@ -102,5 +107,66 @@ describe("Control API v1 protocol", () => {
         error: { code: "RAW_SERVER_ERROR", message: "secret" },
       }).success,
     ).toBe(false);
+  });
+
+  it("validates confirmed stop requests and redacted stop results", () => {
+    expect(
+      stopBotHttpRequestV1Schema.parse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        confirmation: "confirmed",
+      }).confirmation,
+    ).toBe("confirmed");
+    expect(
+      stopBotHttpResponseV1Schema.parse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: {
+          botId: "worker-01",
+          commandId: UUID,
+          outcome: "completed",
+          errorCode: null,
+        },
+      }).data.outcome,
+    ).toBe("completed");
+    expect(
+      stopBotHttpRequestV1Schema.safeParse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        confirmation: "yes",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("validates the Dashboard real-source boundary", () => {
+    expect(
+      dashboardBotListResponseV1Schema.parse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: {
+          source: "control-api",
+          generatedAt: NOW,
+          bots: [detail],
+          capabilities: { stopConfirmationConfigured: true },
+        },
+      }).data.source,
+    ).toBe("control-api");
+    expect(
+      dashboardStopRequestV1Schema.safeParse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        confirmationCode: "short",
+      }).success,
+    ).toBe(false);
+    expect(
+      dashboardApiErrorV1Schema.parse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        error: {
+          code: "CONTROL_API_UNAVAILABLE",
+          message: "Control API is unavailable.",
+        },
+      }).error.code,
+    ).toBe("CONTROL_API_UNAVAILABLE");
   });
 });

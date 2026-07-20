@@ -17,6 +17,8 @@ export {
   controlApiPermissionSchema,
   publicBotDetailV1Schema,
   publicBotSummaryV1Schema,
+  stopBotHttpRequestV1Schema,
+  stopBotHttpResponseV1Schema,
   type BotDetailResponseV1,
   type BotListResponseV1,
   type BotStreamEventV1,
@@ -26,7 +28,22 @@ export {
   type ControlApiPermission,
   type PublicBotDetailV1,
   type PublicBotSummaryV1,
+  type StopBotHttpRequestV1,
+  type StopBotHttpResponseV1,
 } from "./control-api.js";
+
+export {
+  dashboardApiErrorCodeSchema,
+  dashboardApiErrorV1Schema,
+  dashboardBotListResponseV1Schema,
+  dashboardStopRequestV1Schema,
+  dashboardStopResponseV1Schema,
+  type DashboardApiErrorCode,
+  type DashboardApiErrorV1,
+  type DashboardBotListResponseV1,
+  type DashboardStopRequestV1,
+  type DashboardStopResponseV1,
+} from "./dashboard-api.js";
 
 export {
   ProtocolAuthorizationError,

@@ -3,6 +3,8 @@
 import type { EnvironmentSnapshot } from "@minecraft-studio/protocol";
 import { useCallback, useEffect, useState } from "react";
 
+import { BotDashboard } from "@/components/bot-dashboard";
+
 type EnvironmentResponse = {
   requestId: string;
   environment: EnvironmentSnapshot;
@@ -105,6 +107,8 @@ export default function HomePage() {
         </div>
       </section>
 
+      <BotDashboard />
+
       {error ? (
         <section className="errorPanel" role="alert">
           <strong>环境状态不可用</strong>
@@ -205,9 +209,9 @@ export default function HomePage() {
       </section>
       <section className="serviceGrid">
         <article><i className="ready" /><div><strong>环境检测</strong><small>本模块已接入</small></div></article>
-        <article><i /><div><strong>Bot Runtime</strong><small>待接入</small></div></article>
-        <article><i /><div><strong>Coordinator</strong><small>待接入</small></div></article>
-        <article><i /><div><strong>Minecraft 测试服</strong><small>未连接</small></div></article>
+        <article><i className="ready" /><div><strong>Control API</strong><small>状态以实时请求结果为准</small></div></article>
+        <article><i /><div><strong>Bot Runtime</strong><small>无遥测时不生成模拟 Bot</small></div></article>
+        <article><i /><div><strong>Coordinator</strong><small>跨进程遥测通道待接入</small></div></article>
         <article><i /><div><strong>Local AI Hub</strong><small>待通过 AI Router 接入</small></div></article>
       </section>
 

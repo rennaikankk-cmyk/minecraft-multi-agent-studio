@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
-import { BotRegistry } from "@minecraft-studio/coordinator";
-import type { BotStatusV1 } from "@minecraft-studio/protocol";
+import { BotRegistry, type StopController } from "@minecraft-studio/coordinator";
+import type { BotStatusV1, BotStopResultV1 } from "@minecraft-studio/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 
@@ -14,6 +14,7 @@ import {
 const READER_TOKEN = "control-api-reader-token-000000000001";
 const POSITION_TOKEN = "control-api-position-token-000000001";
 const DENIED_TOKEN = "control-api-position-only-token-00000001";
+const OPERATOR_TOKEN = "control-api-stop-operator-token-00000001";
 
 const principals: ApiPrincipalConfig[] = [
   {
@@ -30,6 +31,11 @@ const principals: ApiPrincipalConfig[] = [
     subject: "position-only-01",
     tokenSha256: hash(DENIED_TOKEN),
     permissions: ["bot.position.read"],
+  },
+  {
+    subject: "operator-01",
+    tokenSha256: hash(OPERATOR_TOKEN),
+    permissions: ["bot.read", "bot.position.read", "bot.stop"],
   },
 ];
 
@@ -180,11 +186,55 @@ describe("Control API HTTP and WebSocket integration", () => {
     webSocket.send(JSON.stringify({ command: "stop" }));
     expect(await closed).toBe(1008);
   });
+
+  it("requires stop permission and returns the real confirmed stop result", async () => {
+    const requestStop = vi.fn(async (request: Parameters<StopController["requestStop"]>[0]) =>
+      stopResult(request),
+    );
+    const { registry, baseUrl } = await startServer({
+      stopController: { requestStop },
+    });
+    registry.ingest(statusMessage(1), new Date());
+
+    const denied = await stopFetch(baseUrl, READER_TOKEN, testUuid(2_001));
+    expect(denied.status).toBe(403);
+    expect((await denied.json()).error.code).toBe("PERMISSION_DENIED");
+
+    const commandId = testUuid(2_002);
+    const accepted = await stopFetch(baseUrl, OPERATOR_TOKEN, commandId);
+    expect(accepted.status).toBe(200);
+    expect((await accepted.json()).data).toEqual({
+      botId: "worker-01",
+      commandId,
+      outcome: "completed",
+      errorCode: null,
+    });
+    expect(requestStop).toHaveBeenCalledWith(
+      expect.objectContaining({
+        commandId,
+        traceId: commandId,
+        botId: "worker-01",
+        mode: "graceful",
+        authorization: expect.objectContaining({ actorId: "operator-01" }),
+      }),
+    );
+    const authorization = requestStop.mock.calls[0]?.[0].authorization;
+    expect(authorization?.permissions.has("bot.stop")).toBe(true);
+  });
+
+  it("reports unavailable control instead of fabricating a stop", async () => {
+    const { registry, baseUrl } = await startServer();
+    registry.ingest(statusMessage(1), new Date());
+    const response = await stopFetch(baseUrl, OPERATOR_TOKEN, testUuid(2_003));
+    expect(response.status).toBe(503);
+    expect((await response.json()).error.code).toBe("CONTROL_UNAVAILABLE");
+  });
 });
 
 async function startServer(
   overrides: Partial<{
     requestLimitPerMinute: number;
+    stopController: Pick<StopController, "requestStop">;
   }> = {},
 ): Promise<{
   registry: BotRegistry;
@@ -214,6 +264,21 @@ async function startServer(
 
 function authenticatedFetch(url: string, token: string): Promise<Response> {
   return fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+}
+
+function stopFetch(baseUrl: string, token: string, requestId: string): Promise<Response> {
+  return fetch(`${baseUrl}/v1/bots/worker-01/stop`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      schemaVersion: "1.0",
+      requestId,
+      confirmation: "confirmed",
+    }),
+  });
 }
 
 function connectWebSocket(
@@ -313,6 +378,27 @@ function heartbeatMessage(sequence: number) {
       uptimeMs: sequence * 1_000,
       lastStatusSequence: 1,
       currentTaskId: null,
+    },
+  };
+}
+
+function stopResult(
+  request: Parameters<StopController["requestStop"]>[0],
+): BotStopResultV1 {
+  const now = new Date().toISOString();
+  return {
+    schemaVersion: "1.0",
+    messageId: testUuid(3_001),
+    traceId: request.traceId,
+    timestamp: now,
+    source: { service: "bot-runtime", instanceId: "runtime-api-test" },
+    botId: request.botId,
+    type: "bot.stop.result.v1",
+    payload: {
+      commandId: request.commandId,
+      runtimeInstanceId: "runtime-api-test",
+      outcome: "completed",
+      completedAt: now,
     },
   };
 }

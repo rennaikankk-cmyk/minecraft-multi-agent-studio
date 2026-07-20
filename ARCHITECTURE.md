@@ -35,14 +35,14 @@ AI Router
 apps/
 ├─ bot-runtime/            # 单 Bot Mineflayer 运行时
 ├─ coordinator/            # Bot 注册表与安全停止控制平面
-├─ control-api/            # 认证只读 HTTP/WebSocket API
-└─ dashboard/              # Next.js 前端与环境检测 API
+├─ control-api/            # 认证 HTTP/WebSocket 状态 API 与受权停止入口
+└─ dashboard/              # Next.js 前端、服务端代理与真实状态 Store
 packages/
 ├─ protocol/               # 版本化 Zod Schema
 └─ environment/            # 真实硬件、软件和模式检测
 ```
 
-尚未创建 AI Router、数据库和队列应用。Bot Runtime 已完成 Minecraft 1.21.8 隔离联机验收；Coordinator 已实现进程内 Bot 注册表和安全停止控制边界；Control API 已提供认证只读 HTTP/WebSocket 接口。Dashboard 尚未读取 Control API，因此 Bot 页面仍必须显示“待接入”。
+尚未创建 AI Router、数据库和队列应用。Bot Runtime 已完成 Minecraft 1.21.8 隔离联机验收；Coordinator 已实现进程内 Bot 注册表和安全停止控制边界；Control API 已提供认证 HTTP/WebSocket 状态接口与受 `bot.stop` 保护的停止入口。Dashboard 通过服务端代理读取 Control API，浏览器不会收到长期令牌。
 
 ## 4. 环境检测数据流
 
@@ -168,6 +168,7 @@ permission + input/version validation + rate limits
         ↓
 GET /v1/bots
 GET /v1/bots/:botId
+POST /v1/bots/:botId/stop
 WS  /v1/bots/stream
         ↓
 public projection (no ServerProfile/runtime internals)
@@ -177,4 +178,26 @@ snapshot at sequence N → events N+1, N+2, ...
 
 Control API 默认且当前只允许绑定 `127.0.0.1` 或 `::1`。服务端配置只保存令牌 SHA-256，不保存明文令牌；HTTP 使用 Bearer 头，浏览器 WebSocket 可通过 `minecraft-studio.v1` 与 `auth.<base64url-token>` 子协议认证。`bot.read` 允许读取基本状态，坐标还需要单独的 `bot.position.read` 权限。
 
-列表和详情不会返回 `ServerProfile`、服务器地址、运行实例内部标识或原始错误。WebSocket 连接建立后先发送当前完整快照，再发送严格递增的 `upsert` 事件；客户端发送任何业务消息都会以只读策略关闭。当前独立 Control API 进程没有跨进程 Bot 遥测入口，因此没有共享 Coordinator 实例时会返回真实空列表，不会生成模拟 Bot。
+列表和详情不会返回 `ServerProfile`、服务器地址、运行实例内部标识或原始错误。WebSocket 连接建立后先发送当前完整快照，再发送严格递增的 `upsert` 事件；客户端发送任何业务消息都会以只读策略关闭。
+
+HTTP 停止入口只接受固定的优雅停止请求、UUID 幂等命令 ID 和具有 `bot.stop` 权限的服务端主体。Control API 将认证主体绑定为可信操作者，并通过注入的 `StopController` 等待 Runtime 确认。未注入控制器时返回 `CONTROL_UNAVAILABLE`，不伪造成功。
+
+当前独立 Control API 进程没有跨进程 Bot 遥测和停止传输入口，因此没有共享 Coordinator 实例时会返回真实空列表，停止请求也会明确不可用。
+
+## 10. Dashboard 真实数据链路
+
+```text
+Browser
+  ↓ same-origin GET/POST, no long-lived token
+Next.js Dashboard server routes
+  ↓ loopback-only URL + server-only Bearer token
+Control API
+  ↓ strict v1 response validation
+Zustand real-state store
+  ↓
+online / offline / stale / unavailable UI
+```
+
+Dashboard 每 3 秒通过服务端代理读取 Bot 列表与详情。代理只允许 HTTP 回环地址，设置 4 秒超时，最多读取 100 个 Bot，并验证所有版本化响应。请求失败时 Store 清空 Bot 和采集时间，页面显示后端不可用，不保留“在线”假象。
+
+安全停止需要弹窗二次确认和本地确认码。服务端只保存确认码 SHA-256，并使用时序安全比较；POST 还要求同源、专用动作头和进程内频率限制。Playwright 的 Bot 数据只位于 `apps/dashboard/e2e` 测试夹具中，不会进入生产数据源。

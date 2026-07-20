@@ -10,6 +10,7 @@ const AUTH_PROTOCOL_PREFIX = "auth.";
 const ALLOWED_PERMISSIONS = new Set<ControlApiPermission>([
   "bot.read",
   "bot.position.read",
+  "bot.stop",
 ]);
 
 export type ApiPrincipalConfig = Readonly<{

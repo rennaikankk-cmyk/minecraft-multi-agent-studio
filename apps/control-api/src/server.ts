@@ -8,13 +8,19 @@ import {
 import type { AddressInfo } from "node:net";
 import type { Duplex } from "node:stream";
 
-import type { BotRegistry } from "@minecraft-studio/coordinator";
+import {
+  CoordinatorStopError,
+  type BotRegistry,
+  type StopController,
+} from "@minecraft-studio/coordinator";
 import {
   botDetailResponseV1Schema,
   botListResponseV1Schema,
   botStreamEventV1Schema,
   botStreamSnapshotV1Schema,
   controlApiErrorV1Schema,
+  stopBotHttpRequestV1Schema,
+  stopBotHttpResponseV1Schema,
   type ControlApiErrorCode,
 } from "@minecraft-studio/protocol";
 import { WebSocket, WebSocketServer } from "ws";
@@ -48,6 +54,7 @@ export type ControlApiServerOptions = Readonly<{
   host: "127.0.0.1" | "::1";
   port: number;
   registry: BotRegistry;
+  stopController?: Pick<StopController, "requestStop">;
   principals: readonly ApiPrincipalConfig[];
   logger: ControlApiLogger;
   requestLimitPerMinute?: number;
@@ -135,7 +142,7 @@ export class ControlApiServer {
         headersTimeout: 10_000,
         keepAliveTimeout: 5_000,
       },
-      (request, response) => this.handleHttpSafely(request, response),
+      (request, response) => void this.handleHttpSafely(request, response),
     );
     this.webSocketServer = new WebSocketServer({
       noServer: true,
@@ -211,12 +218,12 @@ export class ControlApiServer {
     return { host: this.options.host, port: (address as AddressInfo).port };
   }
 
-  private handleHttpSafely(
+  private async handleHttpSafely(
     request: IncomingMessage,
     response: ServerResponse,
-  ): void {
+  ): Promise<void> {
     try {
-      this.handleHttp(request, response);
+      await this.handleHttp(request, response);
     } catch {
       this.options.logger.error("control_api_request_failed", {
         code: "INTERNAL_ERROR",
@@ -257,7 +264,10 @@ export class ControlApiServer {
     ]);
   }
 
-  private handleHttp(request: IncomingMessage, response: ServerResponse): void {
+  private async handleHttp(
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
     const requestId = this.randomId();
     const now = validNow(this.now());
     const remoteKey = request.socket.remoteAddress ?? "unknown";
@@ -283,7 +293,7 @@ export class ControlApiServer {
       this.writeError(response, 400, requestId, "INVALID_REQUEST", "Request URL is invalid.");
       return;
     }
-    if (url.searchParams.size !== 0 || hasRequestBody(request)) {
+    if (url.searchParams.size !== 0) {
       this.writeError(response, 400, requestId, "INVALID_REQUEST", "Unexpected request input.");
       return;
     }
@@ -300,23 +310,26 @@ export class ControlApiServer {
       });
       return;
     }
-    if (!principal.permissions.has("bot.read")) {
-      this.writeError(response, 403, requestId, "PERMISSION_DENIED", "Bot read permission is required.");
-      return;
-    }
-    if (request.method !== "GET") {
-      this.writeError(
-        response,
-        405,
-        requestId,
-        "METHOD_NOT_ALLOWED",
-        "This endpoint is read-only.",
-        { Allow: "GET" },
-      );
-      return;
-    }
-
     if (url.pathname === "/v1/bots") {
+      if (request.method !== "GET") {
+        this.writeError(
+          response,
+          405,
+          requestId,
+          "METHOD_NOT_ALLOWED",
+          "This endpoint only accepts GET.",
+          { Allow: "GET" },
+        );
+        return;
+      }
+      if (hasRequestBody(request)) {
+        this.writeError(response, 400, requestId, "INVALID_REQUEST", "Unexpected request input.");
+        return;
+      }
+      if (!principal.permissions.has("bot.read")) {
+        this.writeError(response, 403, requestId, "PERMISSION_DENIED", "Bot read permission is required.");
+        return;
+      }
       const body = botListResponseV1Schema.parse({
         schemaVersion: "1.0",
         requestId,
@@ -329,9 +342,54 @@ export class ControlApiServer {
       return;
     }
 
+    const stopMatch = /^\/v1\/bots\/([^/]+)\/stop$/u.exec(url.pathname);
+    if (stopMatch) {
+      const botId = decodePathSegment(stopMatch[1]);
+      if (!botId || !BOT_ID_PATTERN.test(botId)) {
+        this.writeError(response, 400, requestId, "INVALID_REQUEST", "Bot identifier is invalid.");
+        return;
+      }
+      if (request.method !== "POST") {
+        this.writeError(
+          response,
+          405,
+          requestId,
+          "METHOD_NOT_ALLOWED",
+          "This endpoint only accepts POST.",
+          { Allow: "POST" },
+        );
+        return;
+      }
+      if (!principal.permissions.has("bot.stop")) {
+        this.writeError(response, 403, requestId, "PERMISSION_DENIED", "Bot stop permission is required.");
+        return;
+      }
+      await this.handleStopRequest(request, response, requestId, now, principal, botId);
+      return;
+    }
+
     const detailMatch = /^\/v1\/bots\/([^/]+)$/u.exec(url.pathname);
     if (!detailMatch) {
       this.writeError(response, 404, requestId, "ROUTE_NOT_FOUND", "API route was not found.");
+      return;
+    }
+    if (request.method !== "GET") {
+      this.writeError(
+        response,
+        405,
+        requestId,
+        "METHOD_NOT_ALLOWED",
+        "This endpoint only accepts GET.",
+        { Allow: "GET" },
+      );
+      return;
+    }
+    if (hasRequestBody(request)) {
+      this.writeError(response, 400, requestId, "INVALID_REQUEST", "Unexpected request input.");
+      return;
+    }
+    if (!principal.permissions.has("bot.read")) {
+      this.writeError(response, 403, requestId, "PERMISSION_DENIED", "Bot read permission is required.");
       return;
     }
     const botId = decodePathSegment(detailMatch[1]);
@@ -353,6 +411,122 @@ export class ControlApiServer {
       },
     });
     this.writeJson(response, 200, body);
+  }
+
+  private async handleStopRequest(
+    request: IncomingMessage,
+    response: ServerResponse,
+    responseRequestId: string,
+    now: Date,
+    principal: ApiPrincipal,
+    botId: string,
+  ): Promise<void> {
+    if (!this.options.stopController) {
+      this.writeError(
+        response,
+        503,
+        responseRequestId,
+        "CONTROL_UNAVAILABLE",
+        "Bot stop control is not connected in this process.",
+      );
+      return;
+    }
+    const contentType = request.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
+    if (contentType !== "application/json") {
+      this.writeError(
+        response,
+        400,
+        responseRequestId,
+        "INVALID_REQUEST",
+        "A JSON request body is required.",
+      );
+      return;
+    }
+
+    let input: unknown;
+    try {
+      input = await readLimitedJson(request, 4_096);
+    } catch {
+      this.writeError(
+        response,
+        400,
+        responseRequestId,
+        "INVALID_REQUEST",
+        "The stop request body is invalid.",
+      );
+      return;
+    }
+    const parsed = stopBotHttpRequestV1Schema.safeParse(input);
+    if (!parsed.success) {
+      this.writeError(
+        response,
+        400,
+        responseRequestId,
+        "INVALID_REQUEST",
+        "The stop request body is invalid.",
+      );
+      return;
+    }
+
+    try {
+      const result = await this.options.stopController.requestStop({
+        commandId: parsed.data.requestId,
+        traceId: parsed.data.requestId,
+        botId,
+        mode: "graceful",
+        reason: "dashboard_operator_confirmed",
+        gracePeriodMs: 5_000,
+        timeoutMs: 15_000,
+        authorization: {
+          decisionId: parsed.data.requestId,
+          actorId: principal.subject,
+          permissions: new Set(["bot.stop"]),
+          issuedAt: now,
+          expiresAt: new Date(now.getTime() + 30_000),
+        },
+      });
+      const body = stopBotHttpResponseV1Schema.parse({
+        schemaVersion: "1.0",
+        requestId: responseRequestId,
+        data: {
+          botId,
+          commandId: result.payload.commandId,
+          outcome: result.payload.outcome,
+          errorCode: result.payload.errorCode ?? null,
+        },
+      });
+      this.writeJson(response, 200, body);
+    } catch (cause) {
+      this.writeStopError(response, responseRequestId, cause, principal.subject, botId);
+    }
+  }
+
+  private writeStopError(
+    response: ServerResponse,
+    requestId: string,
+    cause: unknown,
+    subject: string,
+    botId: string,
+  ): void {
+    const code = cause instanceof CoordinatorStopError ? cause.code : "STOP_TRANSPORT_FAILED";
+    this.options.logger.warn("control_api_stop_failed", { subject, botId, code });
+    if (code === "BOT_NOT_FOUND") {
+      this.writeError(response, 404, requestId, "BOT_NOT_FOUND", "Bot was not found.");
+      return;
+    }
+    if (code === "BOT_NOT_STOPPABLE") {
+      this.writeError(response, 409, requestId, "BOT_NOT_STOPPABLE", "Bot is offline or stale.");
+      return;
+    }
+    if (code === "AUTHORIZATION_REJECTED") {
+      this.writeError(response, 403, requestId, "PERMISSION_DENIED", "Stop authorization was rejected.");
+      return;
+    }
+    if (code === "STOP_TIMEOUT") {
+      this.writeError(response, 504, requestId, "STOP_TIMEOUT", "Bot did not confirm the stop in time.");
+      return;
+    }
+    this.writeError(response, 502, requestId, "STOP_FAILED", "Bot stop could not be confirmed.");
   }
 
   private handleUpgrade(
@@ -598,6 +772,22 @@ function hasRequestBody(request: IncomingMessage): boolean {
   const contentLength = request.headers["content-length"];
   return request.headers["transfer-encoding"] !== undefined ||
     (contentLength !== undefined && contentLength !== "0");
+}
+
+async function readLimitedJson(
+  request: IncomingMessage,
+  maximumBytes: number,
+): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.byteLength;
+    if (size > maximumBytes) throw new Error("request_body_too_large");
+    chunks.push(buffer);
+  }
+  if (size === 0) throw new Error("request_body_required");
+  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
 }
 
 function validNow(value: Date): Date {
