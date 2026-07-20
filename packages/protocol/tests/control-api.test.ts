@@ -123,6 +123,7 @@ describe("Control API v1 protocol", () => {
         requestId: UUID,
         data: {
           botId: "worker-01",
+          traceId: UUID,
           commandId: UUID,
           outcome: "completed",
           errorCode: null,

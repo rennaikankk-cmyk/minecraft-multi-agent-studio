@@ -228,7 +228,8 @@ input { font: inherit; }
 .emptyBotPanel { display: grid; gap: 7px; padding: 24px; }
 .emptyBotPanel span { color: var(--muted); line-height: 1.6; }
 .freshnessLine { display: flex; justify-content: space-between; gap: 16px; margin-top: 12px; color: #65736d; font: 10px ui-monospace, SFMono-Regular, Consolas, monospace; }
-.stopResult { margin-top: 13px; padding: 13px 16px; border: 1px solid var(--line); border-radius: 11px; font-size: 13px; }
+.stopResult { display: grid; gap: 6px; margin-top: 13px; padding: 13px 16px; border: 1px solid var(--line); border-radius: 11px; font-size: 13px; }
+.stopResult code { overflow-wrap: anywhere; color: var(--muted); font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .stopResult.completed { color: var(--green); border-color: rgba(110,231,162,.25); background: rgba(110,231,162,.06); }
 .stopResult.failed { color: var(--red); border-color: rgba(255,133,125,.25); background: rgba(255,133,125,.06); }
 

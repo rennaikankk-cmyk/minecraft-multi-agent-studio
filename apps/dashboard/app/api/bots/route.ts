@@ -12,6 +12,7 @@ import {
   fetchDashboardBots,
   loadDashboardControlConfig,
 } from "@/lib/control-api-client";
+import { dashboardLogger } from "@/lib/logger";
 
 export const dynamic = "force-dynamic";
 
@@ -35,8 +36,12 @@ export async function GET() {
     return NextResponse.json(body, { headers: { "Cache-Control": "no-store" } });
   } catch (cause) {
     const error = normalizeError(cause);
-    console.error("Dashboard Control API read failed", {
-      requestId,
+    dashboardLogger.error("dashboard_bot_read_failed", {
+      traceId: requestId,
+      taskId: null,
+      botId: null,
+      skillId: null,
+      modelName: null,
       code: error.code,
     });
     return NextResponse.json(

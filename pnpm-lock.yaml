@@ -24,6 +24,9 @@ importers:
 
   apps/bot-runtime:
     dependencies:
+      '@minecraft-studio/observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
       '@minecraft-studio/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -39,6 +42,9 @@ importers:
       '@minecraft-studio/coordinator':
         specifier: workspace:*
         version: link:../coordinator
+      '@minecraft-studio/observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
       '@minecraft-studio/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -52,6 +58,9 @@ importers:
 
   apps/coordinator:
     dependencies:
+      '@minecraft-studio/observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
       '@minecraft-studio/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -61,6 +70,9 @@ importers:
       '@minecraft-studio/environment':
         specifier: workspace:*
         version: link:../../packages/environment
+      '@minecraft-studio/observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
       '@minecraft-studio/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -98,6 +110,18 @@ importers:
       '@minecraft-studio/protocol':
         specifier: workspace:*
         version: link:../protocol
+
+  packages/observability:
+    devDependencies:
+      '@types/node':
+        specifier: 26.1.1
+        version: 26.1.1
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+      vitest:
+        specifier: 4.1.10
+        version: 4.1.10(@types/node@26.1.1)(vite@8.1.5(@types/node@26.1.1))
 
   packages/protocol:
     dependencies:

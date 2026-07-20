@@ -15,6 +15,7 @@ import {
   requestDashboardBotStop,
   verifyStopConfirmation,
 } from "@/lib/control-api-client";
+import { dashboardLogger } from "@/lib/logger";
 
 const STOP_WINDOW_MS = 60_000;
 const STOP_ATTEMPT_LIMIT = 10;
@@ -58,6 +59,13 @@ export async function POST(
     if (!verifyStopConfirmation(config, input.data.confirmationCode)) {
       return errorResponse(responseRequestId, 403, "CONFIRMATION_REQUIRED", "停止确认码不正确。");
     }
+    dashboardLogger.info("dashboard_stop_requested", {
+      traceId: input.data.requestId,
+      taskId: null,
+      botId,
+      skillId: null,
+      modelName: null,
+    });
     const result = await requestDashboardBotStop(
       config,
       botId,
@@ -68,14 +76,26 @@ export async function POST(
       requestId: responseRequestId,
       data: result.data,
     });
+    dashboardLogger.info("dashboard_stop_result", {
+      traceId: result.data.traceId,
+      taskId: null,
+      botId,
+      skillId: null,
+      modelName: null,
+      commandId: result.data.commandId,
+      outcome: result.data.outcome,
+    });
     return NextResponse.json(body, { headers: { "Cache-Control": "no-store" } });
   } catch (cause) {
     const error = cause instanceof DashboardControlError
       ? { code: cause.code, message: cause.message }
       : { code: "STOP_FAILED" as const, message: "停止结果无法确认。" };
-    console.warn("Dashboard Bot stop failed", {
-      requestId: responseRequestId,
+    dashboardLogger.warn("dashboard_stop_failed", {
+      traceId: input.data.requestId,
+      taskId: null,
       botId,
+      skillId: null,
+      modelName: null,
       code: error.code,
     });
     return errorResponse(

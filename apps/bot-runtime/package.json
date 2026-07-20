@@ -12,6 +12,7 @@
     "test:integration": "vitest run tests/real-isolated-server.integration.test.ts"
   },
   "dependencies": {
+    "@minecraft-studio/observability": "workspace:*",
     "@minecraft-studio/protocol": "workspace:*",
     "mineflayer": "4.37.1",
     "zod": "4.4.3"

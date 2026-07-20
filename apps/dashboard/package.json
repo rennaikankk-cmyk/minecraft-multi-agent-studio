@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@minecraft-studio/environment": "workspace:*",
+    "@minecraft-studio/observability": "workspace:*",
     "@minecraft-studio/protocol": "workspace:*",
     "next": "16.2.10",
     "react": "19.2.7",

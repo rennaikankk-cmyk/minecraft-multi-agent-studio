@@ -3,6 +3,11 @@ import type {
   ControlPermission,
   StopBotCommandV1,
 } from "@minecraft-studio/protocol";
+import {
+  createStructuredLogger,
+  type AppLogger,
+  type StructuredLogRecord,
+} from "@minecraft-studio/observability";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -90,6 +95,7 @@ function controller(
   registry: BotRegistry,
   transport: StopCommandTransport,
   auditSink = new InMemoryStopAuditSink(),
+  logger?: AppLogger,
 ) {
   return {
     auditSink,
@@ -98,6 +104,7 @@ function controller(
       registry,
       transport,
       auditSink,
+      logger,
       now: () => NOW,
       randomId: () => MESSAGE_ID,
     }),
@@ -111,10 +118,22 @@ describe("StopController", () => {
 
   it("dispatches one authorized command, records audit, and confirms offline", async () => {
     const registry = onlineRegistry();
+    const records: StructuredLogRecord[] = [];
+    const operationLogger = createStructuredLogger({
+      service: "coordinator",
+      instanceId: "coordinator-01",
+      now: () => NOW,
+      sink: (record) => records.push(record),
+    });
     const sendStopCommand = vi.fn(
       async (command: StopBotCommandV1) => confirmation(command),
     );
-    const { value, auditSink } = controller(registry, { sendStopCommand });
+    const { value, auditSink } = controller(
+      registry,
+      { sendStopCommand },
+      new InMemoryStopAuditSink(),
+      operationLogger,
+    );
 
     const first = value.requestStop(request());
     const second = value.requestStop(request());
@@ -128,6 +147,22 @@ describe("StopController", () => {
     expect(auditSink.entries().map(({ status }) => status)).toEqual([
       "started",
       "completed",
+    ]);
+    expect(records.map(({ status }) => status)).toEqual(["started", "completed"]);
+    expect(records).toEqual([
+      expect.objectContaining({
+        event: "coordinator_stop_audit",
+        traceId: "trace-stop",
+        botId: "worker-01",
+        taskId: null,
+        skillId: null,
+        modelName: null,
+      }),
+      expect.objectContaining({
+        event: "coordinator_stop_audit",
+        traceId: "trace-stop",
+        status: "completed",
+      }),
     ]);
   });
 

@@ -468,6 +468,13 @@ export class ControlApiServer {
       return;
     }
 
+    this.options.logger.info("control_api_stop_requested", {
+      traceId: parsed.data.requestId,
+      taskId: null,
+      botId,
+      skillId: null,
+      modelName: null,
+    });
     try {
       const result = await this.options.stopController.requestStop({
         commandId: parsed.data.requestId,
@@ -490,26 +497,49 @@ export class ControlApiServer {
         requestId: responseRequestId,
         data: {
           botId,
+          traceId: result.traceId,
           commandId: result.payload.commandId,
           outcome: result.payload.outcome,
           errorCode: result.payload.errorCode ?? null,
         },
       });
+      this.options.logger.info("control_api_stop_result", {
+        traceId: result.traceId,
+        taskId: null,
+        botId,
+        skillId: null,
+        modelName: null,
+        commandId: result.payload.commandId,
+        outcome: result.payload.outcome,
+      });
       this.writeJson(response, 200, body);
     } catch (cause) {
-      this.writeStopError(response, responseRequestId, cause, principal.subject, botId);
+      this.writeStopError(
+        response,
+        responseRequestId,
+        parsed.data.requestId,
+        cause,
+        botId,
+      );
     }
   }
 
   private writeStopError(
     response: ServerResponse,
     requestId: string,
+    traceId: string,
     cause: unknown,
-    subject: string,
     botId: string,
   ): void {
     const code = cause instanceof CoordinatorStopError ? cause.code : "STOP_TRANSPORT_FAILED";
-    this.options.logger.warn("control_api_stop_failed", { subject, botId, code });
+    this.options.logger.warn("control_api_stop_failed", {
+      traceId,
+      taskId: null,
+      botId,
+      skillId: null,
+      modelName: null,
+      code,
+    });
     if (code === "BOT_NOT_FOUND") {
       this.writeError(response, 404, requestId, "BOT_NOT_FOUND", "Bot was not found.");
       return;

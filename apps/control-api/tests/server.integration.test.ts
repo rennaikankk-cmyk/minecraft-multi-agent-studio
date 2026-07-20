@@ -205,6 +205,7 @@ describe("Control API HTTP and WebSocket integration", () => {
     expect(accepted.status).toBe(200);
     expect((await accepted.json()).data).toEqual({
       botId: "worker-01",
+      traceId: commandId,
       commandId,
       outcome: "completed",
       errorCode: null,
@@ -220,6 +221,18 @@ describe("Control API HTTP and WebSocket integration", () => {
     );
     const authorization = requestStop.mock.calls[0]?.[0].authorization;
     expect(authorization?.permissions.has("bot.stop")).toBe(true);
+    expect(logger.info).toHaveBeenCalledWith(
+      "control_api_stop_requested",
+      expect.objectContaining({ traceId: commandId, botId: "worker-01" }),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      "control_api_stop_result",
+      expect.objectContaining({
+        traceId: commandId,
+        botId: "worker-01",
+        outcome: "completed",
+      }),
+    );
   });
 
   it("reports unavailable control instead of fabricating a stop", async () => {

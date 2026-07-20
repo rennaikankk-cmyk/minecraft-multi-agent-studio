@@ -1,37 +1,28 @@
 import type { BotTelemetryMessageV1 } from "@minecraft-studio/protocol";
+import { createStructuredLogger } from "@minecraft-studio/observability";
 
 import { createMineflayerClient } from "./mineflayer-client.js";
 import { SingleBotRuntime } from "./runtime.js";
 import { loadServerProfile, ServerProfileError } from "./server-profile.js";
-import type { RuntimeLogger } from "./runtime-types.js";
-
-function writeLog(
-  level: "info" | "warn" | "error",
-  event: string,
-  fields: Readonly<Record<string, unknown>> = {},
-): void {
-  const output = JSON.stringify({
-    timestamp: new Date().toISOString(),
-    level,
-    event,
-    ...fields,
-  });
-  if (level === "error") console.error(output);
-  else if (level === "warn") console.warn(output);
-  else console.log(output);
-}
-
-const logger: RuntimeLogger = {
-  info: (event, fields) => writeLog("info", event, fields),
-  warn: (event, fields) => writeLog("warn", event, fields),
-  error: (event, fields) => writeLog("error", event, fields),
-};
+const logger = createStructuredLogger({
+  service: "bot-runtime",
+  instanceId: `bot-runtime-${process.pid}`,
+});
 
 function reportTelemetry(message: BotTelemetryMessageV1): void {
   const payload = message.payload;
-  writeLog("info", "bot_telemetry", {
+  logger.info("bot_telemetry", {
+    traceId: message.traceId,
+    taskId:
+      "currentTaskId" in payload
+        ? payload.currentTaskId ?? null
+        : "currentTask" in payload
+          ? payload.currentTask?.taskId ?? null
+          : null,
     messageType: message.type,
     botId: message.botId,
+    skillId: null,
+    modelName: null,
     sequence: "sequence" in payload ? payload.sequence : undefined,
     connectionState:
       "connectionState" in payload ? payload.connectionState : undefined,
@@ -60,9 +51,9 @@ async function main(): Promise<void> {
 
 void main().catch((error: unknown) => {
   if (error instanceof ServerProfileError) {
-    writeLog("error", "server_profile_rejected", { code: error.code });
+    logger.error("server_profile_rejected", { code: error.code });
   } else {
-    writeLog("error", "bot_runtime_start_failed", { code: "UNEXPECTED_ERROR" });
+    logger.error("bot_runtime_start_failed", { code: "UNEXPECTED_ERROR" });
   }
   process.exitCode = 1;
 });

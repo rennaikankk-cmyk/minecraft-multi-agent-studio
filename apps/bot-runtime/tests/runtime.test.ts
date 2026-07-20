@@ -136,6 +136,15 @@ describe("SingleBotRuntime", () => {
       currentTask: null,
     });
     expect(runtime.getState()).toBe("online");
+    expect(runtime.getMetricsSnapshot()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "bot_connection_attempts_total",
+          value: 1,
+        }),
+        expect.objectContaining({ name: "bot_heartbeats_total", value: 2 }),
+      ]),
+    );
 
     client.stateChanged();
     await vi.advanceTimersByTimeAsync(1000);
@@ -170,12 +179,26 @@ describe("SingleBotRuntime", () => {
     });
     expect(factoryCalls).toBe(1);
     expect(messages.some(({ type }) => type === "bot.disconnected.v1")).toBe(true);
+    expect(runtime.getMetricsSnapshot()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "bot_disconnects_total", value: 1 }),
+        expect.objectContaining({
+          name: "bot_reconnects_scheduled_total",
+          value: 1,
+        }),
+      ]),
+    );
 
     await vi.advanceTimersByTimeAsync(499);
     expect(factoryCalls).toBe(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(factoryCalls).toBe(2);
     expect(runtime.getState()).toBe("connecting");
+    expect(
+      runtime.getMetricsSnapshot().find(
+        ({ name }) => name === "bot_connection_attempts_total",
+      )?.value,
+    ).toBe(2);
 
     await runtime.stop();
     expect(clients[1]!.closeCalls).toBe(1);

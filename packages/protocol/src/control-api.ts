@@ -162,6 +162,7 @@ export const stopBotHttpResponseV1Schema = z
     data: z
       .object({
         botId: identifierSchema,
+        traceId: z.string().uuid(),
         commandId: z.string().uuid(),
         outcome: z.enum(["completed", "rejected", "failed"]),
         errorCode: z.string().trim().min(1).max(100).nullable(),

@@ -17,6 +17,7 @@
 - Control API 提供认证列表、详情、WebSocket 状态流和受权优雅停止入口。
 - 安全停止要求弹窗二次确认、本地确认码、`bot.stop` 权限和 Runtime 真实确认结果。
 - Bot 可对批准的隔离服务器自动探测 Minecraft 版本，并上报真实兼容状态。
+- Dashboard 停止操作可用同一追踪编号核对 Control API、Coordinator 和 Bot Runtime 结构化日志。
 
 当前不会自动连接 Minecraft，不会调用模型，也不会显示模拟 Bot。Dashboard 后端断开时会清空 Bot 列表并明确显示错误。
 
@@ -94,7 +95,7 @@ pnpm bot:start
 - 当前只允许离线认证的本机或私有局域网测试服。
 - 不支持公网地址、正式服务器或配置文件密码。
 - 没有设置 `BOT_SERVER_PROFILE_PATH` 时不会尝试连接。
-- 当前 Bot 状态只写入脱敏结构化日志，尚未接入 Dashboard。
+- Bot 状态已定义到 Coordinator、Control API 和 Dashboard 的真实数据链路；独立进程间传输仍待后续模块接入。
 
 版本配置：
 
@@ -197,6 +198,15 @@ pnpm test:e2e
 ```
 
 测试夹具仅位于 `apps/dashboard/e2e`，覆盖在线、离线、失联、后端不可用和安全停止流程，不会作为运行时数据源。
+
+## 可观测性与运行手册
+
+服务端 JSON 日志固定包含 `traceId`、`taskId`、`botId`、`skillId` 和 `modelName`；Dashboard 安全停止结果会显示可复制的追踪编号。Runtime 记录连接、心跳、断线、计划重连、停止请求和停止结果的进程内计数器。
+
+- [隔离 Minecraft 联机验收手册](docs/runbooks/isolated-minecraft.md)
+- [故障排查与追踪手册](docs/runbooks/troubleshooting.md)
+
+当前指标尚未提供 Prometheus 导出，集中日志和持久指标属于后续基础设施模块。
 
 ## 安全说明
 

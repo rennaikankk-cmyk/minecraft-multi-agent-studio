@@ -6,6 +6,7 @@ import {
   DashboardControlError,
   fetchDashboardBots,
   loadDashboardControlConfig,
+  requestDashboardBotStop,
   verifyStopConfirmation,
 } from "../lib/control-api-client";
 
@@ -83,6 +84,27 @@ describe("Dashboard Control API client", () => {
     };
     expect(verifyStopConfirmation(stopConfig, confirmationCode)).toBe(true);
     expect(verifyStopConfirmation(stopConfig, "wrong-code")).toBe(false);
+  });
+
+  it("preserves and validates the stop trace across Control API", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => jsonResponse({
+      schemaVersion: "1.0",
+      requestId: "22222222-2222-4222-8222-222222222222",
+      data: {
+        botId: "worker-01",
+        traceId: UUID,
+        commandId: UUID,
+        outcome: "completed",
+        errorCode: null,
+      },
+    }));
+    const result = await requestDashboardBotStop(
+      config(),
+      "worker-01",
+      UUID,
+      fetcher,
+    );
+    expect(result.data.traceId).toBe(UUID);
   });
 });
 

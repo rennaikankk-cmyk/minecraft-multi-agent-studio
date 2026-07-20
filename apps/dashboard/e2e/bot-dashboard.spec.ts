@@ -61,6 +61,7 @@ test("requires confirmation and shows the confirmed stop result", async ({ page 
         requestId: UUID,
         data: {
           botId: "worker-01",
+          traceId: UUID,
           commandId: UUID,
           outcome: "completed",
           errorCode: null,
@@ -75,6 +76,7 @@ test("requires confirmation and shows the confirmed stop result", async ({ page 
   await page.getByLabel("本地停止确认码").fill("safe-stop-123");
   await page.getByRole("button", { name: "确认优雅停止" }).click();
   await expect(page.getByTestId("stop-result")).toContainText("已确认停止");
+  await expect(page.getByTestId("stop-trace-id")).toContainText(UUID);
   await expect(page.getByTestId("bot-state-worker-01")).toHaveText("离线");
 });
 

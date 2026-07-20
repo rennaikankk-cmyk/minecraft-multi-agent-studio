@@ -125,7 +125,10 @@ export function BotDashboard() {
           role="status"
           data-testid="stop-result"
         >
-          {store.stopMessage}
+          <span>{store.stopMessage}</span>
+          {store.stopTraceId ? (
+            <code data-testid="stop-trace-id">追踪编号：{store.stopTraceId}</code>
+          ) : null}
         </div>
       ) : null}
 

@@ -21,6 +21,7 @@ type BotStore = {
   stopConfirmationConfigured: boolean;
   stopState: StopState;
   stopBotId: string | null;
+  stopTraceId: string | null;
   stopMessage: string | null;
   refresh(): Promise<void>;
   stopBot(botId: string, confirmationCode: string): Promise<boolean>;
@@ -39,6 +40,7 @@ export const useBotStore = create<BotStore>((set, get) => ({
   stopConfirmationConfigured: false,
   stopState: "idle",
   stopBotId: null,
+  stopTraceId: null,
   stopMessage: null,
 
   async refresh() {
@@ -88,6 +90,7 @@ export const useBotStore = create<BotStore>((set, get) => ({
     set({
       stopState: "submitting",
       stopBotId: botId,
+      stopTraceId: requestId,
       stopMessage: null,
     });
     try {
@@ -113,6 +116,7 @@ export const useBotStore = create<BotStore>((set, get) => ({
       set({
         stopState: completed ? "completed" : "failed",
         stopBotId: botId,
+        stopTraceId: parsed.data.data.traceId,
         stopMessage: completed
           ? `机器人 ${botId} 已确认停止。`
           : `机器人 ${botId} 返回 ${parsed.data.data.outcome}（${parsed.data.data.errorCode ?? "UNKNOWN"}）。`,
@@ -123,6 +127,7 @@ export const useBotStore = create<BotStore>((set, get) => ({
       set({
         stopState: "failed",
         stopBotId: botId,
+        stopTraceId: requestId,
         stopMessage: cause instanceof Error ? cause.message : "停止操作未能完成。",
       });
       return false;
@@ -130,7 +135,7 @@ export const useBotStore = create<BotStore>((set, get) => ({
   },
 
   resetStopResult() {
-    set({ stopState: "idle", stopBotId: null, stopMessage: null });
+    set({ stopState: "idle", stopBotId: null, stopTraceId: null, stopMessage: null });
   },
 }));
 

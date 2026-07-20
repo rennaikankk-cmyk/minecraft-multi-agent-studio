@@ -150,7 +150,12 @@ export async function requestDashboardBotStop(
     fetchImplementation,
   );
   const parsed = stopBotHttpResponseV1Schema.safeParse(value);
-  if (!parsed.success || parsed.data.data.botId !== botId) {
+  if (
+    !parsed.success ||
+    parsed.data.data.botId !== botId ||
+    parsed.data.data.traceId !== commandId ||
+    parsed.data.data.commandId !== commandId
+  ) {
     throw new DashboardControlError(
       "INVALID_CONTROL_RESPONSE",
       "Control API 返回了无法识别的停止结果。",

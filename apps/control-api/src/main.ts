@@ -1,13 +1,13 @@
 import { BotRegistry } from "@minecraft-studio/coordinator";
+import { createStructuredLogger } from "@minecraft-studio/observability";
 
 import { loadControlApiConfig } from "./config.js";
-import { ControlApiServer, type ControlApiLogger } from "./server.js";
+import { ControlApiServer } from "./server.js";
 
-const logger: ControlApiLogger = {
-  info: (event, fields = {}) => console.log(JSON.stringify({ event, ...fields })),
-  warn: (event, fields = {}) => console.warn(JSON.stringify({ event, ...fields })),
-  error: (event, fields = {}) => console.error(JSON.stringify({ event, ...fields })),
-};
+const logger = createStructuredLogger({
+  service: "control-api",
+  instanceId: `control-api-${process.pid}`,
+});
 
 async function main(): Promise<void> {
   const config = loadControlApiConfig();

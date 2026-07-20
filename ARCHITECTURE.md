@@ -201,3 +201,11 @@ online / offline / stale / unavailable UI
 Dashboard 每 3 秒通过服务端代理读取 Bot 列表与详情。代理只允许 HTTP 回环地址，设置 4 秒超时，最多读取 100 个 Bot，并验证所有版本化响应。请求失败时 Store 清空 Bot 和采集时间，页面显示后端不可用，不保留“在线”假象。
 
 安全停止需要弹窗二次确认和本地确认码。服务端只保存确认码 SHA-256，并使用时序安全比较；POST 还要求同源、专用动作头和进程内频率限制。Playwright 的 Bot 数据只位于 `apps/dashboard/e2e` 测试夹具中，不会进入生产数据源。
+
+## 11. 可观测性
+
+`@minecraft-studio/observability` 提供统一 JSON 日志和受限的进程内计数器。日志固定带有时间、级别、服务、实例、事件以及 `traceId/taskId/botId/skillId/modelName`；不存在的关联值为 `null`。敏感键、常见令牌格式、换行和过深对象在写出前统一清理。
+
+Dashboard 生成安全停止 UUID，并将它同时作为命令 ID 和追踪 ID。Control API 验证并透传该值，Coordinator 将其写入停止审计和日志，Bot Runtime 使用命令中的追踪 ID 记录请求与真实结果。响应再次返回 `traceId`，Dashboard 校验身份一致后显示给操作者。
+
+Runtime 当前记录连接尝试、心跳、断线、计划重连、停止请求和停止结果。指标只存在于 Runtime 内存并可通过测试或运行时快照读取；Prometheus、集中日志和跨进程传输不在本模块中。

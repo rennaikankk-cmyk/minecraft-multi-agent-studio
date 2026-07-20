@@ -17,6 +17,11 @@ import {
   type MinecraftVersionCompatibility,
   type StopBotCommandV1,
 } from "@minecraft-studio/protocol";
+import {
+  InMemoryMetricRegistry,
+  type MetricRecorder,
+  type MetricSample,
+} from "@minecraft-studio/observability";
 
 import type {
   BotClient,
@@ -37,6 +42,7 @@ export type RuntimeDependencies = {
   createClient: BotClientFactory;
   messageSink: BotMessageSink;
   logger: RuntimeLogger;
+  metrics?: MetricRecorder;
   now?: () => Date;
   randomId?: () => string;
 };
@@ -61,6 +67,7 @@ export class RuntimeControlError extends Error {
 
 export class SingleBotRuntime {
   private readonly runtimeInstanceId: string;
+  private readonly metrics: MetricRecorder;
   private readonly now: () => Date;
   private readonly randomId: () => string;
   private state: BotConnectionState = "offline";
@@ -92,6 +99,7 @@ export class SingleBotRuntime {
     this.now = dependencies.now ?? (() => new Date());
     this.randomId = dependencies.randomId ?? randomUUID;
     this.runtimeInstanceId = `runtime-${this.randomId()}`;
+    this.metrics = dependencies.metrics ?? new InMemoryMetricRegistry();
   }
 
   getState(): BotConnectionState {
@@ -100,6 +108,10 @@ export class SingleBotRuntime {
 
   getRuntimeInstanceId(): string {
     return this.runtimeInstanceId;
+  }
+
+  getMetricsSnapshot(): MetricSample[] {
+    return this.metrics.snapshot();
   }
 
   start(): void {
@@ -112,10 +124,13 @@ export class SingleBotRuntime {
     this.connect();
   }
 
-  stop(reason = "operator_request"): Promise<RuntimeStopOutcome> {
+  stop(
+    reason = "operator_request",
+    operationTraceId = this.traceId,
+  ): Promise<RuntimeStopOutcome> {
     if (this.stopPromise) return this.stopPromise;
 
-    const pending = this.performStop(reason);
+    const pending = this.performStop(reason, operationTraceId);
     this.stopPromise = pending;
     void pending.then((outcome) => {
       if (!outcome.confirmed && this.stopPromise === pending) {
@@ -159,8 +174,15 @@ export class SingleBotRuntime {
     return result;
   }
 
-  private async performStop(reason: string): Promise<RuntimeStopOutcome> {
+  private async performStop(
+    reason: string,
+    operationTraceId: string,
+  ): Promise<RuntimeStopOutcome> {
     this.stopping = true;
+    this.metrics.increment("bot_stop_requests_total", {
+      bot_id: this.profile.botId,
+      source: reason.startsWith("coordinator_") ? "coordinator" : "local",
+    });
     this.clearTimer("reconnect");
     this.clearTimer("status");
     this.clearTimer("deferredStatus");
@@ -175,19 +197,19 @@ export class SingleBotRuntime {
 
     this.state = "stopping";
     this.emitHeartbeat();
-    this.dependencies.logger.info("bot_runtime_stop_requested", {
-      botId: this.profile.botId,
+    this.dependencies.logger.info("bot_runtime_stop_requested", this.logFields({
       reason,
-    });
+    }, operationTraceId));
 
     let closeFailed = false;
     try {
       await activeClient.close(this.profile.stopGracePeriodMs);
     } catch {
       closeFailed = true;
-      this.dependencies.logger.error("bot_runtime_close_failed", {
-        botId: this.profile.botId,
-      });
+      this.dependencies.logger.error(
+        "bot_runtime_close_failed",
+        this.logFields({}, operationTraceId),
+      );
     }
 
     if (closeFailed && this.client === activeClient) {
@@ -220,7 +242,10 @@ export class SingleBotRuntime {
       );
     }
 
-    const outcome = await this.stop(`coordinator_${command.payload.mode}_stop`);
+    const outcome = await this.stop(
+      `coordinator_${command.payload.mode}_stop`,
+      command.traceId,
+    );
     return outcome.confirmed
       ? this.createStopResult(command, "completed")
       : this.createStopResult(command, "failed", outcome.errorCode);
@@ -232,7 +257,7 @@ export class SingleBotRuntime {
     errorCode?: string,
   ): BotStopResultV1 {
     const timestamp = this.now().toISOString();
-    return botStopResultV1Schema.parse({
+    const result = botStopResultV1Schema.parse({
       schemaVersion: "1.0",
       messageId: this.randomId(),
       traceId: command.traceId,
@@ -251,6 +276,19 @@ export class SingleBotRuntime {
         ...(errorCode ? { errorCode } : {}),
       },
     });
+    this.metrics.increment("bot_stop_results_total", {
+      bot_id: this.profile.botId,
+      outcome,
+    });
+    const log = outcome === "completed"
+      ? this.dependencies.logger.info.bind(this.dependencies.logger)
+      : this.dependencies.logger.warn.bind(this.dependencies.logger);
+    log("bot_runtime_stop_result", this.logFields({
+      commandId: command.payload.commandId,
+      outcome,
+      ...(errorCode ? { errorCode } : {}),
+    }, command.traceId));
+    return result;
   }
 
   private trimStopExecutions(): void {
@@ -270,13 +308,15 @@ export class SingleBotRuntime {
     this.minecraftVersionCompatibility = null;
     this.versionUnsupported = false;
     this.state = "connecting";
+    this.metrics.increment("bot_connection_attempts_total", {
+      bot_id: this.profile.botId,
+    });
     this.startHeartbeatTimer();
     this.emitHeartbeat();
-    this.dependencies.logger.info("bot_runtime_connecting", {
-      botId: this.profile.botId,
+    this.dependencies.logger.info("bot_runtime_connecting", this.logFields({
       serverProfileId: this.profile.id,
       attempt: this.reconnectAttempts,
-    });
+    }));
 
     try {
       const client = this.dependencies.createClient(this.profile);
@@ -287,9 +327,10 @@ export class SingleBotRuntime {
         onDisconnected: (info) =>
           this.handleDisconnected(activeGeneration, info),
         onError: () => {
-          this.dependencies.logger.warn("bot_runtime_client_error", {
-            botId: this.profile.botId,
-          });
+          this.dependencies.logger.warn(
+            "bot_runtime_client_error",
+            this.logFields(),
+          );
         },
         onVersionUnsupported: () =>
           this.handleVersionUnsupported(activeGeneration),
@@ -310,16 +351,18 @@ export class SingleBotRuntime {
         this.client.versionCompatibility();
     } catch {
       this.handleVersionUnsupported(generation);
-      this.dependencies.logger.error("bot_runtime_version_metadata_invalid", {
-        botId: this.profile.botId,
-      });
+      this.dependencies.logger.error(
+        "bot_runtime_version_metadata_invalid",
+        this.logFields(),
+      );
       const incompatibleClient = this.client;
       void incompatibleClient
         .close(this.profile.stopGracePeriodMs)
         .catch(() => {
-          this.dependencies.logger.error("bot_runtime_incompatible_close_failed", {
-            botId: this.profile.botId,
-          });
+          this.dependencies.logger.error(
+            "bot_runtime_incompatible_close_failed",
+            this.logFields(),
+          );
         });
       return;
     }
@@ -329,10 +372,9 @@ export class SingleBotRuntime {
     this.startStatusTimer(generation);
     this.emitStatus(generation);
     this.emitHeartbeat();
-    this.dependencies.logger.info("bot_runtime_online", {
-      botId: this.profile.botId,
+    this.dependencies.logger.info("bot_runtime_online", this.logFields({
       serverProfileId: this.profile.id,
-    });
+    }));
   }
 
   private handleVersionUnsupported(generation: number): void {
@@ -345,13 +387,12 @@ export class SingleBotRuntime {
     );
     this.versionUnsupported = true;
     this.emitVersion();
-    this.dependencies.logger.warn("bot_runtime_version_unsupported", {
-      botId: this.profile.botId,
+    this.dependencies.logger.warn("bot_runtime_version_unsupported", this.logFields({
       supportedOldest:
         this.minecraftVersionCompatibility.supportedRange.oldest,
       supportedLatest:
         this.minecraftVersionCompatibility.supportedRange.latest,
-    });
+    }));
   }
 
   private handleDisconnected(
@@ -365,30 +406,31 @@ export class SingleBotRuntime {
     this.clearTimer("deferredStatus");
     this.state = "offline";
     this.emitDisconnected(info);
+    this.metrics.increment("bot_disconnects_total", {
+      bot_id: this.profile.botId,
+      reason: info.reason,
+    });
 
-    this.dependencies.logger.warn("bot_runtime_disconnected", {
-      botId: this.profile.botId,
+    this.dependencies.logger.warn("bot_runtime_disconnected", this.logFields({
       reason: info.reason,
       expected: info.expected,
-    });
+    }));
 
     if (!this.stopping && !this.versionUnsupported) {
       this.scheduleReconnect();
     } else if (this.versionUnsupported) {
-      this.dependencies.logger.warn("bot_runtime_reconnect_suppressed", {
-        botId: this.profile.botId,
+      this.dependencies.logger.warn("bot_runtime_reconnect_suppressed", this.logFields({
         code: "MINECRAFT_VERSION_UNSUPPORTED",
-      });
+      }));
     }
   }
 
   private scheduleReconnect(): void {
     const config = this.profile.reconnect;
     if (!config.enabled || this.reconnectAttempts >= config.maxAttempts) {
-      this.dependencies.logger.warn("bot_runtime_reconnect_exhausted", {
-        botId: this.profile.botId,
+      this.dependencies.logger.warn("bot_runtime_reconnect_exhausted", this.logFields({
         attempts: this.reconnectAttempts,
-      });
+      }));
       return;
     }
 
@@ -397,6 +439,13 @@ export class SingleBotRuntime {
       config.baseDelayMs * 2 ** this.reconnectAttempts,
     );
     this.reconnectAttempts += 1;
+    this.metrics.increment("bot_reconnects_scheduled_total", {
+      bot_id: this.profile.botId,
+    });
+    this.dependencies.logger.info("bot_runtime_reconnect_scheduled", this.logFields({
+      attempt: this.reconnectAttempts,
+      delayMs: delay,
+    }));
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       if (!this.stopping) this.connect();
@@ -467,9 +516,10 @@ export class SingleBotRuntime {
       this.lastStatusAt = this.now().getTime();
       this.emit(message);
     } catch {
-      this.dependencies.logger.error("bot_runtime_status_invalid", {
-        botId: this.profile.botId,
-      });
+      this.dependencies.logger.error(
+        "bot_runtime_status_invalid",
+        this.logFields(),
+      );
     }
   }
 
@@ -502,6 +552,9 @@ export class SingleBotRuntime {
         lastStatusSequence: this.lastStatusSequence,
         currentTaskId: null,
       },
+    });
+    this.metrics.increment("bot_heartbeats_total", {
+      bot_id: this.profile.botId,
     });
     this.emit(message);
   }
@@ -541,16 +594,29 @@ export class SingleBotRuntime {
   private emit(message: Parameters<BotMessageSink>[0]): void {
     const validated = parseBotTelemetryMessage(message);
     void Promise.resolve(this.dependencies.messageSink(validated)).catch(() => {
-      this.dependencies.logger.error("bot_runtime_message_sink_failed", {
-        botId: this.profile.botId,
+      this.dependencies.logger.error("bot_runtime_message_sink_failed", this.logFields({
         messageType: validated.type,
-      });
+      }, validated.traceId));
     });
   }
 
   private nextSequence(): number {
     this.sequence += 1;
     return this.sequence;
+  }
+
+  private logFields(
+    fields: Readonly<Record<string, unknown>> = {},
+    traceId = this.traceId,
+  ): Readonly<Record<string, unknown>> {
+    return {
+      traceId,
+      taskId: null,
+      botId: this.profile.botId,
+      skillId: null,
+      modelName: null,
+      ...fields,
+    };
   }
 
   private clearTimer(

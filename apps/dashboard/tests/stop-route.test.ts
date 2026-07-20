@@ -48,6 +48,7 @@ describe("Dashboard stop route", () => {
         requestId: "22222222-2222-4222-8222-222222222222",
         data: {
           botId: "worker-01",
+          traceId: COMMAND_ID,
           commandId: COMMAND_ID,
           outcome: "completed",
           errorCode: null,
@@ -61,7 +62,10 @@ describe("Dashboard stop route", () => {
       { params: Promise.resolve({ botId: "worker-01" }) },
     );
     expect(response.status).toBe(200);
-    expect((await response.json()).data.outcome).toBe("completed");
+    expect((await response.json()).data).toMatchObject({
+      traceId: COMMAND_ID,
+      outcome: "completed",
+    });
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 });

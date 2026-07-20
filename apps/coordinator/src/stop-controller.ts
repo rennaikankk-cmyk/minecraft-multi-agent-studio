@@ -9,6 +9,7 @@ import {
   type ControlPermission,
   type StopBotCommandV1,
 } from "@minecraft-studio/protocol";
+import type { AppLogger } from "@minecraft-studio/observability";
 
 import { BotRegistry } from "./bot-registry.js";
 
@@ -104,6 +105,7 @@ export type StopControllerOptions = Readonly<{
   now?: () => Date;
   randomId?: () => string;
   maxRememberedCommands?: number;
+  logger?: AppLogger;
 }>;
 
 type StopExecution = {
@@ -317,19 +319,20 @@ export class StopController {
     status: StopAuditStatus,
     errorCode?: string,
   ): Promise<void> {
+    const entry: StopAuditEntry = {
+      recordedAt: validDate(this.now(), "REQUEST_INVALID").toISOString(),
+      traceId: request.traceId,
+      commandId: request.commandId,
+      decisionId: request.authorization.decisionId,
+      actorId: request.authorization.actorId,
+      botId: request.botId,
+      runtimeInstanceId,
+      mode: request.mode,
+      status,
+      ...(errorCode ? { errorCode } : {}),
+    };
     try {
-      await this.options.auditSink.write({
-        recordedAt: validDate(this.now(), "REQUEST_INVALID").toISOString(),
-        traceId: request.traceId,
-        commandId: request.commandId,
-        decisionId: request.authorization.decisionId,
-        actorId: request.authorization.actorId,
-        botId: request.botId,
-        runtimeInstanceId,
-        mode: request.mode,
-        status,
-        ...(errorCode ? { errorCode } : {}),
-      });
+      await this.options.auditSink.write(entry);
     } catch (cause) {
       if (cause instanceof CoordinatorStopError) throw cause;
       throw new CoordinatorStopError(
@@ -337,6 +340,26 @@ export class StopController {
         "The stop operation was blocked because its audit record could not be written.",
         cause,
       );
+    }
+    try {
+      const log = status === "failed" || status === "timed_out"
+        ? this.options.logger?.warn
+        : this.options.logger?.info;
+      log?.("coordinator_stop_audit", {
+        traceId: request.traceId,
+        taskId: null,
+        botId: request.botId,
+        skillId: null,
+        modelName: null,
+        commandId: request.commandId,
+        decisionId: request.authorization.decisionId,
+        runtimeInstanceId,
+        mode: request.mode,
+        status,
+        ...(errorCode ? { errorCode } : {}),
+      });
+    } catch {
+      // Observability transport failure must not rewrite a durable audit outcome.
     }
   }
 

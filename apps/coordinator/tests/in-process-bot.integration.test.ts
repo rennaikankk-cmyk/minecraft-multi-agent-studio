@@ -2,6 +2,10 @@ import type {
   ControlAuthorizationContext,
   StopBotCommandV1,
 } from "@minecraft-studio/protocol";
+import {
+  createStructuredLogger,
+  type StructuredLogRecord,
+} from "@minecraft-studio/observability";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -11,7 +15,6 @@ import type {
 } from "../../bot-runtime/src/client.js";
 import { SingleBotRuntime } from "../../bot-runtime/src/runtime.js";
 import type { ServerProfile } from "../../bot-runtime/src/server-profile.js";
-import type { RuntimeLogger } from "../../bot-runtime/src/runtime-types.js";
 import {
   BotRegistry,
   InMemoryStopAuditSink,
@@ -82,12 +85,6 @@ class IntegrationClient implements BotClient {
   }
 }
 
-const logger: RuntimeLogger = {
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-};
-
 function uuidSequence(): () => string {
   let value = 0;
   return () => {
@@ -104,12 +101,25 @@ describe("Coordinator and Bot Runtime in-process integration", () => {
   it("registers real runtime telemetry and completes an authorized stop", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
+    const records: StructuredLogRecord[] = [];
+    const runtimeLogger = createStructuredLogger({
+      service: "bot-runtime",
+      instanceId: "runtime-integration",
+      now: () => new Date(Date.now()),
+      sink: (record) => records.push(record),
+    });
+    const coordinatorLogger = createStructuredLogger({
+      service: "coordinator",
+      instanceId: "coordinator-01",
+      now: () => new Date(Date.now()),
+      sink: (record) => records.push(record),
+    });
     const registry = new BotRegistry({ staleAfterMs: 10_000, now: () => NOW });
     const client = new IntegrationClient();
     const runtime = new SingleBotRuntime(profile, {
       createClient: () => client,
       messageSink: (message) => registry.ingest(message, NOW),
-      logger,
+      logger: runtimeLogger,
       now: () => new Date(Date.now()),
       randomId: uuidSequence(),
     });
@@ -126,6 +136,7 @@ describe("Coordinator and Bot Runtime in-process integration", () => {
       instanceId: "coordinator-01",
       registry,
       auditSink,
+      logger: coordinatorLogger,
       now: () => new Date(Date.now()),
       randomId: () => "11111111-1111-4111-8111-111111111111",
       transport: {
@@ -163,6 +174,16 @@ describe("Coordinator and Bot Runtime in-process integration", () => {
     expect(auditSink.entries().map(({ status }) => status)).toEqual([
       "started",
       "completed",
+    ]);
+    expect(
+      records
+        .filter(({ traceId }) => traceId === "trace-integration")
+        .map(({ service, event }) => `${service}:${event}`),
+    ).toEqual([
+      "coordinator:coordinator_stop_audit",
+      "bot-runtime:bot_runtime_stop_requested",
+      "bot-runtime:bot_runtime_stop_result",
+      "coordinator:coordinator_stop_audit",
     ]);
   });
 });

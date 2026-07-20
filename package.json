@@ -8,7 +8,7 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "build:packages": "pnpm --filter @minecraft-studio/protocol build && pnpm --filter @minecraft-studio/environment build",
+    "build:packages": "pnpm --filter @minecraft-studio/observability build && pnpm --filter @minecraft-studio/protocol build && pnpm --filter @minecraft-studio/environment build",
     "build:control-plane": "pnpm build:packages && pnpm --filter @minecraft-studio/coordinator build",
     "build": "pnpm build:control-plane && pnpm --filter @minecraft-studio/control-api build && pnpm --filter @minecraft-studio/bot-runtime build && pnpm --filter @minecraft-studio/dashboard build",
     "dev": "pnpm build:packages && pnpm --filter @minecraft-studio/dashboard dev",
@@ -16,8 +16,8 @@
     "bot:start": "pnpm build:packages && pnpm --filter @minecraft-studio/bot-runtime build && pnpm --filter @minecraft-studio/bot-runtime start",
     "api:start": "pnpm build:control-plane && pnpm --filter @minecraft-studio/control-api build && pnpm --filter @minecraft-studio/control-api start",
     "smoke": "node scripts/smoke-test.mjs",
-    "typecheck": "pnpm --filter @minecraft-studio/protocol typecheck && pnpm --filter @minecraft-studio/environment typecheck && pnpm --filter @minecraft-studio/coordinator typecheck && pnpm --filter @minecraft-studio/control-api typecheck && pnpm --filter @minecraft-studio/bot-runtime typecheck && pnpm --filter @minecraft-studio/dashboard typecheck",
-    "test": "pnpm build:control-plane && pnpm --filter @minecraft-studio/protocol test && pnpm --filter @minecraft-studio/environment test && pnpm --filter @minecraft-studio/coordinator test && pnpm --filter @minecraft-studio/control-api test && pnpm --filter @minecraft-studio/bot-runtime test && pnpm --filter @minecraft-studio/dashboard test",
+    "typecheck": "pnpm build:packages && pnpm --filter @minecraft-studio/observability typecheck && pnpm --filter @minecraft-studio/protocol typecheck && pnpm --filter @minecraft-studio/environment typecheck && pnpm --filter @minecraft-studio/coordinator typecheck && pnpm --filter @minecraft-studio/control-api typecheck && pnpm --filter @minecraft-studio/bot-runtime typecheck && pnpm --filter @minecraft-studio/dashboard typecheck",
+    "test": "pnpm build:control-plane && pnpm --filter @minecraft-studio/observability test && pnpm --filter @minecraft-studio/protocol test && pnpm --filter @minecraft-studio/environment test && pnpm --filter @minecraft-studio/coordinator test && pnpm --filter @minecraft-studio/control-api test && pnpm --filter @minecraft-studio/bot-runtime test && pnpm --filter @minecraft-studio/dashboard test",
     "test:e2e": "pnpm --filter @minecraft-studio/dashboard test:e2e",
     "check": "pnpm typecheck && pnpm test && pnpm build"
   },

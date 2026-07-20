@@ -111,10 +111,10 @@
 
 ### P0.6 可观测性和运行手册
 
-- [ ] 统一 `traceId/taskId/botId/skillId` 日志字段。
-- [ ] 增加连接、心跳、断线、重连、停止的基础指标。
-- [ ] 编写隔离测试服运行手册和故障排查手册。
-- [ ] 验证所有日志脱敏。
+- [x] 统一 `traceId/taskId/botId/skillId/modelName` 日志字段。
+- [x] 增加连接、心跳、断线、重连、停止的基础指标。
+- [x] 编写隔离测试服运行手册和故障排查手册。
+- [x] 验证日志敏感键、常见令牌、服务器位置和换行脱敏。
 
 验收：能从 Dashboard 操作追踪到 Coordinator 和 Bot Runtime 日志。
 
@@ -172,4 +172,4 @@
 
 ## 当前唯一下一步
 
-实现 P0.6 可观测性和运行手册，打通 Dashboard 操作到 Coordinator 与 Bot Runtime 的 `traceId` 追踪。
+实现 P1.1 L0 安全层，先完成确定性生存状态采集与安全动作边界。

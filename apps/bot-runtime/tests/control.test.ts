@@ -178,6 +178,21 @@ describe("SingleBotRuntime control path", () => {
         outcome: "completed",
       },
     });
+    expect(bot.getMetricsSnapshot()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "bot_stop_requests_total", value: 1 }),
+        expect.objectContaining({ name: "bot_stop_results_total", value: 1 }),
+      ]),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      "bot_runtime_stop_result",
+      expect.objectContaining({
+        traceId: "trace-control",
+        botId: profile.botId,
+        commandId: COMMAND_ID,
+        outcome: "completed",
+      }),
+    );
   });
 
   it("rejects a command targeting another runtime without stopping", async () => {

@@ -4,6 +4,7 @@ const nextConfig = {
   poweredByHeader: false,
   transpilePackages: [
     "@minecraft-studio/environment",
+    "@minecraft-studio/observability",
     "@minecraft-studio/protocol",
   ],
 };

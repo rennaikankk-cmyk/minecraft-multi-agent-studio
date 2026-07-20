@@ -16,6 +16,7 @@ beforeEach(() => {
     stopConfirmationConfigured: false,
     stopState: "idle",
     stopBotId: null,
+    stopTraceId: null,
     stopMessage: null,
   });
   vi.unstubAllGlobals();
