@@ -1,0 +1,19 @@
+packages:
+  - apps/*
+  - packages/*
+
+allowBuilds:
+  sharp: true
+
+overrides:
+  postcss: 8.5.10
+  uuid: 11.1.1
+
+blockExoticSubdeps: true
+minimumReleaseAge: 1440
+minimumReleaseAgeStrict: true
+saveExact: true
+strictDepBuilds: true
+strictPeerDependencies: true
+trustLockfile: false
+verifyStoreIntegrity: true

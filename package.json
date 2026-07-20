@@ -1,0 +1,26 @@
+{
+  "name": "minecraft-multi-agent-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hardware-neutral Minecraft multi-agent control studio",
+  "packageManager": "pnpm@11.9.0",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build:packages": "pnpm --filter @minecraft-studio/protocol build && pnpm --filter @minecraft-studio/environment build",
+    "build": "pnpm build:packages && pnpm --filter @minecraft-studio/bot-runtime build && pnpm --filter @minecraft-studio/dashboard build",
+    "dev": "pnpm build:packages && pnpm --filter @minecraft-studio/dashboard dev",
+    "start": "pnpm --filter @minecraft-studio/dashboard start",
+    "bot:start": "pnpm build:packages && pnpm --filter @minecraft-studio/bot-runtime build && pnpm --filter @minecraft-studio/bot-runtime start",
+    "smoke": "node scripts/smoke-test.mjs",
+    "typecheck": "pnpm --filter @minecraft-studio/protocol typecheck && pnpm --filter @minecraft-studio/environment typecheck && pnpm --filter @minecraft-studio/bot-runtime typecheck && pnpm --filter @minecraft-studio/dashboard typecheck",
+    "test": "pnpm --filter @minecraft-studio/protocol test && pnpm --filter @minecraft-studio/environment test && pnpm --filter @minecraft-studio/bot-runtime test && pnpm --filter @minecraft-studio/dashboard test",
+    "check": "pnpm typecheck && pnpm test && pnpm build"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.1",
+    "typescript": "6.0.3",
+    "vitest": "4.1.10"
+  }
+}
