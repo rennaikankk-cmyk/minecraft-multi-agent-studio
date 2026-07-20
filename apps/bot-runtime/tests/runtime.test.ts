@@ -1,4 +1,8 @@
 import type { BotTelemetryMessageV1 } from "@minecraft-studio/protocol";
+import type {
+  L0SafetyAction,
+  L0SafetyActionResult,
+} from "@minecraft-studio/safety";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -41,18 +45,38 @@ const snapshot: BotClientSnapshot = {
   armorPoints: 7,
   position: { x: 10.25, y: 64, z: -20.5, dimension: "minecraft:overworld" },
   latencyMs: 45,
+  safety: {
+    oxygenLevel: 20,
+    inWater: false,
+    inLava: false,
+    onGround: true,
+    velocityY: 0,
+    inventory: { usedSlots: 4, totalSlots: 36 },
+    hasSafeFood: true,
+    movementRequested: false,
+  },
 };
 
 class FakeBotClient implements BotClient {
   private handlers: BotClientHandlers | null = null;
   closeCalls = 0;
+  actionCalls: L0SafetyAction[] = [];
+
+  constructor(private currentSnapshot: BotClientSnapshot = structuredClone(snapshot)) {}
 
   setHandlers(handlers: BotClientHandlers): void {
     this.handlers = handlers;
   }
 
   snapshot(): BotClientSnapshot {
-    return structuredClone(snapshot);
+    return structuredClone(this.currentSnapshot);
+  }
+
+  async executeSafetyAction(
+    action: L0SafetyAction,
+  ): Promise<L0SafetyActionResult> {
+    this.actionCalls.push(action);
+    return { outcome: "executed", errorCode: null };
   }
 
   versionCompatibility() {
@@ -76,6 +100,10 @@ class FakeBotClient implements BotClient {
 
   stateChanged(): void {
     this.handlers?.onStateChanged();
+  }
+
+  setSnapshot(next: BotClientSnapshot): void {
+    this.currentSnapshot = structuredClone(next);
   }
 
   versionUnsupported(): void {
@@ -134,6 +162,11 @@ describe("SingleBotRuntime", () => {
       position: snapshot.position,
       latencyMs: snapshot.latencyMs,
       currentTask: null,
+      safety: {
+        mode: "monitoring",
+        activeRisks: [],
+        normalTasksPaused: false,
+      },
     });
     expect(runtime.getState()).toBe("online");
     expect(runtime.getMetricsSnapshot()).toEqual(
@@ -266,6 +299,83 @@ describe("SingleBotRuntime", () => {
           }),
         }),
       }),
+    );
+  });
+
+  it("pauses normal actions and executes a deterministic low-health retreat", async () => {
+    const messages: BotTelemetryMessageV1[] = [];
+    const client = new FakeBotClient();
+    const runtime = new SingleBotRuntime(profile, {
+      createClient: () => client,
+      messageSink: (message) => messages.push(message),
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+
+    runtime.start();
+    client.spawn();
+    client.setSnapshot({
+      ...snapshot,
+      health: { current: 8, maximum: 20 },
+    });
+    client.stateChanged();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(runtime.canAcceptNormalActions()).toBe(false);
+    expect(runtime.getSafetyStatus()).toMatchObject({
+      mode: "paused",
+      activeRisks: ["LOW_HEALTH"],
+      normalTasksPaused: true,
+      lastAction: {
+        kind: "RETREAT_STEP",
+        outcome: "executed",
+      },
+    });
+    expect(client.actionCalls.map(({ kind }) => kind)).toEqual([
+      "PAUSE_NORMAL_TASKS",
+      "RETREAT_STEP",
+    ]);
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "bot.status.v1",
+        payload: expect.objectContaining({
+          safety: expect.objectContaining({
+            activeRisks: ["LOW_HEALTH"],
+          }),
+        }),
+      }),
+    );
+    await runtime.stop("test_cleanup");
+  });
+
+  it("owns the critical-health emergency stop at the runtime boundary", async () => {
+    const client = new FakeBotClient({
+      ...snapshot,
+      health: { current: 4, maximum: 20 },
+    });
+    const runtime = new SingleBotRuntime(profile, {
+      createClient: () => client,
+      messageSink: () => undefined,
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+
+    runtime.start();
+    client.spawn();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(client.actionCalls.map(({ kind }) => kind)).toEqual([
+      "PAUSE_NORMAL_TASKS",
+    ]);
+    expect(client.closeCalls).toBe(1);
+    expect(runtime.getState()).toBe("offline");
+    expect(runtime.getMetricsSnapshot()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "bot_safety_decisions_total" }),
+        expect.objectContaining({ name: "bot_safety_actions_total" }),
+      ]),
     );
   });
 });

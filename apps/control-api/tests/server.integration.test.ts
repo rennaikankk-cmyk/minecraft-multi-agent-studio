@@ -86,6 +86,11 @@ describe("Control API HTTP and WebSocket integration", () => {
         resolvedVersion: "1.21.8",
         supportLevel: "tested",
       },
+      safety: {
+        mode: "monitoring",
+        activeRisks: [],
+        normalTasksPaused: false,
+      },
     });
     expect(JSON.stringify(redactedBody)).not.toContain("isolated-test");
 
@@ -361,6 +366,13 @@ function statusMessage(sequence: number): BotStatusV1 {
       position: { x: 10, y: 64, z: -5, dimension: "minecraft:overworld" },
       latencyMs: 15,
       currentTask: null,
+      safety: {
+        mode: "monitoring",
+        activeRisks: [],
+        normalTasksPaused: false,
+        lastDecisionId: "l0-api-test",
+        lastAction: null,
+      },
       minecraftVersion: {
         selection: "auto",
         requestedVersion: null,

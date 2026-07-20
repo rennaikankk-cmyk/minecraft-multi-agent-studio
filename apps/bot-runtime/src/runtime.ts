@@ -15,6 +15,7 @@ import {
   type BotVersionV1,
   type ControlAuthorizationContext,
   type MinecraftVersionCompatibility,
+  type L0SafetyStatus,
   type StopBotCommandV1,
 } from "@minecraft-studio/protocol";
 import {
@@ -22,10 +23,17 @@ import {
   type MetricRecorder,
   type MetricSample,
 } from "@minecraft-studio/observability";
+import {
+  L0SafetyController,
+  type L0SafetyAction,
+  type L0SafetyActionResult,
+  type L0SafetyDecision,
+} from "@minecraft-studio/safety";
 
 import type {
   BotClient,
   BotClientFactory,
+  BotClientSnapshot,
   BotDisconnectInfo,
 } from "./client.js";
 import type { ServerProfile } from "./server-profile.js";
@@ -43,6 +51,7 @@ export type RuntimeDependencies = {
   messageSink: BotMessageSink;
   logger: RuntimeLogger;
   metrics?: MetricRecorder;
+  safetyController?: L0SafetyController;
   now?: () => Date;
   randomId?: () => string;
 };
@@ -70,6 +79,7 @@ export class SingleBotRuntime {
   private readonly metrics: MetricRecorder;
   private readonly now: () => Date;
   private readonly randomId: () => string;
+  private readonly safetyController: L0SafetyController;
   private state: BotConnectionState = "offline";
   private client: BotClient | null = null;
   private generation = 0;
@@ -87,6 +97,14 @@ export class SingleBotRuntime {
     null;
   private versionUnsupported = false;
   private stopPromise: Promise<RuntimeStopOutcome> | null = null;
+  private safetyActionQueue: Promise<void> = Promise.resolve();
+  private safetyStatus: L0SafetyStatus = {
+    mode: "monitoring",
+    activeRisks: [],
+    normalTasksPaused: false,
+    lastDecisionId: null,
+    lastAction: null,
+  };
   private readonly stopExecutions = new Map<
     string,
     { fingerprint: string; result: Promise<BotStopResultV1> }
@@ -100,6 +118,7 @@ export class SingleBotRuntime {
     this.randomId = dependencies.randomId ?? randomUUID;
     this.runtimeInstanceId = `runtime-${this.randomId()}`;
     this.metrics = dependencies.metrics ?? new InMemoryMetricRegistry();
+    this.safetyController = dependencies.safetyController ?? new L0SafetyController();
   }
 
   getState(): BotConnectionState {
@@ -112,6 +131,14 @@ export class SingleBotRuntime {
 
   getMetricsSnapshot(): MetricSample[] {
     return this.metrics.snapshot();
+  }
+
+  getSafetyStatus(): L0SafetyStatus {
+    return structuredClone(this.safetyStatus);
+  }
+
+  canAcceptNormalActions(): boolean {
+    return this.state === "online" && !this.safetyStatus.normalTasksPaused;
   }
 
   start(): void {
@@ -304,6 +331,14 @@ export class SingleBotRuntime {
   private connect(): void {
     this.generation += 1;
     const activeGeneration = this.generation;
+    this.safetyController.reset();
+    this.safetyStatus = {
+      mode: "monitoring",
+      activeRisks: [],
+      normalTasksPaused: false,
+      lastDecisionId: null,
+      lastAction: null,
+    };
     this.traceId = `connection-${this.randomId()}`;
     this.minecraftVersionCompatibility = null;
     this.versionUnsupported = false;
@@ -454,6 +489,14 @@ export class SingleBotRuntime {
 
   private requestStatus(generation: number): void {
     if (generation !== this.generation || this.state !== "online") return;
+    try {
+      if (this.client) this.evaluateSafetySnapshot(generation, this.client.snapshot());
+    } catch {
+      this.dependencies.logger.error(
+        "l0_safety_snapshot_invalid",
+        this.logFields({ code: "SAFETY_SNAPSHOT_INVALID" }),
+      );
+    }
     const elapsed = this.now().getTime() - this.lastStatusAt;
     if (elapsed >= this.profile.statusIntervalMs) {
       this.emitStatus(generation);
@@ -491,6 +534,7 @@ export class SingleBotRuntime {
 
     try {
       const snapshot = this.client.snapshot();
+      this.evaluateSafetySnapshot(generation, snapshot);
       const sequence = this.nextSequence();
       const observedAt = this.now().toISOString();
       const message: BotStatusV1 = botStatusV1Schema.parse({
@@ -507,6 +551,7 @@ export class SingleBotRuntime {
           position: snapshot.position,
           latencyMs: snapshot.latencyMs,
           currentTask: null,
+          safety: this.safetyStatus,
           ...(this.minecraftVersionCompatibility
             ? { minecraftVersion: this.minecraftVersionCompatibility }
             : {}),
@@ -521,6 +566,151 @@ export class SingleBotRuntime {
         this.logFields(),
       );
     }
+  }
+
+  private evaluateSafetySnapshot(
+    generation: number,
+    snapshot: BotClientSnapshot,
+  ): void {
+    if (generation !== this.generation || this.state !== "online") return;
+    const decision = this.safetyController.evaluate({
+      observedAtMs: this.now().getTime(),
+      health: snapshot.health.current,
+      foodLevel: snapshot.food.level,
+      oxygenLevel: snapshot.safety.oxygenLevel,
+      inWater: snapshot.safety.inWater,
+      inLava: snapshot.safety.inLava,
+      onGround: snapshot.safety.onGround,
+      velocityY: snapshot.safety.velocityY,
+      position: {
+        x: snapshot.position.x,
+        y: snapshot.position.y,
+        z: snapshot.position.z,
+      },
+      inventory: snapshot.safety.inventory,
+      hasSafeFood: snapshot.safety.hasSafeFood,
+      movementRequested: snapshot.safety.movementRequested,
+    });
+    const emergencyStopping = decision.actions.some(
+      ({ kind }) => kind === "EMERGENCY_STOP",
+    );
+    this.safetyStatus = {
+      mode: emergencyStopping
+        ? "emergency_stopping"
+        : decision.normalTasksPaused
+          ? "paused"
+          : decision.activeRisks.length > 0
+            ? "intervening"
+            : "monitoring",
+      activeRisks: [...decision.activeRisks],
+      normalTasksPaused: decision.normalTasksPaused,
+      lastDecisionId: decision.decisionId ?? this.safetyStatus.lastDecisionId,
+      lastAction: this.safetyStatus.lastAction,
+    };
+
+    if (decision.changed || decision.actions.length > 0) {
+      this.metrics.increment("bot_safety_decisions_total", {
+        bot_id: this.profile.botId,
+        severity: decision.severity,
+      });
+      const log = decision.severity === "critical"
+        ? this.dependencies.logger.warn.bind(this.dependencies.logger)
+        : this.dependencies.logger.info.bind(this.dependencies.logger);
+      log("l0_safety_decision", this.logFields({
+        decisionId: decision.decisionId,
+        severity: decision.severity,
+        riskCodes: decision.activeRisks,
+        normalTasksPaused: decision.normalTasksPaused,
+        actionKinds: decision.actions.map(({ kind }) => kind),
+      }));
+    }
+    if (decision.actions.length > 0 && decision.decisionId) {
+      this.queueSafetyActions(generation, decision);
+    }
+  }
+
+  private queueSafetyActions(
+    generation: number,
+    decision: L0SafetyDecision,
+  ): void {
+    const expectedClient = this.client;
+    this.safetyActionQueue = this.safetyActionQueue
+      .then(async () => {
+        for (const action of decision.actions) {
+          if (
+            generation !== this.generation ||
+            !expectedClient ||
+            this.client !== expectedClient ||
+            this.state !== "online"
+          ) {
+            return;
+          }
+          let result: L0SafetyActionResult;
+          if (action.kind === "EMERGENCY_STOP") {
+            const stopOutcome = await this.stop(
+              "l0_emergency_stop",
+              this.traceId,
+            );
+            result = stopOutcome.confirmed
+              ? { outcome: "executed", errorCode: null }
+              : { outcome: "failed", errorCode: stopOutcome.errorCode };
+          } else {
+            result = await expectedClient.executeSafetyAction(action);
+          }
+          this.recordSafetyAction(decision, action, result);
+          if (action.kind === "EMERGENCY_STOP") return;
+        }
+        if (this.state === "online" && this.client === expectedClient) {
+          this.emitStatus(generation);
+        }
+      })
+      .catch(() => {
+        this.dependencies.logger.error(
+          "l0_safety_execution_failed",
+          this.logFields({
+            decisionId: decision.decisionId,
+            code: "SAFETY_EXECUTION_FAILED",
+          }),
+        );
+      });
+  }
+
+  private recordSafetyAction(
+    decision: L0SafetyDecision,
+    action: L0SafetyAction,
+    result: L0SafetyActionResult,
+  ): void {
+    const completedAt = this.now().toISOString();
+    this.safetyStatus = {
+      ...this.safetyStatus,
+      lastAction: {
+        kind: action.kind,
+        outcome: result.outcome,
+        completedAt,
+        errorCode: result.errorCode,
+      },
+    };
+    this.metrics.increment("bot_safety_actions_total", {
+      action: action.kind,
+      bot_id: this.profile.botId,
+      outcome: result.outcome,
+    });
+    if (result.outcome === "failed") {
+      this.metrics.increment("bot_safety_failures_total", {
+        action: action.kind,
+        bot_id: this.profile.botId,
+      });
+    }
+    const log = result.outcome === "executed"
+      ? this.dependencies.logger.info.bind(this.dependencies.logger)
+      : this.dependencies.logger.warn.bind(this.dependencies.logger);
+    log("l0_safety_action_result", this.logFields({
+      decisionId: decision.decisionId,
+      riskCode: action.risk,
+      actionKind: action.kind,
+      outcome: result.outcome,
+      ...(result.errorCode ? { errorCode: result.errorCode } : {}),
+    }));
   }
 
   private emitVersion(): void {

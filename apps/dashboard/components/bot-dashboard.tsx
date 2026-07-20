@@ -211,6 +211,7 @@ function BotCard({
         <Fact label="饥饿" value={bot.food ? `${bot.food.level} / 20` : "不可用"} />
         <Fact label="延迟" value={bot.latencyMs === null ? "不可用" : `${bot.latencyMs} ms`} />
         <Fact label="任务" value={bot.currentTask ? `${bot.currentTask.title} · ${bot.currentTask.status}` : "无任务"} />
+        <Fact label="L0安全" value={formatSafety(bot)} wide />
         <Fact label="位置" value={formatPosition(bot)} wide />
         <Fact label="版本" value={bot.minecraftVersion?.resolvedVersion ?? "未解析"} wide />
       </dl>
@@ -244,6 +245,25 @@ function formatPosition(bot: PublicBotDetailV1): string {
   if (bot.positionRedacted) return "权限不足，坐标已隐藏";
   if (!bot.position) return "不可用";
   return `${formatNumber(bot.position.x)}, ${formatNumber(bot.position.y)}, ${formatNumber(bot.position.z)} · ${bot.position.dimension}`;
+}
+
+function formatSafety(bot: PublicBotDetailV1): string {
+  if (bot.connectionState !== "online") return "不可用（Bot非在线）";
+  const safety = bot.safety;
+  if (!safety) return "不可用";
+  if (safety.mode === "monitoring") return "正常监控";
+  const labels: Record<(typeof safety.activeRisks)[number], string> = {
+    CRITICAL_HEALTH: "生命危险",
+    LOW_HEALTH: "低生命值",
+    HUNGER: "饥饿",
+    DROWNING: "溺水",
+    LAVA: "岩浆",
+    FALLING: "坠落",
+    STUCK: "卡住",
+    INVENTORY_FULL: "背包已满",
+  };
+  const risks = safety.activeRisks.map((risk) => labels[risk]).join("、");
+  return risks || "正在干预";
 }
 
 function formatNumber(value: number): string {

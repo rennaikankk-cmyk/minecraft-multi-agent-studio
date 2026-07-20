@@ -9,6 +9,7 @@ import type {
   BotClientHandlers,
   BotClientSnapshot,
 } from "../src/client.js";
+import type { L0SafetyActionResult } from "@minecraft-studio/safety";
 import {
   RuntimeControlError,
   SingleBotRuntime,
@@ -49,6 +50,16 @@ const snapshot: BotClientSnapshot = {
   armorPoints: 0,
   position: { x: 0, y: 64, z: 0, dimension: "minecraft:overworld" },
   latencyMs: 10,
+  safety: {
+    oxygenLevel: 20,
+    inWater: false,
+    inLava: false,
+    onGround: true,
+    velocityY: 0,
+    inventory: { usedSlots: 0, totalSlots: 36 },
+    hasSafeFood: false,
+    movementRequested: false,
+  },
 };
 
 class ControlTestClient implements BotClient {
@@ -63,6 +74,10 @@ class ControlTestClient implements BotClient {
 
   snapshot(): BotClientSnapshot {
     return snapshot;
+  }
+
+  async executeSafetyAction(): Promise<L0SafetyActionResult> {
+    return { outcome: "executed", errorCode: null };
   }
 
   versionCompatibility() {

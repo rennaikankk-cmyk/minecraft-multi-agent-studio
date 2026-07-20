@@ -6,6 +6,7 @@ import {
   createStructuredLogger,
   type StructuredLogRecord,
 } from "@minecraft-studio/observability";
+import type { L0SafetyActionResult } from "@minecraft-studio/safety";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -62,7 +63,21 @@ class IntegrationClient implements BotClient {
       armorPoints: 0,
       position: { x: 0, y: 64, z: 0, dimension: "minecraft:overworld" },
       latencyMs: 12,
+      safety: {
+        oxygenLevel: 20,
+        inWater: false,
+        inLava: false,
+        onGround: true,
+        velocityY: 0,
+        inventory: { usedSlots: 0, totalSlots: 36 },
+        hasSafeFood: false,
+        movementRequested: false,
+      },
     };
+  }
+
+  async executeSafetyAction(): Promise<L0SafetyActionResult> {
+    return { outcome: "executed", errorCode: null };
   }
 
   versionCompatibility() {

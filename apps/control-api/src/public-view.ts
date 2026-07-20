@@ -32,6 +32,7 @@ export function toPublicBotDetail(
     armorPoints: status?.armorPoints ?? null,
     latencyMs: status?.latencyMs ?? null,
     currentTask: status?.currentTask ?? null,
+    safety: status?.safety ?? null,
     position: status && canReadPosition ? status.position : null,
     positionRedacted: status !== null && !canReadPosition,
     minecraftVersion: record.minecraftVersion,

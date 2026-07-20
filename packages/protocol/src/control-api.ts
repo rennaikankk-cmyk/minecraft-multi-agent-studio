@@ -4,6 +4,7 @@ import {
   botConnectionStateSchema,
   botPositionSchema,
   identifierSchema,
+  l0SafetyStatusSchema,
   minecraftVersionCompatibilitySchema,
   taskStatusSchema,
 } from "./bot-messages.js";
@@ -57,6 +58,7 @@ export const publicBotDetailV1Schema = publicBotSummaryV1Schema
     position: botPositionSchema.nullable(),
     positionRedacted: z.boolean(),
     minecraftVersion: minecraftVersionCompatibilitySchema.nullable(),
+    safety: l0SafetyStatusSchema.nullable().optional(),
   })
   .strict();
 

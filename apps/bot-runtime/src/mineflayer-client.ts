@@ -1,4 +1,8 @@
 import { createBot, type Bot } from "mineflayer";
+import type {
+  L0SafetyAction,
+  L0SafetyActionResult,
+} from "@minecraft-studio/safety";
 
 import type {
   BotClient,
@@ -40,6 +44,43 @@ const ARMOR_POINTS: Readonly<Record<string, number>> = {
   netherite_boots: 3,
   turtle_helmet: 2,
 };
+
+const SAFE_FOOD_NAMES = new Set([
+  "apple",
+  "baked_potato",
+  "beetroot",
+  "beetroot_soup",
+  "bread",
+  "carrot",
+  "cooked_beef",
+  "cooked_chicken",
+  "cooked_cod",
+  "cooked_mutton",
+  "cooked_porkchop",
+  "cooked_rabbit",
+  "cooked_salmon",
+  "dried_kelp",
+  "glow_berries",
+  "melon_slice",
+  "mushroom_stew",
+  "pumpkin_pie",
+  "rabbit_stew",
+  "sweet_berries",
+]);
+
+type SafetyEntityState = Readonly<{
+  isInWater?: unknown;
+  isInLava?: unknown;
+}>;
+
+type FoodMetadata = Readonly<{
+  foodPoints: number;
+  effectiveQuality?: number;
+}>;
+
+type FoodRegistry = Readonly<{
+  foodsByName?: Readonly<Record<string, FoodMetadata>>;
+}>;
 
 function safeDetail(value: unknown): string | undefined {
   const text = typeof value === "string" ? value : JSON.stringify(value);
@@ -122,14 +163,20 @@ export class MineflayerBotClient implements BotClient {
   private kickedDetail: string | undefined;
   private errorDetail: string | undefined;
   private versionUnsupportedReported = false;
+  private inventoryListenerBound = false;
 
   constructor(
     private readonly bot: Bot,
     private readonly configuredVersion: ServerProfile["minecraftVersion"],
   ) {
-    bot.on("spawn", () => this.handlers?.onSpawn());
+    bot.on("spawn", () => {
+      this.bindInventoryEvents();
+      this.handlers?.onSpawn();
+    });
     bot.on("health", () => this.handlers?.onStateChanged());
+    bot.on("breath", () => this.handlers?.onStateChanged());
     bot.on("move", () => this.handlers?.onStateChanged());
+    bot.on("physicsTick", () => this.handlers?.onStateChanged());
     bot.on("entityEquip", (entity) => {
       if (entity === bot.entity) this.handlers?.onStateChanged();
     });
@@ -167,6 +214,16 @@ export class MineflayerBotClient implements BotClient {
   snapshot(): BotClientSnapshot {
     const position = this.bot.entity.position;
     const ping = this.bot.player?.ping;
+    const entityState = this.bot.entity as typeof this.bot.entity &
+      SafetyEntityState;
+    const inventoryStart = this.bot.inventory.inventoryStart;
+    const inventoryEnd = this.bot.inventory.inventoryEnd;
+    const inventorySlots =
+      Number.isInteger(inventoryStart) &&
+      Number.isInteger(inventoryEnd) &&
+      inventoryEnd >= inventoryStart
+        ? this.bot.inventory.slots.slice(inventoryStart, inventoryEnd)
+        : [];
     return {
       health: {
         current: this.bot.health,
@@ -187,7 +244,73 @@ export class MineflayerBotClient implements BotClient {
         typeof ping === "number" && Number.isFinite(ping) && ping >= 0
           ? Math.round(ping)
           : null,
+      safety: {
+        oxygenLevel:
+          Number.isInteger(this.bot.oxygenLevel) &&
+          this.bot.oxygenLevel >= 0 &&
+          this.bot.oxygenLevel <= 20
+            ? this.bot.oxygenLevel
+            : null,
+        inWater: entityState.isInWater === true,
+        inLava: entityState.isInLava === true,
+        onGround: this.bot.entity.onGround === true,
+        velocityY: Number.isFinite(this.bot.entity.velocity.y)
+          ? this.bot.entity.velocity.y
+          : null,
+        inventory: {
+          usedSlots: inventorySlots.filter((item) => item !== null).length,
+          totalSlots: inventorySlots.length,
+        },
+        hasSafeFood: this.safeFoodItems().length > 0,
+        movementRequested: (["forward", "back", "left", "right"] as const)
+          .some((control) => this.bot.getControlState(control)),
+      },
     };
+  }
+
+  async executeSafetyAction(
+    action: L0SafetyAction,
+  ): Promise<L0SafetyActionResult> {
+    if (this.requestedStop) {
+      return { outcome: "skipped", errorCode: "RUNTIME_STOPPING" };
+    }
+    try {
+      if (
+        action.kind === "PAUSE_NORMAL_TASKS" ||
+        action.kind === "HALT_HORIZONTAL_MOVEMENT"
+      ) {
+        this.bot.clearControlStates();
+        return { outcome: "executed", errorCode: null };
+      }
+      if (action.kind === "CONSUME_SAFE_FOOD") {
+        const food = this.safeFoodItems()[0];
+        if (!food) return { outcome: "skipped", errorCode: "NO_SAFE_FOOD" };
+        this.bot.clearControlStates();
+        await this.bot.equip(food.item, "hand");
+        await this.bot.consume();
+        return { outcome: "executed", errorCode: null };
+      }
+      if (action.kind === "RETREAT_STEP") {
+        await this.applyBoundedControls(action.durationMs, ["back", "sprint"]);
+        return { outcome: "executed", errorCode: null };
+      }
+      if (action.kind === "ASCEND") {
+        await this.applyBoundedControls(action.durationMs, ["jump"]);
+        return { outcome: "executed", errorCode: null };
+      }
+      if (action.kind === "ESCAPE_LAVA") {
+        await this.applyBoundedControls(action.durationMs, ["jump", "forward"]);
+        return { outcome: "executed", errorCode: null };
+      }
+      if (action.kind === "UNSTICK") {
+        await this.applyBoundedControls(action.durationMs, ["jump", "back"]);
+        return { outcome: "executed", errorCode: null };
+      }
+      return { outcome: "skipped", errorCode: "RUNTIME_ACTION_REQUIRED" };
+    } catch {
+      this.bot.clearControlStates();
+      return { outcome: "failed", errorCode: "SAFETY_ACTION_FAILED" };
+    }
   }
 
   versionCompatibility() {
@@ -197,6 +320,7 @@ export class MineflayerBotClient implements BotClient {
   async close(gracePeriodMs: number): Promise<void> {
     if (this.requestedStop) return;
     this.requestedStop = true;
+    this.bot.clearControlStates();
 
     await new Promise<void>((resolve) => {
       let settled = false;
@@ -217,6 +341,52 @@ export class MineflayerBotClient implements BotClient {
         this.bot.end("studio_safe_stop");
       }
     });
+  }
+
+  private safeFoodItems() {
+    const registry = this.bot.registry as unknown as FoodRegistry;
+    return this.bot.inventory
+      .items()
+      .filter((item) => SAFE_FOOD_NAMES.has(item.name))
+      .map((item) => ({ item, metadata: registry.foodsByName?.[item.name] }))
+      .filter(
+        (entry): entry is typeof entry & { metadata: FoodMetadata } =>
+          entry.metadata !== undefined &&
+          Number.isFinite(entry.metadata.foodPoints) &&
+          entry.metadata.foodPoints > 0,
+      )
+      .sort(
+        (left, right) =>
+          (right.metadata.effectiveQuality ?? right.metadata.foodPoints) -
+            (left.metadata.effectiveQuality ?? left.metadata.foodPoints) ||
+          left.item.name.localeCompare(right.item.name),
+      );
+  }
+
+  private bindInventoryEvents(): void {
+    if (this.inventoryListenerBound) return;
+    const inventory = this.bot.inventory;
+    if (!inventory || typeof inventory.on !== "function") return;
+    inventory.on("updateSlot", () => this.handlers?.onStateChanged());
+    this.inventoryListenerBound = true;
+  }
+
+  private async applyBoundedControls(
+    durationMs: number | undefined,
+    controls: readonly ("forward" | "back" | "jump" | "sprint")[],
+  ): Promise<void> {
+    if (
+      !Number.isSafeInteger(durationMs) ||
+      durationMs === undefined ||
+      durationMs < 100 ||
+      durationMs > 2_000
+    ) {
+      throw new TypeError("Safety action duration is invalid.");
+    }
+    this.bot.clearControlStates();
+    for (const control of controls) this.bot.setControlState(control, true);
+    await new Promise<void>((resolve) => setTimeout(resolve, durationMs));
+    this.bot.clearControlStates();
   }
 }
 

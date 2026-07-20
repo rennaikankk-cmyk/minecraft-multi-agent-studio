@@ -134,6 +134,13 @@ function detail() {
     armorPoints: 4,
     latencyMs: 22,
     currentTask: null,
+    safety: {
+      mode: "monitoring" as const,
+      activeRisks: [],
+      normalTasksPaused: false,
+      lastDecisionId: "l0-dashboard-test",
+      lastAction: null,
+    },
     position: { x: 1, y: 64, z: 2, dimension: "minecraft:overworld" },
     positionRedacted: false,
     minecraftVersion: null,

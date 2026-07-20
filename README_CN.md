@@ -2,7 +2,7 @@
 
 面向 Minecraft Java 版多智能体机器人的硬件无关控制平台。
 
-当前已完成项目基线、真实环境检测、版本化 Bot 状态协议、单 Bot 隔离联机验收、Minecraft 版本自适应、Coordinator 注册表、Control API 和真实状态 Dashboard：
+当前已完成项目基线、真实环境检测、版本化 Bot 状态协议、单 Bot 隔离联机验收、Minecraft 版本自适应、Coordinator 注册表、Control API、真实状态 Dashboard 和确定性 L0 安全层：
 
 - 自动检测当前 CPU、内存、操作系统和 GPU 探测状态。
 - 检测 Node.js、Java、Docker 和 Git 是否可用。
@@ -18,6 +18,7 @@
 - 安全停止要求弹窗二次确认、本地确认码、`bot.stop` 权限和 Runtime 真实确认结果。
 - Bot 可对批准的隔离服务器自动探测 Minecraft 版本，并上报真实兼容状态。
 - Dashboard 停止操作可用同一追踪编号核对 Control API、Coordinator 和 Bot Runtime 结构化日志。
+- L0 安全层从真实 Mineflayer 状态识别饥饿、低/危急生命值、溺水、岩浆、坠落、卡死和背包满，并执行固定白名单动作。
 
 当前不会自动连接 Minecraft，不会调用模型，也不会显示模拟 Bot。Dashboard 后端断开时会清空 Bot 列表并明确显示错误。
 
@@ -207,6 +208,14 @@ pnpm test:e2e
 - [故障排查与追踪手册](docs/runbooks/troubleshooting.md)
 
 当前指标尚未提供 Prometheus 导出，集中日志和持久指标属于后续基础设施模块。
+
+## L0 安全层
+
+L0 安全判断完全确定性运行，不调用 Local AI Hub 或云模型，也不接受模型生成的动作文本。Runtime 会先暂停普通任务，再串行执行自动进食、短距离撤退、上浮、离开岩浆、停止横向移动或脱困；危急生命值的停止由 Runtime 自身接管。
+
+Dashboard 的 Bot 卡片显示真实 L0 状态。旧 Runtime 未上报该字段时显示“不可用”，不会补造正常状态。
+
+当前边界：撤退与脱困尚无安全路径规划，坠落只停止横向移动，背包满不会自动丢弃物品；饥饿但没有白名单安全食物时会暂停并等待干预。这些能力需要在 P1.2 之后以独立确定性技能实现和验收。
 
 ## 安全说明
 

@@ -48,6 +48,13 @@ const validStatus = {
       status: "running" as const,
       startedAt: NOW,
     },
+    safety: {
+      mode: "monitoring" as const,
+      activeRisks: [],
+      normalTasksPaused: false,
+      lastDecisionId: "l0-42",
+      lastAction: null,
+    },
   },
 };
 
@@ -97,6 +104,33 @@ describe("BotStatusV1", () => {
   it("rejects missing envelope fields", () => {
     const { traceId: _traceId, ...withoutTraceId } = validStatus;
     expect(botStatusV1Schema.safeParse(withoutTraceId).success).toBe(false);
+  });
+
+  it("rejects contradictory or duplicate L0 safety claims", () => {
+    expect(
+      botStatusV1Schema.safeParse({
+        ...validStatus,
+        payload: {
+          ...validStatus.payload,
+          safety: {
+            ...validStatus.payload.safety,
+            activeRisks: ["LAVA", "LAVA"],
+          },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      botStatusV1Schema.safeParse({
+        ...validStatus,
+        payload: {
+          ...validStatus.payload,
+          safety: {
+            ...validStatus.payload.safety,
+            activeRisks: ["LOW_HEALTH"],
+          },
+        },
+      }).success,
+    ).toBe(false);
   });
 });
 

@@ -10,6 +10,8 @@ test("shows an online Bot with real telemetry fields", async ({ page }) => {
   await expect(page.getByTestId("bot-state-worker-01")).toHaveText("在线");
   await expect(page.getByTestId("bot-card-worker-01")).toContainText("18 / 20");
   await expect(page.getByTestId("bot-card-worker-01")).toContainText("巡逻基地");
+  await expect(page.getByTestId("bot-card-worker-01")).toContainText("L0安全");
+  await expect(page.getByTestId("bot-card-worker-01")).toContainText("正常监控");
 });
 
 test("shows a disconnected Bot as offline", async ({ page }) => {
@@ -116,6 +118,13 @@ function botResponse(state: "online" | "offline" | "stale") {
             title: "巡逻基地",
             status: "running",
             startedAt: NOW,
+          },
+          safety: {
+            mode: "monitoring",
+            activeRisks: [],
+            normalTasksPaused: false,
+            lastDecisionId: "l0-e2e-test",
+            lastAction: null,
           },
           position: { x: 12, y: 64, z: -8, dimension: "minecraft:overworld" },
           positionRedacted: false,

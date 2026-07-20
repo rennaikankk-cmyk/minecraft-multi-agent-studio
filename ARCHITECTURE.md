@@ -39,7 +39,9 @@ apps/
 └─ dashboard/              # Next.js 前端、服务端代理与真实状态 Store
 packages/
 ├─ protocol/               # 版本化 Zod Schema
-└─ environment/            # 真实硬件、软件和模式检测
+├─ environment/            # 真实硬件、软件和模式检测
+├─ observability/          # 结构化日志和进程内指标
+└─ safety/                 # 确定性 L0 生存策略与动作边界
 ```
 
 尚未创建 AI Router、数据库和队列应用。Bot Runtime 已完成 Minecraft 1.21.8 隔离联机验收；Coordinator 已实现进程内 Bot 注册表和安全停止控制边界；Control API 已提供认证 HTTP/WebSocket 状态接口与受 `bot.stop` 保护的停止入口。Dashboard 通过服务端代理读取 Control API，浏览器不会收到长期令牌。
@@ -208,4 +210,22 @@ Dashboard 每 3 秒通过服务端代理读取 Bot 列表与详情。代理只�
 
 Dashboard 生成安全停止 UUID，并将它同时作为命令 ID 和追踪 ID。Control API 验证并透传该值，Coordinator 将其写入停止审计和日志，Bot Runtime 使用命令中的追踪 ID 记录请求与真实结果。响应再次返回 `traceId`，Dashboard 校验身份一致后显示给操作者。
 
-Runtime 当前记录连接尝试、心跳、断线、计划重连、停止请求和停止结果。指标只存在于 Runtime 内存并可通过测试或运行时快照读取；Prometheus、集中日志和跨进程传输不在本模块中。
+Runtime 当前记录连接尝试、心跳、断线、计划重连、停止请求、停止结果，以及 L0 安全决策、动作和失败。指标只存在于 Runtime 内存并可通过测试或运行时快照读取；Prometheus、集中日志和跨进程传输不在本模块中。
+
+## 12. L0 确定性安全层
+
+```text
+Mineflayer real snapshot
+  ↓ finite-value validation
+L0SafetyController (fixed thresholds + cooldowns)
+  ↓ typed allowlisted actions
+SingleBotRuntime serial safety queue
+  ├─ bounded Mineflayer controls
+  └─ runtime-owned emergency stop
+```
+
+安全评估在每次 Mineflayer 状态事件和周期状态上报时运行，优先于未来普通技能。输入包含真实生命值、饥饿、氧气、水/岩浆状态、落地状态、垂直速度、位置、背包占用、安全食物和移动请求；非有限数值、越界值或矛盾背包数量直接拒绝。
+
+控制器只产生固定类型的动作，不读取自然语言或模型输出。动作具有固定冷却时间，移动类动作还具有 2 秒以内的固定持续上限，并在同一 Runtime 队列中串行执行。危急生命值产生的 `EMERGENCY_STOP` 由 Runtime 调用既有优雅停止边界，Mineflayer 适配器不能自行声称完成 Runtime 停止。
+
+L0 当前提供基础生存反应，不声称具备路径规划：低血量撤退为短距离后退，坠落只停止横向移动，背包满只暂停普通任务；饥饿且没有白名单安全食物时也保持暂停。更复杂的安全导航、落地、补给和物品搬运必须作为后续确定性技能单独验证。

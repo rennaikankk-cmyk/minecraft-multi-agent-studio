@@ -125,6 +125,85 @@ const currentTaskSchema = z
   })
   .strict();
 
+export const l0SafetyRiskSchema = z.enum([
+  "CRITICAL_HEALTH",
+  "LOW_HEALTH",
+  "HUNGER",
+  "DROWNING",
+  "LAVA",
+  "FALLING",
+  "STUCK",
+  "INVENTORY_FULL",
+]);
+
+export const l0SafetyActionKindSchema = z.enum([
+  "PAUSE_NORMAL_TASKS",
+  "CONSUME_SAFE_FOOD",
+  "RETREAT_STEP",
+  "ASCEND",
+  "ESCAPE_LAVA",
+  "HALT_HORIZONTAL_MOVEMENT",
+  "UNSTICK",
+  "EMERGENCY_STOP",
+]);
+
+export const l0SafetyStatusSchema = z
+  .object({
+    mode: z.enum([
+      "monitoring",
+      "intervening",
+      "paused",
+      "emergency_stopping",
+    ]),
+    activeRisks: z.array(l0SafetyRiskSchema).max(8),
+    normalTasksPaused: z.boolean(),
+    lastDecisionId: identifierSchema.nullable(),
+    lastAction: z
+      .object({
+        kind: l0SafetyActionKindSchema,
+        outcome: z.enum(["executed", "skipped", "failed"]),
+        completedAt: timestampSchema,
+        errorCode: z
+          .string()
+          .min(1)
+          .max(128)
+          .regex(/^[A-Z][A-Z0-9_]*$/u)
+          .nullable(),
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict()
+  .superRefine((status, context) => {
+    if (new Set(status.activeRisks).size !== status.activeRisks.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["activeRisks"],
+        message: "Safety risks must be unique.",
+      });
+    }
+    if (
+      status.mode === "monitoring" &&
+      (status.activeRisks.length > 0 || status.normalTasksPaused)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["mode"],
+        message: "Monitoring mode cannot claim active risks or a task pause.",
+      });
+    }
+    if (
+      (status.mode === "paused" || status.mode === "emergency_stopping") &&
+      !status.normalTasksPaused
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["normalTasksPaused"],
+        message: "Paused safety modes must pause normal tasks.",
+      });
+    }
+  });
+
 const botMessageEnvelopeShape = {
   schemaVersion: z.literal("1.0"),
   messageId: z.string().uuid(),
@@ -156,6 +235,7 @@ export const botStatusV1Schema = z
         position: botPositionSchema,
         latencyMs: z.number().int().nonnegative().max(120_000).nullable(),
         currentTask: currentTaskSchema.nullable(),
+        safety: l0SafetyStatusSchema.optional(),
         minecraftVersion: minecraftVersionCompatibilitySchema
           .refine((value) => value.supportLevel !== "unsupported")
           .optional(),
@@ -402,6 +482,9 @@ export type BotStatusV1 = z.infer<typeof botStatusV1Schema>;
 export type BotHeartbeatV1 = z.infer<typeof botHeartbeatV1Schema>;
 export type BotDisconnectedV1 = z.infer<typeof botDisconnectedV1Schema>;
 export type BotVersionV1 = z.infer<typeof botVersionV1Schema>;
+export type L0SafetyRisk = z.infer<typeof l0SafetyRiskSchema>;
+export type L0SafetyActionKind = z.infer<typeof l0SafetyActionKindSchema>;
+export type L0SafetyStatus = z.infer<typeof l0SafetyStatusSchema>;
 export type MinecraftVersionCompatibility = z.infer<
   typeof minecraftVersionCompatibilitySchema
 >;

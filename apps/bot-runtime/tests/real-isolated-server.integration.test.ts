@@ -2,7 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { BotTelemetryMessageV1 } from "@minecraft-studio/protocol";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { createMineflayerClient } from "../src/mineflayer-client.js";
 import { SingleBotRuntime } from "../src/runtime.js";
@@ -12,10 +12,11 @@ import type { RuntimeLogger } from "../src/runtime-types.js";
 const enabled = process.env.RUN_REAL_MC_TEST === "1";
 const integrationDescribe = enabled ? describe : describe.skip;
 
+const runtimeEvents: string[] = [];
 const logger: RuntimeLogger = {
-  info: () => undefined,
-  warn: () => undefined,
-  error: () => undefined,
+  info: (event) => runtimeEvents.push(`info:${event}`),
+  warn: (event) => runtimeEvents.push(`warn:${event}`),
+  error: (event) => runtimeEvents.push(`error:${event}`),
 };
 
 async function waitForMessage<T extends BotTelemetryMessageV1>(
@@ -29,10 +30,18 @@ async function waitForMessage<T extends BotTelemetryMessageV1>(
     if (message) return message;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error(`Timed out after ${timeoutMs} ms waiting for Bot telemetry.`);
+  throw new Error(
+    `Timed out after ${timeoutMs} ms waiting for Bot telemetry. ` +
+      `Messages: ${messages.map(({ type }) => type).join(",") || "none"}. ` +
+      `Runtime events: ${runtimeEvents.slice(-20).join(",") || "none"}.`,
+  );
 }
 
 integrationDescribe("real isolated Minecraft 1.21.8 server", () => {
+  beforeEach(() => {
+    runtimeEvents.length = 0;
+  });
+
   it(
     "connects, reports a real status snapshot, and stops gracefully",
     async () => {
@@ -62,6 +71,11 @@ integrationDescribe("real isolated Minecraft 1.21.8 server", () => {
         expect(Number.isFinite(status.payload.position.y)).toBe(true);
         expect(Number.isFinite(status.payload.position.z)).toBe(true);
         expect(status.payload.position.dimension).toMatch(/^[a-z0-9_.-]+:[a-z0-9_./-]+$/u);
+        expect(status.payload.safety).toMatchObject({
+          mode: "monitoring",
+          activeRisks: [],
+          normalTasksPaused: false,
+        });
         const version = await waitForMessage(
           messages,
           (message): message is Extract<
