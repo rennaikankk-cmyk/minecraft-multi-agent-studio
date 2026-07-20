@@ -55,6 +55,16 @@ class FakeBotClient implements BotClient {
     return structuredClone(snapshot);
   }
 
+  versionCompatibility() {
+    return {
+      selection: "fixed" as const,
+      requestedVersion: "1.21.8",
+      resolvedVersion: "1.21.8",
+      supportLevel: "tested" as const,
+      supportedRange: { oldest: "1.8.8", latest: "1.21.11" },
+    };
+  }
+
   async close(): Promise<void> {
     this.closeCalls += 1;
     this.handlers?.onDisconnected({ reason: "requested_stop", expected: true });
@@ -66,6 +76,10 @@ class FakeBotClient implements BotClient {
 
   stateChanged(): void {
     this.handlers?.onStateChanged();
+  }
+
+  versionUnsupported(): void {
+    this.handlers?.onVersionUnsupported();
   }
 
   disconnect(info: BotDisconnectInfo): void {
@@ -188,5 +202,47 @@ describe("SingleBotRuntime", () => {
 
     expect(factoryCalls).toBe(1);
     expect(runtime.getState()).toBe("offline");
+  });
+
+  it("reports an unsupported version and suppresses deterministic retries", async () => {
+    const messages: BotTelemetryMessageV1[] = [];
+    const client = new FakeBotClient();
+    let factoryCalls = 0;
+    const runtime = new SingleBotRuntime(
+      { ...profile, minecraftVersion: "auto" },
+      {
+        createClient: () => {
+          factoryCalls += 1;
+          return client;
+        },
+        messageSink: (message) => messages.push(message),
+        logger,
+        now: () => new Date(Date.now()),
+        randomId: () => FIXED_UUID,
+      },
+    );
+
+    runtime.start();
+    client.versionUnsupported();
+    client.disconnect({
+      reason: "runtime_error",
+      expected: false,
+      detail: "unsupported_minecraft_version",
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(factoryCalls).toBe(1);
+    expect(runtime.getState()).toBe("offline");
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "bot.version.v1",
+        payload: expect.objectContaining({
+          compatibility: expect.objectContaining({
+            selection: "auto",
+            supportLevel: "unsupported",
+          }),
+        }),
+      }),
+    );
   });
 });

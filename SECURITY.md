@@ -39,6 +39,7 @@
 - Mineflayer 间接依赖使用的 `uuid` 统一覆盖为已修复的 11.1.1；覆盖前已确认调用面仅为兼容的 `uuid.v4()`。
 - 不下载或执行聊天、模型输出、帖子、网盘或随机 URL 中的代码。
 - 需要二进制资产时，必须使用官方发布源、固定版本和预期 SHA-256。
+- WebSocket 服务端使用官方 npm Registry 的 `ws` 8.21.1，MIT 许可，锁文件保存 npm 完整性哈希；类型包固定为 `@types/ws` 8.18.1。
 
 ## 4. 四种模式
 
@@ -66,20 +67,55 @@
 - 授权必须绑定 `decisionId`、`actorId`、`botId`、`commandId` 和具体权限。
 - 普通停止需要 `bot.stop`；紧急停止需要 `bot.emergency-stop`。
 - 命令或授权过期后必须拒绝，不能自动续期或静默降级。
-- 当前模块只定义和验证协议，不执行停止动作。
+- Coordinator 只生成经过可信授权上下文二次匹配的停止命令；Bot Runtime 只执行目标运行实例一致且未过期的命令。
+- 每个停止操作使用命令 ID 幂等，重复 ID 携带不同参数时拒绝执行。
+- 停止结果必须由目标 Bot Runtime 返回，且 Bot、命令、运行实例、来源实例和追踪 ID 全部匹配。
+- 停止传输有硬超时并使用 `AbortSignal` 通知取消；未收到确认时不伪造完成状态。
+- 当前停止审计存于进程内存，尚未达到持久化审计要求，不可作为生产部署依据。
 
-## 7. Mineflayer 连接边界
+## 7. Coordinator 遥测边界
+
+- Coordinator 在写入注册表前再次执行严格协议校验，仅接受来源为 `bot-runtime` 的遥测。
+- `source.instanceId` 必须与负载中的 `runtimeInstanceId` 一致。
+- 使用 `messageId` 去重，并按 `runtimeInstanceId + sequence` 拒绝重复、乱序和已退役进程的消息。
+- 新 Runtime 接管后，旧 Runtime 的延迟心跳不能把 Bot 重新标记为在线。
+- 超出允许时钟偏差的未来消息拒绝写入。
+- 心跳或其他有效遥测过期后标记 `stale`，只有结构化断线或可信停止确认才标记 `offline`。
+- 当前注册表是进程内真实状态，不会伪装成持久化数据库；进程重启后需要 Bot 重新上报。
+
+## 8. Control API 边界
+
+- 当前只允许绑定回环地址，不接受 `0.0.0.0`、公网 IP 或任意域名监听。
+- 未配置至少一个有效令牌 SHA-256 时拒绝启动；服务端配置中不得保存明文 Bearer 令牌。
+- 令牌摘要使用 SHA-256，并通过固定长度的时序安全比较完成匹配。
+- HTTP 和 WebSocket 都必须具有 `bot.read`；坐标字段还需要 `bot.position.read`。
+- 不信任 `X-Forwarded-For`，限流键只使用实际 TCP 对端和认证主体。
+- HTTP 请求限制方法、路径、查询、请求体、Bot ID、头大小和协议版本。
+- WebSocket 必须协商 `minecraft-studio.v1`，限制握手频率、每主体连接数、消息大小和发送缓冲。
+- WebSocket 只推送状态；客户端发送业务消息时以策略错误关闭，不转换成命令或工具调用。
+- 日志只记录稳定事件、错误码和认证主体，不记录令牌、服务器配置、位置或原始请求内容。
+- 对外列表和详情不返回 ServerProfile、服务器地址或 Runtime 内部标识；坐标按权限脱敏。
+- 所有内部异常统一转换为稳定 `INTERNAL_ERROR`，不把堆栈或底层错误返回客户端。
+
+## 9. Mineflayer 连接边界
 
 - 未设置 `BOT_SERVER_PROFILE_PATH` 时，Bot Runtime 必须以 `SERVER_PROFILE_REQUIRED` 退出，不尝试网络连接。
 - ServerProfile 必须是严格 JSON，最大 64 KiB，不允许未知字段。
 - `purpose` 只能是 `isolated-test`，`auth` 当前只能是 `offline`。
+- `minecraftVersion=auto` 只对 ServerProfile 已批准的单一目标执行协议探测，不发现、扫描或尝试其他服务器。
+- 固定版本必须存在于当前安装 Mineflayer 的真实 `testedVersions` 清单中，不接受手写的未知固定版本。
+- 自动探测成功后上报真实解析版本和兼容等级；不能解析时明确上报 `unsupported`，不填造版本。
+- 不支持版本是确定性错误，不自动重连；升级依赖后必须重新运行版本和真实隔离回归测试。
 - 目标只允许 loopback、RFC1918、链路本地/唯一本地 IPv6 或 `host.docker.internal`。
 - 公网 IP、任意域名、生产用途和配置内密码全部拒绝。
 - 重连次数、退避时间、状态频率、心跳频率和停止宽限时间都有上限。
 - 服务器返回的踢出和错误文本是不可信数据，只做长度限制与换行清理，不执行、不转成命令。
 - 日志不记录服务器地址、玩家坐标、踢出原文、密码或令牌。
 - SIGINT/SIGTERM 触发优雅停止；停止后不得再次重连。
+- 真实联机验收脚本不会自动接受 Minecraft EULA，也不会自动下载依赖；缺少可信资产时立即停止。
+- 验收前必须校验 Minecraft 1.21.8 官方服务端 SHA-1，并强制 `server-ip=127.0.0.1`、关闭 RCON/Query 和在线认证。
+- 端口已被其他进程占用时拒绝复用或终止该进程，测试退出时只清理本次启动的子进程。
 
-## 8. 漏洞报告
+## 10. 漏洞报告
 
 发现疑似密钥或高风险漏洞时，停止相关模块，不在公开日志中粘贴秘密值，只报告文件位置、秘密类型和处置建议。

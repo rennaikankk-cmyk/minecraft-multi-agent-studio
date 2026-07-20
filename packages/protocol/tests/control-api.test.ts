@@ -1,0 +1,106 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  botDetailResponseV1Schema,
+  botListResponseV1Schema,
+  botStreamEventV1Schema,
+  botStreamSnapshotV1Schema,
+  controlApiErrorV1Schema,
+} from "../src/index.js";
+
+const UUID = "11111111-1111-4111-8111-111111111111";
+const NOW = "2026-07-20T06:00:00.000Z";
+const summary = {
+  botId: "worker-01",
+  connectionState: "online" as const,
+  lastMessageAt: NOW,
+  lastHeartbeatAt: NOW,
+  lastStatusAt: NOW,
+};
+const detail = {
+  ...summary,
+  health: { current: 20, maximum: 20 },
+  food: { level: 20, saturation: 5 },
+  armorPoints: 0,
+  latencyMs: 12,
+  currentTask: null,
+  position: null,
+  positionRedacted: true,
+  minecraftVersion: null,
+};
+
+describe("Control API v1 protocol", () => {
+  it("validates versioned list and detail responses", () => {
+    expect(
+      botListResponseV1Schema.parse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: { generatedAt: NOW, bots: [summary] },
+      }).data.bots,
+    ).toEqual([summary]);
+    expect(
+      botDetailResponseV1Schema.parse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: { generatedAt: NOW, bot: detail },
+      }).data.bot.positionRedacted,
+    ).toBe(true);
+  });
+
+  it("rejects unknown response fields and protocol versions", () => {
+    expect(
+      botListResponseV1Schema.safeParse({
+        schemaVersion: "2.0",
+        requestId: UUID,
+        data: { generatedAt: NOW, bots: [] },
+      }).success,
+    ).toBe(false);
+    expect(
+      botDetailResponseV1Schema.safeParse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: { generatedAt: NOW, bot: { ...detail, serverHost: "secret" } },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("validates snapshot-before-increment stream messages", () => {
+    expect(
+      botStreamSnapshotV1Schema.parse({
+        schemaVersion: "1.0",
+        messageId: UUID,
+        timestamp: NOW,
+        streamSequence: 2,
+        type: "bot.stream.snapshot.v1",
+        payload: { bots: [detail] },
+      }).type,
+    ).toBe("bot.stream.snapshot.v1");
+    expect(
+      botStreamEventV1Schema.parse({
+        schemaVersion: "1.0",
+        messageId: UUID,
+        timestamp: NOW,
+        streamSequence: 3,
+        type: "bot.stream.event.v1",
+        payload: { event: "upsert", bot: detail },
+      }).streamSequence,
+    ).toBe(3);
+  });
+
+  it("only accepts stable public error codes", () => {
+    expect(
+      controlApiErrorV1Schema.parse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        error: { code: "AUTH_REQUIRED", message: "Authentication is required." },
+      }).error.code,
+    ).toBe("AUTH_REQUIRED");
+    expect(
+      controlApiErrorV1Schema.safeParse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        error: { code: "RAW_SERVER_ERROR", message: "secret" },
+      }).success,
+    ).toBe(false);
+  });
+});

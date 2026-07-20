@@ -34,6 +34,28 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
 
+  apps/control-api:
+    dependencies:
+      '@minecraft-studio/coordinator':
+        specifier: workspace:*
+        version: link:../coordinator
+      '@minecraft-studio/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      ws:
+        specifier: 8.21.1
+        version: 8.21.1
+    devDependencies:
+      '@types/ws':
+        specifier: 8.18.1
+        version: 8.18.1
+
+  apps/coordinator:
+    dependencies:
+      '@minecraft-studio/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+
   apps/dashboard:
     dependencies:
       '@minecraft-studio/environment':
@@ -451,6 +473,9 @@ packages:
 
   '@types/readable-stream@4.0.24':
     resolution: {integrity: sha512-NRvUNC/JFGPJvqdAfEve8oginbM6V08u5NzLWpG8MwA2kTPOLnqk+wpwuPT+mp3aUsxyuT6m2gnrPuHYCruzEg==}
+
+  '@types/ws@8.18.1':
+    resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
 
   '@vitest/expect@4.1.10':
     resolution: {integrity: sha512-YsCn+qAk1GWjQOWFEsEcL2gNQ0zmVmQu3T03qP6UyjhtmdtwtbuI+DASn/7iQB3HGTXkdBwGddzxPlmiql5vlA==}
@@ -1095,6 +1120,18 @@ packages:
     engines: {node: '>=8'}
     hasBin: true
 
+  ws@8.21.1:
+    resolution: {integrity: sha512-+0NTnW77fFN/DjQi6k/Sq/Yvk4Sgajw7urW8V+asjXnRgDs9gyGkdb7EzgfhA4goXsRIZKE28fzIXBHEzhuiWw==}
+    engines: {node: '>=10.0.0'}
+    peerDependencies:
+      bufferutil: ^4.0.1
+      utf-8-validate: '>=5.0.2'
+    peerDependenciesMeta:
+      bufferutil:
+        optional: true
+      utf-8-validate:
+        optional: true
+
   xxhash-wasm@0.4.2:
     resolution: {integrity: sha512-/eyHVRJQCirEkSZ1agRSCwriMhwlyUcFkXD5TPVSLP+IPzjsqMVzZwdoczLp1SoQU0R3dxz1RpIK+4YNQbCVOA==}
 
@@ -1357,6 +1394,10 @@ snapshots:
       csstype: 3.2.3
 
   '@types/readable-stream@4.0.24':
+    dependencies:
+      '@types/node': 26.1.1
+
+  '@types/ws@8.18.1':
     dependencies:
       '@types/node': 26.1.1
 
@@ -2014,6 +2055,8 @@ snapshots:
     dependencies:
       siginfo: 2.0.0
       stackback: 0.0.2
+
+  ws@8.21.1: {}
 
   xxhash-wasm@0.4.2: {}
 

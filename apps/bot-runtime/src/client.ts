@@ -1,5 +1,6 @@
 import type { BotConnectionState, BotPosition } from "./runtime-types.js";
 import type { ServerProfile } from "./server-profile.js";
+import type { MinecraftVersionCompatibility } from "@minecraft-studio/protocol";
 
 export type BotClientSnapshot = {
   health: { current: number; maximum: number | null };
@@ -27,11 +28,13 @@ export type BotClientHandlers = {
   onStateChanged: () => void;
   onDisconnected: (info: BotDisconnectInfo) => void;
   onError: (error: Error) => void;
+  onVersionUnsupported: () => void;
 };
 
 export interface BotClient {
   setHandlers(handlers: BotClientHandlers): void;
   snapshot(): BotClientSnapshot;
+  versionCompatibility(): MinecraftVersionCompatibility;
   close(gracePeriodMs: number): Promise<void>;
 }
 

@@ -4,7 +4,9 @@ import {
   ProtocolAuthorizationError,
   botDisconnectedV1Schema,
   botHeartbeatV1Schema,
+  botStopResultV1Schema,
   botStatusV1Schema,
+  botVersionV1Schema,
   parseBotProtocolMessage,
   parseBotTelemetryMessage,
   stopBotCommandV1Schema,
@@ -116,6 +118,12 @@ describe("BotHeartbeatV1 and BotDisconnectedV1", () => {
     };
 
     expect(botHeartbeatV1Schema.parse(heartbeat)).toEqual(heartbeat);
+    expect(
+      botHeartbeatV1Schema.safeParse({
+        ...heartbeat,
+        payload: { ...heartbeat.payload, lastStatusSequence: 44 },
+      }).success,
+    ).toBe(false);
   });
 
   it("accepts structured disconnects and bounds free text", () => {
@@ -139,6 +147,79 @@ describe("BotHeartbeatV1 and BotDisconnectedV1", () => {
       botDisconnectedV1Schema.safeParse({
         ...disconnected,
         payload: { ...disconnected.payload, detail: "x".repeat(501) },
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe("BotStopResultV1", () => {
+  const result = {
+    ...envelope,
+    type: "bot.stop.result.v1" as const,
+    payload: {
+      commandId: COMMAND_ID,
+      runtimeInstanceId: "runtime-01",
+      outcome: "completed" as const,
+      completedAt: NOW,
+    },
+  };
+
+  it("accepts a confirmed runtime result", () => {
+    expect(botStopResultV1Schema.parse(result)).toEqual(result);
+  });
+
+  it("requires stable errors only for unsuccessful results", () => {
+    expect(
+      botStopResultV1Schema.safeParse({
+        ...result,
+        payload: { ...result.payload, outcome: "failed" },
+      }).success,
+    ).toBe(false);
+    expect(
+      botStopResultV1Schema.safeParse({
+        ...result,
+        payload: { ...result.payload, errorCode: "UNEXPECTED_ERROR" },
+      }).success,
+    ).toBe(false);
+    expect(
+      botStopResultV1Schema.safeParse({
+        ...result,
+        source: { service: "bot-runtime", instanceId: "runtime-other" },
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe("BotVersionV1", () => {
+  it("reports version compatibility without server connection details", () => {
+    const tested = {
+      ...envelope,
+      type: "bot.version.v1" as const,
+      payload: {
+        serverProfileId: "isolated-test",
+        runtimeInstanceId: "runtime-01",
+        sequence: 45,
+        observedAt: NOW,
+        compatibility: {
+          selection: "auto" as const,
+          requestedVersion: null,
+          resolvedVersion: "1.21.8",
+          supportLevel: "tested" as const,
+          supportedRange: { oldest: "1.8.8", latest: "1.21.11" },
+        },
+      },
+    };
+    expect(botVersionV1Schema.parse(tested)).toEqual(tested);
+    expect(
+      botVersionV1Schema.safeParse({
+        ...tested,
+        payload: {
+          ...tested.payload,
+          compatibility: {
+            ...tested.payload.compatibility,
+            supportLevel: "unsupported",
+          },
+        },
       }).success,
     ).toBe(false);
   });

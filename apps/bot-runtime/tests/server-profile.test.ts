@@ -33,6 +33,21 @@ describe("ServerProfile", () => {
     expect(serverProfileSchema.parse(validProfile)).toEqual(validProfile);
   });
 
+  it("accepts auto detection and rejects untested fixed versions", () => {
+    expect(
+      serverProfileSchema.safeParse({
+        ...validProfile,
+        minecraftVersion: "auto",
+      }).success,
+    ).toBe(true);
+    expect(
+      serverProfileSchema.safeParse({
+        ...validProfile,
+        minecraftVersion: "1.21.10",
+      }).success,
+    ).toBe(false);
+  });
+
   it("accepts RFC1918 hosts only when private-lan is explicit", () => {
     expect(
       serverProfileSchema.safeParse({

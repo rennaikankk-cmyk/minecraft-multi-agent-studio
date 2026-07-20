@@ -1,13 +1,21 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  botVersionV1Schema,
+  botStopResultV1Schema,
   botDisconnectedV1Schema,
   botHeartbeatV1Schema,
   botStatusV1Schema,
+  parseBotProtocolMessage,
   parseBotTelemetryMessage,
   type BotDisconnectedV1,
   type BotHeartbeatV1,
+  type BotStopResultV1,
   type BotStatusV1,
+  type BotVersionV1,
+  type ControlAuthorizationContext,
+  type MinecraftVersionCompatibility,
+  type StopBotCommandV1,
 } from "@minecraft-studio/protocol";
 
 import type {
@@ -21,6 +29,7 @@ import type {
   BotMessageSink,
   RuntimeLogger,
 } from "./runtime-types.js";
+import { unsupportedVersionCompatibility } from "./version-compatibility.js";
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
@@ -31,6 +40,24 @@ export type RuntimeDependencies = {
   now?: () => Date;
   randomId?: () => string;
 };
+
+export type RuntimeStopOutcome =
+  | { confirmed: true }
+  | { confirmed: false; errorCode: "CLIENT_CLOSE_FAILED" };
+
+export type RuntimeControlErrorCode =
+  | "CONTROL_MESSAGE_REQUIRED"
+  | "COMMAND_ID_CONFLICT";
+
+export class RuntimeControlError extends Error {
+  readonly code: RuntimeControlErrorCode;
+
+  constructor(code: RuntimeControlErrorCode, message: string) {
+    super(message);
+    this.name = "RuntimeControlError";
+    this.code = code;
+  }
+}
 
 export class SingleBotRuntime {
   private readonly runtimeInstanceId: string;
@@ -49,6 +76,14 @@ export class SingleBotRuntime {
   private deferredStatusTimer: TimerHandle | null = null;
   private reconnectTimer: TimerHandle | null = null;
   private lastStatusAt = 0;
+  private minecraftVersionCompatibility: MinecraftVersionCompatibility | null =
+    null;
+  private versionUnsupported = false;
+  private stopPromise: Promise<RuntimeStopOutcome> | null = null;
+  private readonly stopExecutions = new Map<
+    string,
+    { fingerprint: string; result: Promise<BotStopResultV1> }
+  >();
 
   constructor(
     private readonly profile: ServerProfile,
@@ -63,17 +98,68 @@ export class SingleBotRuntime {
     return this.state;
   }
 
+  getRuntimeInstanceId(): string {
+    return this.runtimeInstanceId;
+  }
+
   start(): void {
     if (this.state !== "offline" || this.client || this.reconnectTimer) {
       throw new Error("Bot Runtime has already been started.");
     }
+    this.stopPromise = null;
     this.stopping = false;
     this.reconnectAttempts = 0;
     this.connect();
   }
 
-  async stop(reason = "operator_request"): Promise<void> {
-    if (this.stopping) return;
+  stop(reason = "operator_request"): Promise<RuntimeStopOutcome> {
+    if (this.stopPromise) return this.stopPromise;
+
+    const pending = this.performStop(reason);
+    this.stopPromise = pending;
+    void pending.then((outcome) => {
+      if (!outcome.confirmed && this.stopPromise === pending) {
+        this.stopPromise = null;
+        this.stopping = false;
+      }
+    });
+    return pending;
+  }
+
+  handleStopCommand(
+    input: unknown,
+    authorizationContext: ControlAuthorizationContext,
+  ): Promise<BotStopResultV1> {
+    const message = parseBotProtocolMessage(input, authorizationContext);
+    if (message.type !== "bot.stop.command.v1") {
+      throw new RuntimeControlError(
+        "CONTROL_MESSAGE_REQUIRED",
+        "Bot Runtime only accepts a validated stop command on this control path.",
+      );
+    }
+
+    const fingerprint = JSON.stringify(message);
+    const existing = this.stopExecutions.get(message.payload.commandId);
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) {
+        throw new RuntimeControlError(
+          "COMMAND_ID_CONFLICT",
+          "The command ID was already used with different stop parameters.",
+        );
+      }
+      return existing.result;
+    }
+
+    const result = this.executeStopCommand(message);
+    this.stopExecutions.set(message.payload.commandId, { fingerprint, result });
+    void result.then(
+      () => this.trimStopExecutions(),
+      () => this.trimStopExecutions(),
+    );
+    return result;
+  }
+
+  private async performStop(reason: string): Promise<RuntimeStopOutcome> {
     this.stopping = true;
     this.clearTimer("reconnect");
     this.clearTimer("status");
@@ -84,7 +170,7 @@ export class SingleBotRuntime {
     if (!activeClient) {
       this.clearTimer("heartbeat");
       this.state = "offline";
-      return;
+      return { confirmed: true };
     }
 
     this.state = "stopping";
@@ -94,19 +180,86 @@ export class SingleBotRuntime {
       reason,
     });
 
+    let closeFailed = false;
     try {
       await activeClient.close(this.profile.stopGracePeriodMs);
     } catch {
+      closeFailed = true;
       this.dependencies.logger.error("bot_runtime_close_failed", {
         botId: this.profile.botId,
       });
     }
 
+    if (closeFailed && this.client === activeClient) {
+      this.state = "error";
+      this.emitHeartbeat();
+      return { confirmed: false, errorCode: "CLIENT_CLOSE_FAILED" };
+    }
     if (this.client === activeClient) {
       this.handleDisconnected(activeGeneration, {
         reason: "requested_stop",
         expected: true,
       });
+    }
+    return { confirmed: true };
+  }
+
+  private async executeStopCommand(
+    command: StopBotCommandV1,
+  ): Promise<BotStopResultV1> {
+    const expectedRuntimeInstanceId =
+      command.payload.expectedRuntimeInstanceId;
+    if (
+      expectedRuntimeInstanceId !== null &&
+      expectedRuntimeInstanceId !== this.runtimeInstanceId
+    ) {
+      return this.createStopResult(
+        command,
+        "rejected",
+        "RUNTIME_INSTANCE_MISMATCH",
+      );
+    }
+
+    const outcome = await this.stop(`coordinator_${command.payload.mode}_stop`);
+    return outcome.confirmed
+      ? this.createStopResult(command, "completed")
+      : this.createStopResult(command, "failed", outcome.errorCode);
+  }
+
+  private createStopResult(
+    command: StopBotCommandV1,
+    outcome: BotStopResultV1["payload"]["outcome"],
+    errorCode?: string,
+  ): BotStopResultV1 {
+    const timestamp = this.now().toISOString();
+    return botStopResultV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: this.randomId(),
+      traceId: command.traceId,
+      timestamp,
+      source: {
+        service: "bot-runtime",
+        instanceId: this.runtimeInstanceId,
+      },
+      botId: this.profile.botId,
+      type: "bot.stop.result.v1",
+      payload: {
+        commandId: command.payload.commandId,
+        runtimeInstanceId: this.runtimeInstanceId,
+        outcome,
+        completedAt: timestamp,
+        ...(errorCode ? { errorCode } : {}),
+      },
+    });
+  }
+
+  private trimStopExecutions(): void {
+    while (this.stopExecutions.size > 128) {
+      const oldest = this.stopExecutions.keys().next().value as
+        | string
+        | undefined;
+      if (!oldest) return;
+      this.stopExecutions.delete(oldest);
     }
   }
 
@@ -114,6 +267,8 @@ export class SingleBotRuntime {
     this.generation += 1;
     const activeGeneration = this.generation;
     this.traceId = `connection-${this.randomId()}`;
+    this.minecraftVersionCompatibility = null;
+    this.versionUnsupported = false;
     this.state = "connecting";
     this.startHeartbeatTimer();
     this.emitHeartbeat();
@@ -136,6 +291,8 @@ export class SingleBotRuntime {
             botId: this.profile.botId,
           });
         },
+        onVersionUnsupported: () =>
+          this.handleVersionUnsupported(activeGeneration),
       });
     } catch {
       this.handleDisconnected(activeGeneration, {
@@ -148,14 +305,52 @@ export class SingleBotRuntime {
 
   private handleSpawn(generation: number): void {
     if (generation !== this.generation || this.stopping || !this.client) return;
+    try {
+      this.minecraftVersionCompatibility =
+        this.client.versionCompatibility();
+    } catch {
+      this.handleVersionUnsupported(generation);
+      this.dependencies.logger.error("bot_runtime_version_metadata_invalid", {
+        botId: this.profile.botId,
+      });
+      const incompatibleClient = this.client;
+      void incompatibleClient
+        .close(this.profile.stopGracePeriodMs)
+        .catch(() => {
+          this.dependencies.logger.error("bot_runtime_incompatible_close_failed", {
+            botId: this.profile.botId,
+          });
+        });
+      return;
+    }
     this.state = "online";
     this.reconnectAttempts = 0;
+    this.emitVersion();
     this.startStatusTimer(generation);
     this.emitStatus(generation);
     this.emitHeartbeat();
     this.dependencies.logger.info("bot_runtime_online", {
       botId: this.profile.botId,
       serverProfileId: this.profile.id,
+    });
+  }
+
+  private handleVersionUnsupported(generation: number): void {
+    if (generation !== this.generation || this.stopping) return;
+    if (this.minecraftVersionCompatibility?.supportLevel === "unsupported") {
+      return;
+    }
+    this.minecraftVersionCompatibility = unsupportedVersionCompatibility(
+      this.profile.minecraftVersion,
+    );
+    this.versionUnsupported = true;
+    this.emitVersion();
+    this.dependencies.logger.warn("bot_runtime_version_unsupported", {
+      botId: this.profile.botId,
+      supportedOldest:
+        this.minecraftVersionCompatibility.supportedRange.oldest,
+      supportedLatest:
+        this.minecraftVersionCompatibility.supportedRange.latest,
     });
   }
 
@@ -177,7 +372,14 @@ export class SingleBotRuntime {
       expected: info.expected,
     });
 
-    if (!this.stopping) this.scheduleReconnect();
+    if (!this.stopping && !this.versionUnsupported) {
+      this.scheduleReconnect();
+    } else if (this.versionUnsupported) {
+      this.dependencies.logger.warn("bot_runtime_reconnect_suppressed", {
+        botId: this.profile.botId,
+        code: "MINECRAFT_VERSION_UNSUPPORTED",
+      });
+    }
   }
 
   private scheduleReconnect(): void {
@@ -256,6 +458,9 @@ export class SingleBotRuntime {
           position: snapshot.position,
           latencyMs: snapshot.latencyMs,
           currentTask: null,
+          ...(this.minecraftVersionCompatibility
+            ? { minecraftVersion: this.minecraftVersionCompatibility }
+            : {}),
         },
       });
       this.lastStatusSequence = sequence;
@@ -266,6 +471,21 @@ export class SingleBotRuntime {
         botId: this.profile.botId,
       });
     }
+  }
+
+  private emitVersion(): void {
+    if (!this.minecraftVersionCompatibility) return;
+    const message: BotVersionV1 = botVersionV1Schema.parse({
+      ...this.envelope("bot.version.v1"),
+      payload: {
+        serverProfileId: this.profile.id,
+        runtimeInstanceId: this.runtimeInstanceId,
+        sequence: this.nextSequence(),
+        observedAt: this.now().toISOString(),
+        compatibility: this.minecraftVersionCompatibility,
+      },
+    });
+    this.emit(message);
   }
 
   private emitHeartbeat(): void {

@@ -34,13 +34,15 @@ AI Router
 ```text
 apps/
 ├─ bot-runtime/            # 单 Bot Mineflayer 运行时
+├─ coordinator/            # Bot 注册表与安全停止控制平面
+├─ control-api/            # 认证只读 HTTP/WebSocket API
 └─ dashboard/              # Next.js 前端与环境检测 API
 packages/
 ├─ protocol/               # 版本化 Zod Schema
 └─ environment/            # 真实硬件、软件和模式检测
 ```
 
-尚未创建 Coordinator、AI Router、数据库和队列应用。Bot Runtime 已实现但尚未完成隔离测试服联机验收，前端仍必须显示“待接入”。
+尚未创建 AI Router、数据库和队列应用。Bot Runtime 已完成 Minecraft 1.21.8 隔离联机验收；Coordinator 已实现进程内 Bot 注册表和安全停止控制边界；Control API 已提供认证只读 HTTP/WebSocket 接口。Dashboard 尚未读取 Control API，因此 Bot 页面仍必须显示“待接入”。
 
 ## 4. 环境检测数据流
 
@@ -83,7 +85,9 @@ Dashboard real status view
 - `BotStatusV1`：完整状态快照，包含真实血量、饥饿、护甲、位置和当前任务。
 - `BotHeartbeatV1`：轻量心跳、运行实例、序列号和最近状态序列号。
 - `BotDisconnectedV1`：结构化断线原因、是否预期和最后状态序列号。
+- `BotVersionV1`：版本选择、真实解析版本、兼容等级和适配器支持范围。
 - `StopBotCommandV1`：有期限、幂等命令 ID 和授权决策引用的安全停止命令。
+- `BotStopResultV1`：由目标 Runtime 返回的完成、拒绝或失败确认。
 
 ```text
 Bot Runtime
@@ -91,12 +95,14 @@ Bot Runtime
   ├─ BotHeartbeatV1
   └─ BotDisconnectedV1
           ↓ strict Zod validation
-      future Coordinator
+      Coordinator BotRegistry
 
 API Gateway / Coordinator
   └─ StopBotCommandV1
           ↓ schema + trusted authorization context
-      future Bot Runtime
+      Bot Runtime
+          ↓ BotStopResultV1
+      Coordinator audit + registry
 ```
 
 每条消息都包含 `schemaVersion`、`messageId`、`traceId`、`timestamp`、`source.instanceId` 和 `botId`。遥测中的 `runtimeInstanceId + sequence` 用于后续识别重启、重复和乱序消息。
@@ -120,13 +126,55 @@ SingleBotRuntime
 message sink (future Coordinator)
 ```
 
-运行时不包含服务器地址默认值，也不会扫描或自动选择服务器。只有显式设置 `BOT_SERVER_PROFILE_PATH` 后才创建 Mineflayer 客户端。
+运行时不包含服务器地址默认值，也不会扫描或自动选择服务器。只有显式设置 `BOT_SERVER_PROFILE_PATH` 后才创建 Mineflayer 客户端。版本自动探测只发生在这个已经通过网络范围校验的目标上。
 
 ServerProfile 只接受：
 
 - `purpose=isolated-test`
 - `auth=offline`
 - loopback 或 RFC1918/本地 IPv6 地址
-- 固定 Minecraft 版本、有限重连次数和有上限的超时
+- `minecraftVersion=auto` 或当前 Mineflayer 明确测试过的固定版本
+- 有限重连次数和有上限的超时
 
 状态来自 Mineflayer 实例。无法可靠读取最大生命值、护甲或延迟时使用 `null`，不使用假定值替代。
+
+版本能力直接读取锁定的 Mineflayer 4.37.1 公开导出，而不是在业务代码复制版本表。当前包声明的测试范围是 1.8.8 至 1.21.11，共 27 个测试版本。自动模式省略 Mineflayer `version` 选项，由其先探测目标服务器协议；成功后读取 Bot 的真实解析版本并标记为 `tested` 或 `compatible-untested`。超出适配器能力时上报 `unsupported`，并禁止对同一确定性错误继续重连。
+
+真实联机验收由 `scripts/run-isolated-minecraft-test.ps1` 编排。脚本只接受预先准备的可信 Java、Minecraft 1.21.8 官方服务端和本地 ServerProfile，启动前校验服务端哈希、用户 EULA 状态、安全属性与端口占用，测试完成后优雅关闭本地服务。运行时世界、日志和本地配置保存在忽略提交的 `runtime-data` 中。
+
+## 8. Coordinator Bot 注册表
+
+```text
+validated Bot telemetry
+        ↓ source/runtime identity check
+messageId dedupe + runtimeInstanceId + sequence ordering
+        ↓
+BotRegistry (in-memory, real process state)
+  ├─ online / connecting / stopping / error
+  ├─ stale after liveness timeout
+  └─ offline after disconnect or confirmed stop
+```
+
+注册表按 Bot 保留当前运行实例和有限数量的已退役运行实例。新运行实例接管后，旧实例的延迟心跳不能恢复在线状态；同一实例的重复或乱序序列也不会覆盖较新状态。状态读取返回副本，不能从调用方直接修改注册表内部数据。
+
+安全停止由 `StopController` 生成并再次校验 `StopBotCommandV1`，可信授权上下文必须匹配决策、操作者、Bot、命令、权限和有效期。命令通过传输适配器交给 Bot Runtime，Runtime 校验目标运行实例并返回 `BotStopResultV1`；Coordinator 只在确认身份完全匹配后更新离线状态。当前注册表、命令幂等缓存和审计记录均为进程内存，持久化与跨进程传输留给后续模块。
+
+## 9. Control API 与实时状态流
+
+```text
+Bearer token or WebSocket auth subprotocol
+        ↓ SHA-256 digest + timing-safe comparison
+permission + input/version validation + rate limits
+        ↓
+GET /v1/bots
+GET /v1/bots/:botId
+WS  /v1/bots/stream
+        ↓
+public projection (no ServerProfile/runtime internals)
+        ↓
+snapshot at sequence N → events N+1, N+2, ...
+```
+
+Control API 默认且当前只允许绑定 `127.0.0.1` 或 `::1`。服务端配置只保存令牌 SHA-256，不保存明文令牌；HTTP 使用 Bearer 头，浏览器 WebSocket 可通过 `minecraft-studio.v1` 与 `auth.<base64url-token>` 子协议认证。`bot.read` 允许读取基本状态，坐标还需要单独的 `bot.position.read` 权限。
+
+列表和详情不会返回 `ServerProfile`、服务器地址、运行实例内部标识或原始错误。WebSocket 连接建立后先发送当前完整快照，再发送严格递增的 `upsert` 事件；客户端发送任何业务消息都会以只读策略关闭。当前独立 Control API 进程没有跨进程 Bot 遥测入口，因此没有共享 Coordinator 实例时会返回真实空列表，不会生成模拟 Bot。

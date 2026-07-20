@@ -67,8 +67,17 @@ void main().catch((error: unknown) => {
   process.exitCode = 1;
 });
 
-export { createMineflayerClient } from "./mineflayer-client.js";
-export { SingleBotRuntime, type RuntimeDependencies } from "./runtime.js";
+export {
+  createMineflayerClient,
+  createMineflayerOptions,
+} from "./mineflayer-client.js";
+export {
+  RuntimeControlError,
+  SingleBotRuntime,
+  type RuntimeControlErrorCode,
+  type RuntimeDependencies,
+  type RuntimeStopOutcome,
+} from "./runtime.js";
 export {
   ServerProfileError,
   loadServerProfile,
@@ -83,3 +92,12 @@ export type {
   BotClientSnapshot,
   BotDisconnectInfo,
 } from "./client.js";
+export {
+  isMineflayerTestedVersion,
+  isMineflayerUnsupportedVersionError,
+  mineflayerVersionOption,
+  mineflayerVersionSupport,
+  resolvedVersionCompatibility,
+  unsupportedVersionCompatibility,
+  type MinecraftVersionSelection,
+} from "./version-compatibility.js";

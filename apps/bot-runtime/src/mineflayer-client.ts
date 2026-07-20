@@ -7,6 +7,11 @@ import type {
   BotDisconnectInfo,
 } from "./client.js";
 import type { ServerProfile } from "./server-profile.js";
+import {
+  isMineflayerUnsupportedVersionError,
+  mineflayerVersionOption,
+  resolvedVersionCompatibility,
+} from "./version-compatibility.js";
 
 const ARMOR_POINTS: Readonly<Record<string, number>> = {
   leather_helmet: 1,
@@ -77,12 +82,20 @@ function readArmorPoints(bot: Bot): number | null {
 
 function mapDisconnectReason(
   requestedStop: boolean,
+  versionUnsupported: boolean,
   kickedDetail: string | undefined,
   errorDetail: string | undefined,
   endReason: string,
 ): BotDisconnectInfo {
   if (requestedStop) {
     return { reason: "requested_stop", expected: true };
+  }
+  if (versionUnsupported) {
+    return {
+      reason: "runtime_error",
+      expected: false,
+      detail: "unsupported_minecraft_version",
+    };
   }
   if (kickedDetail) {
     return { reason: "kicked", expected: false, detail: kickedDetail };
@@ -108,8 +121,12 @@ export class MineflayerBotClient implements BotClient {
   private requestedStop = false;
   private kickedDetail: string | undefined;
   private errorDetail: string | undefined;
+  private versionUnsupportedReported = false;
 
-  constructor(private readonly bot: Bot) {
+  constructor(
+    private readonly bot: Bot,
+    private readonly configuredVersion: ServerProfile["minecraftVersion"],
+  ) {
     bot.on("spawn", () => this.handlers?.onSpawn());
     bot.on("health", () => this.handlers?.onStateChanged());
     bot.on("move", () => this.handlers?.onStateChanged());
@@ -121,12 +138,20 @@ export class MineflayerBotClient implements BotClient {
     });
     bot.on("error", (error) => {
       this.errorDetail = safeDetail(error.message);
+      if (
+        !this.versionUnsupportedReported &&
+        isMineflayerUnsupportedVersionError(error)
+      ) {
+        this.versionUnsupportedReported = true;
+        this.handlers?.onVersionUnsupported();
+      }
       this.handlers?.onError(error);
     });
     bot.on("end", (reason) => {
       this.handlers?.onDisconnected(
         mapDisconnectReason(
           this.requestedStop,
+          this.versionUnsupportedReported,
           this.kickedDetail,
           this.errorDetail,
           reason,
@@ -165,6 +190,10 @@ export class MineflayerBotClient implements BotClient {
     };
   }
 
+  versionCompatibility() {
+    return resolvedVersionCompatibility(this.configuredVersion, this.bot.version);
+  }
+
   async close(gracePeriodMs: number): Promise<void> {
     if (this.requestedStop) return;
     this.requestedStop = true;
@@ -192,14 +221,19 @@ export class MineflayerBotClient implements BotClient {
 }
 
 export function createMineflayerClient(profile: ServerProfile): BotClient {
-  const bot = createBot({
+  const bot = createBot(createMineflayerOptions(profile));
+  return new MineflayerBotClient(bot, profile.minecraftVersion);
+}
+
+export function createMineflayerOptions(profile: ServerProfile) {
+  const version = mineflayerVersionOption(profile.minecraftVersion);
+  return {
     host: profile.host,
     port: profile.port,
     username: profile.username,
     auth: profile.auth,
-    version: profile.minecraftVersion,
+    ...(version === false ? {} : { version }),
     hideErrors: true,
     logErrors: false,
-  });
-  return new MineflayerBotClient(bot);
+  };
 }

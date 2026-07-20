@@ -1,12 +1,12 @@
 import type {
-  BotProtocolMessageV1,
   BotStatusV1,
+  BotTelemetryMessageV1,
 } from "@minecraft-studio/protocol";
 
 export type BotConnectionState = BotStatusV1["payload"]["connectionState"];
 export type BotPosition = BotStatusV1["payload"]["position"];
 export type BotMessageSink = (
-  message: Exclude<BotProtocolMessageV1, { type: "bot.stop.command.v1" }>,
+  message: BotTelemetryMessageV1,
 ) => Promise<void> | void;
 
 export type RuntimeLogger = {
