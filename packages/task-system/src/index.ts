@@ -3,6 +3,7 @@ export {
   type TaskSystemErrorCode,
 } from "./errors.js";
 export {
+  taskCancelCommandSchema,
   taskCreateCommandSchema,
   taskEvidenceSchema,
   taskLeaseAcquireCommandSchema,
@@ -16,6 +17,7 @@ export {
   taskStatusSchema,
   taskTargetSchema,
   taskTransitionCommandSchema,
+  type TaskCancelCommand,
   type TaskCreateCommand,
   type TaskLeaseAcquireCommand,
   type TaskLeaseExpireCommand,
@@ -26,6 +28,7 @@ export {
   type TaskTransitionCommand,
 } from "./model.js";
 export {
+  MAX_EXPIRED_LEASE_BATCH_SIZE,
   PostgresTaskRepository,
   taskOperationFingerprint,
   type CreateTaskResult,
@@ -40,3 +43,32 @@ export {
   renewTaskLease,
   transitionTask,
 } from "./state-machine.js";
+export {
+  TaskInfrastructureConfigError,
+  parseIsolatedPostgresUrl,
+  parseIsolatedRedisUrl,
+  parseIsolatedTaskInfrastructureConfig,
+  type IsolatedTaskInfrastructureConfig,
+} from "./infrastructure-config.js";
+export { PgTaskPoolAdapter } from "./pg-pool-adapter.js";
+export {
+  BullMqTaskQueue,
+  TASK_DISPATCH_JOB_NAME,
+  TaskQueueError,
+  bullMqTaskConnectionOptions,
+  bullMqTaskQueueConnectionOptions,
+  taskDispatchEquivalenceFingerprint,
+  taskDispatchJobId,
+  type BullMqTaskQueueOptions,
+  type TaskDispatchQueueResult,
+  type TaskWorkerQueueResult,
+} from "./bullmq-queue.js";
+export {
+  BullMqTaskWorker,
+  TaskHandlerRegistry,
+  TaskWorkerError,
+  type BullMqTaskWorkerOptions,
+  type TaskHandlerContext,
+  type TaskHandlerDefinition,
+  type TaskHandlerResult,
+} from "./bullmq-worker.js";

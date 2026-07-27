@@ -2,7 +2,7 @@
 
 面向 Minecraft Java 版多智能体机器人的硬件无关控制平台。
 
-当前已完成项目基线、真实环境检测、版本化 Bot 状态协议、单 Bot 隔离联机验收、Minecraft 版本自适应、Coordinator 注册表、Control API、真实状态 Dashboard、确定性 L0 安全层、受限 Pathfinder 技能，以及 P1.3 任务持久化基础：
+当前已完成项目基线、真实环境检测、版本化 Bot 状态协议、单 Bot 隔离联机验收、Minecraft 版本自适应、Coordinator 进程内注册表、Control API/Dashboard 契约、确定性 L0 安全层、受限 Pathfinder 技能，以及 P1.3 任务持久化基础：
 
 - 自动检测当前 CPU、内存、操作系统和 GPU 探测状态。
 - 检测 Node.js、Java、Docker 和 Git 是否可用。
@@ -17,12 +17,15 @@
 - Control API 提供认证列表、详情、WebSocket 状态流和受权优雅停止入口。
 - 安全停止要求弹窗二次确认、本地确认码、`bot.stop` 权限和 Runtime 真实确认结果。
 - Bot 可对批准的隔离服务器自动探测 Minecraft 版本，并上报真实兼容状态。
-- Dashboard 停止操作可用同一追踪编号核对 Control API、Coordinator 和 Bot Runtime 结构化日志。
+- 进程内链路可用同一追踪编号核对 Control API、Coordinator 和 Bot Runtime 结构化日志。
 - L0 安全层从真实 Mineflayer 状态识别饥饿、低/危急生命值、溺水、岩浆、坠落、卡死和背包满，并执行固定白名单动作。
 - `movement.goto@1.0.0` 通过受限 Pathfinder 适配器移动，不允许挖掘、搭塔、垫方块或跑酷。
-- 任务系统提供 PostgreSQL 迁移、严格状态机、幂等键、乐观修订号和租约边界；真实 PostgreSQL 与 BullMQ 尚待接入。
+- 任务系统提供 PostgreSQL 迁移、严格状态机、幂等键、乐观修订号、租约边界、版本化处理器契约、严格派发协议和 BullMQ Worker。
+- 隔离 PostgreSQL/Redis 集成测试已加入 GitHub Actions；本机没有运行这些服务时不会冒充已验证。
 
-当前不会自动连接 Minecraft，不会调用模型，也不会显示模拟 Bot。Dashboard 后端断开时会清空 Bot 列表并明确显示错误。
+当前项目是单 Bot 安全执行与任务基础设施，不是已经完成的多智能体产品。独立 Control API 尚未接入 Runtime/Coordinator 跨进程遥测，因此单独启动时返回真实空列表；Dashboard 后端断开时会清空 Bot 列表并明确显示错误。
+
+当前不会自动连接 Minecraft，不会调用模型，也不会显示模拟 Bot。
 
 仅在显式设置隔离测试服配置并执行 `pnpm bot:start` 时才会尝试连接 Minecraft。
 
@@ -54,10 +57,10 @@ pnpm dev
 ## 检查
 
 ```powershell
-pnpm typecheck
-pnpm test
-pnpm build
+pnpm check
 ```
+
+`pnpm check` 依次运行类型检查、离线测试和生产构建，不会启动 Minecraft 或外部基础设施。
 
 生产服务启动后可运行冒烟测试：
 
@@ -227,9 +230,22 @@ Dashboard 的 Bot 卡片显示真实 L0 状态。旧 Runtime 未上报该字段�
 
 ## P1.3 任务系统当前边界
 
-`@minecraft-studio/task-system` 提供任务 Schema、状态机、重试预算、创建幂等、操作重放、租约和参数化 PostgreSQL 仓库。迁移文件位于 `packages/task-system/migrations/0001_task_system.sql`，不会自动执行。
+`@minecraft-studio/task-system` 提供任务 Schema、状态机、重试预算、创建幂等、操作重放、租约、参数化 PostgreSQL 仓库、`pg` 连接适配器、BullMQ 队列和 Worker。迁移文件位于 `packages/task-system/migrations`，不会由普通启动命令自动执行。
 
-当前没有配置数据库连接，也没有启动 Redis/BullMQ。单元测试验证的是状态与 SQL 边界，不代表 PostgreSQL 或队列服务在线。
+Worker 只接受 `TaskDispatchV1` 严格消息和预先注册的精确版本任务处理器；任务、派发和注册表中的处理器版本与幂等策略必须完全一致。消息中的文本、代码、Shell、URL 或未知字段不会执行。PostgreSQL 是任务事实源，Redis 只保存队列和临时 Worker 状态。BullMQ 自身不代替领域重试预算。
+
+活动取消、超时和截止时间先传播 `AbortSignal`；即使受信任处理器不合作，Worker 也会停止等待、停止续租并按数据库权威时间释放持久租约。任务处理器当前仍与 Worker 运行在同一 Node.js 进程，并非强隔离沙盒，因此已失去租约的处理器代码仍可能继续执行自身副作用，后续必须通过独立进程隔离获得硬终止能力。旧 job 的恢复仅在显式 BullMQ 重投、原租约已过期、Bot 归属匹配、持久化处理器版本/幂等策略与当前注册表一致且 PostgreSQL 重试预算仍有余额时允许。当前还没有 outbox、自动 PostgreSQL→BullMQ 对账重投或跨 Worker 取消 API。
+
+本机没有配置 PostgreSQL/Redis 时，普通 `pnpm check` 只运行离线测试。真实基础设施测试使用专用数据库 Schema 和 Redis 前缀，拒绝非回环地址，也不会执行 `FLUSHALL` 或连接 Minecraft。该命令不会下载或启动 PostgreSQL/Redis；准备好已运行的隔离服务后执行：
+
+```powershell
+$env:TASK_POSTGRES_URL='postgresql://<test-user>:<test-password>@127.0.0.1:5432/<isolated-test-db>'
+$env:TASK_REDIS_URL='redis://127.0.0.1:6379/0'
+$env:TASK_INFRA_TEST_NAMESPACE='studio_test_local_unique01'
+pnpm test:task-infra
+```
+
+三个变量缺少任意一个时命令会失败，不会静默跳过。GitHub Actions 使用固定摘要的临时 PostgreSQL/Redis 服务完成同一组测试；在工作流实际通过前不得声称真实服务已验证。Coordinator 调度入口、outbox/自动对账重投、跨 Worker 取消、任务 Control API、Dashboard 任务看板和生产基础设施仍待后续模块接入。
 
 ## 安全说明
 
@@ -237,4 +253,4 @@ Dashboard 的 Bot 卡片显示真实 L0 状态。旧 Runtime 未上报该字段�
 - 子进程明确禁用 Shell。
 - 不采集主机名、用户名、IP、密钥或 Minecraft 服务器信息。
 - 依赖只允许从官方 npm Registry 下载，并由锁文件记录完整性哈希。
-- pnpm 只允许经过审核的 `sharp` 执行安装脚本，其余依赖脚本默认阻止。
+- pnpm 只允许经过审核的 `sharp` 执行安装脚本；BullMQ 间接依赖的可选原生 `msgpackr-extract` 明确禁止构建，其余依赖脚本默认阻止。

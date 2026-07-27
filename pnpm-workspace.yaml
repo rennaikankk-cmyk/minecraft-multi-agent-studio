@@ -3,6 +3,7 @@ packages:
   - packages/*
 
 allowBuilds:
+  msgpackr-extract: false
   sharp: true
 
 overrides:

@@ -75,11 +75,41 @@ function assertDeadline(task: TaskRecord, nowMs: number): void {
   }
 }
 
-function assertActiveLease(
+function assertCompletionWithinTimeout(
   task: TaskRecord,
-  leaseOwner: string | null,
   nowMs: number,
 ): void {
+  if (
+    task.startedAt !== null &&
+    Date.parse(task.startedAt) + task.timeoutMs <= nowMs
+  ) {
+    throw new TaskSystemError(
+      "TASK_TIMEOUT_EXPIRED",
+      "Running task cannot complete after its execution timeout.",
+    );
+  }
+}
+
+function leaseExpiry(
+  task: TaskRecord,
+  nowMs: number,
+  durationMs: number,
+): string {
+  const requestedExpiryMs = nowMs + durationMs;
+  const expiryMs =
+    task.deadline === null
+      ? requestedExpiryMs
+      : Math.min(requestedExpiryMs, Date.parse(task.deadline));
+  return new Date(expiryMs).toISOString();
+}
+
+function assertLeaseOwner(
+  task: TaskRecord,
+  leaseOwner: string | null,
+): asserts task is TaskRecord & {
+  leaseOwner: string;
+  leaseExpiresAt: string;
+} {
   if (task.leaseOwner === null || task.leaseExpiresAt === null) {
     throw new TaskSystemError(
       "TASK_LEASE_REQUIRED",
@@ -92,6 +122,14 @@ function assertActiveLease(
       "Task lease belongs to another owner.",
     );
   }
+}
+
+function assertActiveLease(
+  task: TaskRecord,
+  leaseOwner: string | null,
+  nowMs: number,
+): void {
+  assertLeaseOwner(task, leaseOwner);
   if (Date.parse(task.leaseExpiresAt) <= nowMs) {
     throw new TaskSystemError(
       "TASK_LEASE_EXPIRED",
@@ -141,7 +179,16 @@ export function transitionTask(
     assertActiveLease(task, command.leaseOwner, nowMs);
   }
   if (task.status === "running") {
-    assertActiveLease(task, command.leaseOwner, nowMs);
+    if (command.to === "expired") {
+      // The owning worker must be able to persist the deadline terminal state
+      // after the deadline-clamped lease reaches its exact expiry.
+      assertLeaseOwner(task, command.leaseOwner);
+    } else {
+      if (command.to === "completed") {
+        assertCompletionWithinTimeout(task, nowMs);
+      }
+      assertActiveLease(task, command.leaseOwner, nowMs);
+    }
   }
   if (command.to !== "expired" && command.to !== "cancelled") {
     assertDeadline(task, nowMs);
@@ -255,9 +302,7 @@ export function acquireTaskLease(
     status: "assigned",
     assignedBotId: command.botId,
     leaseOwner: command.leaseOwner,
-    leaseExpiresAt: new Date(
-      nowMs + command.leaseDurationMs,
-    ).toISOString(),
+    leaseExpiresAt: leaseExpiry(task, nowMs, command.leaseDurationMs),
     updatedAt: timestamp,
     revision: task.revision + 1,
   });
@@ -292,9 +337,7 @@ export function renewTaskLease(
 
   return taskRecordSchema.parse({
     ...task,
-    leaseExpiresAt: new Date(
-      nowMs + command.leaseDurationMs,
-    ).toISOString(),
+    leaseExpiresAt: leaseExpiry(task, nowMs, command.leaseDurationMs),
     updatedAt: timestamp,
     revision: task.revision + 1,
   });

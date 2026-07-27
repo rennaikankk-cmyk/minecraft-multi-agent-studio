@@ -102,3 +102,11 @@ export {
   type SkillInvocationV1,
   type SkillJsonValue,
 } from "./skill-messages.js";
+
+export {
+  parseTaskDispatch,
+  taskDispatchTaskTypeSchema,
+  taskDispatchV1Schema,
+  taskQueueSourceSchema,
+  type TaskDispatchV1,
+} from "./task-dispatch.js";

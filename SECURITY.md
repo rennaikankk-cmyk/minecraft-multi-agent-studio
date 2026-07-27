@@ -34,7 +34,7 @@
 - npm 依赖只从 `https://registry.npmjs.org/` 获取。
 - 必须提交 `pnpm-lock.yaml`，并保留包完整性哈希。
 - CI 和一键安装使用 `pnpm install --frozen-lockfile`。
-- `pnpm-workspace.yaml` 只允许经过审核的 `sharp` 执行安装脚本，其他依赖脚本默认阻止。
+- `pnpm-workspace.yaml` 只允许经过审核的 `sharp` 执行安装脚本；BullMQ 间接依赖的可选原生 `msgpackr-extract` 明确设置为禁止构建，其他依赖脚本默认阻止。
 - 新依赖必须记录包名、用途、版本、来源和许可证，并完成漏洞检查。
 - Mineflayer 间接依赖使用的 `uuid` 统一覆盖为已修复的 11.1.1；覆盖前已确认调用面仅为兼容的 `uuid.v4()`。
 - 不下载或执行聊天、模型输出、帖子、网盘或随机 URL 中的代码。
@@ -44,7 +44,11 @@
 - 浏览器验收使用官方 npm Registry 的 Playwright Test 1.61.1（Apache-2.0），完整性为 `sha512-8nKv6+0RJSL9FE4jYOEGXnPeM/Hg12qZpmqzZjRh3qM0Y7c3z1mrOTfFLids72RDQYVh9WpLEfR5WdpNX4fkig==`；本机验收复用已安装 Edge，未自动下载浏览器。
 - 安全寻路使用 PrismarineJS 官方 `mineflayer-pathfinder` 2.4.5（MIT），来源为官方 npm Registry，完整性为 `sha512-Jh3JnUgRLwhMh2Dugo4SPza68C41y+NPP5sdsgxRu35ydndo70i1JJGxauVWbXrpNwIxYNztUw78aFyb7icw8g==`。
 - Dashboard 使用 Next.js 16.2.11（MIT），完整性为 `sha512-B339zaqbyK8cmxhoAvLrcwoabwCP1wz21zSzfqxqXAemTu2BXnH7tQnfcglKv1vnMUIDBc+Hth7XODQriTZiRQ==`。
-- Next.js 间接依赖 PostCSS 覆盖为 8.5.18（MIT），完整性为 `sha512-xdB1oSLHbz1vRWgCDalrCqEFTWzFlhqFC5tIHLMOSUIjhm3XXQ1qrFy8S/ESr1JYRRXqM3c1QFiMZUJdUTqyMQ==`；Sharp 覆盖为 0.35.0（Apache-2.0），完整性为 `sha512-BqvG5XbwPZ4NV0DK90d86leEECMsoa8bO0nqnKWlBDYxri4GJ7c4EDInaF6q20lTh/mATmnDIKWJFfXnoVfH5g==`。
+- Next.js 间接依赖 PostCSS 覆盖为 8.5.18（MIT），完整性为 `sha512-xdB1oSLHbz1vRWgCDalrCqEFTWzFlhqFC5tIHLMOSUIjhm3XXQ1qrFy8S/ESr1JYRRXqM3c1QFiMZUJdUTqyMQ==`；Sharp 覆盖为 0.35.0（核心包 Apache-2.0，Windows x64 平台包声明 Apache-2.0 AND LGPL-3.0-or-later），完整性为 `sha512-BqvG5XbwPZ4NV0DK90d86leEECMsoa8bO0nqnKWlBDYxri4GJ7c4EDInaF6q20lTh/mATmnDIKWJFfXnoVfH5g==`。
+- 任务队列使用官方 npm Registry 的 BullMQ 5.81.2（MIT），完整性为 `sha512-Hi9GaVCC6HE9bQP65j/FNv1aL1fcEukTF99ezS5pl1Ud+joCFpNWiPCV45mWdkEmpuacS0XJdMMFGKPIHCwoPg==`。
+- PostgreSQL 驱动使用官方 npm Registry 的 `pg` 8.22.0（MIT），完整性为 `sha512-8wih1vVIBMxoUM2oB4soJsD9tDnDpLv4OXBJ+EJzFsvycD+lfyIreC2gGHq78f8jbLLt+bvlPTFdFZfJkOuzAA==`；开发类型包固定为 `@types/pg` 8.20.0（MIT），完整性为 `sha512-bEPFOaMAHTEP1EzpvHTbmwR8UsFyHSKsRisLIHVMXnpNefSbGA1bD6CVy+qKjGSqmZqNqBDV2azOBo8TgkcVow==`。
+- P1.3.1 CI 服务固定为 PostgreSQL `17.10-alpine3.23@sha256:8189a1f6e40904781fc9e2612687877791d21679866db58b1de996b31fc312e4` 和 Redis `8.8.0-alpine3.23@sha256:9d317178eceac8454a2284a9e6df2466b93c745529947f0cd42a0fa9609d7005`。
+- P1.3.1 CI 固定使用 Node 24 runtime 的 GitHub 官方 `actions/checkout` 提交 `d23441a48e516b6c34aea4fa41551a30e30af803` 和 `actions/setup-node` 提交 `249970729cb0ef3589644e2896645e5dc5ba9c38`，Node.js 固定为 24.18.0 LTS。pnpm 固定为 11.9.0（MIT），npm 完整性为 `sha512-vWgtXQP+Ul73yf1ngMaITR51asTJyf4AxTh4KCQxDc+Q493E9Tg18G3669UIXkGFXgvLs7YN4qxburieUDbwOw==`，Corepack 使用等价 SHA-512 十六进制固定值。
 
 ## 4. 四种模式
 
@@ -173,12 +177,20 @@
 - 任务命令使用严格 Schema，未知字段、自依赖、越界优先级、超长内容和无效坐标默认拒绝。
 - 任务创建使用 `(idempotency_scope, idempotency_key)` 唯一约束和规范化 SHA-256 请求指纹；同一键携带不同参数必须拒绝。
 - 每个状态、租约操作携带全局唯一操作 ID；重复 ID 只有在任务和指纹完全一致时才能返回已有快照。
-- 当前任务行使用 `revision` 乐观并发控制，并在事务内 `SELECT ... FOR UPDATE`；状态更新和历史追加必须同时提交或回滚。
+- 相同操作 ID 先使用 PostgreSQL 事务级 advisory lock 串行化；任务行再使用 `revision` 乐观并发控制和事务内 `SELECT ... FOR UPDATE`。状态更新和历史追加必须同时提交或回滚。
 - 运行任务必须持有未过期且所有者匹配的租约；依赖任务未完成时禁止领取。租约时长限制为 1 秒至 5 分钟。
 - R3/R4 任务在可信审批上下文尚未接入前一律禁止领取，不能依靠命令内字段自证批准。
 - `studio_tasks` 禁止直接删除，`studio_task_history` 禁止更新或删除。取消、失败和过期通过状态与历史表达。
 - 所有 SQL 使用固定语句和参数绑定，不拼接任务输入。唯一的动态 SQL 片段是源码固定的 `FOR UPDATE` 选择。
-- 当前迁移尚未应用到真实 PostgreSQL，BullMQ 和 Redis 也未接入；不得把单元测试结果描述为数据库或队列服务在线。
+- 两个迁移文件在真实测试运行前分别校验 SHA-256：`0001_task_system.sql` 为 `8a66af4a41c4a3d8d938e997ac5c96a3d3c644c3eec0b7d947f9b584a2bbfb3a`，`0002_task_lease_invariants.sql` 为 `c92d06257824e343190b0f08ee950e34d486a7df4c2e01a34ed308a97970ca1c`。
+- 队列只接受严格 `TaskDispatchV1`，job 名称和 ID 均由代码固定。消息不包含可执行代码、Shell、模型文本或 URL；Worker 只调用任务、派发和注册表三方处理器版本/幂等策略完全一致的确定性处理器。
+- Redis 只用于消息投递和 BullMQ 临时锁，不能覆盖 PostgreSQL 事实。BullMQ 固定 `attempts=1`，领域重试必须经过任务状态机、幂等处理器声明和持久化重试预算。
+- 活动取消、超时与截止时间先传播 `AbortSignal`；Worker 有界停止等待和续租，并使用 PostgreSQL 权威时钟写入 cancelled/failed/expired 终态。续租在最终状态提交前停止并等待，避免续租与完成并发修改同一修订号。
+- 旧 job 恢复只允许显式 BullMQ 重投，且原任务必须为租约已过期的 assigned/running 状态、Bot 归属匹配；running 任务还要求持久化的精确处理器版本与幂等策略匹配当前注册表，且重试预算未用尽。
+- 处理器是预先审核的受信任进程内代码，并非沙盒；严格队列消息阻止消息携带代码，但不能约束开发者主动注册的 Node.js 处理器。Worker 不会因不合作处理器而无限持有租约，但忽略 `AbortSignal` 的代码可能在失去租约后继续运行自身副作用，硬终止需要后续独立进程隔离。
+- 隔离基础设施配置只接受回环地址、专用数据库 Schema 和严格 Redis 前缀；测试清理不使用 `FLUSHALL`，也不会连接 Minecraft。
+- 当前没有事务 outbox、Redis 丢失后的自动队列重建、PostgreSQL→BullMQ reconciler 或跨 Worker 取消 API。数据库提交与入队不具备原子性，不得声称 exactly-once 或自动故障恢复。
+- 当前代码和 CI 流程已经接入 BullMQ/Redis/PostgreSQL 测试边界，但本机没有运行这些服务；在 GitHub Actions 真实集成作业通过前不得描述为真实服务已验证或在线。
 
 ## 15. 漏洞报告
 

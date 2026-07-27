@@ -4,6 +4,7 @@ import {
   TaskSystemError,
   acquireTaskLease,
   expireTaskLease,
+  renewTaskLease,
   taskRecordSchema,
   transitionTask,
   type TaskRecord,
@@ -20,6 +21,8 @@ function task(overrides: Partial<TaskRecord> = {}): TaskRecord {
     idempotencyKey: "collect-stone-001",
     requestFingerprint: "a".repeat(64),
     taskType: "resource.collect",
+    handlerVersion: "1.0.0",
+    executionIdempotent: true,
     title: "Collect stone",
     description: "Collect a bounded amount of stone in the isolated world.",
     priority: 50,
@@ -98,6 +101,39 @@ describe("task state and lease boundaries", () => {
       leaseExpiresAt: "2026-07-27T12:00:30.000Z",
       revision: 1,
     });
+  });
+
+  it("caps acquired and renewed leases at the task deadline", () => {
+    const deadline = "2026-07-27T12:00:10.000Z";
+    const acquired = acquireTaskLease(
+      task({ deadline }),
+      {
+        ...operationBase("12121212-1212-4212-8212-121212121212", 0),
+        botId: "worker-01",
+        leaseOwner: "coordinator-lease-01",
+        leaseDurationMs: 30_000,
+      },
+      { now: NOW, dependenciesReady: true },
+    );
+    expect(acquired.leaseExpiresAt).toBe(deadline);
+
+    const renewed = renewTaskLease(
+      task({
+        deadline,
+        status: "assigned",
+        assignedBotId: "worker-01",
+        leaseOwner: "coordinator-lease-01",
+        leaseExpiresAt: "2026-07-27T12:00:05.000Z",
+        revision: 1,
+      }),
+      {
+        ...operationBase("13131313-1313-4313-8313-131313131313", 1),
+        leaseOwner: "coordinator-lease-01",
+        leaseDurationMs: 30_000,
+      },
+      NOW,
+    );
+    expect(renewed.leaseExpiresAt).toBe(deadline);
   });
 
   it("keeps the lease while starting and releases it on completion", () => {
@@ -216,6 +252,38 @@ describe("task state and lease boundaries", () => {
     );
   });
 
+  it("rejects completion at or after the execution timeout", () => {
+    const running = task({
+      status: "running",
+      assignedBotId: "worker-01",
+      leaseOwner: "coordinator-lease-01",
+      leaseExpiresAt: "2026-07-27T12:01:00.000Z",
+      startedAt: "2026-07-27T11:59:00.000Z",
+      timeoutMs: 60_000,
+      revision: 2,
+    });
+
+    expect(() =>
+      transitionTask(
+        running,
+        {
+          ...operationBase("14141414-1414-4414-8414-141414141414", 2),
+          to: "completed",
+          reasonCode: "TASK_COMPLETED",
+          leaseOwner: "coordinator-lease-01",
+          failureReason: null,
+          result: { collected: 16 },
+          evidence: [],
+        },
+        NOW,
+      ),
+    ).toThrowError(
+      expect.objectContaining<Partial<TaskSystemError>>({
+        code: "TASK_TIMEOUT_EXPIRED",
+      }),
+    );
+  });
+
   it("moves an expired running lease to a traceable failure", () => {
     const expired = expireTaskLease(
       task({
@@ -238,6 +306,39 @@ describe("task state and lease boundaries", () => {
       assignedBotId: null,
       leaseOwner: null,
       failureReason: "TASK_LEASE_EXPIRED",
+      finishedAt: NOW.toISOString(),
+      revision: 3,
+    });
+  });
+
+  it("lets the exact lease owner persist deadline expiry after the lease boundary", () => {
+    const expired = transitionTask(
+      task({
+        status: "running",
+        assignedBotId: "worker-01",
+        leaseOwner: "coordinator-lease-01",
+        leaseExpiresAt: "2026-07-27T12:00:00.000Z",
+        startedAt: "2026-07-27T11:59:30.000Z",
+        deadline: "2026-07-27T12:00:00.000Z",
+        revision: 2,
+      }),
+      {
+        ...operationBase("79797979-7979-4979-8979-797979797979", 2),
+        to: "expired",
+        reasonCode: "TASK_DEADLINE_EXPIRED",
+        leaseOwner: "coordinator-lease-01",
+        failureReason: null,
+        result: null,
+        evidence: [],
+      },
+      NOW,
+    );
+
+    expect(expired).toMatchObject({
+      status: "expired",
+      assignedBotId: null,
+      leaseOwner: null,
+      leaseExpiresAt: null,
       finishedAt: NOW.toISOString(),
       revision: 3,
     });

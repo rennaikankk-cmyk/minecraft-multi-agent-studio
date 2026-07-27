@@ -6,7 +6,10 @@ import {
 } from "@minecraft-studio/protocol";
 import { z } from "zod";
 
-const timestampSchema = z.string().datetime({ offset: true });
+const timestampSchema = z
+  .string()
+  .datetime({ offset: true })
+  .transform((value) => new Date(value).toISOString());
 const taskTypeSchema = z
   .string()
   .min(3)
@@ -89,6 +92,8 @@ export const taskCreateCommandSchema = z
       .max(128)
       .regex(/^[A-Za-z0-9._:-]+$/u),
     taskType: taskTypeSchema,
+    handlerVersion: skillVersionSchema,
+    executionIdempotent: z.boolean(),
     title: z.string().trim().min(1).max(200),
     description: z.string().trim().max(4_000),
     priority: z.number().int().min(0).max(100),
@@ -149,6 +154,8 @@ export const taskRecordSchema = z
     idempotencyKey: z.string().min(8).max(128),
     requestFingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
     taskType: taskTypeSchema,
+    handlerVersion: skillVersionSchema,
+    executionIdempotent: z.boolean(),
     title: z.string().min(1).max(200),
     description: z.string().max(4_000),
     priority: z.number().int().min(0).max(100),
@@ -198,6 +205,17 @@ export const taskTransitionCommandSchema = z
   })
   .strict();
 
+export const taskCancelCommandSchema = z
+  .object({
+    schemaVersion: z.literal("1.0"),
+    operationId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    actorId: identifierSchema,
+    leaseOwner: identifierSchema.nullable(),
+    reasonCode: reasonCodeSchema,
+  })
+  .strict();
+
 export const taskLeaseAcquireCommandSchema = z
   .object({
     ...operationBaseShape,
@@ -236,6 +254,7 @@ export type TaskRecord = z.infer<typeof taskRecordSchema>;
 export type TaskTransitionCommand = z.infer<
   typeof taskTransitionCommandSchema
 >;
+export type TaskCancelCommand = z.infer<typeof taskCancelCommandSchema>;
 export type TaskLeaseAcquireCommand = z.infer<
   typeof taskLeaseAcquireCommandSchema
 >;

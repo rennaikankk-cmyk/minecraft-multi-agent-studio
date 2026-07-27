@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Hardware-neutral Minecraft multi-agent control studio",
-  "packageManager": "pnpm@11.9.0",
+  "packageManager": "pnpm@11.9.0+sha512.bd682d5d03fe525ef7c9fd6780c6884d1e756ac4c9c9fe00c538782824310dcf90e3ddc4f53835f06dfaebd5085e41855e0bcbb3b60de2ac5bbab89e5036f03b",
   "engines": {
     "node": ">=22.0.0"
   },
@@ -18,6 +18,7 @@
     "smoke": "node scripts/smoke-test.mjs",
     "typecheck": "pnpm build:packages && pnpm --filter @minecraft-studio/observability typecheck && pnpm --filter @minecraft-studio/protocol typecheck && pnpm --filter @minecraft-studio/environment typecheck && pnpm --filter @minecraft-studio/safety typecheck && pnpm --filter @minecraft-studio/skills typecheck && pnpm --filter @minecraft-studio/task-system typecheck && pnpm --filter @minecraft-studio/coordinator typecheck && pnpm --filter @minecraft-studio/control-api typecheck && pnpm --filter @minecraft-studio/bot-runtime typecheck && pnpm --filter @minecraft-studio/dashboard typecheck",
     "test": "pnpm build:control-plane && pnpm --filter @minecraft-studio/observability test && pnpm --filter @minecraft-studio/protocol test && pnpm --filter @minecraft-studio/environment test && pnpm --filter @minecraft-studio/safety test && pnpm --filter @minecraft-studio/skills test && pnpm --filter @minecraft-studio/task-system test && pnpm --filter @minecraft-studio/coordinator test && pnpm --filter @minecraft-studio/control-api test && pnpm --filter @minecraft-studio/bot-runtime test && pnpm --filter @minecraft-studio/dashboard test",
+    "test:task-infra": "pnpm build:packages && node scripts/run-task-infrastructure-tests.mjs",
     "test:e2e": "pnpm --filter @minecraft-studio/dashboard test:e2e",
     "check": "pnpm typecheck && pnpm test && pnpm build"
   },

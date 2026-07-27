@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { TaskSystemError } from "./errors.js";
 import {
+  taskCancelCommandSchema,
   taskCreateCommandSchema,
   taskLeaseAcquireCommandSchema,
   taskLeaseExpireCommandSchema,
@@ -49,18 +50,44 @@ export type CreateTaskResult = Readonly<{
   created: boolean;
 }>;
 
+export const MAX_EXPIRED_LEASE_BATCH_SIZE = 100;
+
+const TRANSACTION_LOCK_TIMEOUT_SQL =
+  "SET LOCAL lock_timeout = '3000ms'";
+const TRANSACTION_STATEMENT_TIMEOUT_SQL =
+  "SET LOCAL statement_timeout = '10000ms'";
+
 type OperationCommand = Readonly<{
   operationId: string;
   taskId: string;
   actorId: string;
 }>;
 
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function canonicalCreateCommand(command: TaskCreateCommand): TaskCreateCommand {
+  return {
+    ...command,
+    requiredSkills: [...command.requiredSkills].sort(
+      (left, right) =>
+        compareText(left.skillId, right.skillId) ||
+        compareText(left.skillVersion, right.skillVersion),
+    ),
+    requiredItems: [...command.requiredItems].sort((left, right) =>
+      compareText(left.itemName, right.itemName),
+    ),
+    dependencyIds: [...command.dependencyIds].sort(compareText),
+  };
+}
+
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize);
   if (value !== null && typeof value === "object") {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
+        .sort(([left], [right]) => compareText(left, right))
         .map(([key, entry]) => [key, canonicalize(entry)]),
     );
   }
@@ -68,8 +95,12 @@ function canonicalize(value: unknown): unknown {
 }
 
 export function taskOperationFingerprint(value: unknown): string {
+  const parsedCreateCommand = taskCreateCommandSchema.safeParse(value);
+  const fingerprintValue = parsedCreateCommand.success
+    ? canonicalCreateCommand(parsedCreateCommand.data)
+    : value;
   return createHash("sha256")
-    .update(JSON.stringify(canonicalize(value)), "utf8")
+    .update(JSON.stringify(canonicalize(fingerprintValue)), "utf8")
     .digest("hex");
 }
 
@@ -138,6 +169,8 @@ function mapTaskRow(
     idempotencyKey: row.idempotency_key,
     requestFingerprint: row.request_fingerprint,
     taskType: row.task_type,
+    handlerVersion: row.handler_version,
+    executionIdempotent: row.execution_idempotent,
     title: row.title,
     description: row.description,
     priority: integer(row.priority),
@@ -179,6 +212,8 @@ function createdTask(
     idempotencyKey: command.idempotencyKey,
     requestFingerprint,
     taskType: command.taskType,
+    handlerVersion: command.handlerVersion,
+    executionIdempotent: command.executionIdempotent,
     title: command.title,
     description: command.description,
     priority: command.priority,
@@ -209,31 +244,19 @@ function createdTask(
 }
 
 export class PostgresTaskRepository {
-  constructor(
-    private readonly pool: PostgresPoolLike,
-    private readonly now: () => Date = () => new Date(),
-  ) {}
+  constructor(private readonly pool: PostgresPoolLike) {}
 
   async createTask(input: unknown): Promise<CreateTaskResult> {
-    const command = taskCreateCommandSchema.parse(input);
-    const now = this.now();
-    const timestamp = now.toISOString();
-    if (
-      command.deadline !== null &&
-      Date.parse(command.deadline) <= now.getTime()
-    ) {
-      throw new TaskSystemError(
-        "TASK_DEADLINE_EXPIRED",
-        "Task deadline has already expired.",
-      );
-    }
+    const command = canonicalCreateCommand(
+      taskCreateCommandSchema.parse(input),
+    );
     const requestFingerprint = createRequestFingerprint(command);
     const operationFingerprint = taskOperationFingerprint(command);
-    const proposed = createdTask(command, requestFingerprint, timestamp);
     const client = await this.pool.connect();
 
     try {
-      await client.query("BEGIN");
+      await this.beginTransaction(client);
+      await this.lockOperation(client, command.operationId);
       const replay = await this.findOperationReplay(
         client,
         command,
@@ -243,20 +266,33 @@ export class PostgresTaskRepository {
         await client.query("COMMIT");
         return { task: replay, created: false };
       }
+      const now = await this.databaseNow(client);
+      const timestamp = now.toISOString();
+      if (
+        command.deadline !== null &&
+        Date.parse(command.deadline) <= now.getTime()
+      ) {
+        throw new TaskSystemError(
+          "TASK_DEADLINE_EXPIRED",
+          "Task deadline has already expired.",
+        );
+      }
+      const proposed = createdTask(command, requestFingerprint, timestamp);
 
       const inserted = await client.query(
         `INSERT INTO studio_tasks (
           task_id, schema_version, idempotency_scope, idempotency_key,
-          request_fingerprint, task_type, title, description, priority, status,
+          request_fingerprint, task_type, handler_version,
+          execution_idempotent, title, description, priority, status,
           assigned_bot_id, required_skills, required_items, target,
           parent_task_id, deadline, timeout_ms, retry_count, max_retries,
           lease_owner, lease_expires_at, risk_level, failure_reason, result,
           evidence, trace_id, revision, created_at, updated_at, started_at,
           finished_at
         ) VALUES (
-          $1, '1.0', $2, $3, $4, $5, $6, $7, $8, 'queued',
-          NULL, $9::jsonb, $10::jsonb, $11::jsonb, $12, $13, $14, 0, $15,
-          NULL, NULL, $16, NULL, NULL, '[]'::jsonb, $17, 0, $18, $18, NULL,
+          $1, '1.0', $2, $3, $4, $5, $6, $7, $8, $9, $10, 'queued',
+          NULL, $11::jsonb, $12::jsonb, $13::jsonb, $14, $15, $16, 0, $17,
+          NULL, NULL, $18, NULL, NULL, '[]'::jsonb, $19, 0, $20, $20, NULL,
           NULL
         )
         ON CONFLICT (idempotency_scope, idempotency_key) DO NOTHING
@@ -267,6 +303,8 @@ export class PostgresTaskRepository {
           command.idempotencyKey,
           requestFingerprint,
           command.taskType,
+          command.handlerVersion,
+          command.executionIdempotent,
           command.title,
           command.description,
           command.priority,
@@ -366,6 +404,54 @@ export class PostgresTaskRepository {
     }
   }
 
+  async getDatabaseTime(): Promise<Date> {
+    const client = await this.pool.connect();
+    try {
+      return await this.databaseNow(client);
+    } catch (error) {
+      throw this.persistenceError(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  async listExpiredLeases(limit: number): Promise<readonly TaskRecord[]> {
+    if (
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > MAX_EXPIRED_LEASE_BATCH_SIZE
+    ) {
+      throw new RangeError(
+        `Expired lease batch limit must be between 1 and ${MAX_EXPIRED_LEASE_BATCH_SIZE}.`,
+      );
+    }
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(
+        `SELECT *
+         FROM studio_tasks
+         WHERE status IN ('assigned', 'running')
+           AND lease_expires_at IS NOT NULL
+           AND lease_expires_at <= clock_timestamp()
+         ORDER BY lease_expires_at ASC, task_id ASC
+         LIMIT $1`,
+        [limit],
+      );
+      const tasks: TaskRecord[] = [];
+      for (const row of result.rows) {
+        const taskId = text(row.task_id);
+        tasks.push(
+          mapTaskRow(row, await this.loadDependencyIds(client, taskId)),
+        );
+      }
+      return tasks;
+    } catch (error) {
+      throw this.persistenceError(error);
+    } finally {
+      client.release();
+    }
+  }
+
   transition(input: unknown): Promise<TaskRecord> {
     const command = taskTransitionCommandSchema.parse(input);
     return this.mutate(
@@ -373,6 +459,33 @@ export class PostgresTaskRepository {
       "task.transitioned",
       command.reasonCode,
       (task, now) => transitionTask(task, command, now),
+    );
+  }
+
+  cancelTask(input: unknown): Promise<TaskRecord> {
+    const command = taskCancelCommandSchema.parse(input);
+    return this.mutate(
+      command,
+      "task.cancelled",
+      command.reasonCode,
+      (task, now) =>
+        transitionTask(
+          task,
+          {
+            schemaVersion: "1.0",
+            operationId: command.operationId,
+            taskId: command.taskId,
+            expectedRevision: task.revision,
+            actorId: command.actorId,
+            to: "cancelled",
+            reasonCode: command.reasonCode,
+            leaseOwner: command.leaseOwner,
+            failureReason: null,
+            result: null,
+            evidence: [],
+          },
+          now,
+        ),
     );
   }
 
@@ -436,7 +549,8 @@ export class PostgresTaskRepository {
     const operationFingerprint = taskOperationFingerprint(command);
     const client = await this.pool.connect();
     try {
-      await client.query("BEGIN");
+      await this.beginTransaction(client);
+      await this.lockOperation(client, command.operationId);
       const replay = await this.findOperationReplay(
         client,
         command,
@@ -450,7 +564,7 @@ export class PostgresTaskRepository {
       if (!current) {
         throw new TaskSystemError("TASK_NOT_FOUND", "Task does not exist.");
       }
-      const now = this.now();
+      const now = await this.databaseNow(client);
       const next = await planner(current, now, client);
       const updated = await client.query(
         `UPDATE studio_tasks SET
@@ -521,6 +635,13 @@ export class PostgresTaskRepository {
     );
     const row = taskResult.rows[0];
     if (!row) return null;
+    return mapTaskRow(row, await this.loadDependencyIds(client, taskId));
+  }
+
+  private async loadDependencyIds(
+    client: PostgresClientLike,
+    taskId: string,
+  ): Promise<readonly string[]> {
     const dependencies = await client.query<{ dependency_task_id: unknown }>(
       `SELECT dependency_task_id
        FROM studio_task_dependencies
@@ -528,12 +649,41 @@ export class PostgresTaskRepository {
        ORDER BY dependency_task_id ASC`,
       [taskId],
     );
-    return mapTaskRow(
-      row,
-      dependencies.rows.map(({ dependency_task_id }) =>
-        text(dependency_task_id),
-      ),
+    return dependencies.rows.map(({ dependency_task_id }) =>
+      text(dependency_task_id),
     );
+  }
+
+  private async lockOperation(
+    client: PostgresClientLike,
+    operationId: string,
+  ): Promise<void> {
+    await client.query(
+      `SELECT pg_advisory_xact_lock(
+         hashtextextended($1::text, 0)
+       )`,
+      [operationId],
+    );
+  }
+
+  private async beginTransaction(client: PostgresClientLike): Promise<void> {
+    await client.query("BEGIN");
+    await client.query(TRANSACTION_LOCK_TIMEOUT_SQL);
+    await client.query(TRANSACTION_STATEMENT_TIMEOUT_SQL);
+  }
+
+  private async databaseNow(client: PostgresClientLike): Promise<Date> {
+    const result = await client.query<{ database_now: unknown }>(
+      "SELECT clock_timestamp() AS database_now",
+    );
+    const timestamp = iso(result.rows[0]?.database_now);
+    if (timestamp === null) {
+      throw new TaskSystemError(
+        "TASK_PERSISTENCE_FAILED",
+        "PostgreSQL did not return its current timestamp.",
+      );
+    }
+    return new Date(timestamp);
   }
 
   private async dependenciesReady(

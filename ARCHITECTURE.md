@@ -43,10 +43,10 @@ packages/
 ├─ observability/          # 结构化日志和进程内指标
 ├─ safety/                 # 确定性 L0 生存策略与动作边界
 ├─ skills/                 # 版本化确定性技能注册与受限执行框架
-└─ task-system/            # PostgreSQL 任务模型、状态机、幂等和租约边界
+└─ task-system/            # PostgreSQL 事实源、BullMQ 队列与确定性 Worker
 ```
 
-尚未创建 AI Router、数据库和队列应用。Bot Runtime 已完成 Minecraft 1.21.8 隔离联机验收；Coordinator 已实现进程内 Bot 注册表和安全停止控制边界；Control API 已提供认证 HTTP/WebSocket 状态接口与受 `bot.stop` 保护的停止入口。Dashboard 通过服务端代理读取 Control API，浏览器不会收到长期令牌。确定性技能库已注册 `movement.goto@1.0.0`，Bot Runtime 通过受限 Pathfinder 适配器执行；PostgreSQL 任务 Schema 和仓库边界已建立，但尚未连接运行中的 PostgreSQL 或 BullMQ。
+尚未创建 AI Router、生产数据库部署和独立任务 Worker 应用。Bot Runtime 已完成 Minecraft 1.21.8 隔离联机验收；Coordinator 已实现进程内 Bot 注册表和安全停止控制边界；Control API 已提供认证 HTTP/WebSocket 状态接口与受 `bot.stop` 保护的停止入口。Dashboard 通过服务端代理读取 Control API，浏览器不会收到长期令牌。确定性技能库已注册 `movement.goto@1.0.0`，Bot Runtime 通过受限 Pathfinder 适配器执行；任务包已建立 PostgreSQL 适配器、严格 BullMQ 队列和可嵌入 Worker，当前只允许通过显式隔离测试配置连接真实 PostgreSQL/Redis。
 
 ## 4. 环境检测数据流
 
@@ -119,6 +119,12 @@ API Gateway / Coordinator
 - `SkillExecutionResultV1`：由 Bot Runtime 返回的结构化完成、拒绝、失败、取消或超时结果。
 - 调用消息不携带可自证的能力授权；执行器必须把消息与独立可信上下文逐项匹配。
 - 完成结果必须包含经技能 Schema 和 JSON Schema 双重验证的输出；其他结果只能包含稳定错误码。
+
+### Task Dispatch Protocol v1
+
+- `TaskDispatchV1`：Coordinator 发送到队列的严格任务派发消息，只携带任务 ID、Bot ID、任务类型、处理器版本、持久化幂等策略和预期 PostgreSQL 修订号。
+- 队列消息固定 `type=task.dispatch.v1` 和 `schemaVersion=1.0`，未知字段或版本默认拒绝。
+- 消息不包含可执行代码、Shell、模型文本、URL 或任意参数；Worker 只按 PostgreSQL 任务类型和处理器版本查找本地精确注册的确定性处理器，并拒绝幂等策略不一致。
 
 ## 7. 单 Bot Runtime
 
@@ -274,18 +280,22 @@ Pathfinder adapter
 
 目标必须包含 ServerProfile 和维度，且与 Bot 当前真实状态一致。技能半径限制为 1～4 格、三维直线距离最多 64 格、总超时 20 秒。L0 安全暂停、Runtime 停止或断线会取消活动技能并停止 Pathfinder。该技能已通过离线单元和 Runtime 集成测试，尚未在真实隔离服执行路径场景，因此不声称跨版本实机寻路已经验收。
 
-## 14. P1.3 任务持久化基础
+## 14. P1.3 任务基础设施
 
 ```text
-strict task command
-        ↓ operation ID replay + idempotency scope/key
-PostgresTaskRepository transaction
-        ↓ SELECT ... FOR UPDATE + expected revision
-deterministic state/lease planner
-        ↓ task row update + append-only history
-PostgreSQL
+future Coordinator (pending)
+  └─ TaskDispatchV1 → BullMQ (delivery and temporary locks)
+                         ↓ strict parse + exact handler lookup
+                    deterministic Worker
+                         ↓ acquire / renew / finish / cancel
+PostgreSQL ← parameterized transaction + revision + append-only history
+    ↑ authoritative task state, timeout and retry budget
 ```
 
-`@minecraft-studio/task-system` 定义了 queued、assigned、running、blocked、waiting、paused、completed、failed、cancelled 和 expired 状态。状态转换使用乐观修订号；运行和完成必须持有未过期且所有者匹配的租约。任务创建使用作用域化幂等键和规范化 SHA-256 请求指纹，重复操作 ID 只能返回完全相同的持久化快照。可信高风险审批尚未接入，因此 R3/R4 任务当前可以记录但不能领取执行。
+`@minecraft-studio/task-system` 定义了 queued、assigned、running、blocked、waiting、paused、completed、failed、cancelled 和 expired 状态。状态转换使用乐观修订号；运行和完成必须持有未过期且所有者匹配的租约，原租约所有者可在截止时间到达后写入 expired 终态。任务创建持久化精确处理器版本与幂等策略，使用作用域化幂等键和规范化 SHA-256 请求指纹；相同操作 ID 由事务级 advisory lock 串行化，只能返回完全相同的持久化快照。截止时间统一规范化为 UTC，时间、租约过期判断和状态历史以 PostgreSQL 时钟为准。可信高风险审批尚未接入，因此 R3/R4 任务当前可以记录但不能领取执行。
 
-迁移创建 `studio_tasks`、`studio_task_dependencies` 和只追加的 `studio_task_history`。任务禁止直接删除，历史禁止更新或删除。当前仓库适配器通过参数化 SQL 工作，但尚未配置或启动 PostgreSQL 实例，也没有运行真实数据库迁移测试；BullMQ、Redis Worker、任务 API 和 Dashboard 任务看板仍待后续模块接入。
+迁移创建 `studio_tasks`、`studio_task_dependencies` 和只追加的 `studio_task_history`，并约束 assigned/running 状态必须存在完整租约和 Bot 归属。任务禁止直接删除，历史禁止更新或删除。BullMQ job 固定一次尝试，领域重试只在 PostgreSQL 中显式记账；旧 job 只有在显式重投、租约真实过期、Bot 归属匹配、持久化处理器版本/幂等策略与注册表一致且重试预算仍有余额时才可恢复。活动取消、超时和截止时间传播 `AbortSignal` 后，Worker 会有界停止等待和续租并写入权威终态；进程内处理器本身仍不是强隔离沙盒，忽略信号的代码可能在失去租约后继续运行自身副作用。
+
+真实基础设施测试只接受本机回环 PostgreSQL/Redis、专用 PostgreSQL Schema 和独立 Redis 前缀；清理范围不超过这些测试命名空间，也不连接 Minecraft。GitHub Actions 已配置固定镜像摘要的临时服务，用于执行迁移、并发重放/领取、队列去重、续租、取消、超时和显式重投场景；在工作流实际通过前，该配置只代表待验证的测试入口。
+
+当前没有事务 outbox 或 PostgreSQL→BullMQ 自动 reconciler：数据库提交与入队不是原子事务，Redis 数据丢失后也不会自动从 PostgreSQL 重建。取消只覆盖当前 Worker 进程内的活动处理器；跨 Worker 取消、自动故障重投、Coordinator 任务调度、任务 API、Dashboard 任务看板和生产服务编排仍待后续模块接入。

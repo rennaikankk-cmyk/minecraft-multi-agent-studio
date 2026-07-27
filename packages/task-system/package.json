@@ -19,10 +19,13 @@
   },
   "dependencies": {
     "@minecraft-studio/protocol": "workspace:*",
+    "bullmq": "5.81.2",
+    "pg": "8.22.0",
     "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/node": "26.1.1",
+    "@types/pg": "8.20.0",
     "typescript": "6.0.3",
     "vitest": "4.1.10"
   }
