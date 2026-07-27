@@ -21,7 +21,7 @@
 - L0 安全层从真实 Mineflayer 状态识别饥饿、低/危急生命值、溺水、岩浆、坠落、卡死和背包满，并执行固定白名单动作。
 - `movement.goto@1.0.0` 通过受限 Pathfinder 适配器移动，不允许挖掘、搭塔、垫方块或跑酷。
 - 任务系统提供 PostgreSQL 迁移、严格状态机、幂等键、乐观修订号、租约边界、版本化处理器契约、严格派发协议和 BullMQ Worker。
-- 隔离 PostgreSQL/Redis 集成测试已加入 GitHub Actions；本机没有运行这些服务时不会冒充已验证。
+- 隔离 PostgreSQL/Redis 集成测试已于 2026-07-28 在 GitHub Actions 真实临时服务中通过；本机没有运行这些服务时不会冒充本机服务在线。
 
 当前项目是单 Bot 安全执行与任务基础设施，不是已经完成的多智能体产品。独立 Control API 尚未接入 Runtime/Coordinator 跨进程遥测，因此单独启动时返回真实空列表；Dashboard 后端断开时会清空 Bot 列表并明确显示错误。
 
@@ -245,7 +245,7 @@ $env:TASK_INFRA_TEST_NAMESPACE='studio_test_local_unique01'
 pnpm test:task-infra
 ```
 
-三个变量缺少任意一个时命令会失败，不会静默跳过。GitHub Actions 使用固定摘要的临时 PostgreSQL/Redis 服务完成同一组测试；在工作流实际通过前不得声称真实服务已验证。Coordinator 调度入口、outbox/自动对账重投、跨 Worker 取消、任务 Control API、Dashboard 任务看板和生产基础设施仍待后续模块接入。
+三个变量缺少任意一个时命令会失败，不会静默跳过。GitHub Actions 使用固定摘要的临时 PostgreSQL/Redis 服务完成同一组测试，2026-07-28 的运行 `30315095898` 已通过。该结果证明隔离集成边界，不代表生产基础设施在线；Coordinator 调度入口、outbox/自动对账重投、跨 Worker 取消、任务 Control API、Dashboard 任务看板和生产基础设施仍待后续模块接入。
 
 ## 安全说明
 

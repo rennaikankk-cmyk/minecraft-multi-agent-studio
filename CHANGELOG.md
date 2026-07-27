@@ -26,9 +26,13 @@
 - 新增 BullMQ 5.81.2、`pg` 8.22.0 和 `@types/pg` 8.20.0，均来自官方 npm Registry，使用精确版本并由锁文件记录完整性。
 - 明确禁止 BullMQ 间接可选原生依赖 `msgpackr-extract` 的安装构建脚本。
 
+### 修复
+
+- 修正 PostgreSQL 处理器版本检查约束的正则转义，使严格 SemVer 版本可在真实数据库中写入；同步更新迁移摘要。
+
 ### 当前限制
 
-- 本机未检测到 PostgreSQL、Redis 或 Docker，真实集成测试需由已配置的隔离服务或 GitHub Actions 执行；工作流通过前不声称真实服务已验证。
+- 本机未检测到 PostgreSQL、Redis 或 Docker；2026-07-28 的 GitHub Actions 运行 `30315095898` 已通过真实临时 PostgreSQL/Redis 集成门，该结果不代表生产服务在线。
 - 当前提供可嵌入 Worker 库，尚未提供独立生产 Worker 应用、Coordinator 任务调度、任务 Control API 或 Dashboard 任务看板。
 - 当前没有事务 outbox、自动 PostgreSQL→BullMQ 对账重投或跨 Worker 取消；数据库提交和入队不是原子事务。
 - 任务处理器是受信任的进程内代码，并非强隔离沙盒；不合作响应 `AbortSignal` 的代码在失去租约后仍可能继续运行自身副作用，硬终止需后续独立进程隔离。

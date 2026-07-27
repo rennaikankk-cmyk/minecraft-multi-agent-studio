@@ -190,7 +190,7 @@
 - 处理器是预先审核的受信任进程内代码，并非沙盒；严格队列消息阻止消息携带代码，但不能约束开发者主动注册的 Node.js 处理器。Worker 不会因不合作处理器而无限持有租约，但忽略 `AbortSignal` 的代码可能在失去租约后继续运行自身副作用，硬终止需要后续独立进程隔离。
 - 隔离基础设施配置只接受回环地址、专用数据库 Schema 和严格 Redis 前缀；测试清理不使用 `FLUSHALL`，也不会连接 Minecraft。
 - 当前没有事务 outbox、Redis 丢失后的自动队列重建、PostgreSQL→BullMQ reconciler 或跨 Worker 取消 API。数据库提交与入队不具备原子性，不得声称 exactly-once 或自动故障恢复。
-- 当前代码和 CI 流程已经接入 BullMQ/Redis/PostgreSQL 测试边界，但本机没有运行这些服务；在 GitHub Actions 真实集成作业通过前不得描述为真实服务已验证或在线。
+- 当前代码和 CI 流程已经接入 BullMQ/Redis/PostgreSQL 测试边界，本机没有运行这些服务；2026-07-28 的 GitHub Actions 运行 `30315095898` 已通过真实临时服务集成作业。该结果不得扩张解释为生产基础设施在线或已具备自动故障恢复。
 
 ## 15. 漏洞报告
 

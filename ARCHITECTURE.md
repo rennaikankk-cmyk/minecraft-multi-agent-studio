@@ -296,6 +296,6 @@ PostgreSQL ← parameterized transaction + revision + append-only history
 
 迁移创建 `studio_tasks`、`studio_task_dependencies` 和只追加的 `studio_task_history`，并约束 assigned/running 状态必须存在完整租约和 Bot 归属。任务禁止直接删除，历史禁止更新或删除。BullMQ job 固定一次尝试，领域重试只在 PostgreSQL 中显式记账；旧 job 只有在显式重投、租约真实过期、Bot 归属匹配、持久化处理器版本/幂等策略与注册表一致且重试预算仍有余额时才可恢复。活动取消、超时和截止时间传播 `AbortSignal` 后，Worker 会有界停止等待和续租并写入权威终态；进程内处理器本身仍不是强隔离沙盒，忽略信号的代码可能在失去租约后继续运行自身副作用。
 
-真实基础设施测试只接受本机回环 PostgreSQL/Redis、专用 PostgreSQL Schema 和独立 Redis 前缀；清理范围不超过这些测试命名空间，也不连接 Minecraft。GitHub Actions 已配置固定镜像摘要的临时服务，用于执行迁移、并发重放/领取、队列去重、续租、取消、超时和显式重投场景；在工作流实际通过前，该配置只代表待验证的测试入口。
+真实基础设施测试只接受本机回环 PostgreSQL/Redis、专用 PostgreSQL Schema 和独立 Redis 前缀；清理范围不超过这些测试命名空间，也不连接 Minecraft。GitHub Actions 使用固定镜像摘要的临时服务执行迁移、并发重放/领取、队列去重、续租、取消、超时和显式重投场景，2026-07-28 的运行 `30315095898` 已通过。该结果证明隔离集成边界，不代表生产基础设施在线。
 
 当前没有事务 outbox 或 PostgreSQL→BullMQ 自动 reconciler：数据库提交与入队不是原子事务，Redis 数据丢失后也不会自动从 PostgreSQL 重建。取消只覆盖当前 Worker 进程内的活动处理器；跨 Worker 取消、自动故障重投、Coordinator 任务调度、任务 API、Dashboard 任务看板和生产服务编排仍待后续模块接入。
