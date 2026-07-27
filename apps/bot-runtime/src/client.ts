@@ -5,6 +5,7 @@ import type {
   L0SafetyAction,
   L0SafetyActionResult,
 } from "@minecraft-studio/safety";
+import type { SkillCapabilityRequest } from "@minecraft-studio/skills";
 
 export type BotClientSnapshot = {
   health: { current: number; maximum: number | null };
@@ -49,6 +50,7 @@ export interface BotClient {
   setHandlers(handlers: BotClientHandlers): void;
   snapshot(): BotClientSnapshot;
   executeSafetyAction(action: L0SafetyAction): Promise<L0SafetyActionResult>;
+  invokeSkillCapability?(request: SkillCapabilityRequest): Promise<unknown>;
   versionCompatibility(): MinecraftVersionCompatibility;
   close(gracePeriodMs: number): Promise<void>;
 }

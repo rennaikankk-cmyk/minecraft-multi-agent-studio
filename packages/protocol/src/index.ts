@@ -85,3 +85,20 @@ export {
   type ProtocolAuthorizationErrorCode,
   type StopBotCommandV1,
 } from "./bot-messages.js";
+
+export {
+  parseSkillExecutionResult,
+  parseSkillInvocation,
+  skillCapabilitySchema,
+  skillErrorCodeSchema,
+  skillExecutionResultV1Schema,
+  skillIdentifierSchema,
+  skillInvocationV1Schema,
+  skillJsonValueSchema,
+  skillOperationSchema,
+  skillVersionSchema,
+  type SkillCapability,
+  type SkillExecutionResultV1,
+  type SkillInvocationV1,
+  type SkillJsonValue,
+} from "./skill-messages.js";

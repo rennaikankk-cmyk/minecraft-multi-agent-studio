@@ -42,6 +42,9 @@
 - WebSocket 服务端使用官方 npm Registry 的 `ws` 8.21.1，MIT 许可，锁文件保存 npm 完整性哈希；类型包固定为 `@types/ws` 8.18.1。
 - Dashboard 状态管理使用官方 npm Registry 的 Zustand 5.0.14（MIT），完整性为 `sha512-/8tAspM5LMPr28b3fwLYrtdj77ECpfZviaP75CMTnwO8ISyaE4GDIG/9rDDYq/cH9D2Xw2A2RXglLInmVBQB/g==`。
 - 浏览器验收使用官方 npm Registry 的 Playwright Test 1.61.1（Apache-2.0），完整性为 `sha512-8nKv6+0RJSL9FE4jYOEGXnPeM/Hg12qZpmqzZjRh3qM0Y7c3z1mrOTfFLids72RDQYVh9WpLEfR5WdpNX4fkig==`；本机验收复用已安装 Edge，未自动下载浏览器。
+- 安全寻路使用 PrismarineJS 官方 `mineflayer-pathfinder` 2.4.5（MIT），来源为官方 npm Registry，完整性为 `sha512-Jh3JnUgRLwhMh2Dugo4SPza68C41y+NPP5sdsgxRu35ydndo70i1JJGxauVWbXrpNwIxYNztUw78aFyb7icw8g==`。
+- Dashboard 使用 Next.js 16.2.11（MIT），完整性为 `sha512-B339zaqbyK8cmxhoAvLrcwoabwCP1wz21zSzfqxqXAemTu2BXnH7tQnfcglKv1vnMUIDBc+Hth7XODQriTZiRQ==`。
+- Next.js 间接依赖 PostCSS 覆盖为 8.5.18（MIT），完整性为 `sha512-xdB1oSLHbz1vRWgCDalrCqEFTWzFlhqFC5tIHLMOSUIjhm3XXQ1qrFy8S/ESr1JYRRXqM3c1QFiMZUJdUTqyMQ==`；Sharp 覆盖为 0.35.0（Apache-2.0），完整性为 `sha512-BqvG5XbwPZ4NV0DK90d86leEECMsoa8bO0nqnKWlBDYxri4GJ7c4EDInaF6q20lTh/mATmnDIKWJFfXnoVfH5g==`。
 
 ## 4. 四种模式
 
@@ -150,6 +153,33 @@
 - 危急生命值的紧急停止由 Bot Runtime 调用已有停止流程，客户端适配器不能执行或伪造完成。
 - 安全日志只包含稳定风险码、动作码、结果和关联 ID，不包含玩家位置、服务器地址或原始异常。
 
-## 13. 漏洞报告
+## 13. 确定性技能边界
+
+- 技能调用和结果必须使用严格 `Skill Protocol v1`，未知版本、未知字段、非 JSON 输入和超长有效期默认拒绝。
+- 技能 ID 和版本必须精确匹配注册表；禁止 `latest`、模糊匹配或静默降级。
+- 消息内授权只是引用，执行器必须与可信上下文中的来源、操作者、任务、Bot、调用、技能、版本和有效期逐项匹配。
+- 每个技能必须声明输入、输出、状态 Schema、确定性前置条件、能力清单、超时、幂等性和有界重试策略。
+- 非幂等技能最多执行一次；只有明确声明的稳定错误码可触发有限指数退避和抖动重试。
+- 技能只能调用同时存在于技能声明和可信授权集合中的能力；不存在 Shell、文件系统、任意网络、Docker、数据库管理员或模型执行能力。
+- 能力请求和响应必须为有界结构化 JSON；技能输出还要通过技能输出 Schema 与通用 JSON Schema 双重验证。
+- 超时或取消后执行器禁止新的能力调用，能力适配器必须遵守 `AbortSignal`。当前进程内 JavaScript 处理器不是强隔离沙盒，不能将忽略取消的代码标记为已强制终止。
+- 当前只注册 `movement.goto@1.0.0` 真实技能。目标必须匹配当前 ServerProfile 和维度，距离最多 64 格，半径 1～4 格，总超时 20 秒。
+- Pathfinder 适配器固定关闭挖掘、搭塔、垫方块、开门、跑酷、冲刺和超过 2 格的下落；不能由技能输入重新启用。
+- 同一 Bot 同时只允许一个 Pathfinder 调用。L0 暂停、Runtime 停止、断线和外部取消都会调用 `pathfinder.stop()`。
+- 当前只完成离线单元和 Runtime 集成测试，尚未在真实隔离服验证跨版本路径行为，前端不得显示“实机寻路已验收”。
+
+## 14. 任务持久化边界
+
+- 任务命令使用严格 Schema，未知字段、自依赖、越界优先级、超长内容和无效坐标默认拒绝。
+- 任务创建使用 `(idempotency_scope, idempotency_key)` 唯一约束和规范化 SHA-256 请求指纹；同一键携带不同参数必须拒绝。
+- 每个状态、租约操作携带全局唯一操作 ID；重复 ID 只有在任务和指纹完全一致时才能返回已有快照。
+- 当前任务行使用 `revision` 乐观并发控制，并在事务内 `SELECT ... FOR UPDATE`；状态更新和历史追加必须同时提交或回滚。
+- 运行任务必须持有未过期且所有者匹配的租约；依赖任务未完成时禁止领取。租约时长限制为 1 秒至 5 分钟。
+- R3/R4 任务在可信审批上下文尚未接入前一律禁止领取，不能依靠命令内字段自证批准。
+- `studio_tasks` 禁止直接删除，`studio_task_history` 禁止更新或删除。取消、失败和过期通过状态与历史表达。
+- 所有 SQL 使用固定语句和参数绑定，不拼接任务输入。唯一的动态 SQL 片段是源码固定的 `FOR UPDATE` 选择。
+- 当前迁移尚未应用到真实 PostgreSQL，BullMQ 和 Redis 也未接入；不得把单元测试结果描述为数据库或队列服务在线。
+
+## 15. 漏洞报告
 
 发现疑似密钥或高风险漏洞时，停止相关模块，不在公开日志中粘贴秘密值，只报告文件位置、秘密类型和处置建议。

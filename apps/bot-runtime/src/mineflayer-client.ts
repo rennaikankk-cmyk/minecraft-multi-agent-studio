@@ -1,8 +1,20 @@
 import { createBot, type Bot } from "mineflayer";
+import {
+  goals,
+  Movements,
+  pathfinder,
+} from "mineflayer-pathfinder";
 import type {
   L0SafetyAction,
   L0SafetyActionResult,
 } from "@minecraft-studio/safety";
+import {
+  SAFE_PATH_MAX_DISTANCE,
+  SkillFault,
+  safeMovementGotoCapabilityInputSchema,
+  safeMovementGotoCapabilityOutputSchema,
+  type SkillCapabilityRequest,
+} from "@minecraft-studio/skills";
 
 import type {
   BotClient,
@@ -94,6 +106,25 @@ function normalizeDimension(value: string): string {
   return `minecraft:${normalized || "unknown"}`;
 }
 
+export function configureSafePathfinderMovements(
+  movements: Movements,
+): Movements {
+  movements.canDig = false;
+  movements.canOpenDoors = false;
+  movements.dontCreateFlow = true;
+  movements.dontMineUnderFallingBlock = true;
+  movements.allow1by1towers = false;
+  movements.allowFreeMotion = false;
+  movements.allowParkour = false;
+  movements.allowSprinting = false;
+  movements.scafoldingBlocks = [];
+  movements.maxDropDown = 2;
+  movements.infiniteLiquidDropdownDistance = false;
+  movements.exclusionAreasBreak = [() => 100];
+  movements.exclusionAreasPlace = [() => 100];
+  return movements;
+}
+
 function readMaximumHealth(bot: Bot): number | null {
   const entity = bot.entity as typeof bot.entity & {
     attributes?: Record<string, { value?: number }>;
@@ -164,10 +195,12 @@ export class MineflayerBotClient implements BotClient {
   private errorDetail: string | undefined;
   private versionUnsupportedReported = false;
   private inventoryListenerBound = false;
+  private activePathInvocationId: string | null = null;
 
   constructor(
     private readonly bot: Bot,
     private readonly configuredVersion: ServerProfile["minecraftVersion"],
+    private readonly serverProfileId: string | null = null,
   ) {
     bot.on("spawn", () => {
       this.bindInventoryEvents();
@@ -275,6 +308,7 @@ export class MineflayerBotClient implements BotClient {
       return { outcome: "skipped", errorCode: "RUNTIME_STOPPING" };
     }
     try {
+      this.stopPathfinder();
       if (
         action.kind === "PAUSE_NORMAL_TASKS" ||
         action.kind === "HALT_HORIZONTAL_MOVEMENT"
@@ -313,6 +347,114 @@ export class MineflayerBotClient implements BotClient {
     }
   }
 
+  async invokeSkillCapability(
+    request: SkillCapabilityRequest,
+  ): Promise<unknown> {
+    if (
+      request.capability !== "bot.move" ||
+      request.operation !== "pathfinder.goto-safe"
+    ) {
+      throw new SkillFault("SKILL_CAPABILITY_UNSUPPORTED");
+    }
+    if (this.requestedStop) {
+      throw new SkillFault("RUNTIME_STOPPING");
+    }
+    if (!this.serverProfileId || !this.bot.pathfinder) {
+      throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE");
+    }
+    if (this.activePathInvocationId !== null) {
+      throw new SkillFault("BOT_MOVEMENT_BUSY");
+    }
+
+    const input = safeMovementGotoCapabilityInputSchema.safeParse(
+      request.input,
+    );
+    if (!input.success) {
+      throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    }
+    const currentDimension = normalizeDimension(String(this.bot.game.dimension));
+    if (input.data.target.serverProfileId !== this.serverProfileId) {
+      throw new SkillFault("TARGET_SERVER_PROFILE_MISMATCH");
+    }
+    if (input.data.target.dimension !== currentDimension) {
+      throw new SkillFault("TARGET_DIMENSION_MISMATCH");
+    }
+
+    const startingPosition = this.bot.entity.position;
+    const startingDistance = Math.hypot(
+      input.data.target.x - startingPosition.x,
+      input.data.target.y - startingPosition.y,
+      input.data.target.z - startingPosition.z,
+    );
+    if (
+      !Number.isFinite(startingDistance) ||
+      startingDistance > SAFE_PATH_MAX_DISTANCE
+    ) {
+      throw new SkillFault("TARGET_OUT_OF_SAFE_RANGE");
+    }
+
+    const movements = configureSafePathfinderMovements(
+      new Movements(this.bot),
+    );
+    this.bot.pathfinder.setMovements(movements);
+    this.bot.pathfinder.thinkTimeout = 5_000;
+    this.bot.pathfinder.tickTimeout = 20;
+    this.activePathInvocationId = request.invocationId;
+
+    const stopOnAbort = () => this.stopPathfinder();
+    request.signal.addEventListener("abort", stopOnAbort, { once: true });
+    try {
+      if (request.signal.aborted) {
+        stopOnAbort();
+        throw new SkillFault("SKILL_CANCELLED");
+      }
+      await this.bot.pathfinder.goto(
+        new goals.GoalNear(
+          input.data.target.x,
+          input.data.target.y,
+          input.data.target.z,
+          input.data.radius,
+        ),
+      );
+    } catch {
+      if (request.signal.aborted) {
+        throw new SkillFault("SKILL_CANCELLED");
+      }
+      this.stopPathfinder();
+      throw new SkillFault("PATHFINDER_GOTO_FAILED");
+    } finally {
+      request.signal.removeEventListener("abort", stopOnAbort);
+      if (this.activePathInvocationId === request.invocationId) {
+        this.activePathInvocationId = null;
+      }
+    }
+
+    const finalPosition = this.bot.entity.position;
+    const distanceToTarget = Math.hypot(
+      input.data.target.x - finalPosition.x,
+      input.data.target.y - finalPosition.y,
+      input.data.target.z - finalPosition.z,
+    );
+    if (
+      !Number.isFinite(distanceToTarget) ||
+      distanceToTarget > input.data.radius + 0.5
+    ) {
+      throw new SkillFault("PATH_TARGET_NOT_REACHED");
+    }
+
+    return safeMovementGotoCapabilityOutputSchema.parse({
+      reached: true,
+      finalPosition: {
+        x: finalPosition.x,
+        y: finalPosition.y,
+        z: finalPosition.z,
+        dimension: currentDimension,
+        serverProfileId: this.serverProfileId,
+      },
+      distanceToTarget,
+    });
+  }
+
   versionCompatibility() {
     return resolvedVersionCompatibility(this.configuredVersion, this.bot.version);
   }
@@ -320,6 +462,7 @@ export class MineflayerBotClient implements BotClient {
   async close(gracePeriodMs: number): Promise<void> {
     if (this.requestedStop) return;
     this.requestedStop = true;
+    this.stopPathfinder();
     this.bot.clearControlStates();
 
     await new Promise<void>((resolve) => {
@@ -388,11 +531,24 @@ export class MineflayerBotClient implements BotClient {
     await new Promise<void>((resolve) => setTimeout(resolve, durationMs));
     this.bot.clearControlStates();
   }
+
+  private stopPathfinder(): void {
+    try {
+      this.bot.pathfinder?.stop();
+    } catch {
+      // Stopping movement is best-effort; callers still clear Mineflayer controls.
+    }
+  }
 }
 
 export function createMineflayerClient(profile: ServerProfile): BotClient {
   const bot = createBot(createMineflayerOptions(profile));
-  return new MineflayerBotClient(bot, profile.minecraftVersion);
+  bot.loadPlugin(pathfinder);
+  return new MineflayerBotClient(
+    bot,
+    profile.minecraftVersion,
+    profile.id,
+  );
 }
 
 export function createMineflayerOptions(profile: ServerProfile) {

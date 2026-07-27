@@ -1,0 +1,27 @@
+export type TaskSystemErrorCode =
+  | "TASK_NOT_FOUND"
+  | "TASK_IDEMPOTENCY_CONFLICT"
+  | "TASK_OPERATION_CONFLICT"
+  | "TASK_REVISION_CONFLICT"
+  | "TASK_TRANSITION_INVALID"
+  | "TASK_TERMINAL"
+  | "TASK_RETRY_EXHAUSTED"
+  | "TASK_FAILURE_REASON_REQUIRED"
+  | "TASK_LEASE_REQUIRED"
+  | "TASK_LEASE_CONFLICT"
+  | "TASK_LEASE_EXPIRED"
+  | "TASK_LEASE_OWNER_MISMATCH"
+  | "TASK_DEPENDENCIES_INCOMPLETE"
+  | "TASK_DEADLINE_EXPIRED"
+  | "TASK_RISK_APPROVAL_REQUIRED"
+  | "TASK_PERSISTENCE_FAILED";
+
+export class TaskSystemError extends Error {
+  constructor(
+    readonly code: TaskSystemErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "TaskSystemError";
+  }
+}

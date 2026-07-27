@@ -41,6 +41,7 @@ export const lifecycleMetricNames = [
   "bot_safety_decisions_total",
   "bot_safety_actions_total",
   "bot_safety_failures_total",
+  "bot_skill_results_total",
 ] as const;
 
 export type LifecycleMetricName = (typeof lifecycleMetricNames)[number];

@@ -41,10 +41,12 @@ packages/
 ├─ protocol/               # 版本化 Zod Schema
 ├─ environment/            # 真实硬件、软件和模式检测
 ├─ observability/          # 结构化日志和进程内指标
-└─ safety/                 # 确定性 L0 生存策略与动作边界
+├─ safety/                 # 确定性 L0 生存策略与动作边界
+├─ skills/                 # 版本化确定性技能注册与受限执行框架
+└─ task-system/            # PostgreSQL 任务模型、状态机、幂等和租约边界
 ```
 
-尚未创建 AI Router、数据库和队列应用。Bot Runtime 已完成 Minecraft 1.21.8 隔离联机验收；Coordinator 已实现进程内 Bot 注册表和安全停止控制边界；Control API 已提供认证 HTTP/WebSocket 状态接口与受 `bot.stop` 保护的停止入口。Dashboard 通过服务端代理读取 Control API，浏览器不会收到长期令牌。
+尚未创建 AI Router、数据库和队列应用。Bot Runtime 已完成 Minecraft 1.21.8 隔离联机验收；Coordinator 已实现进程内 Bot 注册表和安全停止控制边界；Control API 已提供认证 HTTP/WebSocket 状态接口与受 `bot.stop` 保护的停止入口。Dashboard 通过服务端代理读取 Control API，浏览器不会收到长期令牌。确定性技能库已注册 `movement.goto@1.0.0`，Bot Runtime 通过受限 Pathfinder 适配器执行；PostgreSQL 任务 Schema 和仓库边界已建立，但尚未连接运行中的 PostgreSQL 或 BullMQ。
 
 ## 4. 环境检测数据流
 
@@ -110,6 +112,13 @@ API Gateway / Coordinator
 每条消息都包含 `schemaVersion`、`messageId`、`traceId`、`timestamp`、`source.instanceId` 和 `botId`。遥测中的 `runtimeInstanceId + sequence` 用于后续识别重启、重复和乱序消息。
 
 `StopBotCommandV1` 的消息内授权字段只是一份引用，不能自证权限。执行前必须由 `parseBotProtocolMessage` 将它与服务器端可信上下文中的决策、操作者、目标 Bot、命令 ID、权限和有效期逐项匹配。
+
+### Skill Protocol v1
+
+- `SkillInvocationV1`：由 Coordinator 发出的严格 JSON 技能调用，固定技能 ID 和 SemVer 版本，携带任务、Bot、追踪、期限和授权引用。
+- `SkillExecutionResultV1`：由 Bot Runtime 返回的结构化完成、拒绝、失败、取消或超时结果。
+- 调用消息不携带可自证的能力授权；执行器必须把消息与独立可信上下文逐项匹配。
+- 完成结果必须包含经技能 Schema 和 JSON Schema 双重验证的输出；其他结果只能包含稳定错误码。
 
 ## 7. 单 Bot Runtime
 
@@ -229,3 +238,54 @@ SingleBotRuntime serial safety queue
 控制器只产生固定类型的动作，不读取自然语言或模型输出。动作具有固定冷却时间，移动类动作还具有 2 秒以内的固定持续上限，并在同一 Runtime 队列中串行执行。危急生命值产生的 `EMERGENCY_STOP` 由 Runtime 调用既有优雅停止边界，Mineflayer 适配器不能自行声称完成 Runtime 停止。
 
 L0 当前提供基础生存反应，不声称具备路径规划：低血量撤退为短距离后退，坠落只停止横向移动，背包满只暂停普通任务；饥饿且没有白名单安全食物时也保持暂停。更复杂的安全导航、落地、补给和物品搬运必须作为后续确定性技能单独验证。
+
+## 13. 确定性技能库
+
+```text
+SkillInvocationV1 + trusted authorization context
+        ↓ exact skill ID/version lookup
+strict input/state Schema + deterministic preconditions
+        ↓ capability declaration/grant intersection
+SkillExecutor
+  ├─ bounded timeout and cancellation
+  ├─ idempotent-only bounded retry with backoff and jitter
+  └─ capability adapter calls only
+        ↓ strict JSON SkillExecutionResultV1
+```
+
+技能注册表允许同一技能的多个明确版本，但不提供 `latest` 或静默版本回退。每个定义必须声明输入、输出、状态、前置条件、能力、超时、幂等性和重试策略；非幂等技能不能自动重试。
+
+执行器不会把 Mineflayer、Shell、文件系统、网络或模型对象直接交给技能。技能只能通过已声明且可信上下文已授权的能力适配器发起结构化 JSON 调用，适配器返回值和最终结果也必须可验证、可序列化。当前框架仍在 Bot Runtime 进程内运行；若处理器忽略 `AbortSignal` 并执行纯 CPU 或绕过适配器的自有副作用，JavaScript 无法强制终止它，因此不将本模块标记为隔离沙盒。
+
+### `movement.goto@1.0.0`
+
+```text
+validated target (profile + dimension + <= 64 blocks)
+        ↓ exact skill/version + bot.move grant
+Runtime normal-action and L0 gate
+        ↓
+Pathfinder adapter
+  ├─ canDig=false
+  ├─ no scaffolding / towers / parkour / sprinting
+  ├─ no door interaction
+  ├─ max drop 2 blocks
+  └─ AbortSignal → pathfinder.stop()
+```
+
+目标必须包含 ServerProfile 和维度，且与 Bot 当前真实状态一致。技能半径限制为 1～4 格、三维直线距离最多 64 格、总超时 20 秒。L0 安全暂停、Runtime 停止或断线会取消活动技能并停止 Pathfinder。该技能已通过离线单元和 Runtime 集成测试，尚未在真实隔离服执行路径场景，因此不声称跨版本实机寻路已经验收。
+
+## 14. P1.3 任务持久化基础
+
+```text
+strict task command
+        ↓ operation ID replay + idempotency scope/key
+PostgresTaskRepository transaction
+        ↓ SELECT ... FOR UPDATE + expected revision
+deterministic state/lease planner
+        ↓ task row update + append-only history
+PostgreSQL
+```
+
+`@minecraft-studio/task-system` 定义了 queued、assigned、running、blocked、waiting、paused、completed、failed、cancelled 和 expired 状态。状态转换使用乐观修订号；运行和完成必须持有未过期且所有者匹配的租约。任务创建使用作用域化幂等键和规范化 SHA-256 请求指纹，重复操作 ID 只能返回完全相同的持久化快照。可信高风险审批尚未接入，因此 R3/R4 任务当前可以记录但不能领取执行。
+
+迁移创建 `studio_tasks`、`studio_task_dependencies` 和只追加的 `studio_task_history`。任务禁止直接删除，历史禁止更新或删除。当前仓库适配器通过参数化 SQL 工作，但尚未配置或启动 PostgreSQL 实例，也没有运行真实数据库迁移测试；BullMQ、Redis Worker、任务 API 和 Dashboard 任务看板仍待后续模块接入。

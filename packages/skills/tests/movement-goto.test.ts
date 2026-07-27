@@ -1,0 +1,171 @@
+import { describe, expect, it, vi } from "vitest";
+
+import {
+  movementGotoSkill,
+  SkillExecutor,
+  SkillRegistry,
+  type SkillExecutionAuthorization,
+} from "../src/index.js";
+
+const NOW = "2026-07-27T10:00:00.000Z";
+const invocation = {
+  schemaVersion: "1.0" as const,
+  messageId: "11111111-1111-4111-8111-111111111111",
+  traceId: "trace-pathfinder-001",
+  timestamp: NOW,
+  source: { service: "coordinator" as const, instanceId: "coordinator-01" },
+  botId: "worker-01",
+  taskId: "task-pathfinder-001",
+  type: "skill.invoke.v1" as const,
+  payload: {
+    invocationId: "22222222-2222-4222-8222-222222222222",
+    skillId: "movement.goto",
+    skillVersion: "1.0.0",
+    expiresAt: "2026-07-27T10:01:00.000Z",
+    input: {
+      target: {
+        x: 12,
+        y: 64,
+        z: -6,
+        dimension: "minecraft:overworld",
+        serverProfileId: "isolated-local",
+      },
+      radius: 2,
+    },
+    authorization: {
+      decisionId: "33333333-3333-4333-8333-333333333333",
+      actorId: "coordinator-agent",
+      issuedAt: "2026-07-27T09:59:59.000Z",
+      expiresAt: "2026-07-27T10:01:00.000Z",
+    },
+  },
+};
+
+const state = {
+  online: true,
+  normalActionsAllowed: true,
+  serverProfileId: "isolated-local",
+  position: {
+    x: 10,
+    y: 64,
+    z: -5,
+    dimension: "minecraft:overworld",
+    serverProfileId: "isolated-local",
+  },
+};
+
+function authorization(): SkillExecutionAuthorization {
+  return {
+    decisionId: invocation.payload.authorization.decisionId,
+    actorId: invocation.payload.authorization.actorId,
+    sourceInstanceId: invocation.source.instanceId,
+    traceId: invocation.traceId,
+    taskId: invocation.taskId,
+    botId: invocation.botId,
+    invocationId: invocation.payload.invocationId,
+    skillId: invocation.payload.skillId,
+    skillVersion: invocation.payload.skillVersion,
+    issuedAt: invocation.payload.authorization.issuedAt,
+    expiresAt: invocation.payload.authorization.expiresAt,
+    allowedCapabilities: new Set(["bot.move"]),
+  };
+}
+
+function executor(invoke = vi.fn()) {
+  const registry = new SkillRegistry();
+  registry.register(movementGotoSkill);
+  return {
+    invoke,
+    executor: new SkillExecutor(registry, {
+      runtimeInstanceId: "runtime-01",
+      capabilityAdapter: { invoke },
+      now: () => new Date(NOW),
+      random: () => 0,
+      messageId: () => "44444444-4444-4444-8444-444444444444",
+    }),
+  };
+}
+
+describe("movement.goto@1.0.0", () => {
+  it("calls only the bounded Pathfinder capability", async () => {
+    const adapter = vi.fn(async () => ({
+      reached: true,
+      finalPosition: invocation.payload.input.target,
+      distanceToTarget: 0,
+    }));
+    const run = executor(adapter);
+
+    const result = await run.executor.execute(
+      invocation,
+      authorization(),
+      state,
+    );
+
+    expect(result.payload).toMatchObject({
+      outcome: "completed",
+      output: { reached: true, distanceToTarget: 0 },
+    });
+    expect(adapter).toHaveBeenCalledWith(
+      expect.objectContaining({
+        capability: "bot.move",
+        operation: "pathfinder.goto-safe",
+        input: invocation.payload.input,
+      }),
+    );
+  });
+
+  it("rejects paused, cross-dimension and distant targets before movement", async () => {
+    const run = executor();
+
+    expect(
+      (
+        await run.executor.execute(invocation, authorization(), {
+          ...state,
+          normalActionsAllowed: false,
+        })
+      ).payload.errorCode,
+    ).toBe("NORMAL_ACTIONS_PAUSED");
+
+    expect(
+      (
+        await run.executor.execute(
+          {
+            ...invocation,
+            payload: {
+              ...invocation.payload,
+              input: {
+                ...invocation.payload.input,
+                target: {
+                  ...invocation.payload.input.target,
+                  dimension: "minecraft:the_nether",
+                },
+              },
+            },
+          },
+          authorization(),
+          state,
+        )
+      ).payload.errorCode,
+    ).toBe("TARGET_DIMENSION_MISMATCH");
+
+    expect(
+      (
+        await run.executor.execute(
+          {
+            ...invocation,
+            payload: {
+              ...invocation.payload,
+              input: {
+                ...invocation.payload.input,
+                target: { ...invocation.payload.input.target, x: 100 },
+              },
+            },
+          },
+          authorization(),
+          state,
+        )
+      ).payload.errorCode,
+    ).toBe("TARGET_OUT_OF_SAFE_RANGE");
+    expect(run.invoke).not.toHaveBeenCalled();
+  });
+});

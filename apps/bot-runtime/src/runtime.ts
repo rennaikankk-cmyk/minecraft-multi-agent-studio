@@ -10,6 +10,7 @@ import {
   parseBotTelemetryMessage,
   type BotDisconnectedV1,
   type BotHeartbeatV1,
+  type SkillExecutionResultV1,
   type BotStopResultV1,
   type BotStatusV1,
   type BotVersionV1,
@@ -29,6 +30,14 @@ import {
   type L0SafetyActionResult,
   type L0SafetyDecision,
 } from "@minecraft-studio/safety";
+import {
+  movementGotoSkill,
+  SkillExecutor,
+  SkillFault,
+  SkillRegistry,
+  type SkillCapabilityRequest,
+  type SkillExecutionAuthorization,
+} from "@minecraft-studio/skills";
 
 import type {
   BotClient,
@@ -52,6 +61,7 @@ export type RuntimeDependencies = {
   logger: RuntimeLogger;
   metrics?: MetricRecorder;
   safetyController?: L0SafetyController;
+  skillRegistry?: SkillRegistry;
   now?: () => Date;
   randomId?: () => string;
 };
@@ -80,6 +90,7 @@ export class SingleBotRuntime {
   private readonly now: () => Date;
   private readonly randomId: () => string;
   private readonly safetyController: L0SafetyController;
+  private readonly skillExecutor: SkillExecutor;
   private state: BotConnectionState = "offline";
   private client: BotClient | null = null;
   private generation = 0;
@@ -109,6 +120,7 @@ export class SingleBotRuntime {
     string,
     { fingerprint: string; result: Promise<BotStopResultV1> }
   >();
+  private readonly activeSkillControllers = new Set<AbortController>();
 
   constructor(
     private readonly profile: ServerProfile,
@@ -119,6 +131,18 @@ export class SingleBotRuntime {
     this.runtimeInstanceId = `runtime-${this.randomId()}`;
     this.metrics = dependencies.metrics ?? new InMemoryMetricRegistry();
     this.safetyController = dependencies.safetyController ?? new L0SafetyController();
+    const skillRegistry = dependencies.skillRegistry ?? new SkillRegistry();
+    if (!dependencies.skillRegistry) {
+      skillRegistry.register(movementGotoSkill);
+    }
+    this.skillExecutor = new SkillExecutor(skillRegistry, {
+      runtimeInstanceId: this.runtimeInstanceId,
+      capabilityAdapter: {
+        invoke: (request) => this.invokeSkillCapability(request),
+      },
+      now: this.now,
+      messageId: this.randomId,
+    });
   }
 
   getState(): BotConnectionState {
@@ -201,11 +225,62 @@ export class SingleBotRuntime {
     return result;
   }
 
+  async handleSkillInvocation(
+    input: unknown,
+    authorization: SkillExecutionAuthorization,
+    externalSignal?: AbortSignal,
+  ): Promise<SkillExecutionResultV1> {
+    const controller = new AbortController();
+    const cancelFromCaller = () => controller.abort();
+    externalSignal?.addEventListener("abort", cancelFromCaller, { once: true });
+    if (externalSignal?.aborted) cancelFromCaller();
+    this.activeSkillControllers.add(controller);
+
+    try {
+      const result = await this.skillExecutor.execute(
+        input,
+        authorization,
+        this.skillState(),
+        controller.signal,
+      );
+      this.metrics.increment("bot_skill_results_total", {
+        bot_id: this.profile.botId,
+        outcome: result.payload.outcome,
+        skill_id: result.payload.skillId,
+      });
+      const log =
+        result.payload.outcome === "completed"
+          ? this.dependencies.logger.info.bind(this.dependencies.logger)
+          : this.dependencies.logger.warn.bind(this.dependencies.logger);
+      log(
+        "bot_runtime_skill_result",
+        this.logFields(
+          {
+            skillVersion: result.payload.skillVersion,
+            outcome: result.payload.outcome,
+            attempts: result.payload.attempts,
+            ...("errorCode" in result.payload
+              ? { errorCode: result.payload.errorCode }
+              : {}),
+          },
+          result.traceId,
+          result.taskId,
+          result.payload.skillId,
+        ),
+      );
+      return result;
+    } finally {
+      this.activeSkillControllers.delete(controller);
+      externalSignal?.removeEventListener("abort", cancelFromCaller);
+    }
+  }
+
   private async performStop(
     reason: string,
     operationTraceId: string,
   ): Promise<RuntimeStopOutcome> {
     this.stopping = true;
+    this.cancelActiveSkills();
     this.metrics.increment("bot_stop_requests_total", {
       bot_id: this.profile.botId,
       source: reason.startsWith("coordinator_") ? "coordinator" : "local",
@@ -435,6 +510,7 @@ export class SingleBotRuntime {
     info: BotDisconnectInfo,
   ): void {
     if (generation !== this.generation) return;
+    this.cancelActiveSkills();
     this.client = null;
     this.clearTimer("heartbeat");
     this.clearTimer("status");
@@ -607,6 +683,9 @@ export class SingleBotRuntime {
       lastDecisionId: decision.decisionId ?? this.safetyStatus.lastDecisionId,
       lastAction: this.safetyStatus.lastAction,
     };
+    if (decision.normalTasksPaused) {
+      this.cancelActiveSkills();
+    }
 
     if (decision.changed || decision.actions.length > 0) {
       this.metrics.increment("bot_safety_decisions_total", {
@@ -798,15 +877,70 @@ export class SingleBotRuntime {
   private logFields(
     fields: Readonly<Record<string, unknown>> = {},
     traceId = this.traceId,
+    taskId: string | null = null,
+    skillId: string | null = null,
   ): Readonly<Record<string, unknown>> {
     return {
       traceId,
-      taskId: null,
+      taskId,
       botId: this.profile.botId,
-      skillId: null,
+      skillId,
       modelName: null,
       ...fields,
     };
+  }
+
+  private skillState() {
+    let position: (BotClientSnapshot["position"] & {
+      serverProfileId: string;
+    }) | null = null;
+    if (this.state === "online" && this.client) {
+      try {
+        position = {
+          ...this.client.snapshot().position,
+          serverProfileId: this.profile.id,
+        };
+      } catch {
+        position = null;
+      }
+    }
+    return {
+      online: this.state === "online",
+      normalActionsAllowed: this.canAcceptNormalActions(),
+      serverProfileId: this.profile.id,
+      position,
+    };
+  }
+
+  private async invokeSkillCapability(
+    request: SkillCapabilityRequest,
+  ): Promise<unknown> {
+    const activeClient = this.client;
+    if (
+      !activeClient ||
+      this.state !== "online" ||
+      this.safetyStatus.normalTasksPaused
+    ) {
+      throw new SkillFault("NORMAL_ACTIONS_PAUSED");
+    }
+    if (!activeClient.invokeSkillCapability) {
+      throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE");
+    }
+    const output = await activeClient.invokeSkillCapability(request);
+    if (
+      this.client !== activeClient ||
+      this.state !== "online" ||
+      this.safetyStatus.normalTasksPaused
+    ) {
+      throw new SkillFault("SKILL_EXECUTION_INTERRUPTED");
+    }
+    return output;
+  }
+
+  private cancelActiveSkills(): void {
+    for (const controller of this.activeSkillControllers) {
+      controller.abort();
+    }
   }
 
   private clearTimer(

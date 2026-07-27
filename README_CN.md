@@ -2,7 +2,7 @@
 
 面向 Minecraft Java 版多智能体机器人的硬件无关控制平台。
 
-当前已完成项目基线、真实环境检测、版本化 Bot 状态协议、单 Bot 隔离联机验收、Minecraft 版本自适应、Coordinator 注册表、Control API、真实状态 Dashboard 和确定性 L0 安全层：
+当前已完成项目基线、真实环境检测、版本化 Bot 状态协议、单 Bot 隔离联机验收、Minecraft 版本自适应、Coordinator 注册表、Control API、真实状态 Dashboard、确定性 L0 安全层、受限 Pathfinder 技能，以及 P1.3 任务持久化基础：
 
 - 自动检测当前 CPU、内存、操作系统和 GPU 探测状态。
 - 检测 Node.js、Java、Docker 和 Git 是否可用。
@@ -19,6 +19,8 @@
 - Bot 可对批准的隔离服务器自动探测 Minecraft 版本，并上报真实兼容状态。
 - Dashboard 停止操作可用同一追踪编号核对 Control API、Coordinator 和 Bot Runtime 结构化日志。
 - L0 安全层从真实 Mineflayer 状态识别饥饿、低/危急生命值、溺水、岩浆、坠落、卡死和背包满，并执行固定白名单动作。
+- `movement.goto@1.0.0` 通过受限 Pathfinder 适配器移动，不允许挖掘、搭塔、垫方块或跑酷。
+- 任务系统提供 PostgreSQL 迁移、严格状态机、幂等键、乐观修订号和租约边界；真实 PostgreSQL 与 BullMQ 尚待接入。
 
 当前不会自动连接 Minecraft，不会调用模型，也不会显示模拟 Bot。Dashboard 后端断开时会清空 Bot 列表并明确显示错误。
 
@@ -216,6 +218,18 @@ L0 安全判断完全确定性运行，不调用 Local AI Hub 或云模型，也
 Dashboard 的 Bot 卡片显示真实 L0 状态。旧 Runtime 未上报该字段时显示“不可用”，不会补造正常状态。
 
 当前边界：撤退与脱困尚无安全路径规划，坠落只停止横向移动，背包满不会自动丢弃物品；饥饿但没有白名单安全食物时会暂停并等待干预。这些能力需要在 P1.2 之后以独立确定性技能实现和验收。
+
+## Pathfinder 确定性技能
+
+当前仅注册 [`movement.goto@1.0.0`](SKILLS.md)。目标必须与 Bot 当前 ServerProfile 和维度一致，距离最多 64 格，半径 1～4 格，超时 20 秒。L0 暂停、Runtime 停止、断线或取消会停止寻路。
+
+该技能已通过离线测试，但尚未在真实隔离服运行路径场景和跨版本矩阵，因此不能视为实机寻路验收完成。
+
+## P1.3 任务系统当前边界
+
+`@minecraft-studio/task-system` 提供任务 Schema、状态机、重试预算、创建幂等、操作重放、租约和参数化 PostgreSQL 仓库。迁移文件位于 `packages/task-system/migrations/0001_task_system.sql`，不会自动执行。
+
+当前没有配置数据库连接，也没有启动 Redis/BullMQ。单元测试验证的是状态与 SQL 边界，不代表 PostgreSQL 或队列服务在线。
 
 ## 安全说明
 
