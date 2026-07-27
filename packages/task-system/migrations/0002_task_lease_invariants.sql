@@ -14,7 +14,7 @@ BEGIN
   ) THEN
     ALTER TABLE studio_tasks
       ADD CONSTRAINT studio_tasks_handler_version_check
-      CHECK (handler_version ~ '^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$');
+      CHECK (handler_version ~ '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$');
   END IF;
 END;
 $$;

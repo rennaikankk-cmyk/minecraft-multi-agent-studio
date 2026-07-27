@@ -49,7 +49,7 @@ const migrationFiles = [
       ),
     ),
     sha256:
-      "c92d06257824e343190b0f08ee950e34d486a7df4c2e01a34ed308a97970ca1c",
+      "5c1514a76f11b201e5eb95613441f77aaab49ce4e05da3182c21b173bb237a6c",
   },
 ] as const;
 

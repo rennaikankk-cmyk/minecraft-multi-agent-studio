@@ -182,7 +182,7 @@
 - R3/R4 任务在可信审批上下文尚未接入前一律禁止领取，不能依靠命令内字段自证批准。
 - `studio_tasks` 禁止直接删除，`studio_task_history` 禁止更新或删除。取消、失败和过期通过状态与历史表达。
 - 所有 SQL 使用固定语句和参数绑定，不拼接任务输入。唯一的动态 SQL 片段是源码固定的 `FOR UPDATE` 选择。
-- 两个迁移文件在真实测试运行前分别校验 SHA-256：`0001_task_system.sql` 为 `8a66af4a41c4a3d8d938e997ac5c96a3d3c644c3eec0b7d947f9b584a2bbfb3a`，`0002_task_lease_invariants.sql` 为 `c92d06257824e343190b0f08ee950e34d486a7df4c2e01a34ed308a97970ca1c`。
+- 两个迁移文件在真实测试运行前分别校验 SHA-256：`0001_task_system.sql` 为 `8a66af4a41c4a3d8d938e997ac5c96a3d3c644c3eec0b7d947f9b584a2bbfb3a`，`0002_task_lease_invariants.sql` 为 `5c1514a76f11b201e5eb95613441f77aaab49ce4e05da3182c21b173bb237a6c`。
 - 队列只接受严格 `TaskDispatchV1`，job 名称和 ID 均由代码固定。消息不包含可执行代码、Shell、模型文本或 URL；Worker 只调用任务、派发和注册表三方处理器版本/幂等策略完全一致的确定性处理器。
 - Redis 只用于消息投递和 BullMQ 临时锁，不能覆盖 PostgreSQL 事实。BullMQ 固定 `attempts=1`，领域重试必须经过任务状态机、幂等处理器声明和持久化重试预算。
 - 活动取消、超时与截止时间先传播 `AbortSignal`；Worker 有界停止等待和续租，并使用 PostgreSQL 权威时钟写入 cancelled/failed/expired 终态。续租在最终状态提交前停止并等待，避免续租与完成并发修改同一修订号。
