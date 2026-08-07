@@ -11,7 +11,6 @@ const PERMISSIONS = new Set<ControlApiPermission>([
 export type ControlApiRuntimeConfig = Readonly<{
   host: "127.0.0.1" | "::1";
   port: number;
-  staleAfterMs: number;
   principals: ApiPrincipalConfig[];
   requestLimitPerMinute: number;
   handshakeLimitPerMinute: number;
@@ -61,12 +60,6 @@ export function loadControlApiConfig(
   return {
     host,
     port: integerEnvironment(environment.CONTROL_API_PORT, 3210, 1, 65_535),
-    staleAfterMs: integerEnvironment(
-      environment.CONTROL_API_STALE_AFTER_MS,
-      15_000,
-      1_000,
-      300_000,
-    ),
     principals,
     requestLimitPerMinute: integerEnvironment(
       environment.CONTROL_API_REQUESTS_PER_MINUTE,

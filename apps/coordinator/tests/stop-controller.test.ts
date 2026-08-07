@@ -136,7 +136,15 @@ describe("StopController", () => {
     );
 
     const first = value.requestStop(request());
-    const second = value.requestStop(request());
+    const retry = request();
+    const second = value.requestStop({
+      ...retry,
+      authorization: {
+        ...retry.authorization,
+        issuedAt: new Date(retry.authorization.issuedAt.getTime() + 500),
+        expiresAt: new Date(retry.authorization.expiresAt.getTime() + 500),
+      },
+    });
     const result = await first;
 
     expect(second).toBe(first);

@@ -148,6 +148,7 @@ export async function requestDashboardBotStop(
       }),
     },
     fetchImplementation,
+    20_000,
   );
   const parsed = stopBotHttpResponseV1Schema.safeParse(value);
   if (
@@ -179,6 +180,7 @@ async function requestJson(
   path: string,
   init: RequestInit,
   fetchImplementation: typeof fetch,
+  timeoutMs = 4_000,
 ): Promise<unknown> {
   let response: Response;
   try {
@@ -186,7 +188,7 @@ async function requestJson(
       ...init,
       cache: "no-store",
       redirect: "error",
-      signal: AbortSignal.timeout(4_000),
+      signal: AbortSignal.timeout(timeoutMs),
       headers: {
         Authorization: `Bearer ${config.token}`,
         "X-Studio-Schema-Version": "1.0",

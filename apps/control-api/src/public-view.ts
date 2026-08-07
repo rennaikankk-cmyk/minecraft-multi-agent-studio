@@ -8,7 +8,7 @@ import {
 } from "@minecraft-studio/protocol";
 
 export function toPublicBotSummary(
-  record: BotRegistryRecord,
+  record: BotRegistryRecord | PublicBotDetailV1,
 ): PublicBotSummaryV1 {
   return publicBotSummaryV1Schema.parse({
     botId: record.botId,
@@ -20,9 +20,17 @@ export function toPublicBotSummary(
 }
 
 export function toPublicBotDetail(
-  record: BotRegistryRecord,
+  record: BotRegistryRecord | PublicBotDetailV1,
   permissions: ReadonlySet<ControlApiPermission>,
 ): PublicBotDetailV1 {
+  if ("positionRedacted" in record) {
+    const canReadPosition = permissions.has("bot.position.read");
+    return publicBotDetailV1Schema.parse({
+      ...structuredClone(record),
+      position: canReadPosition ? record.position : null,
+      positionRedacted: record.position !== null && !canReadPosition,
+    });
+  }
   const status = record.currentStatus;
   const canReadPosition = permissions.has("bot.position.read");
   return publicBotDetailV1Schema.parse({

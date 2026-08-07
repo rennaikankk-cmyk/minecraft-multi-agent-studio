@@ -12,10 +12,30 @@ export {
   type BotStateSubscription,
 } from "./bot-state-hub.js";
 export {
+  RegistryBotStateSource,
+  normalizeBotStateSource,
+  type BotStateAvailabilityListener,
+  type BotStateListener,
+  type BotStateSource,
+  type BotStopRequester,
+} from "./bot-state-source.js";
+export {
   ControlApiConfigError,
   loadControlApiConfig,
   type ControlApiRuntimeConfig,
 } from "./config.js";
+export {
+  CoordinatorLinkClient,
+  CoordinatorLinkClientError,
+  type CoordinatorLinkClientErrorCode,
+  type CoordinatorLinkClientOptions,
+} from "./coordinator-link-client.js";
+export {
+  CoordinatorLinkConfigError,
+  loadCoordinatorLinkConfig,
+  type CoordinatorLinkClientConfig,
+  type CoordinatorLinkConfigErrorCode,
+} from "./coordinator-link-config.js";
 export { toPublicBotDetail, toPublicBotSummary } from "./public-view.js";
 export { ConnectionLimiter, FixedWindowRateLimiter } from "./rate-limit.js";
 export {

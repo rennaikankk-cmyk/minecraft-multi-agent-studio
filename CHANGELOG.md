@@ -6,6 +6,10 @@
 
 ### 新增
 
+- 新增严格 Control Link v1 协议、Coordinator 回环服务端和 Control API 客户端，通过双向 HMAC 认证传输原子 Bot 状态快照、有序增量和固定优雅停止 RPC。
+- Control API 生产入口改为在 Control Link 首个完整快照后才启动；运行中断线会原子清空镜像、关闭 Bot 状态流，并让列表、详情和停止返回 `503 CONTROL_UNAVAILABLE`。
+- 新增 Dashboard → Control API → Coordinator → Runtime 四进程服务级验收。2026-08-07 由两位执行者独立各运行一次均退出码 0，覆盖 `空 → online → stop completed → offline`、固定 `traceId`、单次关闭、凭据扫描和无残留；使用测试专用 Runtime fixture，未连接 Minecraft，也不是浏览器 E2E。
+- 新增 `EnvironmentMemorySample v1.0`、轻量 `/api/environment/memory` 和 Dashboard 页面可见期间的 5 秒真实内存刷新；只读取服务端主机/容器 Node OS 总量与可用量，不重跑完整环境探测、不持久化，失败或长期未成功时保留上次真实值并明确标为过期，页面恢复可见后立即重采。
 - 新增严格 Runtime Link v1 握手与遥测 ACK 协议，复用既有 Bot 遥测、停止命令和停止结果，不引入可执行消息。
 - 新增独立 Coordinator Runtime Link 入口和 Bot Runtime 客户端，通过真实回环 WebSocket 传输遥测与停止确认。
 - 新增两个独立 Node 测试进程的 Runtime Link 验收：Coordinator 进程组合生产传输组件，Runtime 进程使用生产 `SingleBotRuntime` 和测试专用 BotClient，验证在线状态、优雅停止、单次关闭、离线结果、审计顺序和跨进程 `traceId`；不启动生产 Coordinator `main`、Control API 或 Minecraft。
@@ -18,6 +22,14 @@
 
 ### 安全
 
+- Control Link 固定回环地址、路径、子协议、64 KiB 文本帧和有界资源；Coordinator 只保存 Control API 共享密钥 SHA-256，Control API 明文密钥只存在于自身环境变量，双方以随机 nonce 和方向绑定 HMAC proof 相互认证。
+- Control API 状态镜像只在完整 begin/item/end 快照后原子提交；半包快照、序列跳号、身份变化或断线全部 fail-closed 为 503，不沿用旧在线状态。
+- Control API 新增默认 75 秒入站存活看门狗；协议、序列、背压或失活先同步撤销镜像，忽略失败 socket 的排队帧并安全重连。Coordinator 身份变化会拒绝绑定旧实例的待处理停止，同时保持新链路可恢复。
+- Coordinator 与 Control API 改用每次启动新生成的高熵 UUID 作为 boot identity，避免 PID 复用让跨重启旧停止操作被误判为同一会话。
+- Bot 失联阈值迁移为实际由 Coordinator 读取并注入注册表的 `COORDINATOR_BOT_STALE_AFTER_MS`；删除已不生效的 Control API 旧配置，避免假配置。
+- Control Link 停止固定绑定同一操作/追踪/授权 ID、操作者、Bot、短期有效期、仅 `bot.stop` 权限、5 秒宽限和 15 秒超时；身份不匹配、超时或背压不能转成成功。
+- 5 秒内存接口使用严格 Schema、`no-store`、非重叠请求、4 秒超时和卸载 Abort；超过 15 秒没有成功样本或页面从后台恢复时会明确标记旧值并立即重采，不读取浏览器设备、不记录历史，也不以假值掩盖采样失败。
+- 内存样本按 `capturedAt` 单调提交；较早启动但较晚返回的完整环境检测不会覆盖更新的轻量内存样本或把旧数据重新标为新鲜。
 - Runtime Link 固定回环地址、路径、子协议、64 KiB 文本帧和有界资源，并拒绝带浏览器 `Origin` 的升级请求；每 Bot 共享密钥通过双向 nonce/HMAC challenge 完成相互认证，密钥不进入 URL、日志或仓库。
 - Runtime 在控制链路认证成功后才启动；重连耗尽、关键遥测队列溢出、身份不匹配或协议异常时 fail-closed，不允许模型或消息直接执行。
 - Worker 只调用任务、派发和注册表三方版本/幂等策略完全匹配的确定性任务处理器；队列消息不能携带模型文本、代码、Shell、URL 或任意字段。
@@ -40,7 +52,8 @@
 
 ### 当前限制
 
-- Runtime ↔ Coordinator 已通过真实双进程回环验收，但 Control API ↔ 独立 Coordinator 状态/停止桥接、Dashboard 四进程追踪、跨主机传输和持久化停止审计尚未完成。
+- Runtime ↔ Coordinator 已通过真实双进程回环验收，Dashboard → Control API → Coordinator → 测试专用 Runtime 已通过四进程服务级回环验收；后者没有连接 Minecraft，也不等同于浏览器 E2E 或正式服务器验收。
+- Control Link 当前只支持同机回环，状态、停止幂等缓存和审计仍在内存中；跨主机 TLS、密钥轮换、用户登录和持久化停止审计尚未完成。
 - 本机未检测到 PostgreSQL、Redis 或 Docker；2026-07-28 的 GitHub Actions 运行 `30315095898` 已通过真实临时 PostgreSQL/Redis 集成门，该结果不代表生产服务在线。
 - 当前提供可嵌入 Worker 库，尚未提供独立生产 Worker 应用、Coordinator 任务调度、任务 Control API 或 Dashboard 任务看板。
 - 当前没有事务 outbox、自动 PostgreSQL→BullMQ 对账重投或跨 Worker 取消；数据库提交和入队不是原子事务。

@@ -10,6 +10,7 @@ export type RuntimeLinkPeerConfig = Readonly<{
 export type RuntimeLinkRuntimeConfig = Readonly<{
   host: "127.0.0.1" | "::1";
   port: number;
+  botStaleAfterMs: number;
   peers: RuntimeLinkPeerConfig[];
 }>;
 
@@ -17,7 +18,8 @@ export type RuntimeLinkConfigErrorCode =
   | "RUNTIME_LINK_HOST_INVALID"
   | "RUNTIME_LINK_PORT_INVALID"
   | "RUNTIME_LINK_AUTH_REQUIRED"
-  | "RUNTIME_LINK_AUTH_INVALID";
+  | "RUNTIME_LINK_AUTH_INVALID"
+  | "COORDINATOR_BOT_STALE_AFTER_MS_INVALID";
 
 export class RuntimeLinkConfigError extends Error {
   readonly code: RuntimeLinkConfigErrorCode;
@@ -86,7 +88,14 @@ export function loadRuntimeLinkConfig(
     return peer;
   });
 
-  return { host, port, peers };
+  return {
+    host,
+    port,
+    botStaleAfterMs: parseBotStaleAfterMs(
+      environment.COORDINATOR_BOT_STALE_AFTER_MS,
+    ),
+    peers,
+  };
 }
 
 function parsePeer(value: unknown): RuntimeLinkPeerConfig {
@@ -145,4 +154,26 @@ function parsePort(value: string | undefined): number {
     );
   }
   return port;
+}
+
+function parseBotStaleAfterMs(value: string | undefined): number {
+  if (value === undefined || value === "") return 15_000;
+  if (!/^[0-9]+$/u.test(value)) {
+    throw new RuntimeLinkConfigError(
+      "COORDINATOR_BOT_STALE_AFTER_MS_INVALID",
+      "COORDINATOR_BOT_STALE_AFTER_MS must be an integer.",
+    );
+  }
+  const milliseconds = Number(value);
+  if (
+    !Number.isSafeInteger(milliseconds) ||
+    milliseconds < 1_000 ||
+    milliseconds > 300_000
+  ) {
+    throw new RuntimeLinkConfigError(
+      "COORDINATOR_BOT_STALE_AFTER_MS_INVALID",
+      "COORDINATOR_BOT_STALE_AFTER_MS must be between 1000 and 300000.",
+    );
+  }
+  return milliseconds;
 }

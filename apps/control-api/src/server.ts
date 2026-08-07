@@ -11,7 +11,6 @@ import type { Duplex } from "node:stream";
 import {
   CoordinatorStopError,
   type BotRegistry,
-  type StopController,
 } from "@minecraft-studio/coordinator";
 import {
   botDetailResponseV1Schema,
@@ -32,7 +31,17 @@ import {
   type ApiPrincipal,
   type ApiPrincipalConfig,
 } from "./auth.js";
-import { BotStateHub, type BotStateEvent } from "./bot-state-hub.js";
+import {
+  BotStateHub,
+  type BotStateEvent,
+  type BotStateSubscription,
+} from "./bot-state-hub.js";
+import {
+  normalizeBotStateSource,
+  type BotStateSource,
+  type BotStopRequester,
+} from "./bot-state-source.js";
+import { CoordinatorLinkClientError } from "./coordinator-link-client.js";
 import { toPublicBotDetail, toPublicBotSummary } from "./public-view.js";
 import { ConnectionLimiter, FixedWindowRateLimiter } from "./rate-limit.js";
 
@@ -53,8 +62,8 @@ export type ControlApiLogger = Readonly<{
 export type ControlApiServerOptions = Readonly<{
   host: "127.0.0.1" | "::1";
   port: number;
-  registry: BotRegistry;
-  stopController?: Pick<StopController, "requestStop">;
+  registry: BotRegistry | BotStateSource;
+  stopController?: BotStopRequester;
   principals: readonly ApiPrincipalConfig[];
   logger: ControlApiLogger;
   requestLimitPerMinute?: number;
@@ -80,7 +89,9 @@ export class ControlApiServer {
   private readonly principalRequestLimiter: FixedWindowRateLimiter;
   private readonly handshakeLimiter: FixedWindowRateLimiter;
   private readonly connectionLimiter: ConnectionLimiter;
+  private readonly stateSource: BotStateSource;
   private readonly hub: BotStateHub;
+  private readonly unsubscribeAvailability: () => void;
   private readonly httpServer: HttpServer;
   private readonly webSocketServer: WebSocketServer;
   private readonly sockets = new Set<WebSocket>();
@@ -94,6 +105,9 @@ export class ControlApiServer {
   private stopped = false;
 
   constructor(private readonly options: ControlApiServerOptions) {
+    if (options.host !== "127.0.0.1" && options.host !== "::1") {
+      throw new TypeError("Control API only permits an explicit loopback bind.");
+    }
     this.now = options.now ?? (() => new Date());
     this.randomId = options.randomId ?? randomUUID;
     this.authenticator = new TokenAuthenticator(options.principals);
@@ -112,6 +126,7 @@ export class ControlApiServer {
     this.connectionLimiter = new ConnectionLimiter(
       options.maxConnectionsPerSubject ?? 5,
     );
+    this.stateSource = normalizeBotStateSource(options.registry);
     this.staleSweepIntervalMs = boundedInteger(
       options.staleSweepIntervalMs ?? 1_000,
       100,
@@ -134,7 +149,13 @@ export class ControlApiServer {
       throw new TypeError("Control API port is invalid.");
     }
 
-    this.hub = new BotStateHub(options.registry);
+    this.hub = new BotStateHub(this.stateSource);
+    this.unsubscribeAvailability = this.stateSource.subscribeAvailability(
+      (ready) => {
+        if (ready) return;
+        for (const socket of this.sockets) socket.close(1012, "coordinator_unavailable");
+      },
+    );
     this.httpServer = createServer(
       {
         maxHeaderSize: 16_384,
@@ -194,18 +215,20 @@ export class ControlApiServer {
       );
     });
     this.started = true;
-    this.staleSweepTimer = setInterval(
-      () => {
-        try {
-          this.options.registry.sweepStale(this.now());
-        } catch {
-          this.options.logger.error("control_api_stale_sweep_failed", {
-            code: "INTERNAL_ERROR",
-          });
-        }
-      },
-      this.staleSweepIntervalMs,
-    );
+    if (this.stateSource.sweepStale) {
+      this.staleSweepTimer = setInterval(
+        () => {
+          try {
+            this.stateSource.sweepStale?.(this.now());
+          } catch {
+            this.options.logger.error("control_api_stale_sweep_failed", {
+              code: "INTERNAL_ERROR",
+            });
+          }
+        },
+        this.staleSweepIntervalMs,
+      );
+    }
     this.pingTimer = setInterval(
       () => this.pingWebSockets(),
       this.webSocketPingIntervalMs,
@@ -249,6 +272,7 @@ export class ControlApiServer {
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.staleSweepTimer = null;
     this.pingTimer = null;
+    this.unsubscribeAvailability();
     this.hub.dispose();
     for (const socket of this.sockets) socket.terminate();
     this.sockets.clear();
@@ -330,12 +354,16 @@ export class ControlApiServer {
         this.writeError(response, 403, requestId, "PERMISSION_DENIED", "Bot read permission is required.");
         return;
       }
+      if (!this.stateSource.isReady()) {
+        this.writeControlUnavailable(response, requestId);
+        return;
+      }
       const body = botListResponseV1Schema.parse({
         schemaVersion: "1.0",
         requestId,
         data: {
           generatedAt: now.toISOString(),
-          bots: this.options.registry.list(now).map(toPublicBotSummary),
+          bots: this.stateSource.list(now).map(toPublicBotSummary),
         },
       });
       this.writeJson(response, 200, body);
@@ -397,7 +425,11 @@ export class ControlApiServer {
       this.writeError(response, 400, requestId, "INVALID_REQUEST", "Bot identifier is invalid.");
       return;
     }
-    const record = this.options.registry.get(botId, now);
+    if (!this.stateSource.isReady()) {
+      this.writeControlUnavailable(response, requestId);
+      return;
+    }
+    const record = this.stateSource.get(botId, now);
     if (!record) {
       this.writeError(response, 404, requestId, "BOT_NOT_FOUND", "Bot was not found.");
       return;
@@ -421,14 +453,8 @@ export class ControlApiServer {
     principal: ApiPrincipal,
     botId: string,
   ): Promise<void> {
-    if (!this.options.stopController) {
-      this.writeError(
-        response,
-        503,
-        responseRequestId,
-        "CONTROL_UNAVAILABLE",
-        "Bot stop control is not connected in this process.",
-      );
+    if (!this.stateSource.isReady() || !this.options.stopController) {
+      this.writeControlUnavailable(response, responseRequestId);
       return;
     }
     const contentType = request.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
@@ -447,6 +473,10 @@ export class ControlApiServer {
     try {
       input = await readLimitedJson(request, 4_096);
     } catch {
+      if (!this.stateSource.isReady()) {
+        this.writeControlUnavailable(response, responseRequestId);
+        return;
+      }
       this.writeError(
         response,
         400,
@@ -454,6 +484,10 @@ export class ControlApiServer {
         "INVALID_REQUEST",
         "The stop request body is invalid.",
       );
+      return;
+    }
+    if (!this.stateSource.isReady()) {
+      this.writeControlUnavailable(response, responseRequestId);
       return;
     }
     const parsed = stopBotHttpRequestV1Schema.safeParse(input);
@@ -531,7 +565,11 @@ export class ControlApiServer {
     cause: unknown,
     botId: string,
   ): void {
-    const code = cause instanceof CoordinatorStopError ? cause.code : "STOP_TRANSPORT_FAILED";
+    const code =
+      cause instanceof CoordinatorStopError ||
+      cause instanceof CoordinatorLinkClientError
+        ? cause.code
+        : "STOP_TRANSPORT_FAILED";
     this.options.logger.warn("control_api_stop_failed", {
       traceId,
       taskId: null,
@@ -540,6 +578,10 @@ export class ControlApiServer {
       modelName: null,
       code,
     });
+    if (cause instanceof CoordinatorLinkClientError) {
+      this.writeControlUnavailable(response, requestId);
+      return;
+    }
     if (code === "BOT_NOT_FOUND") {
       this.writeError(response, 404, requestId, "BOT_NOT_FOUND", "Bot was not found.");
       return;
@@ -595,6 +637,16 @@ export class ControlApiServer {
       this.rejectUpgrade(socket, 403, requestId, "PERMISSION_DENIED", "Bot read permission is required.");
       return;
     }
+    if (!this.stateSource.isReady()) {
+      this.rejectUpgrade(
+        socket,
+        503,
+        requestId,
+        "CONTROL_UNAVAILABLE",
+        "Coordinator state is unavailable.",
+      );
+      return;
+    }
     if (!this.connectionLimiter.acquire(principal.subject)) {
       this.rejectUpgrade(socket, 429, requestId, "RATE_LIMITED", "Connection limit exceeded.");
       return;
@@ -611,20 +663,15 @@ export class ControlApiServer {
   }
 
   private openWebSocket(webSocket: WebSocket, principal: ApiPrincipal): void {
-    this.sockets.add(webSocket);
-    this.socketAlive.set(webSocket, true);
     let released = false;
     let snapshotSent = false;
     const pending: BotStateEvent[] = [];
-    const subscription = this.hub.subscribe((event) => {
-      if (!snapshotSent) pending.push(event);
-      else this.sendStreamEvent(webSocket, principal, event);
-    }, validNow(this.now()));
+    let subscription: BotStateSubscription | null = null;
 
     const release = () => {
       if (released) return;
       released = true;
-      subscription.unsubscribe();
+      subscription?.unsubscribe();
       this.connectionLimiter.release(principal.subject);
       this.sockets.delete(webSocket);
       this.socketAlive.delete(webSocket);
@@ -635,10 +682,16 @@ export class ControlApiServer {
         subject: principal.subject,
       });
     });
-    webSocket.on("pong", () => this.socketAlive.set(webSocket, true));
-    webSocket.on("message", () => webSocket.close(1008, "read_only"));
 
     try {
+      subscription = this.hub.subscribe((event) => {
+        if (!snapshotSent) pending.push(event);
+        else this.sendStreamEvent(webSocket, principal, event);
+      }, validNow(this.now()));
+      this.sockets.add(webSocket);
+      this.socketAlive.set(webSocket, true);
+      webSocket.on("pong", () => this.socketAlive.set(webSocket, true));
+      webSocket.on("message", () => webSocket.close(1008, "read_only"));
       const snapshot = botStreamSnapshotV1Schema.parse({
         schemaVersion: "1.0",
         messageId: this.randomId(),
@@ -646,8 +699,8 @@ export class ControlApiServer {
         streamSequence: subscription.streamSequence,
         type: "bot.stream.snapshot.v1",
         payload: {
-          bots: subscription.records.map((record) =>
-            toPublicBotDetail(record, principal.permissions),
+          bots: subscription.bots.map((bot) =>
+            toPublicBotDetail(bot, principal.permissions),
           ),
         },
       });
@@ -661,7 +714,12 @@ export class ControlApiServer {
       pending.length = 0;
     } catch {
       release();
-      webSocket.close(1011, "stream_initialization_failed");
+      if (
+        webSocket.readyState === WebSocket.OPEN ||
+        webSocket.readyState === WebSocket.CONNECTING
+      ) {
+        webSocket.close(1011, "stream_initialization_failed");
+      }
     }
   }
 
@@ -679,7 +737,7 @@ export class ControlApiServer {
         type: "bot.stream.event.v1",
         payload: {
           event: "upsert",
-          bot: toPublicBotDetail(event.record, principal.permissions),
+          bot: toPublicBotDetail(event.bot, principal.permissions),
         },
       });
       this.sendWebSocket(webSocket, message);
@@ -712,6 +770,19 @@ export class ControlApiServer {
   private hasSupportedHttpVersion(request: IncomingMessage): boolean {
     const value = request.headers["x-studio-schema-version"];
     return value === undefined || value === "1.0";
+  }
+
+  private writeControlUnavailable(
+    response: ServerResponse,
+    requestId: string,
+  ): void {
+    this.writeError(
+      response,
+      503,
+      requestId,
+      "CONTROL_UNAVAILABLE",
+      "Coordinator state and stop control are unavailable.",
+    );
   }
 
   private writeError(
@@ -778,6 +849,7 @@ const HTTP_STATUS_TEXT: Readonly<Record<number, string>> = {
   426: "Upgrade Required",
   429: "Too Many Requests",
   500: "Internal Server Error",
+  503: "Service Unavailable",
 };
 
 function safeUrl(value: string | undefined): URL | null {

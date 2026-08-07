@@ -115,6 +115,9 @@ input { font: inherit; }
 .metricGrid { display: grid; grid-template-columns: 1.5fr 1fr 1fr; gap: 13px; }
 .metricCard { min-height: 142px; padding: 23px; }
 .metricCard strong { display: block; margin: 17px 0 9px; font-size: 20px; line-height: 1.35; }
+.memorySampleStatus { display: block; margin-top: 8px; font-size: 11px; }
+.memorySampleStatus.fresh { color: var(--green); }
+.memorySampleStatus.stale { color: var(--red); }
 
 .panelGrid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; margin-top: 13px; }
 .panel { padding: 23px; }

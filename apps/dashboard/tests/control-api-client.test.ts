@@ -87,6 +87,7 @@ describe("Dashboard Control API client", () => {
   });
 
   it("preserves and validates the stop trace across Control API", async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
     const fetcher = vi.fn<typeof fetch>(async () => jsonResponse({
       schemaVersion: "1.0",
       requestId: "22222222-2222-4222-8222-222222222222",
@@ -105,6 +106,7 @@ describe("Dashboard Control API client", () => {
       fetcher,
     );
     expect(result.data.traceId).toBe(UUID);
+    expect(timeoutSpy).toHaveBeenCalledWith(20_000);
   });
 });
 

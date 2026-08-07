@@ -39,3 +39,17 @@ export {
   type RuntimeLinkServerOptions,
   type RuntimeLinkTransportErrorCode,
 } from "./runtime-link-server.js";
+
+export {
+  ControlLinkConfigError,
+  loadControlLinkConfig,
+  type ControlLinkClientConfig,
+  type ControlLinkConfigErrorCode,
+  type ControlLinkRuntimeConfig,
+} from "./control-link-config.js";
+
+export {
+  ControlLinkServer,
+  type ControlLinkAddress,
+  type ControlLinkServerOptions,
+} from "./control-link-server.js";

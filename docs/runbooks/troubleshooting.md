@@ -28,16 +28,17 @@ Get-ChildItem -LiteralPath '<日志目录>' -File -Recurse | Select-String -Simp
 | `Minecraft EULA has not been accepted` | 用户阅读并明确接受后手工设置；不得自动修改。 |
 | 25565 已占用 | 查明占用者并由用户处理；脚本不会复用或结束未知进程。 |
 | `MINECRAFT_VERSION_UNSUPPORTED` | 保留真实错误；升级锁定依赖并重新跑版本测试和隔离联机验收，不循环重连。 |
-| Dashboard 显示 Control API 不可用 | 确认 API 已启动、本机令牌匹配且 URL 仍为回环地址。页面不会回退到假 Bot。 |
+| Dashboard 显示 Control API 不可用 | 确认 Coordinator、Control API 均已启动，Control Link 双方身份/密钥匹配，Dashboard 令牌匹配且所有 URL 仍为回环地址。页面不会回退到假 Bot。 |
 | Dashboard 显示“失联” | 检查最近心跳、Runtime 日志和重连计数；不要把旧状态改成在线。 |
-| `CONTROL_UNAVAILABLE` | 独立 Control API 尚未注入跨进程 StopController，不能伪造停止成功。 |
+| `CONTROL_UNAVAILABLE` | Control Link 尚未完成首个原子快照、已经断开，或快照/增量序列被拒绝。先检查 `control_api_coordinator_link_*` 与 `coordinator_control_link_*` 稳定事件；不要把 503 改成空列表或停止成功。 |
 | `STOP_TIMEOUT` | 用追踪编号核对 Coordinator 是否发出命令以及 Runtime 是否返回结果；状态保持不确定，不重复使用新命令冒充成功。 |
+| 内存卡片显示“数据已过期” | 这是 5 秒轻量内存请求失败、请求超过 4 秒，或连续 15 秒没有成功样本的结果；显示值仍是最后一次真实样本。检查 Dashboard 服务端及同源 `/api/environment/memory`，页面从后台恢复后会立即重采；不要误解为浏览器设备内存。 |
 
 ## 指标判断
 
 Runtime 当前提供进程内快照：连接尝试、心跳、断线、计划重连、停止请求、停止结果。断线持续增长而心跳不增长时优先检查版本和网络范围；停止请求增长但停止结果不增长时按 `traceId` 检查控制传输。
 
-当前没有 Prometheus 导出端点和集中日志系统；指标在进程重启后清零。跨进程遥测与停止传输尚未接入，因此完整四层链路当前由协议和进程内集成测试验证，独立启动时不能宣称已产生不存在的 Coordinator/Runtime 日志。
+当前没有 Prometheus 导出端点和集中日志系统；指标在进程重启后清零。Runtime Link 和 Control Link 已接入真实回环传输，四进程服务级验收已核对固定追踪编号，但使用测试专用 Runtime fixture、未连接 Minecraft、也未驱动浏览器。排障时只能引用本次实际启动产生的日志，不能把验收结论扩张为当前服务在线。
 
 ## 脱敏边界
 

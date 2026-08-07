@@ -19,6 +19,31 @@ export const gpuProbeStatusSchema = z.enum([
   "probe_unavailable",
 ]);
 
+export const environmentMemorySchema = z
+  .object({
+    totalBytes: z.number().int().positive(),
+    freeBytes: z.number().int().nonnegative(),
+  })
+  .strict()
+  .superRefine((memory, context) => {
+    if (memory.freeBytes > memory.totalBytes) {
+      context.addIssue({
+        code: "custom",
+        path: ["freeBytes"],
+        message: "Free memory cannot exceed total memory.",
+      });
+    }
+  });
+
+export const environmentMemorySampleSchema = z
+  .object({
+    schemaVersion: z.literal("1.0"),
+    capturedAt: z.string().datetime(),
+    source: z.literal("node-os"),
+    memory: environmentMemorySchema,
+  })
+  .strict();
+
 export const environmentSnapshotSchema = z.object({
   schemaVersion: z.literal("1.0"),
   capturedAt: z.string().datetime(),
@@ -34,10 +59,7 @@ export const environmentSnapshotSchema = z.object({
       model: z.string().min(1),
       logicalCores: z.number().int().positive(),
     }),
-    memory: z.object({
-      totalBytes: z.number().int().positive(),
-      freeBytes: z.number().int().nonnegative(),
-    }),
+    memory: environmentMemorySchema,
     gpu: z.object({
       status: gpuProbeStatusSchema,
       source: z.string().min(1),
@@ -64,4 +86,7 @@ export const environmentSnapshotSchema = z.object({
 });
 
 export type DeploymentMode = z.infer<typeof deploymentModeSchema>;
+export type EnvironmentMemorySample = z.infer<
+  typeof environmentMemorySampleSchema
+>;
 export type EnvironmentSnapshot = z.infer<typeof environmentSnapshotSchema>;

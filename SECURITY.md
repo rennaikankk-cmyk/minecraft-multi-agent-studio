@@ -28,6 +28,10 @@
 - 设置超时和输出大小限制。
 - 探测失败返回 `unavailable`、`unknown` 或 `probe_unavailable`。
 - 原始系统错误不直接返回浏览器。
+- Dashboard 页面可见期间的 5 秒内存刷新只能读取其服务端进程可见的 `os.totalmem()` 和 `os.freemem()`，不得重新执行软件/GPU 探针或读取浏览器终端信息。
+- 内存样本必须通过严格 `EnvironmentMemorySample v1.0` 校验并满足 `0 <= freeBytes <= totalBytes`；接口强制 `no-store`，样本不持久化。
+- 前端请求不得重叠，4 秒超时并在页面卸载时 Abort；失败只能保留最后一次真实值且必须明确标为过期，不能填造新值。
+- 完整环境重检与轻量内存请求可能并发；前端只接受 `capturedAt` 不早于当前样本的结果，旧响应不得覆盖较新的真实内存或重置过期状态。
 
 ## 3. 依赖可信策略
 
@@ -95,7 +99,7 @@
 ### Runtime Link 传输边界
 
 - 服务端与客户端只接受 `ws://127.0.0.1` 或 `ws://[::1]`、固定 `/v1/runtime-link` 路径和 `minecraft-studio.runtime.v1` 子协议；拒绝域名、私网/公网地址、凭据 URL、查询、片段、重定向以及任何带浏览器 `Origin` 的升级请求。
-- 每个 key 只绑定一个 Bot；Coordinator 环境只保存共享密钥 SHA-256，Runtime 明文密钥只存在于自身进程环境变量，二者都不得写入日志或仓库。
+- 每个 key 只绑定一个 Bot；Coordinator 环境只保存共享密钥 SHA-256，Runtime 明文密钥只存在于自身进程环境变量。摘要直接参与 HMAC，属于等价认证密钥，二者都必须按明文密钥同等级保护且不得写入日志或仓库。
 - 双方以独立随机 nonce 和方向绑定 HMAC proof 完成相互认证；证明绑定 challenge、Coordinator、Bot、运行实例和 key ID，并使用时序安全比较。
 - 认证会话绑定 `botId + runtimeInstanceId + keyId`；任何遥测、停止结果或目标运行实例不一致都会拒绝并关闭连接。
 - 只接受严格 v1 文本 JSON，单帧最大 64 KiB并禁用压缩；会话、待确认停止、发送缓冲和 Runtime 遥测队列均有硬上限。
@@ -103,6 +107,22 @@
 - 停止命令中的授权字段不能自证权限；Runtime 只在相互认证成功的 Coordinator 会话上重建最小权限上下文，再调用既有协议授权校验。
 - 控制链路重连耗尽、关键队列溢出或身份异常时 Runtime fail-closed；未收到匹配停止结果时 Coordinator 不报告成功。
 - 当前仅完成同一主机回环部署；Docker 跨容器、跨主机 TLS 和密钥轮换尚未接入，不能通过放宽监听地址绕过。
+
+### Control Link 传输边界
+
+- Coordinator 服务端和 Control API 客户端只接受 `ws://127.0.0.1` 或 `ws://[::1]`、固定 `/v1/control-link` 路径和 `minecraft-studio.control-link.v1` 子协议；拒绝域名、其他私网/公网地址、凭据 URL、查询、片段、重定向和带浏览器 `Origin` 的升级请求。
+- `COORDINATOR_CONTROL_LINK_CLIENTS_JSON` 只保存共享密钥 SHA-256；该摘要会直接参与 HMAC，是可用于冒充客户端的等价认证密钥，必须按明文密钥同等级保护。`CONTROL_API_COORDINATOR_LINK_SECRET` 明文只存在于 Control API 进程环境。`clientId`、`keyId` 和摘要必须各自唯一，配置不得进入日志或仓库。
+- 双方使用独立随机 nonce、方向绑定 HMAC proof 和时序安全比较完成相互认证；proof 绑定 challenge、Coordinator 实例、Control API 实例、客户端和 key 身份。认证前不发送状态、不接受停止。
+- 客户端当前必须精确具有 `bot.read` 与 `bot.stop` 两项能力；未知、缺失、重复能力或配置字段默认拒绝。
+- 只接受严格 Control Link v1 文本 JSON，单帧最大 64 KiB并禁用压缩；会话、快照期间增量缓冲、待处理停止、重复应答者和发送缓冲均有硬上限，溢出时断链或返回稳定背压错误。
+- Coordinator 以 begin/item/end 发送一致性快照，并在其后按连续序列发送增量。Control API 只在完整快照末尾原子提交；半包快照、重复 Bot/索引、序列跳号、实例身份变化或断线会清空镜像并关闭外部状态流。
+- Bot 失联阈值只由持有权威注册表的 Coordinator 读取 `COORDINATOR_BOT_STALE_AFTER_MS`；配置必须是 1000～300000 的整数毫秒值。Control API 不得暴露或接受不会影响权威状态的伪配置。
+- 镜像不可用时，Control API 列表、详情和停止统一返回 `503 CONTROL_UNAVAILABLE`，不得返回旧快照、空列表冒充当前权威状态或伪造停止成功。
+- Control API 使用默认 75 秒入站看门狗检测未关闭但已失活的 Coordinator socket；协议、序列、背压、看门狗或传输失败必须先同步撤销镜像与认证状态，再关闭并重连。关闭握手中的排队帧不得恢复可用状态或升级为永久认证失败。
+- 待处理停止只允许在同一 `coordinatorInstanceId` 的短暂重连中重投；Coordinator 身份变化时必须拒绝旧操作并清除其计时器，不能向新实例发送绑定旧身份的帧。
+- Coordinator 与 Control API 的实例身份必须在每次进程启动时由高熵随机 UUID 生成，不得只使用可能复用的 PID；boot ID 变化是拒绝跨重启旧停止操作的安全边界。
+- Control Link 停止固定为已确认的 `graceful`、`dashboard_operator_confirmed`、5 秒宽限和 15 秒超时；同一 UUID 绑定命令、追踪、授权决策和 operation，权限集合只能包含 `bot.stop`。客户端能力、操作者、Bot、期限、幂等指纹和返回身份必须全部匹配。
+- 2026-08-07 四进程服务级验收由两位执行者独立通过，覆盖固定追踪、凭据扫描和清理；测试 Runtime 是 fixture、`minecraftConnected=false`，该结果不授权正式 Minecraft、跨主机传输或浏览器执行控制。
 
 ## 8. Control API 边界
 
@@ -117,6 +137,7 @@
 - 日志只记录稳定事件、错误码和认证主体，不记录令牌、服务器配置、位置或原始请求内容。
 - 对外列表和详情不返回 ServerProfile、服务器地址或 Runtime 内部标识；坐标按权限脱敏。
 - 所有内部异常统一转换为稳定 `INTERNAL_ERROR`，不把堆栈或底层错误返回客户端。
+- 生产入口必须先完成 Control Link 双向认证和首个原子快照再监听 HTTP；运行中 Control Link 断开时立即进入不可用状态并关闭已连接的 Bot WebSocket。
 
 ## 9. Dashboard 边界
 
@@ -127,8 +148,10 @@
 - 停止确认码只保存 SHA-256，通过时序安全比较校验；浏览器提交明文仅用于本次同源请求，不写日志或 Store。
 - Dashboard 停止 POST 要求同源 `Origin`、`Sec-Fetch-Site` 和专用动作头，并限制每进程每分钟最多 10 次确认尝试。
 - Dashboard 只请求优雅停止；Control API 还必须验证 `bot.stop` 权限并收到 `StopController` 的真实结果。
-- 独立 Control API 未注入停止传输时返回 `CONTROL_UNAVAILABLE`，Dashboard 必须展示错误，不能伪造完成。
+- Control Link 未就绪、断开或停止结果不匹配时，Control API 返回 `CONTROL_UNAVAILABLE` 或稳定停止错误；Dashboard 必须展示错误，不能伪造完成。
 - Playwright 模拟 Bot 仅存在于 `e2e` 测试目录，生产代码没有演示数据回退路径。
+- 环境内存轮询只访问 Dashboard 自身同源 `/api/environment/memory`，不携带 Control API 令牌；返回值代表 Dashboard 服务端主机/容器，而非浏览器设备。
+- 内存轮询只在页面可见期间运行，每 5 秒至多一个请求；失败或超过 15 秒没有成功样本时必须明确显示最后一次真实样本已经过期，页面恢复可见后立即重采，样本不写入 Store 持久化、文件或数据库。
 
 ## 10. Mineflayer 连接边界
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  captureMemorySample,
   detectEnvironment,
   resolveDeploymentMode,
   type CommandRunner,
@@ -53,6 +54,7 @@ describe("detectEnvironment", () => {
       commandRunner: runner,
       dockerMarkerExists: async () => false,
       now: () => new Date("2026-07-19T10:00:00.000Z"),
+      memoryReader: () => ({ totalBytes: 16_000, freeBytes: 8_000 }),
     });
 
     expect(snapshot.mode.value).toBe("portable");
@@ -65,5 +67,43 @@ describe("detectEnvironment", () => {
       "unavailable",
     );
     expect(snapshot.capturedAt).toBe("2026-07-19T10:00:00.000Z");
+    expect(snapshot.hardware.memory).toEqual({
+      totalBytes: 16_000,
+      freeBytes: 8_000,
+    });
+  });
+});
+
+describe("captureMemorySample", () => {
+  it("captures a fresh schema-validated OS memory reading", () => {
+    let freeBytes = 8_000;
+    const memoryReader = () => ({ totalBytes: 16_000, freeBytes });
+
+    const first = captureMemorySample({
+      memoryReader,
+      now: () => new Date("2026-07-19T10:00:00.000Z"),
+    });
+    freeBytes = 7_000;
+    const second = captureMemorySample({
+      memoryReader,
+      now: () => new Date("2026-07-19T10:00:05.000Z"),
+    });
+
+    expect(first).toEqual({
+      schemaVersion: "1.0",
+      capturedAt: "2026-07-19T10:00:00.000Z",
+      source: "node-os",
+      memory: { totalBytes: 16_000, freeBytes: 8_000 },
+    });
+    expect(second.memory.freeBytes).toBe(7_000);
+    expect(second.capturedAt).toBe("2026-07-19T10:00:05.000Z");
+  });
+
+  it("rejects a reading whose free memory exceeds total memory", () => {
+    expect(() =>
+      captureMemorySample({
+        memoryReader: () => ({ totalBytes: 8_000, freeBytes: 8_001 }),
+      })
+    ).toThrow();
   });
 });

@@ -386,8 +386,8 @@ function requestFingerprint(request: StopBotRequest): string {
         decisionId: request.authorization.decisionId,
         actorId: request.authorization.actorId,
         permissions: [...request.authorization.permissions].sort(),
-        issuedAt: request.authorization.issuedAt.toISOString(),
-        expiresAt: request.authorization.expiresAt.toISOString(),
+        // Trusted gateways may renew the authorization window while retrying
+        // the same decision. Identity and permissions remain conflict-bound.
       },
     });
   } catch (cause) {

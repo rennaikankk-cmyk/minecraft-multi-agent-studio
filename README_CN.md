@@ -2,29 +2,29 @@
 
 面向 Minecraft Java 版多智能体机器人的硬件无关控制平台。
 
-当前已完成项目基线、真实环境检测、版本化 Bot 状态协议、单 Bot 隔离联机验收、Minecraft 版本自适应、Runtime ↔ Coordinator 认证链路、Control API/Dashboard 契约、确定性 L0 安全层、受限 Pathfinder 技能，以及 P1.3 任务持久化基础：
+当前已完成项目基线、真实环境检测、版本化 Bot 状态协议、单 Bot 隔离联机验收、Minecraft 版本自适应、Runtime ↔ Coordinator 认证链路、Control API/Dashboard 四进程服务链路、确定性 L0 安全层、受限 Pathfinder 技能，以及 P1.3 任务持久化基础：
 
 - 自动检测当前 CPU、内存、操作系统和 GPU 探测状态。
 - 检测 Node.js、Java、Docker 和 Git 是否可用。
 - 识别标准、Docker、便携和网吧运行模式。
-- 通过真实 API 在响应式前端展示检测结果。
-- Dashboard 服务端代理与 Control API 契约已完成，可显示经过校验的在线、离线、失联和后端不可用状态；独立 Control API 尚未桥接 Coordinator，当前真实结果为空列表且停止不可用。
+- 通过真实 API 在响应式前端展示检测结果；Dashboard 页面可见期间每 5 秒只重新读取其服务端主机或容器的 `os.totalmem()` / `os.freemem()`，不重跑软件/GPU 探测，也不持久化历史。
+- Dashboard 服务端代理与 Control API 契约已完成，可显示经过校验的在线、离线、失联和后端不可用状态。
 - 定义并测试 Bot 状态、心跳、断线和安全停止协议 v1。
 - 实现只允许隔离测试服的单 Bot Mineflayer Runtime。
 - 已在仅绑定本机回环地址的 Minecraft 1.21.8 服务端验证连接、停止、断线和有限重连。
 - Coordinator 使用真实遥测维护在线、失联和离线状态，并拒绝重复、乱序及旧进程心跳。
 - Bot Runtime 与独立 Coordinator 通过双向 HMAC 认证的本机 WebSocket 传输遥测、回执、停止命令和真实停止结果。
 - 安全停止要求可信授权、幂等命令 ID、审计、超时和 Runtime 确认结果。
-- Control API 已提供认证列表、详情、WebSocket 状态流和受权优雅停止入口；未注入 Coordinator 桥接时会返回空列表和 `CONTROL_UNAVAILABLE`。
+- Control API 已提供认证列表、详情、WebSocket 状态流和受权优雅停止入口；生产入口通过双向 HMAC 的本机 Control Link 获取 Coordinator 原子状态快照并转发停止请求，链路未就绪或断开时返回 `503 CONTROL_UNAVAILABLE`。
 - 安全停止要求弹窗二次确认、本地确认码、`bot.stop` 权限和 Runtime 真实确认结果。
 - Bot 可对批准的隔离服务器自动探测 Minecraft 版本，并上报真实兼容状态。
-- Runtime Link 双进程链路可用同一追踪编号核对 Coordinator 和 Bot Runtime 结构化日志；Control API/Dashboard 四进程追踪仍待接入。
+- Runtime Link 双进程链路和 Dashboard → Control API → Coordinator → Bot Runtime 四进程服务链路均可用同一追踪编号核对结构化日志；四进程验收使用测试专用 Runtime fixture，不连接 Minecraft，也不替代浏览器 E2E。
 - L0 安全层从真实 Mineflayer 状态识别饥饿、低/危急生命值、溺水、岩浆、坠落、卡死和背包满，并执行固定白名单动作。
 - `movement.goto@1.0.0` 通过受限 Pathfinder 适配器移动，不允许挖掘、搭塔、垫方块或跑酷。
 - 任务系统提供 PostgreSQL 迁移、严格状态机、幂等键、乐观修订号、租约边界、版本化处理器契约、严格派发协议和 BullMQ Worker。
 - 隔离 PostgreSQL/Redis 集成测试已于 2026-07-28 在 GitHub Actions 真实临时服务中通过；本机没有运行这些服务时不会冒充本机服务在线。
 
-当前项目是单 Bot 安全执行与任务基础设施，不是已经完成的多智能体产品。Runtime ↔ Coordinator 已跨进程接通；独立 Control API 尚未接入 Coordinator，因此单独启动仍返回真实空列表，Dashboard 后端断开时会清空 Bot 列表并明确显示错误。
+当前项目是单 Bot 安全执行与任务基础设施，不是已经完成的多智能体产品。Runtime ↔ Coordinator 已通过双进程验收，Dashboard → Control API → Coordinator → Runtime 已通过不连接 Minecraft 的四进程服务级验收。Control Link 不可用时不会沿用旧快照：Control API 返回 503，Dashboard 清空 Bot 列表并明确显示错误。
 
 当前不会自动连接 Minecraft，不会调用模型，也不会显示模拟 Bot。
 
@@ -105,7 +105,7 @@ pnpm bot:start
 - 当前只允许离线认证的本机或私有局域网测试服。
 - 不支持公网地址、正式服务器或配置文件密码。
 - 没有设置 `BOT_SERVER_PROFILE_PATH` 时不会尝试连接。
-- Runtime ↔ Coordinator 已接入真实跨进程传输；Control API ↔ 独立 Coordinator 仍待下一模块接入。
+- Runtime ↔ Coordinator 与 Control API ↔ Coordinator 都已接入真实回环跨进程传输，并通过不连接 Minecraft 的服务级四进程验收。
 
 版本配置：
 
@@ -131,7 +131,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-isolated-m
 
 - 注册表、停止命令缓存和审计记录当前保存在进程内存中，进程重启后 Bot 必须重新上报。
 - Coordinator 与 Bot Runtime 的认证回环传输已经完成，并通过两个独立 Node 测试进程验收；Coordinator 进程组合生产 Runtime Link、注册表和停止控制器，Runtime 进程使用生产 `SingleBotRuntime` 与明确的测试专用内存 BotClient。
-- Control API 与 Dashboard 的接口契约已经完成，但 Control API ↔ 独立 Coordinator 远程桥接、用户登录和持久化审计仍为“待接入”。
+- Coordinator 与 Control API 的 Control Link 固定使用 `ws://127.0.0.1:3221/v1/control-link`（或显式 `[::1]`），双方先完成方向绑定的双向 HMAC，再传输严格 v1 消息。
+- Control API 只有在收到 `snapshot-begin → snapshot-item* → snapshot-end` 完整快照后才原子替换可读状态；链路断开、协议/序列异常或 75 秒没有任何入站帧/ping 时会立即丢弃镜像、关闭状态流，并让列表、详情和停止返回 `503 CONTROL_UNAVAILABLE`。同一 Coordinator 实例短暂重连可重投原操作；Coordinator 实例变化时旧停止操作以身份变化失败，不会污染新链路。
+- 停止 RPC 只接受固定契约：同一 UUID 绑定 `commandId/traceId/decisionId`、`graceful`、`dashboard_operator_confirmed`、5 秒宽限、15 秒超时和仅 `bot.stop` 权限；结果身份不匹配或超时都不能报告成功。
+- Dashboard → Control API → Coordinator → Runtime 已通过真实回环四进程服务级验收；验收中的 Runtime 是测试专用 fixture，未连接 Minecraft，也不是浏览器 E2E。用户登录和持久化审计仍未接入。
 - 当前不提供连接正式 Minecraft 服务器的入口。
 
 ## 验证 Runtime Link
@@ -144,7 +147,9 @@ pnpm test:runtime-link
 
 该命令启动两个独立 Node 测试进程：Coordinator 进程组合生产 Runtime Link、注册表和停止控制器，Runtime 进程组合生产 Runtime Link 客户端、`SingleBotRuntime` 与测试专用内存 BotClient。业务遥测、停止命令和确认全部走真实 `127.0.0.1` WebSocket；IPC 只负责启动、收集结果和清理。该验收不启动生产 Coordinator `main`、Control API 或 Minecraft，也不会打开 Minecraft 端口。
 
-手动启动独立 Coordinator 时，先生成至少 32 字符的共享密钥及 SHA-256，把摘要配置给 Coordinator，把明文只配置给目标 Runtime：
+手动启动生产 Coordinator 时，需要分别为 Runtime Link 和 Control Link 生成至少 32 字符的共享密钥及 SHA-256。Coordinator 只接收两个摘要，两个明文分别只交给目标 Runtime 和 Control API。摘要会直接参与 HMAC，泄露后同样可用于冒充，必须按明文密钥同等级保护：
+
+Bot 遥测失联阈值由真正持有注册表的 Coordinator 配置：`COORDINATOR_BOT_STALE_AFTER_MS` 默认 `15000`，只接受 `1000`～`300000` 的整数毫秒值。Control API 不再暴露无效的同名旧配置。
 
 ```powershell
 $bytes = New-Object byte[] 32
@@ -156,10 +161,23 @@ $hashBytes = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($secret))
 $secretHash = ($hashBytes | ForEach-Object { $_.ToString('x2') }) -join ''
 $peers = @(@{ keyId = 'runtime-key-01'; botId = 'studio-bot-01'; secretSha256 = $secretHash })
 $env:COORDINATOR_RUNTIME_LINK_PEERS_JSON = ConvertTo-Json -InputObject $peers -Compress
+
+$controlBytes = New-Object byte[] 32
+$rng.GetBytes($controlBytes)
+$controlSecret = [Convert]::ToBase64String($controlBytes)
+$controlHashBytes = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($controlSecret))
+$controlSecretHash = ($controlHashBytes | ForEach-Object { $_.ToString('x2') }) -join ''
+$clients = @(@{
+  clientId = 'local-control-api'
+  keyId = 'control-api-key-01'
+  secretSha256 = $controlSecretHash
+  capabilities = @('bot.read', 'bot.stop')
+})
+$env:COORDINATOR_CONTROL_LINK_CLIENTS_JSON = ConvertTo-Json -InputObject $clients -Depth 3 -Compress
 pnpm coordinator:start
 ```
 
-目标 Runtime 进程需要设置 `BOT_RUNTIME_LINK_URL`、`BOT_RUNTIME_LINK_KEY_ID` 和 `BOT_RUNTIME_LINK_SECRET`。只有同时提供经过校验的 `BOT_SERVER_PROFILE_PATH` 并显式运行 `pnpm bot:start` 才会尝试连接隔离 Minecraft 测试服；不要用于正式服务器。
+目标 Runtime 进程需要设置 `BOT_RUNTIME_LINK_URL`、`BOT_RUNTIME_LINK_KEY_ID` 和 `BOT_RUNTIME_LINK_SECRET`。把 `$controlSecret` 通过本机安全方式交给下一节的 Control API 进程环境，不要写入仓库或日志。只有同时提供经过校验的 `BOT_SERVER_PROFILE_PATH` 并显式运行 `pnpm bot:start` 才会尝试连接隔离 Minecraft 测试服；不要用于正式服务器。
 
 ## 启动 Control API
 
@@ -176,7 +194,7 @@ $tokenHash = ($hashBytes | ForEach-Object { $_.ToString('x2') }) -join ''
 $token
 ```
 
-仅把 `$tokenHash` 写入进程环境并启动：
+仅把 `$tokenHash` 写入 Control API 认证配置，并提供与已运行 Coordinator 匹配的 Control Link 身份和明文共享密钥后启动：
 
 ```powershell
 $principal = @(@{
@@ -185,6 +203,10 @@ $principal = @(@{
   permissions = @('bot.read', 'bot.position.read', 'bot.stop')
 })
 $env:CONTROL_API_AUTH_JSON = ConvertTo-Json -InputObject $principal -Compress
+$env:CONTROL_API_COORDINATOR_LINK_URL = 'ws://127.0.0.1:3221/v1/control-link'
+$env:CONTROL_API_COORDINATOR_LINK_CLIENT_ID = 'local-control-api'
+$env:CONTROL_API_COORDINATOR_LINK_KEY_ID = 'control-api-key-01'
+$env:CONTROL_API_COORDINATOR_LINK_SECRET = '<从 Coordinator 配置步骤安全传递的至少 32 字符明文密钥>'
 pnpm api:start
 ```
 
@@ -195,9 +217,19 @@ pnpm api:start
 - `POST http://127.0.0.1:3210/v1/bots/{botId}/stop`
 - `WS ws://127.0.0.1:3210/v1/bots/stream`
 
-HTTP 使用 `Authorization: Bearer <明文令牌>`。浏览器 WebSocket 使用子协议 `minecraft-studio.v1` 和 `auth.<明文令牌的 base64url>`。停止 POST 固定为优雅停止并要求 `bot.stop`；未注入 StopController 时返回 `CONTROL_UNAVAILABLE`。
+HTTP 使用 `Authorization: Bearer <明文令牌>`。浏览器 WebSocket 使用子协议 `minecraft-studio.v1` 和 `auth.<明文令牌的 base64url>`。停止 POST 固定为优雅停止并要求 `bot.stop`。
 
-当前独立 API 进程尚未连接独立 Coordinator 的状态与停止 RPC，因此会返回真实空列表，不会创建模拟 Bot，也不会伪造停止成功。
+生产 Control API 启动时必须先通过 Control Link 双向 HMAC，并完整接收 Coordinator 原子快照；首个快照未完成时不开放 HTTP 服务。运行中链路断开或快照/增量序列无效时，内存镜像立即失效，读取和停止返回 `503 CONTROL_UNAVAILABLE`，不会创建模拟 Bot、沿用旧在线状态或伪造停止成功。
+
+## 验证四进程控制链路
+
+不启动 Minecraft 的服务级四进程验收：
+
+```powershell
+pnpm test:four-process
+```
+
+该命令使用生产 Coordinator、Control API 和 Dashboard 独立服务进程，以及测试专用 Runtime fixture，通过真实 `127.0.0.1` Runtime Link、Control Link 和 HTTP 路径验证 `空快照 → online → stop completed → offline`、单次关闭、固定 `traceId` 跨四进程关联和输出凭据扫描。该验收已在 2026-08-07 由两个独立执行者各成功运行一次；两次均为退出码 0、`minecraftConnected=false` 且无残留进程。它是服务级验收，不是浏览器 Playwright E2E，也不代表真实 Minecraft 联机或正式服务器权限。
 
 ## 接入 Dashboard 真实 Bot 状态
 
@@ -223,7 +255,9 @@ $env:DASHBOARD_STOP_CONFIRMATION_SHA256 = ($hashBytes | ForEach-Object { $_.ToSt
 pnpm dev
 ```
 
-Dashboard 每 3 秒读取一次本机 Control API。长期令牌不会发送到浏览器；确认码明文只用于一次同源停止请求，不写入日志或 Store。若 Control API 未运行、令牌错误或响应无效，页面显示错误并清空在线 Bot。
+Dashboard 每 3 秒读取一次本机 Control API。长期令牌不会发送到浏览器；确认码明文只用于一次同源停止请求，不写入日志或 Store。若 Control API 未运行、Control Link 断开、令牌错误或响应无效，页面显示错误并清空在线 Bot。
+
+Dashboard 页面可见时，初次完整环境检测之后还会每 5 秒调用同源 `/api/environment/memory`。该轻量接口仅在 Dashboard 服务端读取 Node.js `os.totalmem()` 和 `os.freemem()`，因此数值表示运行 Dashboard 服务端的主机或容器，不是手机/平板浏览器本身；它不会重新执行 Java、Docker、Git 或 GPU 探针，也不会保存历史。请求不重叠、4 秒超时并在页面卸载时取消；失败或超过 15 秒没有成功样本时保留最后一次真实值但明确标为“数据已过期”，页面从后台恢复可见后会立即重采。
 
 ## Dashboard 浏览器验收
 

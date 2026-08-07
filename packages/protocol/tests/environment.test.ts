@@ -1,6 +1,42 @@
 import { describe, expect, it } from "vitest";
 
-import { environmentSnapshotSchema } from "../src/index.js";
+import {
+  environmentMemorySampleSchema,
+  environmentSnapshotSchema,
+} from "../src/index.js";
+
+describe("environmentMemorySampleSchema", () => {
+  it("accepts a strict operating-system memory sample", () => {
+    expect(
+      environmentMemorySampleSchema.safeParse({
+        schemaVersion: "1.0",
+        capturedAt: "2026-07-19T10:00:00.000Z",
+        source: "node-os",
+        memory: { totalBytes: 16_000, freeBytes: 8_000 },
+      }).success,
+    ).toBe(true);
+  });
+
+  it("rejects impossible memory values and unknown fields", () => {
+    expect(
+      environmentMemorySampleSchema.safeParse({
+        schemaVersion: "1.0",
+        capturedAt: "2026-07-19T10:00:00.000Z",
+        source: "node-os",
+        memory: { totalBytes: 8_000, freeBytes: 8_001 },
+      }).success,
+    ).toBe(false);
+    expect(
+      environmentMemorySampleSchema.safeParse({
+        schemaVersion: "1.0",
+        capturedAt: "2026-07-19T10:00:00.000Z",
+        source: "node-os",
+        memory: { totalBytes: 16_000, freeBytes: 8_000 },
+        processList: [],
+      }).success,
+    ).toBe(false);
+  });
+});
 
 describe("environmentSnapshotSchema", () => {
   it("accepts a valid real-environment snapshot", () => {

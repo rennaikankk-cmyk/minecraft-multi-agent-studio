@@ -1,4 +1,8 @@
 import { createHash } from "node:crypto";
+import {
+  request as createHttpRequest,
+  type ClientRequest,
+} from "node:http";
 
 import { BotRegistry, type StopController } from "@minecraft-studio/coordinator";
 import type { BotStatusV1, BotStopResultV1 } from "@minecraft-studio/protocol";
@@ -8,6 +12,7 @@ import WebSocket from "ws";
 import {
   ControlApiServer,
   type ApiPrincipalConfig,
+  type BotStateSource,
   type ControlApiLogger,
 } from "../src/index.js";
 
@@ -53,6 +58,19 @@ afterEach(async () => {
 });
 
 describe("Control API HTTP and WebSocket integration", () => {
+  it("rejects a non-loopback bind at the server boundary", () => {
+    expect(
+      () =>
+        new ControlApiServer({
+          host: "0.0.0.0" as "127.0.0.1",
+          port: 0,
+          registry: new BotRegistry({ staleAfterMs: 30_000 }),
+          principals,
+          logger,
+        }),
+    ).toThrowError("Control API only permits an explicit loopback bind.");
+  });
+
   it("authenticates list/detail reads and redacts position without permission", async () => {
     const { registry, baseUrl } = await startServer();
     registry.ingest(statusMessage(1), new Date());
@@ -247,14 +265,112 @@ describe("Control API HTTP and WebSocket integration", () => {
     expect(response.status).toBe(503);
     expect((await response.json()).error.code).toBe("CONTROL_UNAVAILABLE");
   });
+
+  it("returns 503 instead of an empty list when the Coordinator mirror is unavailable", async () => {
+    const unavailableSource: BotStateSource = {
+      isReady: () => false,
+      get: () => null,
+      list: () => [],
+      subscribe: () => () => undefined,
+      subscribeAvailability: () => () => undefined,
+    };
+    const { baseUrl } = await startServer({ stateSource: unavailableSource });
+    const response = await authenticatedFetch(
+      `${baseUrl}/v1/bots`,
+      READER_TOKEN,
+    );
+    expect(response.status).toBe(503);
+    expect((await response.json()).error.code).toBe("CONTROL_UNAVAILABLE");
+  });
+
+  it("returns 503 when the Coordinator mirror drops while reading a stop body", async () => {
+    let ready = true;
+    const isReady = vi.fn(() => ready);
+    const requestStop = vi.fn(async () => {
+      throw new Error("stop_must_not_run");
+    });
+    const source: BotStateSource = {
+      isReady,
+      get: () => null,
+      list: () => [],
+      subscribe: () => () => undefined,
+      subscribeAvailability: () => () => undefined,
+    };
+    const { baseUrl } = await startServer({
+      stateSource: source,
+      stopController: { requestStop },
+    });
+    const requestId = testUuid(2_004);
+    const body = JSON.stringify({
+      schemaVersion: "1.0",
+      requestId,
+      confirmation: "confirmed",
+    });
+    const pending = beginChunkedStop(baseUrl);
+    pending.request.write(body.slice(0, -1));
+    await waitFor(() => isReady.mock.calls.length > 0);
+
+    ready = false;
+    pending.request.end(body.slice(-1));
+    const result = await pending.response;
+
+    expect(result.status).toBe(503);
+    expect(result.body.error.code).toBe("CONTROL_UNAVAILABLE");
+    expect(requestStop).not.toHaveBeenCalled();
+  });
+
+  it("cleans up a failed WebSocket initialization before admitting the next client", async () => {
+    const list = vi
+      .fn<BotStateSource["list"]>()
+      .mockImplementationOnce(() => {
+        throw new Error("snapshot_source_failed");
+      })
+      .mockReturnValue([]);
+    const source: BotStateSource = {
+      isReady: () => true,
+      get: () => null,
+      list,
+      subscribe: () => () => undefined,
+      subscribeAvailability: () => () => undefined,
+    };
+    const { server, webSocketUrl } = await startServer({
+      stateSource: source,
+      maxConnectionsPerSubject: 1,
+    });
+
+    expect(
+      await webSocketCloseCode(webSocketUrl, READER_TOKEN),
+    ).toBe(1011);
+    await waitFor(() => controlSocketCount(server) === 0);
+    expect(controlSocketAliveCount(server)).toBe(0);
+
+    const { webSocket, firstMessage } = await connectWebSocket(
+      webSocketUrl,
+      ["minecraft-studio.v1"],
+      READER_TOKEN,
+    );
+    expect(firstMessage).toMatchObject({
+      type: "bot.stream.snapshot.v1",
+      payload: { bots: [] },
+    });
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(logger.error).not.toHaveBeenCalledWith(
+      "control_api_upgrade_failed",
+      expect.anything(),
+    );
+    webSocket.close();
+  });
 });
 
 async function startServer(
   overrides: Partial<{
     requestLimitPerMinute: number;
     stopController: Pick<StopController, "requestStop">;
+    stateSource: BotStateSource;
+    maxConnectionsPerSubject: number;
   }> = {},
 ): Promise<{
+  server: ControlApiServer;
   registry: BotRegistry;
   baseUrl: string;
   webSocketUrl: string;
@@ -263,21 +379,70 @@ async function startServer(
   const server = new ControlApiServer({
     host: "127.0.0.1",
     port: 0,
-    registry,
+    registry: overrides.stateSource ?? registry,
     principals,
     logger,
     staleSweepIntervalMs: 10_000,
     webSocketPingIntervalMs: 10_000,
     randomId: uuidSequence(),
-    ...overrides,
+    ...(overrides.requestLimitPerMinute === undefined
+      ? {}
+      : { requestLimitPerMinute: overrides.requestLimitPerMinute }),
+    ...(overrides.stopController === undefined
+      ? {}
+      : { stopController: overrides.stopController }),
+    ...(overrides.maxConnectionsPerSubject === undefined
+      ? {}
+      : { maxConnectionsPerSubject: overrides.maxConnectionsPerSubject }),
   });
   runningServers.push(server);
   const address = await server.start();
   return {
+    server,
     registry,
     baseUrl: `http://127.0.0.1:${address.port}`,
     webSocketUrl: `ws://127.0.0.1:${address.port}/v1/bots/stream`,
   };
+}
+
+function beginChunkedStop(baseUrl: string): {
+  request: ClientRequest;
+  response: Promise<{ status: number; body: any }>;
+} {
+  let request!: ClientRequest;
+  const response = new Promise<{ status: number; body: any }>(
+    (resolve, reject) => {
+      request = createHttpRequest(
+        `${baseUrl}/v1/bots/worker-01/stop`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${OPERATOR_TOKEN}`,
+            "Content-Type": "application/json",
+          },
+        },
+        (incoming) => {
+          const chunks: Buffer[] = [];
+          incoming.on("data", (chunk) =>
+            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)),
+          );
+          incoming.once("end", () => {
+            try {
+              resolve({
+                status: incoming.statusCode ?? 0,
+                body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
+              });
+            } catch (cause) {
+              reject(cause);
+            }
+          });
+          incoming.once("error", reject);
+        },
+      );
+      request.once("error", reject);
+    },
+  );
+  return { request, response };
 }
 
 function authenticatedFetch(url: string, token: string): Promise<Response> {
@@ -342,6 +507,34 @@ function rejectedWebSocketStatus(url: string, protocols: string[]): Promise<numb
       reject(new Error("Expected WebSocket upgrade rejection."));
     });
   });
+}
+
+function webSocketCloseCode(url: string, token: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const webSocket = new WebSocket(url, ["minecraft-studio.v1"], {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    webSocket.once("close", (code) => resolve(code));
+    webSocket.once("error", reject);
+  });
+}
+
+function controlSocketCount(server: ControlApiServer): number {
+  return (server as unknown as { sockets: Set<WebSocket> }).sockets.size;
+}
+
+function controlSocketAliveCount(server: ControlApiServer): number {
+  return (
+    server as unknown as { socketAlive: Map<WebSocket, boolean> }
+  ).socketAlive.size;
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("condition_timeout");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 function statusMessage(sequence: number): BotStatusV1 {

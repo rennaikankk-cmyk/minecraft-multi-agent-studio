@@ -1,16 +1,15 @@
-import type {
-  BotRegistry,
-  BotRegistryRecord,
-} from "@minecraft-studio/coordinator";
+import type { PublicBotDetailV1 } from "@minecraft-studio/protocol";
+
+import type { BotStateSource } from "./bot-state-source.js";
 
 export type BotStateEvent = Readonly<{
   streamSequence: number;
-  record: BotRegistryRecord;
+  bot: PublicBotDetailV1;
 }>;
 
 export type BotStateSubscription = Readonly<{
   streamSequence: number;
-  records: BotRegistryRecord[];
+  bots: PublicBotDetailV1[];
   unsubscribe: () => void;
 }>;
 
@@ -19,10 +18,10 @@ export class BotStateHub {
   private readonly listeners = new Set<(event: BotStateEvent) => void>();
   private readonly unsubscribeRegistry: () => void;
 
-  constructor(private readonly registry: BotRegistry) {
-    this.unsubscribeRegistry = registry.subscribe((record) => {
+  constructor(private readonly source: BotStateSource) {
+    this.unsubscribeRegistry = source.subscribe((bot) => {
       this.streamSequence += 1;
-      const event = { streamSequence: this.streamSequence, record };
+      const event = { streamSequence: this.streamSequence, bot };
       for (const listener of this.listeners) {
         try {
           listener(event);
@@ -38,10 +37,16 @@ export class BotStateHub {
     at: Date,
   ): BotStateSubscription {
     this.listeners.add(listener);
-    const records = this.registry.list(at);
+    let bots: PublicBotDetailV1[];
+    try {
+      bots = this.source.list(at);
+    } catch (cause) {
+      this.listeners.delete(listener);
+      throw cause;
+    }
     return {
       streamSequence: this.streamSequence,
-      records,
+      bots,
       unsubscribe: () => this.listeners.delete(listener),
     };
   }

@@ -82,6 +82,108 @@ test("requires confirmation and shows the confirmed stop result", async ({ page 
   await expect(page.getByTestId("bot-state-worker-01")).toHaveText("离线");
 });
 
+test("samples real memory every five seconds without repeating full detection", async ({
+  page,
+}) => {
+  let environmentRequests = 0;
+  let memoryRequests = 0;
+  await page.clock.install({ time: new Date(NOW) });
+  await routeBots(page, "offline");
+  await page.route(/\/api\/environment$/, async (route) => {
+    environmentRequests += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(environmentResponse()),
+    });
+  });
+  await page.route(/\/api\/environment\/memory$/, async (route) => {
+    memoryRequests += 1;
+    if (memoryRequests === 1) {
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({
+          requestId: UUID,
+          error: {
+            code: "ENVIRONMENT_MEMORY_CAPTURE_FAILED",
+            message: "内存采集暂时不可用",
+          },
+        }),
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        requestId: UUID,
+        sample: {
+          schemaVersion: "1.0",
+          capturedAt: "2026-07-20T08:00:10.000Z",
+          source: "node-os",
+          memory: {
+            totalBytes: 16 * 1024 ** 3,
+            freeBytes: 7 * 1024 ** 3,
+          },
+        },
+      }),
+    });
+  });
+
+  await page.goto("/");
+  await expect(page.getByTestId("memory-free")).toContainText("8.00 GiB");
+  const initialEnvironmentRequests = environmentRequests;
+  expect(initialEnvironmentRequests).toBeGreaterThan(0);
+  expect(memoryRequests).toBe(0);
+
+  await page.clock.fastForward(5_000);
+  await expect.poll(() => memoryRequests).toBe(1);
+  await expect(page.getByTestId("memory-free")).toContainText("8.00 GiB");
+  await expect(page.getByTestId("memory-sample-status")).toContainText(
+    "数据已过期",
+  );
+
+  await page.clock.fastForward(5_000);
+  await expect.poll(() => memoryRequests).toBe(2);
+  await expect(page.getByTestId("memory-free")).toContainText("7.00 GiB");
+    await expect(page.getByTestId("memory-sample-status")).toContainText(
+      "每 5 秒采集",
+    );
+    expect(environmentRequests).toBe(initialEnvironmentRequests);
+
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        value: "hidden",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await page.clock.fastForward(15_001);
+    await expect(page.getByTestId("memory-sample-status")).toContainText(
+      "超过 15 秒未成功采集",
+    );
+    expect(memoryRequests).toBe(2);
+
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        value: "visible",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await expect.poll(() => memoryRequests).toBe(3);
+    await expect(page.getByTestId("memory-sample-status")).toContainText(
+      "每 5 秒采集",
+    );
+
+    await page.getByRole("button", { name: "重新检测" }).click();
+    await expect.poll(() => environmentRequests).toBe(
+      initialEnvironmentRequests + 1,
+    );
+    await expect(page.getByTestId("memory-free")).toContainText("7.00 GiB");
+  });
+
 async function routeBots(page: Page, state: "online" | "offline" | "stale") {
   await page.route(/\/api\/bots$/, async (route) => fulfillBots(route, state));
 }
@@ -137,6 +239,30 @@ function botResponse(state: "online" | "offline" | "stale") {
           },
         },
       ],
+    },
+  };
+}
+
+function environmentResponse() {
+  return {
+    requestId: UUID,
+    environment: {
+      schemaVersion: "1.0",
+      capturedAt: NOW,
+      mode: { value: "standard", source: "default" },
+      hardware: {
+        platform: "win32",
+        release: "10.0.26100",
+        architecture: "x64",
+        cpu: { model: "Detected CPU", logicalCores: 16 },
+        memory: {
+          totalBytes: 16 * 1024 ** 3,
+          freeBytes: 8 * 1024 ** 3,
+        },
+        gpu: { status: "not_detected", source: "test-probe", devices: [] },
+      },
+      software: [],
+      warnings: [],
     },
   };
 }

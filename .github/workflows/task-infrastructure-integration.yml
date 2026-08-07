@@ -38,6 +38,8 @@ jobs:
         run: pnpm check
       - name: Verify authenticated Runtime Link across processes
         run: node scripts/run-runtime-link-acceptance.mjs
+      - name: Verify the four-process local control path
+        run: node scripts/run-four-process-acceptance.mjs
 
   real-postgres-redis:
     runs-on: ubuntu-24.04

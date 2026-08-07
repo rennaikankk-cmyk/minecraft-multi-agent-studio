@@ -2,7 +2,7 @@
 
 更新时间：2026-08-07
 当前阶段：阶段 1（安全执行底座）
-当前状态：Runtime ↔ Coordinator 认证链路已通过双进程验收；Control API 四进程链路未完成
+当前状态：Runtime Link 已通过双进程验收；Dashboard → Control API → Coordinator → Runtime 已通过四进程服务级验收
 
 ## 当前进度总览
 
@@ -14,11 +14,14 @@
 - 隔离测试服单 Bot Runtime、有限重连、优雅停止和 Minecraft 版本自适应。
 - Coordinator 进程内注册表、Control API/WebSocket 契约、Dashboard UI 与浏览器测试。
 - Runtime 与独立 Coordinator 之间的认证回环 WebSocket、遥测回执、停止确认、有限重连和失联安全停止。
+- Coordinator 与 Control API 之间的双向 HMAC Control Link、原子状态快照/有序增量、断线 503 和固定停止 RPC。
+- Dashboard 页面可见期间每 5 秒读取服务端主机或容器真实 Node OS 内存值；轻量采集不重跑软件/GPU 探测、不重叠、不持久化，失败或超过 15 秒没有成功样本时明确显示旧值已过期，页面从后台恢复后立即重采。
 - 确定性 L0 安全控制器、技能框架，以及离线验收的 `movement.goto@1.0.0`。
 - 任务 Schema、状态机、PostgreSQL 仓库、严格派发协议、BullMQ Queue/Worker 和隔离基础设施测试入口。
 - 2026-07-28 本机门禁：类型检查、158 项离线测试、生产构建、5 项 Dashboard E2E 和生产依赖审计通过；11 项外部环境测试按设计跳过。
 - 2026-07-28 GitHub Actions 运行 `30315095898`：完整离线质量门和真实 PostgreSQL/Redis 隔离集成门均通过。
-- 2026-08-07 本机门禁：锁文件 258 个条目通过供应链策略，生产依赖审计无已知漏洞，`pnpm check` 通过，190 项测试通过、11 项外部环境测试按设计跳过，生产构建与 5 项 Dashboard E2E 通过；Runtime Link 双进程验收通过且 `minecraftConnected=false`。GitHub CI 结果等待本分支推送后验证。
+- 2026-08-07 本机门禁：锁文件 258 个条目通过供应链策略，生产依赖审计无已知漏洞，`pnpm check` 通过，217 项测试通过、11 项外部环境测试按设计跳过，生产构建与 6 项 Dashboard E2E 通过；Runtime Link 双进程验收通过且 `minecraftConnected=false`。GitHub CI 结果等待本分支推送后验证。
+- 2026-08-07 四进程服务级验收由两位执行者独立各运行一次，均退出码 0：生产 Coordinator、Control API、Dashboard 与测试专用 Runtime fixture 完成 `空 → online → stop completed → offline`，固定 `traceId` 贯穿四进程、关闭调用一次、凭据扫描通过、`minecraftConnected=false` 且无残留进程。该结果不是浏览器 E2E，也不代表真实 Minecraft 联机。
 
 ### 已完成并有真实基础设施验证
 
@@ -26,9 +29,9 @@
 - Redis/BullMQ 去重、续租、取消、超时、截止时间和显式幂等恢复已在临时真实服务上通过。
 - 不合作处理器的有界 Worker 等待已通过真实超时场景；进程内处理器本身仍不是可强制终止的沙盒。
 
-### 尚未形成端到端产品链路
+### 尚未形成生产闭环
 
-- 独立 Coordinator 与 Control API 之间的状态镜像和停止 RPC，因此 Dashboard 四进程链路仍未闭合。
+- Control Link 状态、停止幂等缓存和审计仍在内存中；用户登录、持久化审计、跨主机 TLS 和密钥轮换尚未接入。
 - 独立 Worker、事务 outbox、自动对账重投、跨 Worker 取消、任务 API 和 Dashboard 任务看板。
 - 多 Bot 调度、生产技能、长期记忆、AI Router、本地规划和生产部署。
 
@@ -135,11 +138,24 @@
 - [x] 停止命令只路由到当前已认证运行实例，Abort、断线、超时或结果身份不一致时不报告成功。
 - [x] 两个独立 Node 测试进程通过真实 `127.0.0.1` WebSocket 验证在线遥测、优雅停止、单次关闭、离线状态、审计顺序和跨进程 `traceId`；Coordinator 进程组合生产 Runtime Link/注册表/停止控制器，Runtime 进程使用生产 `SingleBotRuntime` 与测试专用 BotClient，未启动生产 `main`、Control API 或 Minecraft。
 
-验收：协议、Runtime、Coordinator 单元/回环集成测试和 `test:runtime-link` 双进程验收通过；该结果不代表 Control API/Dashboard 四进程或真实 Minecraft 联机已完成。
+验收：协议、Runtime、Coordinator 单元/回环集成测试和 `test:runtime-link` 双进程验收通过；本项结果本身不代表后续 Control API/Dashboard 四进程或真实 Minecraft 联机验收。
+
+### P0.4.3 Coordinator ↔ Control API 认证链路
+
+状态：**已完成（服务级四进程验收）**
+
+- [x] Control Link 只允许显式回环地址、固定 `/v1/control-link` 路径和 `minecraft-studio.control-link.v1` 子协议。
+- [x] Coordinator 只保存 Control API 共享密钥 SHA-256，双方通过随机 nonce、方向绑定 proof 和时序安全比较完成双向 HMAC。
+- [x] 所有帧使用严格 v1 Schema；帧、会话、快照增量缓冲、待处理停止和发送缓冲均有硬上限。
+- [x] Control API 只在完整 `snapshot-begin/item/end` 后原子发布状态；快照不完整、序列跳号、身份变化、断线或 75 秒入站失活时清空镜像并让读取/停止返回 503。
+- [x] 停止 RPC 固定为已确认的优雅停止契约，绑定同一操作 ID/追踪 ID、操作者、Bot、期限和仅 `bot.stop` 权限；超时、背压或结果身份不一致不报告成功。
+- [x] 生产 Coordinator、Control API、Dashboard 与测试专用 Runtime fixture 通过真实回环四进程服务级验收；两位执行者各运行一次均退出码 0，覆盖空快照、在线、停止完成、离线、单次关闭、四进程 `traceId`、凭据扫描和无残留。
+
+验收边界：`pnpm test:four-process` 不连接 Minecraft，验收中的 Runtime 是测试 fixture；它不是浏览器 Playwright E2E，也不证明正式 Minecraft、跨主机网络或持久化审计可用。
 
 ### P0.5 Dashboard 真实数据接入
 
-状态：**UI/API 契约与进程内链路已完成；Control API ↔ 独立 Coordinator 跨进程链路未完成**
+状态：**已完成（UI 浏览器测试 + 四进程服务级验收）**
 
 - [x] 实际项目没有既有机器人页或 Store，因此在保留环境页的基础上首次创建 Zustand Bot Store 和机器人区域。
 - [x] 生产数据源固定为服务端代理后的 Control API；Playwright 夹具只存在于 `e2e` 测试目录。
@@ -147,19 +163,21 @@
 - [x] 状态过期时显示“失联”，清晰区别于在线和离线，并禁用停止。
 - [x] 安全停止要求确认弹窗、本地确认码、`bot.stop` 权限和真实 StopController 结果。
 - [x] 后端不可用时清空 Bot 状态并显示错误，不回退成未标注的假数据。
+- [x] 通过认证 Control Link 读取独立 Coordinator 的原子状态镜像并转发固定停止 RPC；链路断开时返回 503。
+- [x] Dashboard 页面可见时每 5 秒真实轻量采集服务端主机/容器内存，不重新执行完整环境探测；失败或超过 15 秒没有成功样本时保留上次真实值但明确标为过期，恢复可见后立即重采。
 
-验收：Playwright 覆盖在线、断线、失联、后端不可用和安全停止流程。独立 Control API 当前没有 Coordinator 状态镜像或遥测订阅，未共享 Coordinator 实例时返回真实空列表。
+验收：Playwright 覆盖在线、断线、失联、后端不可用、安全停止和 5 秒内存刷新；独立的四进程服务验收覆盖生产服务间真实回环传输。两类验收彼此独立，四进程脚本不驱动浏览器且不连接 Minecraft。
 
 ### P0.6 可观测性和运行手册
 
-状态：**日志/指标契约和手册已完成；双进程追踪已验证，四进程追踪未完成**
+状态：**日志/指标契约和手册已完成；双进程与四进程服务追踪已验证**
 
 - [x] 统一 `traceId/taskId/botId/skillId/modelName` 日志字段。
 - [x] 增加连接、心跳、断线、重连、停止的基础指标。
 - [x] 编写隔离测试服运行手册和故障排查手册。
 - [x] 验证日志敏感键、常见令牌、服务器位置和换行脱敏。
 
-验收：Runtime Link 双进程测试已使用同一 `traceId` 核对 Coordinator 与 Bot Runtime；Dashboard → Control API → Coordinator → Bot Runtime 四进程追踪仍待接入。
+验收：Runtime Link 双进程测试已使用同一 `traceId` 核对 Coordinator 与 Bot Runtime；四进程服务级测试已使用同一 `traceId` 核对 Dashboard、Control API、Coordinator 与测试专用 Runtime fixture。尚无集中日志或持久指标。
 
 ## P1：稳定执行和多 Bot 协作
 
@@ -259,7 +277,7 @@
 
 1. **已完成：P1.3.1 真实基础设施门禁**：GitHub Actions 中的 PostgreSQL/Redis 隔离测试已通过；测试没有连接 Minecraft。
 2. **已完成：P0 Runtime Link**：Runtime ↔ Coordinator 的认证遥测与停止传输已通过真实双进程回环验收；测试没有连接 Minecraft。
-3. **P0 Control Bridge**：实现 Control API ↔ 独立 Coordinator 的状态镜像和停止 RPC，完成真实 Dashboard 状态、停止和四进程追踪验收。
+3. **已完成：P0 Control Bridge**：Control API ↔ 独立 Coordinator 的原子状态镜像和固定停止 RPC 已通过不连接 Minecraft 的真实四进程回环服务验收。
 4. **P1.3.2 持久任务闭环**：增加独立 Worker、事务 outbox/reconciler、自动过期租约恢复、持久取消请求和跨 Worker 取消，再接入任务 API 与 Dashboard。
 5. **P1.1/P1.2 实机矩阵**：验证 L0 危险场景和 Pathfinder 多版本真实寻路，不扩大正式服务器权限。
 6. **P1.4 多 Bot 协调**：实现任务分配、资源/箱子/区域锁、替补执行和故障转移。
@@ -268,4 +286,4 @@
 
 ## 当前唯一下一步
 
-实现 Control API ↔ 独立 Coordinator 的认证状态镜像和停止 RPC，补齐真实 Dashboard、停止和四进程 `traceId` 验收；在此之前不把已完成的 Runtime Link 称为端到端产品。
+完成 P1.3.2 持久任务闭环：先实现独立 Worker、事务 outbox/reconciler、自动过期租约恢复和跨 Worker 持久取消，再接入任务 Control API 与 Dashboard；本步不扩大 Minecraft 连接权限。
