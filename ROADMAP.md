@@ -1,8 +1,8 @@
 # Minecraft 多智能体机器人项目路线图
 
-更新时间：2026-07-28
+更新时间：2026-08-07
 当前阶段：阶段 1（安全执行底座）
-当前状态：P1.3.1 真实基础设施门禁已通过；任务系统生产闭环未完成
+当前状态：Runtime ↔ Coordinator 认证链路已通过双进程验收；Control API 四进程链路未完成
 
 ## 当前进度总览
 
@@ -13,10 +13,12 @@
 - 环境检测、运行模式识别、版本化 Bot/Control/Skill 协议。
 - 隔离测试服单 Bot Runtime、有限重连、优雅停止和 Minecraft 版本自适应。
 - Coordinator 进程内注册表、Control API/WebSocket 契约、Dashboard UI 与浏览器测试。
+- Runtime 与独立 Coordinator 之间的认证回环 WebSocket、遥测回执、停止确认、有限重连和失联安全停止。
 - 确定性 L0 安全控制器、技能框架，以及离线验收的 `movement.goto@1.0.0`。
 - 任务 Schema、状态机、PostgreSQL 仓库、严格派发协议、BullMQ Queue/Worker 和隔离基础设施测试入口。
 - 2026-07-28 本机门禁：类型检查、158 项离线测试、生产构建、5 项 Dashboard E2E 和生产依赖审计通过；11 项外部环境测试按设计跳过。
 - 2026-07-28 GitHub Actions 运行 `30315095898`：完整离线质量门和真实 PostgreSQL/Redis 隔离集成门均通过。
+- 2026-08-07 本机门禁：锁文件 258 个条目通过供应链策略，生产依赖审计无已知漏洞，`pnpm check` 通过，190 项测试通过、11 项外部环境测试按设计跳过，生产构建与 5 项 Dashboard E2E 通过；Runtime Link 双进程验收通过且 `minecraftConnected=false`。GitHub CI 结果等待本分支推送后验证。
 
 ### 已完成并有真实基础设施验证
 
@@ -26,7 +28,7 @@
 
 ### 尚未形成端到端产品链路
 
-- Bot Runtime 与 Coordinator/Control API 之间的跨进程遥测和停止传输。
+- 独立 Coordinator 与 Control API 之间的状态镜像和停止 RPC，因此 Dashboard 四进程链路仍未闭合。
 - 独立 Worker、事务 outbox、自动对账重投、跨 Worker 取消、任务 API 和 Dashboard 任务看板。
 - 多 Bot 调度、生产技能、长期记忆、AI Router、本地规划和生产部署。
 
@@ -122,9 +124,22 @@
 
 验收：协议、ServerProfile、版本选择、Runtime、Coordinator 和 Control API 测试通过；真实隔离服在未预设版本时解析为 1.21.8。
 
+### P0.4.2 Runtime ↔ Coordinator 认证链路
+
+状态：**已完成；Control API 远程桥接未包含在本模块**
+
+- [x] 新增独立 Coordinator Runtime Link 入口，仅绑定显式回环地址。
+- [x] 使用严格 v1 握手 Schema 和每 Bot 共享密钥 SHA-256 完成双向 HMAC challenge，密钥不进入 URL、日志或仓库。
+- [x] Runtime 在认证成功后才启动 Mineflayer；重连耗尽、队列溢出或身份异常时 fail-closed。
+- [x] 遥测使用有界队列、单飞 ACK、同 `messageId` 重投和最新状态合并；Coordinator 继续按运行实例与序列拒绝旧消息。
+- [x] 停止命令只路由到当前已认证运行实例，Abort、断线、超时或结果身份不一致时不报告成功。
+- [x] 两个独立 Node 测试进程通过真实 `127.0.0.1` WebSocket 验证在线遥测、优雅停止、单次关闭、离线状态、审计顺序和跨进程 `traceId`；Coordinator 进程组合生产 Runtime Link/注册表/停止控制器，Runtime 进程使用生产 `SingleBotRuntime` 与测试专用 BotClient，未启动生产 `main`、Control API 或 Minecraft。
+
+验收：协议、Runtime、Coordinator 单元/回环集成测试和 `test:runtime-link` 双进程验收通过；该结果不代表 Control API/Dashboard 四进程或真实 Minecraft 联机已完成。
+
 ### P0.5 Dashboard 真实数据接入
 
-状态：**UI/API 契约与进程内链路已完成；跨进程链路未完成**
+状态：**UI/API 契约与进程内链路已完成；Control API ↔ 独立 Coordinator 跨进程链路未完成**
 
 - [x] 实际项目没有既有机器人页或 Store，因此在保留环境页的基础上首次创建 Zustand Bot Store 和机器人区域。
 - [x] 生产数据源固定为服务端代理后的 Control API；Playwright 夹具只存在于 `e2e` 测试目录。
@@ -133,18 +148,18 @@
 - [x] 安全停止要求确认弹窗、本地确认码、`bot.stop` 权限和真实 StopController 结果。
 - [x] 后端不可用时清空 Bot 状态并显示错误，不回退成未标注的假数据。
 
-验收：Playwright 覆盖在线、断线、失联、后端不可用和安全停止流程。独立 Control API 当前没有 Runtime 遥测传输，未共享 Coordinator 实例时返回真实空列表。
+验收：Playwright 覆盖在线、断线、失联、后端不可用和安全停止流程。独立 Control API 当前没有 Coordinator 状态镜像或遥测订阅，未共享 Coordinator 实例时返回真实空列表。
 
 ### P0.6 可观测性和运行手册
 
-状态：**日志/指标契约和手册已完成；跨进程追踪未完成**
+状态：**日志/指标契约和手册已完成；双进程追踪已验证，四进程追踪未完成**
 
 - [x] 统一 `traceId/taskId/botId/skillId/modelName` 日志字段。
 - [x] 增加连接、心跳、断线、重连、停止的基础指标。
 - [x] 编写隔离测试服运行手册和故障排查手册。
 - [x] 验证日志敏感键、常见令牌、服务器位置和换行脱敏。
 
-验收：进程内测试可使用同一 `traceId` 核对链路；部署形态的 Dashboard → Control API → Coordinator → Bot Runtime 四进程追踪仍待接入。
+验收：Runtime Link 双进程测试已使用同一 `traceId` 核对 Coordinator 与 Bot Runtime；Dashboard → Control API → Coordinator → Bot Runtime 四进程追踪仍待接入。
 
 ## P1：稳定执行和多 Bot 协作
 
@@ -243,13 +258,14 @@
 ## 后续交付路线
 
 1. **已完成：P1.3.1 真实基础设施门禁**：GitHub Actions 中的 PostgreSQL/Redis 隔离测试已通过；测试没有连接 Minecraft。
-2. **P0 收尾纵向链路**：实现 Runtime ↔ Coordinator 的跨进程遥测与停止传输，完成真实 Dashboard、停止和四进程追踪验收。
-3. **P1.3.2 持久任务闭环**：增加独立 Worker、事务 outbox/reconciler、自动过期租约恢复、持久取消请求和跨 Worker 取消，再接入任务 API 与 Dashboard。
-4. **P1.1/P1.2 实机矩阵**：验证 L0 危险场景和 Pathfinder 多版本真实寻路，不扩大正式服务器权限。
-5. **P1.4 多 Bot 协调**：实现任务分配、资源/箱子/区域锁、替补执行和故障转移。
-6. **P1.5/P1.6 生产能力与基础设施**：按场景逐项增加生产技能，再完善指标、日志、备份与可回滚部署。
-7. **P2 智能层**：基础设施稳定后再接长期记忆、AI Router 和本地规划；受监管自我改进、基地撤离和战斗保持最后阶段。
+2. **已完成：P0 Runtime Link**：Runtime ↔ Coordinator 的认证遥测与停止传输已通过真实双进程回环验收；测试没有连接 Minecraft。
+3. **P0 Control Bridge**：实现 Control API ↔ 独立 Coordinator 的状态镜像和停止 RPC，完成真实 Dashboard 状态、停止和四进程追踪验收。
+4. **P1.3.2 持久任务闭环**：增加独立 Worker、事务 outbox/reconciler、自动过期租约恢复、持久取消请求和跨 Worker 取消，再接入任务 API 与 Dashboard。
+5. **P1.1/P1.2 实机矩阵**：验证 L0 危险场景和 Pathfinder 多版本真实寻路，不扩大正式服务器权限。
+6. **P1.4 多 Bot 协调**：实现任务分配、资源/箱子/区域锁、替补执行和故障转移。
+7. **P1.5/P1.6 生产能力与基础设施**：按场景逐项增加生产技能，再完善指标、日志、备份与可回滚部署。
+8. **P2 智能层**：基础设施稳定后再接长期记忆、AI Router 和本地规划；受监管自我改进、基地撤离和战斗保持最后阶段。
 
 ## 当前唯一下一步
 
-完成 Runtime ↔ Coordinator 的跨进程遥测与停止传输，补齐真实 Dashboard、停止和四进程 `traceId` 验收；在此之前不把现有进程内契约称为端到端产品。
+实现 Control API ↔ 独立 Coordinator 的认证状态镜像和停止 RPC，补齐真实 Dashboard、停止和四进程 `traceId` 验收；在此之前不把已完成的 Runtime Link 称为端到端产品。

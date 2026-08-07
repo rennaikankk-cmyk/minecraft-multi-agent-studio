@@ -261,9 +261,19 @@ describe("SingleBotRuntime", () => {
       ]),
     );
 
+    const beforeRefresh = messages.length;
+    await vi.advanceTimersByTimeAsync(10);
+    runtime.publishCurrentState();
+    expect(messages.slice(beforeRefresh).map(({ type }) => type)).toEqual([
+      "bot.version.v1",
+      "bot.status.v1",
+      "bot.heartbeat.v1",
+    ]);
+    expect(messages.at(-1)?.timestamp).toBe("2026-07-19T10:00:00.010Z");
+
     client.stateChanged();
     await vi.advanceTimersByTimeAsync(1000);
-    expect(messages.filter(({ type }) => type === "bot.status.v1").length).toBe(2);
+    expect(messages.filter(({ type }) => type === "bot.status.v1").length).toBe(3);
 
     await runtime.stop();
     expect(client.closeCalls).toBe(1);

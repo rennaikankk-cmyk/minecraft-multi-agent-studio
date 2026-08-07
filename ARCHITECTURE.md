@@ -46,7 +46,7 @@ packages/
 └─ task-system/            # PostgreSQL 事实源、BullMQ 队列与确定性 Worker
 ```
 
-尚未创建 AI Router、生产数据库部署和独立任务 Worker 应用。Bot Runtime 已完成 Minecraft 1.21.8 隔离联机验收；Coordinator 已实现进程内 Bot 注册表和安全停止控制边界；Control API 已提供认证 HTTP/WebSocket 状态接口与受 `bot.stop` 保护的停止入口。Dashboard 通过服务端代理读取 Control API，浏览器不会收到长期令牌。确定性技能库已注册 `movement.goto@1.0.0`，Bot Runtime 通过受限 Pathfinder 适配器执行；任务包已建立 PostgreSQL 适配器、严格 BullMQ 队列和可嵌入 Worker，当前只允许通过显式隔离测试配置连接真实 PostgreSQL/Redis。
+尚未创建 AI Router、生产数据库部署和独立任务 Worker 应用。Bot Runtime 已完成 Minecraft 1.21.8 隔离联机验收，并已通过认证 Runtime Link 接入独立 Coordinator 的进程内 Bot 注册表和安全停止控制边界；Control API 已提供认证 HTTP/WebSocket 状态接口与受 `bot.stop` 保护的停止入口，但尚未远程连接独立 Coordinator。Dashboard 通过服务端代理读取 Control API，浏览器不会收到长期令牌。确定性技能库已注册 `movement.goto@1.0.0`，Bot Runtime 通过受限 Pathfinder 适配器执行；任务包已建立 PostgreSQL 适配器、严格 BullMQ 队列和可嵌入 Worker，当前只允许通过显式隔离测试配置连接真实 PostgreSQL/Redis。
 
 ## 4. 环境检测数据流
 
@@ -140,7 +140,11 @@ SingleBotRuntime
   ├─ bounded exponential reconnect
   └─ graceful stop
         ↓ Bot Protocol v1 validation
-message sink (future Coordinator)
+RuntimeLinkClient (bounded queue + telemetry ACK)
+        ⇅ mutual HMAC, ws://loopback/v1/runtime-link
+RuntimeLinkServer
+        ↓ strict identity/order validation
+Coordinator BotRegistry
 ```
 
 运行时不包含服务器地址默认值，也不会扫描或自动选择服务器。只有显式设置 `BOT_SERVER_PROFILE_PATH` 后才创建 Mineflayer 客户端。版本自动探测只发生在这个已经通过网络范围校验的目标上。
@@ -174,7 +178,11 @@ BotRegistry (in-memory, real process state)
 
 注册表按 Bot 保留当前运行实例和有限数量的已退役运行实例。新运行实例接管后，旧实例的延迟心跳不能恢复在线状态；同一实例的重复或乱序序列也不会覆盖较新状态。状态读取返回副本，不能从调用方直接修改注册表内部数据。
 
-安全停止由 `StopController` 生成并再次校验 `StopBotCommandV1`，可信授权上下文必须匹配决策、操作者、Bot、命令、权限和有效期。命令通过传输适配器交给 Bot Runtime，Runtime 校验目标运行实例并返回 `BotStopResultV1`；Coordinator 只在确认身份完全匹配后更新离线状态。当前注册表、命令幂等缓存和审计记录均为进程内存，持久化与跨进程传输留给后续模块。
+安全停止由 `StopController` 生成并再次校验 `StopBotCommandV1`，可信授权上下文必须匹配决策、操作者、Bot、命令、权限和有效期。`RuntimeLinkServer` 只把命令路由到注册表当前运行实例对应的认证会话，Runtime 从已认证 Coordinator 会话重建可信上下文并返回 `BotStopResultV1`；Coordinator 只在确认身份完全匹配后更新离线状态。
+
+Runtime Link 固定使用 `minecraft-studio.runtime.v1` 子协议、`/v1/runtime-link` 路径和显式回环地址。Coordinator 配置只保存每 Bot 共享密钥的 SHA-256；双方使用随机 nonce 和方向绑定的 HMAC proof 相互认证。文本 JSON 帧最大 64 KiB，禁用压缩；连接、待确认停止、发送缓冲和 Runtime 遥测队列都有上限。遥测在 ACK 前使用同一 `messageId` 重投，注册表负责幂等；重连后 Runtime 另外生成新状态，旧重复消息不会刷新存活时间。控制链路重试耗尽或关键队列溢出时 Runtime 确定性停止，不继续无人监管运行。
+
+当前注册表、命令幂等缓存和审计记录仍为进程内存。Runtime ↔ Coordinator 已跨进程接通，但独立 Control API 尚未连接这个 Coordinator，因此 Dashboard 四进程链路仍未闭合，不能称为端到端产品。
 
 ## 9. Control API 与实时状态流
 
@@ -199,7 +207,7 @@ Control API 默认且当前只允许绑定 `127.0.0.1` 或 `::1`。服务端配�
 
 HTTP 停止入口只接受固定的优雅停止请求、UUID 幂等命令 ID 和具有 `bot.stop` 权限的服务端主体。Control API 将认证主体绑定为可信操作者，并通过注入的 `StopController` 等待 Runtime 确认。未注入控制器时返回 `CONTROL_UNAVAILABLE`，不伪造成功。
 
-当前独立 Control API 进程没有跨进程 Bot 遥测和停止传输入口，因此没有共享 Coordinator 实例时会返回真实空列表，停止请求也会明确不可用。
+当前独立 Control API 进程尚未连接独立 Coordinator 的状态镜像与停止 RPC，因此会返回真实空列表，停止请求也会明确不可用。
 
 ## 10. Dashboard 真实数据链路
 
@@ -223,9 +231,9 @@ Dashboard 每 3 秒通过服务端代理读取 Bot 列表与详情。代理只�
 
 `@minecraft-studio/observability` 提供统一 JSON 日志和受限的进程内计数器。日志固定带有时间、级别、服务、实例、事件以及 `traceId/taskId/botId/skillId/modelName`；不存在的关联值为 `null`。敏感键、常见令牌格式、换行和过深对象在写出前统一清理。
 
-Dashboard 生成安全停止 UUID，并将它同时作为命令 ID 和追踪 ID。Control API 验证并透传该值，Coordinator 将其写入停止审计和日志，Bot Runtime 使用命令中的追踪 ID 记录请求与真实结果。响应再次返回 `traceId`，Dashboard 校验身份一致后显示给操作者。
+Dashboard、Control API、Coordinator 和 Bot Runtime 已分别实现同一安全停止 UUID/`traceId` 的生成、校验、审计和结果绑定契约；Runtime Link 双进程验收已经核对 Coordinator 与 Bot Runtime 使用同一追踪编号。独立 Control API 尚未连接 Coordinator，因此 Dashboard → Control API → Coordinator → Bot Runtime 的四进程追踪仍未贯通，不能把分段契约测试称为端到端结果。
 
-Runtime 当前记录连接尝试、心跳、断线、计划重连、停止请求、停止结果，以及 L0 安全决策、动作和失败。指标只存在于 Runtime 内存并可通过测试或运行时快照读取；Prometheus、集中日志和跨进程传输不在本模块中。
+Runtime 当前记录连接尝试、心跳、断线、计划重连、停止请求、停止结果，以及 L0 安全决策、动作和失败。Runtime Link 已把 Bot 遥测、停止命令和停止结果带同一 `traceId` 传到独立 Coordinator；指标仍只存在于 Runtime 内存并可通过测试或运行时快照读取，Prometheus、集中日志以及 Control API ↔ Coordinator 传输尚未接入。
 
 ## 12. L0 确定性安全层
 

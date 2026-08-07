@@ -165,6 +165,21 @@ export class SingleBotRuntime {
     return this.state === "online" && !this.safetyStatus.normalTasksPaused;
   }
 
+  /**
+   * Publishes a fresh control-plane snapshot after an authenticated Runtime
+   * Link reconnect. Old queued telemetry must not be replayed to make a stale
+   * Bot appear live.
+   */
+  publishCurrentState(): void {
+    if (this.minecraftVersionCompatibility) {
+      this.emitVersion();
+    }
+    if (this.state === "online" && this.client) {
+      this.emitStatus(this.generation);
+    }
+    this.emitHeartbeat();
+  }
+
   start(): void {
     if (this.state !== "offline" || this.client || this.reconnectTimer) {
       throw new Error("Bot Runtime has already been started.");

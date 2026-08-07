@@ -87,6 +87,32 @@ export {
 } from "./bot-messages.js";
 
 export {
+  RUNTIME_LINK_MAX_PAYLOAD_BYTES,
+  RUNTIME_LINK_PATH,
+  RUNTIME_LINK_SUBPROTOCOL,
+  parseRuntimeLinkClientMessage,
+  parseRuntimeLinkServerMessage,
+  runtimeLinkAcceptedV1Schema,
+  runtimeLinkAuthenticateV1Schema,
+  runtimeLinkChallengeV1Schema,
+  runtimeLinkClientMessageV1Schema,
+  runtimeLinkClientProofInput,
+  runtimeLinkServerMessageV1Schema,
+  runtimeLinkServerProofInput,
+  runtimeLinkTelemetryAckReasonSchema,
+  runtimeLinkTelemetryAckV1Schema,
+  type RuntimeLinkAcceptedV1,
+  type RuntimeLinkAuthenticateV1,
+  type RuntimeLinkChallengeV1,
+  type RuntimeLinkClientMessageV1,
+  type RuntimeLinkProofContext,
+  type RuntimeLinkServerMessageV1,
+  type RuntimeLinkServerProofContext,
+  type RuntimeLinkTelemetryAckReason,
+  type RuntimeLinkTelemetryAckV1,
+} from "./runtime-link.js";
+
+export {
   parseSkillExecutionResult,
   parseSkillInvocation,
   skillCapabilitySchema,

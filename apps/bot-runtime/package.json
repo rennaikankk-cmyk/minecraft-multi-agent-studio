@@ -18,6 +18,10 @@
     "@minecraft-studio/skills": "workspace:*",
     "mineflayer": "4.37.1",
     "mineflayer-pathfinder": "2.4.5",
+    "ws": "8.21.1",
     "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/ws": "8.18.1"
   }
 }

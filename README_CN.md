@@ -2,28 +2,29 @@
 
 面向 Minecraft Java 版多智能体机器人的硬件无关控制平台。
 
-当前已完成项目基线、真实环境检测、版本化 Bot 状态协议、单 Bot 隔离联机验收、Minecraft 版本自适应、Coordinator 进程内注册表、Control API/Dashboard 契约、确定性 L0 安全层、受限 Pathfinder 技能，以及 P1.3 任务持久化基础：
+当前已完成项目基线、真实环境检测、版本化 Bot 状态协议、单 Bot 隔离联机验收、Minecraft 版本自适应、Runtime ↔ Coordinator 认证链路、Control API/Dashboard 契约、确定性 L0 安全层、受限 Pathfinder 技能，以及 P1.3 任务持久化基础：
 
 - 自动检测当前 CPU、内存、操作系统和 GPU 探测状态。
 - 检测 Node.js、Java、Docker 和 Git 是否可用。
 - 识别标准、Docker、便携和网吧运行模式。
 - 通过真实 API 在响应式前端展示检测结果。
-- Dashboard 通过服务端代理读取 Control API，显示真实在线、离线、失联和后端不可用状态。
+- Dashboard 服务端代理与 Control API 契约已完成，可显示经过校验的在线、离线、失联和后端不可用状态；独立 Control API 尚未桥接 Coordinator，当前真实结果为空列表且停止不可用。
 - 定义并测试 Bot 状态、心跳、断线和安全停止协议 v1。
 - 实现只允许隔离测试服的单 Bot Mineflayer Runtime。
 - 已在仅绑定本机回环地址的 Minecraft 1.21.8 服务端验证连接、停止、断线和有限重连。
 - Coordinator 使用真实遥测维护在线、失联和离线状态，并拒绝重复、乱序及旧进程心跳。
+- Bot Runtime 与独立 Coordinator 通过双向 HMAC 认证的本机 WebSocket 传输遥测、回执、停止命令和真实停止结果。
 - 安全停止要求可信授权、幂等命令 ID、审计、超时和 Runtime 确认结果。
-- Control API 提供认证列表、详情、WebSocket 状态流和受权优雅停止入口。
+- Control API 已提供认证列表、详情、WebSocket 状态流和受权优雅停止入口；未注入 Coordinator 桥接时会返回空列表和 `CONTROL_UNAVAILABLE`。
 - 安全停止要求弹窗二次确认、本地确认码、`bot.stop` 权限和 Runtime 真实确认结果。
 - Bot 可对批准的隔离服务器自动探测 Minecraft 版本，并上报真实兼容状态。
-- 进程内链路可用同一追踪编号核对 Control API、Coordinator 和 Bot Runtime 结构化日志。
+- Runtime Link 双进程链路可用同一追踪编号核对 Coordinator 和 Bot Runtime 结构化日志；Control API/Dashboard 四进程追踪仍待接入。
 - L0 安全层从真实 Mineflayer 状态识别饥饿、低/危急生命值、溺水、岩浆、坠落、卡死和背包满，并执行固定白名单动作。
 - `movement.goto@1.0.0` 通过受限 Pathfinder 适配器移动，不允许挖掘、搭塔、垫方块或跑酷。
 - 任务系统提供 PostgreSQL 迁移、严格状态机、幂等键、乐观修订号、租约边界、版本化处理器契约、严格派发协议和 BullMQ Worker。
 - 隔离 PostgreSQL/Redis 集成测试已于 2026-07-28 在 GitHub Actions 真实临时服务中通过；本机没有运行这些服务时不会冒充本机服务在线。
 
-当前项目是单 Bot 安全执行与任务基础设施，不是已经完成的多智能体产品。独立 Control API 尚未接入 Runtime/Coordinator 跨进程遥测，因此单独启动时返回真实空列表；Dashboard 后端断开时会清空 Bot 列表并明确显示错误。
+当前项目是单 Bot 安全执行与任务基础设施，不是已经完成的多智能体产品。Runtime ↔ Coordinator 已跨进程接通；独立 Control API 尚未接入 Coordinator，因此单独启动仍返回真实空列表，Dashboard 后端断开时会清空 Bot 列表并明确显示错误。
 
 当前不会自动连接 Minecraft，不会调用模型，也不会显示模拟 Bot。
 
@@ -89,10 +90,13 @@ STUDIO_MODE=standard
 Copy-Item .\configs\servers\isolated-test.example.json .\configs\servers\isolated-test.local.json
 ```
 
-确认配置指向你自己的 Minecraft Java 隔离测试服，然后运行：
+确认配置指向你自己的 Minecraft Java 隔离测试服，并先按下文“验证 Runtime Link”配置和启动 Coordinator。然后在 Runtime 窗口设置同一 Bot 的链路身份与明文共享密钥：
 
 ```powershell
 $env:BOT_SERVER_PROFILE_PATH="$PWD\configs\servers\isolated-test.local.json"
+$env:BOT_RUNTIME_LINK_URL='ws://127.0.0.1:3220/v1/runtime-link'
+$env:BOT_RUNTIME_LINK_KEY_ID='runtime-key-01'
+$env:BOT_RUNTIME_LINK_SECRET='<只存在于当前进程的明文共享密钥>'
 pnpm bot:start
 ```
 
@@ -101,7 +105,7 @@ pnpm bot:start
 - 当前只允许离线认证的本机或私有局域网测试服。
 - 不支持公网地址、正式服务器或配置文件密码。
 - 没有设置 `BOT_SERVER_PROFILE_PATH` 时不会尝试连接。
-- Bot 状态已定义到 Coordinator、Control API 和 Dashboard 的真实数据链路；独立进程间传输仍待后续模块接入。
+- Runtime ↔ Coordinator 已接入真实跨进程传输；Control API ↔ 独立 Coordinator 仍待下一模块接入。
 
 版本配置：
 
@@ -126,9 +130,36 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-isolated-m
 ## Coordinator 当前边界
 
 - 注册表、停止命令缓存和审计记录当前保存在进程内存中，进程重启后 Bot 必须重新上报。
-- Coordinator 与 Bot Runtime 的协议边界和进程内集成测试已经完成。
-- Control API 与 Dashboard 状态读取已接入；跨进程 Bot 遥测、停止传输、用户登录和持久化审计仍为“待接入”。
+- Coordinator 与 Bot Runtime 的认证回环传输已经完成，并通过两个独立 Node 测试进程验收；Coordinator 进程组合生产 Runtime Link、注册表和停止控制器，Runtime 进程使用生产 `SingleBotRuntime` 与明确的测试专用内存 BotClient。
+- Control API 与 Dashboard 的接口契约已经完成，但 Control API ↔ 独立 Coordinator 远程桥接、用户登录和持久化审计仍为“待接入”。
 - 当前不提供连接正式 Minecraft 服务器的入口。
+
+## 验证 Runtime Link
+
+不启动 Minecraft 的双进程验收：
+
+```powershell
+pnpm test:runtime-link
+```
+
+该命令启动两个独立 Node 测试进程：Coordinator 进程组合生产 Runtime Link、注册表和停止控制器，Runtime 进程组合生产 Runtime Link 客户端、`SingleBotRuntime` 与测试专用内存 BotClient。业务遥测、停止命令和确认全部走真实 `127.0.0.1` WebSocket；IPC 只负责启动、收集结果和清理。该验收不启动生产 Coordinator `main`、Control API 或 Minecraft，也不会打开 Minecraft 端口。
+
+手动启动独立 Coordinator 时，先生成至少 32 字符的共享密钥及 SHA-256，把摘要配置给 Coordinator，把明文只配置给目标 Runtime：
+
+```powershell
+$bytes = New-Object byte[] 32
+$rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+$rng.GetBytes($bytes)
+$secret = [Convert]::ToBase64String($bytes)
+$sha = [Security.Cryptography.SHA256]::Create()
+$hashBytes = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($secret))
+$secretHash = ($hashBytes | ForEach-Object { $_.ToString('x2') }) -join ''
+$peers = @(@{ keyId = 'runtime-key-01'; botId = 'studio-bot-01'; secretSha256 = $secretHash })
+$env:COORDINATOR_RUNTIME_LINK_PEERS_JSON = ConvertTo-Json -InputObject $peers -Compress
+pnpm coordinator:start
+```
+
+目标 Runtime 进程需要设置 `BOT_RUNTIME_LINK_URL`、`BOT_RUNTIME_LINK_KEY_ID` 和 `BOT_RUNTIME_LINK_SECRET`。只有同时提供经过校验的 `BOT_SERVER_PROFILE_PATH` 并显式运行 `pnpm bot:start` 才会尝试连接隔离 Minecraft 测试服；不要用于正式服务器。
 
 ## 启动 Control API
 
@@ -166,7 +197,7 @@ pnpm api:start
 
 HTTP 使用 `Authorization: Bearer <明文令牌>`。浏览器 WebSocket 使用子协议 `minecraft-studio.v1` 和 `auth.<明文令牌的 base64url>`。停止 POST 固定为优雅停止并要求 `bot.stop`；未注入 StopController 时返回 `CONTROL_UNAVAILABLE`。
 
-当前独立 API 进程没有跨进程遥测与停止传输入口，因此未共享 Coordinator 注册表时会返回真实空列表，不会创建模拟 Bot，也不会伪造停止成功。
+当前独立 API 进程尚未连接独立 Coordinator 的状态与停止 RPC，因此会返回真实空列表，不会创建模拟 Bot，也不会伪造停止成功。
 
 ## 接入 Dashboard 真实 Bot 状态
 

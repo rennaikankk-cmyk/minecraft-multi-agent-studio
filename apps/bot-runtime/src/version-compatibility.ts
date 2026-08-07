@@ -1,12 +1,13 @@
-import {
-  latestSupportedVersion,
-  oldestSupportedVersion,
-  testedVersions,
-} from "mineflayer";
+import mineflayer from "mineflayer";
 
 import type { MinecraftVersionCompatibility } from "@minecraft-studio/protocol";
 
 const VERSION_PATTERN = /^1\.\d+(?:\.\d+)?$/u;
+const {
+  latestSupportedVersion,
+  oldestSupportedVersion,
+  testedVersions,
+} = mineflayer;
 const installedTestedVersions = Object.freeze([...testedVersions]);
 const installedTestedVersionSet = new Set(installedTestedVersions);
 

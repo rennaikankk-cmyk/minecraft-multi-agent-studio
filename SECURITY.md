@@ -44,7 +44,7 @@
 - 浏览器验收使用官方 npm Registry 的 Playwright Test 1.61.1（Apache-2.0），完整性为 `sha512-8nKv6+0RJSL9FE4jYOEGXnPeM/Hg12qZpmqzZjRh3qM0Y7c3z1mrOTfFLids72RDQYVh9WpLEfR5WdpNX4fkig==`；本机验收复用已安装 Edge，未自动下载浏览器。
 - 安全寻路使用 PrismarineJS 官方 `mineflayer-pathfinder` 2.4.5（MIT），来源为官方 npm Registry，完整性为 `sha512-Jh3JnUgRLwhMh2Dugo4SPza68C41y+NPP5sdsgxRu35ydndo70i1JJGxauVWbXrpNwIxYNztUw78aFyb7icw8g==`。
 - Dashboard 使用 Next.js 16.2.11（MIT），完整性为 `sha512-B339zaqbyK8cmxhoAvLrcwoabwCP1wz21zSzfqxqXAemTu2BXnH7tQnfcglKv1vnMUIDBc+Hth7XODQriTZiRQ==`。
-- Next.js 间接依赖 PostCSS 覆盖为 8.5.18（MIT），完整性为 `sha512-xdB1oSLHbz1vRWgCDalrCqEFTWzFlhqFC5tIHLMOSUIjhm3XXQ1qrFy8S/ESr1JYRRXqM3c1QFiMZUJdUTqyMQ==`；Sharp 覆盖为 0.35.0（核心包 Apache-2.0，Windows x64 平台包声明 Apache-2.0 AND LGPL-3.0-or-later），完整性为 `sha512-BqvG5XbwPZ4NV0DK90d86leEECMsoa8bO0nqnKWlBDYxri4GJ7c4EDInaF6q20lTh/mATmnDIKWJFfXnoVfH5g==`。
+- Next.js 间接依赖 PostCSS 覆盖为 8.5.23（MIT），完整性为 `sha512-g50586zr4bZmwFiTlflMu8E0bDTb5I5gertgwAKmsdUlTQIhZtunzUlD1WSzwcVWPoAVpsrA6vlfCD7oXvRwgg==`；Sharp 覆盖为 0.35.0（核心包 Apache-2.0，Windows x64 平台包声明 Apache-2.0 AND LGPL-3.0-or-later），完整性为 `sha512-BqvG5XbwPZ4NV0DK90d86leEECMsoa8bO0nqnKWlBDYxri4GJ7c4EDInaF6q20lTh/mATmnDIKWJFfXnoVfH5g==`。
 - 任务队列使用官方 npm Registry 的 BullMQ 5.81.2（MIT），完整性为 `sha512-Hi9GaVCC6HE9bQP65j/FNv1aL1fcEukTF99ezS5pl1Ud+joCFpNWiPCV45mWdkEmpuacS0XJdMMFGKPIHCwoPg==`。
 - PostgreSQL 驱动使用官方 npm Registry 的 `pg` 8.22.0（MIT），完整性为 `sha512-8wih1vVIBMxoUM2oB4soJsD9tDnDpLv4OXBJ+EJzFsvycD+lfyIreC2gGHq78f8jbLLt+bvlPTFdFZfJkOuzAA==`；开发类型包固定为 `@types/pg` 8.20.0（MIT），完整性为 `sha512-bEPFOaMAHTEP1EzpvHTbmwR8UsFyHSKsRisLIHVMXnpNefSbGA1bD6CVy+qKjGSqmZqNqBDV2azOBo8TgkcVow==`。
 - P1.3.1 CI 服务固定为 PostgreSQL `17.10-alpine3.23@sha256:8189a1f6e40904781fc9e2612687877791d21679866db58b1de996b31fc312e4` 和 Redis `8.8.0-alpine3.23@sha256:9d317178eceac8454a2284a9e6df2466b93c745529947f0cd42a0fa9609d7005`。
@@ -91,6 +91,18 @@
 - 超出允许时钟偏差的未来消息拒绝写入。
 - 心跳或其他有效遥测过期后标记 `stale`，只有结构化断线或可信停止确认才标记 `offline`。
 - 当前注册表是进程内真实状态，不会伪装成持久化数据库；进程重启后需要 Bot 重新上报。
+
+### Runtime Link 传输边界
+
+- 服务端与客户端只接受 `ws://127.0.0.1` 或 `ws://[::1]`、固定 `/v1/runtime-link` 路径和 `minecraft-studio.runtime.v1` 子协议；拒绝域名、私网/公网地址、凭据 URL、查询、片段、重定向以及任何带浏览器 `Origin` 的升级请求。
+- 每个 key 只绑定一个 Bot；Coordinator 环境只保存共享密钥 SHA-256，Runtime 明文密钥只存在于自身进程环境变量，二者都不得写入日志或仓库。
+- 双方以独立随机 nonce 和方向绑定 HMAC proof 完成相互认证；证明绑定 challenge、Coordinator、Bot、运行实例和 key ID，并使用时序安全比较。
+- 认证会话绑定 `botId + runtimeInstanceId + keyId`；任何遥测、停止结果或目标运行实例不一致都会拒绝并关闭连接。
+- 只接受严格 v1 文本 JSON，单帧最大 64 KiB并禁用压缩；会话、待确认停止、发送缓冲和 Runtime 遥测队列均有硬上限。
+- 遥测单飞等待 ACK；网络中断可用同一 `messageId` 重投，由注册表去重。重复消息不刷新 liveness，重连后必须另外上报新状态。
+- 停止命令中的授权字段不能自证权限；Runtime 只在相互认证成功的 Coordinator 会话上重建最小权限上下文，再调用既有协议授权校验。
+- 控制链路重连耗尽、关键队列溢出或身份异常时 Runtime fail-closed；未收到匹配停止结果时 Coordinator 不报告成功。
+- 当前仅完成同一主机回环部署；Docker 跨容器、跨主机 TLS 和密钥轮换尚未接入，不能通过放宽监听地址绕过。
 
 ## 8. Control API 边界
 

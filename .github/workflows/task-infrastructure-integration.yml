@@ -36,6 +36,8 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Run complete offline quality gate
         run: pnpm check
+      - name: Verify authenticated Runtime Link across processes
+        run: node scripts/run-runtime-link-acceptance.mjs
 
   real-postgres-redis:
     runs-on: ubuntu-24.04

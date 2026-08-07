@@ -23,3 +23,19 @@ export {
   type StopCommandTransport,
   type StopControllerOptions,
 } from "./stop-controller.js";
+
+export {
+  RuntimeLinkConfigError,
+  loadRuntimeLinkConfig,
+  type RuntimeLinkConfigErrorCode,
+  type RuntimeLinkPeerConfig,
+  type RuntimeLinkRuntimeConfig,
+} from "./runtime-link-config.js";
+
+export {
+  RuntimeLinkServer,
+  RuntimeLinkTransportError,
+  type RuntimeLinkAddress,
+  type RuntimeLinkServerOptions,
+  type RuntimeLinkTransportErrorCode,
+} from "./runtime-link-server.js";

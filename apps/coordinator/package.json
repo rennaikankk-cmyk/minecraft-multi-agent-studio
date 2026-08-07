@@ -14,11 +14,16 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
     "@minecraft-studio/observability": "workspace:*",
-    "@minecraft-studio/protocol": "workspace:*"
+    "@minecraft-studio/protocol": "workspace:*",
+    "ws": "8.21.1"
+  },
+  "devDependencies": {
+    "@types/ws": "8.18.1"
   }
 }

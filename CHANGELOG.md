@@ -6,6 +6,10 @@
 
 ### 新增
 
+- 新增严格 Runtime Link v1 握手与遥测 ACK 协议，复用既有 Bot 遥测、停止命令和停止结果，不引入可执行消息。
+- 新增独立 Coordinator Runtime Link 入口和 Bot Runtime 客户端，通过真实回环 WebSocket 传输遥测与停止确认。
+- 新增两个独立 Node 测试进程的 Runtime Link 验收：Coordinator 进程组合生产传输组件，Runtime 进程使用生产 `SingleBotRuntime` 和测试专用 BotClient，验证在线状态、优雅停止、单次关闭、离线结果、审计顺序和跨进程 `traceId`；不启动生产 Coordinator `main`、Control API 或 Minecraft。
+- GitHub Actions 离线质量任务新增 Runtime Link 双进程回环验收，防止仅在单元测试转换环境中可用的传输代码进入主线。
 - 新增严格 `TaskDispatchV1` 队列协议，固定 Coordinator 来源、消息版本、任务修订号、任务类型、处理器版本和幂等策略，拒绝未知字段。
 - 新增显式 `pg` Pool 适配器、BullMQ 队列和可嵌入 Worker，支持领取、启动、续租、结构化完成、协作取消、超时和受限的过期租约重投。
 - 新增 PostgreSQL 租约一致性迁移、事务级操作 ID 串行化、数据库权威时钟和有界过期租约查询。
@@ -14,6 +18,8 @@
 
 ### 安全
 
+- Runtime Link 固定回环地址、路径、子协议、64 KiB 文本帧和有界资源，并拒绝带浏览器 `Origin` 的升级请求；每 Bot 共享密钥通过双向 nonce/HMAC challenge 完成相互认证，密钥不进入 URL、日志或仓库。
+- Runtime 在控制链路认证成功后才启动；重连耗尽、关键遥测队列溢出、身份不匹配或协议异常时 fail-closed，不允许模型或消息直接执行。
 - Worker 只调用任务、派发和注册表三方版本/幂等策略完全匹配的确定性任务处理器；队列消息不能携带模型文本、代码、Shell、URL 或任意字段。
 - PostgreSQL 保持任务事实源；Redis 只用于消息投递和临时状态，BullMQ 自身重试固定为一次。
 - 活动取消、超时和截止时间先传播 `AbortSignal`；Worker 有界停止等待和续租，并按 PostgreSQL 权威时间持久化终态。旧 job 重投要求租约真实过期、Bot 归属匹配、持久化处理器版本/幂等策略匹配且重试预算仍有余额。
@@ -23,15 +29,18 @@
 
 ### 依赖
 
-- 新增 BullMQ 5.81.2、`pg` 8.22.0 和 `@types/pg` 8.20.0，均来自官方 npm Registry，使用精确版本并由锁文件记录完整性。
+- 新增 BullMQ 5.81.2、`pg` 8.22.0 和 `@types/pg` 8.20.0，均来自官方 npm Registry，使用精确版本并由锁文件记录完整性；Coordinator 与 Bot Runtime 复用仓库已锁定的 `ws` 8.21.1 和 `@types/ws` 8.18.1。
 - 明确禁止 BullMQ 间接可选原生依赖 `msgpackr-extract` 的安装构建脚本。
 
 ### 修复
 
+- 将 Next.js 间接依赖 PostCSS 从 8.5.18 精确覆盖到 8.5.23，修复发布前生产依赖审计发现的 `GHSA-fxqj-rqcc-2cmp`；版本与 npm 完整性哈希写入锁文件和安全文档。
+- 修复 Mineflayer CommonJS 包在原生 Node ESM 中使用命名导入导致生产构建无法加载的问题；Vitest 转换此前未暴露该错误。
 - 修正 PostgreSQL 处理器版本检查约束的正则转义，使严格 SemVer 版本可在真实数据库中写入；同步更新迁移摘要。
 
 ### 当前限制
 
+- Runtime ↔ Coordinator 已通过真实双进程回环验收，但 Control API ↔ 独立 Coordinator 状态/停止桥接、Dashboard 四进程追踪、跨主机传输和持久化停止审计尚未完成。
 - 本机未检测到 PostgreSQL、Redis 或 Docker；2026-07-28 的 GitHub Actions 运行 `30315095898` 已通过真实临时 PostgreSQL/Redis 集成门，该结果不代表生产服务在线。
 - 当前提供可嵌入 Worker 库，尚未提供独立生产 Worker 应用、Coordinator 任务调度、任务 Control API 或 Dashboard 任务看板。
 - 当前没有事务 outbox、自动 PostgreSQL→BullMQ 对账重投或跨 Worker 取消；数据库提交和入队不是原子事务。
