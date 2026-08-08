@@ -12,7 +12,8 @@
 1. `docs/anarchy-combat-design-2026-08-08.pdf`（或同名 .html）——**作战体系设计 v2，这是你的主蓝图**：七类角色、三层 AI 调度、正式服现实约束、面向作战的 MVP 路线（M0~M6）。
 2. `docs/architecture-review-2026-08-08.pdf`——v1 架构评审，其中协议/fail-closed/验收文化/Rust 触发原则/千行文件与 secure-link 重构点继续有效。
 3. `AGENTS.md`、`ROADMAP.md`、`CHANGELOG.md`——项目自身规则与进度事实源。
-4. `git log --oneline -10`——提交 `40b406e` 是未验证的 P1.3.2 WIP（outbox/reconciler），离线测试通过但真实基础设施集成测试未跑。
+4. `docs/combat-tactics-reference.md`——**到 M3 再精读**：战斗打法清单（AutoTotem/CrystalAura/AutoArmor/Surround/寻路/反检测）与侦察的基岩顶+地狱门扫描战术。纯机制描述，非代码；实现须遵守 §0.6（只学打法、禁抄 GPL、先测时序）。
+5. `git log --oneline -10`——提交 `40b406e` 是未验证的 P1.3.2 WIP（outbox/reconciler），离线测试通过但真实基础设施集成测试未跑。
 
 ## 最高设计原则（违反即否决）
 
@@ -29,7 +30,7 @@
 
 1. **M0 闭环底座**：完成 v1 遗留的 P1.3.2 持久任务闭环（在 `40b406e` 上继续）+ 独立 Worker 应用 + Coordinator 任务调度接入（PG 任务 → TaskDispatchV1 → Worker → SkillInvocationV1 → Runtime）+ 审计落 PostgreSQL。验收：杀任意进程任务不丢不重；Dashboard 建任务能驱动 Bot 动作。
 2. **M1 存活与旅行**：online-mode 正版账号认证适配（**与隔离测试 offline 路径并存，由 ServerProfile 显式区分**）；L0 存活升级（死前断线保号、贵重装备暂存）；`travel.highway` + 鞘翅飞行。
-3. **M2 首个生产角色**：侦察角色（探索+坐标记录+写共享世界记忆）或农场角色（一个稳定自动农场）——二选一先做，连续运行数小时无人干预。
+3. **M2 首个生产角色**：侦察角色（探索+坐标记录+写共享世界记忆）或农场角色（一个稳定自动农场）——二选一先做，连续运行数小时无人干预。侦察角色须包含**基岩顶巡逻 + 地狱门扫描**战术：入服先探测能否上下界基岩顶（部分服未修补），能上则在基岩顶巡逻（鞘翅效率最高）并扫描已加载区块中的已激活地狱门（下界坐标 ×8 = 主世界基地嫌疑点），标记写入共享世界记忆、由战略层指派其他 bot 核实；探测失败自动去除此项、退回地狱顶层公路，结果记入 ServerProfile。
 4. **M3 战斗反射（独立里程碑，单独硬化）**：确定性水晶 PvP/图腾/换甲，在隔离 PvP 测试环境反复验证反应时序与事件循环抖动。达标前不上任何真实对抗。战斗打法以开源实现（Meteor Client、Baritone、mineflayer-pvp 等）为**参考**——**只学机制与参数、重写为本项目 TS，禁止逐行翻译/复制 GPL 源码；GPL 仅在不分发时无约束，分发前必做许可评审；继续用 Mineflayer 无头 bot，不引入 MC 客户端模组栈**。Mineflayer 无头能否达到 <50ms 时序是未验证假设，M3 实测扛不住才评估换栈/Rust。（详见 AGENTS.md §0.6）
 5. **M4 多角色协调**：Coordinator 进程编排（拉起/回收多 Bot）+ 动态角色分配 + 共享世界记忆（pgvector）+ 分布式部署（家用节点跑农场/建造/后勤，靠近目标服的 VPS 跑战斗/突袭/侦察）。
 6. **M5 收敛重构**：抽 `packages/secure-link` 消灭约 3700 行重复；拆三个千行文件（postgres-repository / bullmq-worker / control-link-server）。趁规模可控时做，排在多 Bot 稳定后、上正式服前。

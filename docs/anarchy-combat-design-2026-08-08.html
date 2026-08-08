@@ -78,9 +78,10 @@
 <div class="role">
 <h3>1. 侦察 / 探索 Scout</h3>
 <p><b>职责</b>：沿主干道（地狱顶层公路、坐标轴高速）远程旅行，记录基地/物资仓/玩家坐标，覆盖地图空白区，跟踪玩家找到其基地，鞘翅+烟花飞行，地狱门 8 倍距离穿梭。</p>
-<p><span class="ai">AI 决策</span>：探索方向与覆盖策略、某结构是否值得上报、是否跟踪某玩家。<br>
-<span class="det">确定性</span>：公路循迹、避障、鞘翅飞行力学、自动进食、危险断线、坐标记录。</p>
-<p><b>技能</b>：<code>travel.highway</code> · <code>fly.elytra</code> · <code>scan.chunks</code> · <code>track.player</code> · <code>log.coordinate</code></p>
+<p><b>基岩顶巡逻 · 地狱门扫描（按服务器能力启停）</b>：入服后先<b>探测能否上到下界基岩顶</b>（Y=127 之上；部分服未修补此通道）。能上则优先在基岩顶巡逻——平坦、无怪物、鞘翅移动效率全游戏最高；且服务器同步的区块数据包含脚下整个区块柱的方块，bot 在顶上即可<b>直接扫描已加载区块中的已激活地狱门</b>，无需下到下界内部。已激活的门=有人使用过，下界坐标 ×8 即主世界基地嫌疑点。扫描 bot 只负责把门的坐标与状态<b>标记写入共享世界记忆</b>，由战略层按优先级指派其他侦察 bot 前往核实。探测失败（服务器已修补）则自动去除此项，退回地狱顶层公路巡逻，不做无谓尝试。探测结果记入 ServerProfile，换服重新探测。</p>
+<p><span class="ai">AI 决策</span>：探索方向与覆盖策略、某结构是否值得上报、是否跟踪某玩家、已标记地狱门的核实优先级。<br>
+<span class="det">确定性</span>：基岩顶可达性探测、区块地狱门扫描与坐标换算（×8）、公路循迹、避障、鞘翅飞行力学、自动进食、危险断线、坐标记录与标记写入。</p>
+<p><b>技能</b>：<code>travel.highway</code> · <code>fly.elytra</code> · <code>scan.chunks</code> · <code>scan.portal</code> · <code>probe.roof</code> · <code>track.player</code> · <code>log.coordinate</code></p>
 <p><b>产出</b>：写入共享世界记忆（基地/仓库坐标、玩家活动规律）——正是 P2.1 pgvector 长期记忆的输入源。侦察是整个集群的"眼睛"，突袭和防御都依赖它的数据。</p>
 </div>
 
