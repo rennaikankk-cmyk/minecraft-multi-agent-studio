@@ -51,6 +51,13 @@ const migrationFiles = [
     sha256:
       "5c1514a76f11b201e5eb95613441f77aaab49ce4e05da3182c21b173bb237a6c",
   },
+  {
+    path: fileURLToPath(
+      new URL("../migrations/0003_task_delivery.sql", import.meta.url),
+    ),
+    sha256:
+      "02429755277df4c7d6dbd32a6dc4769a305c8bad4cea559b1fbbf5151e3d2918",
+  },
 ] as const;
 
 function isolatedNamespace(input: string | undefined): string {
@@ -289,8 +296,10 @@ describeReal.sequential(
         [schemaName],
       );
       expect(tables.rows.map(({ table_name }) => table_name)).toEqual([
+        "studio_task_cancellation_requests",
         "studio_task_dependencies",
         "studio_task_history",
+        "studio_task_outbox",
         "studio_tasks",
       ]);
 

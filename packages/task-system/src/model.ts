@@ -3,6 +3,8 @@ import {
   skillIdentifierSchema,
   skillJsonValueSchema,
   skillVersionSchema,
+  taskDispatchV1Schema,
+  type TaskDispatchV1,
 } from "@minecraft-studio/protocol";
 import { z } from "zod";
 
@@ -146,6 +148,100 @@ export const taskCreateCommandSchema = z
     }
   });
 
+/**
+ * A task submission is a task creation with a durable dispatch target.  The
+ * legacy create command intentionally remains unchanged so callers that only
+ * persist a queued task do not silently start delivery.
+ */
+export const taskSubmitCommandSchema = taskCreateCommandSchema.extend({
+  dispatchBotId: identifierSchema,
+});
+
+export const taskOutboxStatusSchema = z.enum([
+  "pending",
+  "claimed",
+  "delivered",
+]);
+
+export const taskOutboxRecordSchema = z
+  .object({
+    messageId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    expectedRevision: z.number().int().nonnegative(),
+    type: z.literal("task.dispatch.v1"),
+    payload: taskDispatchV1Schema,
+    status: taskOutboxStatusSchema,
+    attemptCount: z.number().int().min(0).max(1_000),
+    availableAt: timestampSchema,
+    claimedBy: identifierSchema.nullable(),
+    claimExpiresAt: timestampSchema.nullable(),
+    lastError: z.string().max(4_000).nullable(),
+    createdAt: timestampSchema,
+    updatedAt: timestampSchema,
+    deliveredAt: timestampSchema.nullable(),
+  })
+  .strict()
+  .superRefine((record, context) => {
+    if (record.payload.messageId !== record.messageId) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "messageId"],
+        message: "Outbox payload messageId must match its durable identity.",
+      });
+    }
+    if (
+      record.payload.taskId !== record.taskId ||
+      record.payload.payload.expectedRevision !== record.expectedRevision
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload"],
+        message: "Outbox payload task revision must match its durable identity.",
+      });
+    }
+    if (record.status === "claimed") {
+      if (record.claimedBy === null || record.claimExpiresAt === null) {
+        context.addIssue({
+          code: "custom",
+          path: ["claimedBy"],
+          message: "Claimed outbox entries require a live claim owner.",
+        });
+      }
+    } else if (record.claimedBy !== null || record.claimExpiresAt !== null) {
+      context.addIssue({
+        code: "custom",
+        path: ["claimedBy"],
+        message: "Unclaimed outbox entries cannot retain a claim owner.",
+      });
+    }
+  });
+
+export const taskCancellationRequestSchema = z
+  .object({
+    requestId: z.string().uuid(),
+    operationId: z.string().uuid(),
+    taskId: z.string().uuid(),
+    operationFingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
+    actorId: identifierSchema,
+    reasonCode: reasonCodeSchema,
+    requestedAt: timestampSchema,
+    acknowledgedAt: timestampSchema.nullable(),
+    acknowledgedBy: identifierSchema.nullable(),
+  })
+  .strict()
+  .superRefine((request, context) => {
+    if (
+      (request.acknowledgedAt === null) !==
+      (request.acknowledgedBy === null)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["acknowledgedAt"],
+        message: "Cancellation acknowledgement fields must be paired.",
+      });
+    }
+  });
+
 export const taskRecordSchema = z
   .object({
     schemaVersion: z.literal("1.0"),
@@ -160,6 +256,7 @@ export const taskRecordSchema = z
     description: z.string().max(4_000),
     priority: z.number().int().min(0).max(100),
     status: taskStatusSchema,
+    dispatchBotId: identifierSchema.nullable().default(null),
     assignedBotId: identifierSchema.nullable(),
     requiredSkills: z.array(taskRequiredSkillSchema).max(32),
     requiredItems: z.array(taskRequiredItemSchema).max(128),
@@ -250,7 +347,14 @@ export const taskLeaseExpireCommandSchema = z
 
 export type TaskStatus = z.infer<typeof taskStatusSchema>;
 export type TaskCreateCommand = z.infer<typeof taskCreateCommandSchema>;
+export type TaskSubmitCommand = z.infer<typeof taskSubmitCommandSchema>;
 export type TaskRecord = z.infer<typeof taskRecordSchema>;
+export type TaskOutboxStatus = z.infer<typeof taskOutboxStatusSchema>;
+export type TaskOutboxRecord = z.infer<typeof taskOutboxRecordSchema>;
+export type TaskCancellationRequest = z.infer<
+  typeof taskCancellationRequestSchema
+>;
+export type TaskDispatch = TaskDispatchV1;
 export type TaskTransitionCommand = z.infer<
   typeof taskTransitionCommandSchema
 >;

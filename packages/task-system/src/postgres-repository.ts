@@ -1,4 +1,10 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+
+import {
+  identifierSchema,
+  taskDispatchV1Schema,
+  type TaskDispatchV1,
+} from "@minecraft-studio/protocol";
 
 import { TaskSystemError } from "./errors.js";
 import {
@@ -8,9 +14,15 @@ import {
   taskLeaseExpireCommandSchema,
   taskLeaseReleaseCommandSchema,
   taskLeaseRenewCommandSchema,
+  taskOutboxRecordSchema,
+  taskCancellationRequestSchema,
+  taskSubmitCommandSchema,
   taskRecordSchema,
   taskTransitionCommandSchema,
   type TaskCreateCommand,
+  type TaskOutboxRecord,
+  type TaskCancellationRequest,
+  type TaskSubmitCommand,
   type TaskLeaseAcquireCommand,
   type TaskLeaseExpireCommand,
   type TaskLeaseReleaseCommand,
@@ -50,12 +62,61 @@ export type CreateTaskResult = Readonly<{
   created: boolean;
 }>;
 
+export type SubmitTaskResult = Readonly<{
+  task: TaskRecord;
+  created: boolean;
+  dispatch: TaskDispatchV1;
+  outbox: TaskOutboxRecord;
+}>;
+
+export type PostgresTaskRepositoryOptions = Readonly<{
+  dispatchSourceInstanceId?: string;
+}>;
+
+export type TaskOutboxClaimOptions = Readonly<{
+  claimerId: string;
+  limit?: number;
+  leaseDurationMs?: number;
+}>;
+
+export type TaskOutboxAckOptions = Readonly<{
+  messageId: string;
+  claimerId: string;
+}>;
+
+export type TaskOutboxRetryOptions = Readonly<{
+  messageId: string;
+  claimerId: string;
+  error: string;
+  delayMs?: number;
+}>;
+
+export type TaskCancellationRequestInput = Readonly<{
+  operationId: string;
+  taskId: string;
+  actorId: string;
+  reasonCode: string;
+}>;
+
+export type TaskCancellationAcknowledgeInput = Readonly<{
+  taskId: string;
+  leaseOwner: string;
+}>;
+
 export const MAX_EXPIRED_LEASE_BATCH_SIZE = 100;
 
 const TRANSACTION_LOCK_TIMEOUT_SQL =
   "SET LOCAL lock_timeout = '3000ms'";
 const TRANSACTION_STATEMENT_TIMEOUT_SQL =
   "SET LOCAL statement_timeout = '10000ms'";
+
+const DEFAULT_DISPATCH_SOURCE_INSTANCE_ID = "coordinator-main";
+export const MAX_TASK_OUTBOX_BATCH_SIZE = 100;
+const DEFAULT_OUTBOX_CLAIM_MS = 30_000;
+const MAX_OUTBOX_CLAIM_MS = 5 * 60_000;
+const DEFAULT_OUTBOX_RETRY_MS = 1_000;
+const MAX_OUTBOX_RETRY_MS = 5 * 60_000;
+const OUTBOX_DELIVERY_RECHECK_MS = 30_000;
 
 type OperationCommand = Readonly<{
   operationId: string;
@@ -82,6 +143,14 @@ function canonicalCreateCommand(command: TaskCreateCommand): TaskCreateCommand {
   };
 }
 
+function canonicalSubmitCommand(command: TaskSubmitCommand): TaskSubmitCommand {
+  const { dispatchBotId, ...createCommand } = command;
+  return {
+    ...canonicalCreateCommand(taskCreateCommandSchema.parse(createCommand)),
+    dispatchBotId,
+  };
+}
+
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize);
   if (value !== null && typeof value === "object") {
@@ -95,10 +164,13 @@ function canonicalize(value: unknown): unknown {
 }
 
 export function taskOperationFingerprint(value: unknown): string {
+  const parsedSubmitCommand = taskSubmitCommandSchema.safeParse(value);
   const parsedCreateCommand = taskCreateCommandSchema.safeParse(value);
-  const fingerprintValue = parsedCreateCommand.success
-    ? canonicalCreateCommand(parsedCreateCommand.data)
-    : value;
+  const fingerprintValue = parsedSubmitCommand.success
+    ? canonicalSubmitCommand(parsedSubmitCommand.data)
+    : parsedCreateCommand.success
+      ? canonicalCreateCommand(parsedCreateCommand.data)
+      : value;
   return createHash("sha256")
     .update(JSON.stringify(canonicalize(fingerprintValue)), "utf8")
     .digest("hex");
@@ -175,6 +247,7 @@ function mapTaskRow(
     description: row.description,
     priority: integer(row.priority),
     status: row.status,
+    dispatchBotId: nullableText(row.dispatch_bot_id),
     assignedBotId: nullableText(row.assigned_bot_id),
     requiredSkills: row.required_skills,
     requiredItems: row.required_items,
@@ -204,6 +277,7 @@ function createdTask(
   command: TaskCreateCommand,
   requestFingerprint: string,
   timestamp: string,
+  dispatchBotId: string | null = null,
 ): TaskRecord {
   return taskRecordSchema.parse({
     schemaVersion: "1.0",
@@ -218,6 +292,7 @@ function createdTask(
     description: command.description,
     priority: command.priority,
     status: "queued",
+    dispatchBotId,
     assignedBotId: null,
     requiredSkills: command.requiredSkills,
     requiredItems: command.requiredItems,
@@ -243,15 +318,135 @@ function createdTask(
   });
 }
 
+function mapOutboxRow(row: SqlRow): TaskOutboxRecord {
+  return taskOutboxRecordSchema.parse({
+    messageId: row.message_id,
+    taskId: row.task_id,
+    expectedRevision: integer(row.expected_revision),
+    type: row.type,
+    payload: row.payload,
+    status: row.status,
+    attemptCount: integer(row.attempt_count),
+    availableAt: iso(row.available_at),
+    claimedBy: nullableText(row.claimed_by),
+    claimExpiresAt: iso(row.claim_expires_at),
+    lastError: nullableText(row.last_error),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+    deliveredAt: iso(row.delivered_at),
+  });
+}
+
+function mapCancellationRequestRow(row: SqlRow): TaskCancellationRequest {
+  return taskCancellationRequestSchema.parse({
+    requestId: row.request_id,
+    operationId: row.operation_id,
+    taskId: row.task_id,
+    operationFingerprint: row.operation_fingerprint,
+    actorId: row.actor_id,
+    reasonCode: row.reason_code,
+    requestedAt: iso(row.requested_at),
+    acknowledgedAt: iso(row.acknowledged_at),
+    acknowledgedBy: nullableText(row.acknowledged_by),
+  });
+}
+
+function dispatchPayload(
+  task: TaskRecord,
+  sourceInstanceId: string,
+  timestamp: string,
+): TaskDispatchV1 {
+  if (task.dispatchBotId === null) {
+    throw new TaskSystemError(
+      "TASK_PERSISTENCE_FAILED",
+      "A submitted task must have a durable dispatch Bot target.",
+    );
+  }
+  return taskDispatchV1Schema.parse({
+    schemaVersion: "1.0",
+    messageId: randomUUID(),
+    traceId: task.traceId,
+    timestamp,
+    source: {
+      service: "coordinator",
+      instanceId: sourceInstanceId,
+    },
+    taskId: task.taskId,
+    botId: task.dispatchBotId,
+    type: "task.dispatch.v1",
+    payload: {
+      expectedRevision: task.revision,
+      taskType: task.taskType,
+      handlerVersion: task.handlerVersion,
+      executionIdempotent: task.executionIdempotent,
+    },
+  });
+}
+
 export class PostgresTaskRepository {
-  constructor(private readonly pool: PostgresPoolLike) {}
+  private readonly dispatchSourceInstanceId: string;
+
+  constructor(
+    private readonly pool: PostgresPoolLike,
+    options: PostgresTaskRepositoryOptions = {},
+  ) {
+    this.dispatchSourceInstanceId = identifierSchema.parse(
+      options.dispatchSourceInstanceId ?? DEFAULT_DISPATCH_SOURCE_INSTANCE_ID,
+    );
+  }
 
   async createTask(input: unknown): Promise<CreateTaskResult> {
     const command = canonicalCreateCommand(
       taskCreateCommandSchema.parse(input),
     );
-    const requestFingerprint = createRequestFingerprint(command);
-    const operationFingerprint = taskOperationFingerprint(command);
+    return await this.persistTaskCreate(
+      command,
+      null,
+      createRequestFingerprint(command),
+      taskOperationFingerprint(command),
+    );
+  }
+
+  async submitTask(input: unknown): Promise<SubmitTaskResult> {
+    const submitted = canonicalSubmitCommand(taskSubmitCommandSchema.parse(input));
+    const { dispatchBotId, ...createInput } = submitted;
+    const command = canonicalCreateCommand(
+      taskCreateCommandSchema.parse(createInput),
+    );
+    const { operationId: _operationId, actorId: _actorId, ...semantic } =
+      submitted;
+    const requestFingerprint = taskOperationFingerprint(semantic);
+    const operationFingerprint = taskOperationFingerprint(submitted);
+    const result = await this.persistTaskCreate(
+      command,
+      dispatchBotId,
+      requestFingerprint,
+      operationFingerprint,
+    );
+    if (!("outbox" in result)) {
+      throw new TaskSystemError(
+        "TASK_PERSISTENCE_FAILED",
+        "Submitted task did not produce a durable dispatch outbox row.",
+      );
+    }
+    const outbox = result.outbox;
+    return {
+      task: result.task,
+      created: result.created,
+      dispatch: outbox.payload,
+      outbox,
+    };
+  }
+
+  private async persistTaskCreate(
+    command: TaskCreateCommand,
+    dispatchBotId: string | null,
+    requestFingerprint: string,
+    operationFingerprint: string,
+  ): Promise<
+    | CreateTaskResult
+    | (CreateTaskResult & { outbox: TaskOutboxRecord })
+  > {
     const client = await this.pool.connect();
 
     try {
@@ -263,7 +458,18 @@ export class PostgresTaskRepository {
         operationFingerprint,
       );
       if (replay) {
+        const replayOutbox =
+          dispatchBotId === null
+            ? undefined
+            : await this.ensureDispatchOutbox(
+                client,
+                replay,
+                replay.updatedAt,
+              );
         await client.query("COMMIT");
+        if (replayOutbox) {
+          return { task: replay, created: false, outbox: replayOutbox };
+        }
         return { task: replay, created: false };
       }
       const now = await this.databaseNow(client);
@@ -277,22 +483,27 @@ export class PostgresTaskRepository {
           "Task deadline has already expired.",
         );
       }
-      const proposed = createdTask(command, requestFingerprint, timestamp);
+      const proposed = createdTask(
+        command,
+        requestFingerprint,
+        timestamp,
+        dispatchBotId,
+      );
 
       const inserted = await client.query(
         `INSERT INTO studio_tasks (
           task_id, schema_version, idempotency_scope, idempotency_key,
           request_fingerprint, task_type, handler_version,
           execution_idempotent, title, description, priority, status,
-          assigned_bot_id, required_skills, required_items, target,
+          dispatch_bot_id, assigned_bot_id, required_skills, required_items, target,
           parent_task_id, deadline, timeout_ms, retry_count, max_retries,
           lease_owner, lease_expires_at, risk_level, failure_reason, result,
           evidence, trace_id, revision, created_at, updated_at, started_at,
           finished_at
         ) VALUES (
           $1, '1.0', $2, $3, $4, $5, $6, $7, $8, $9, $10, 'queued',
-          NULL, $11::jsonb, $12::jsonb, $13::jsonb, $14, $15, $16, 0, $17,
-          NULL, NULL, $18, NULL, NULL, '[]'::jsonb, $19, 0, $20, $20, NULL,
+          $11, NULL, $12::jsonb, $13::jsonb, $14::jsonb, $15, $16, $17, 0, $18,
+          NULL, NULL, $19, NULL, NULL, '[]'::jsonb, $20, 0, $21, $21, NULL,
           NULL
         )
         ON CONFLICT (idempotency_scope, idempotency_key) DO NOTHING
@@ -308,6 +519,7 @@ export class PostgresTaskRepository {
           command.title,
           command.description,
           command.priority,
+          dispatchBotId,
           JSON.stringify(command.requiredSkills),
           JSON.stringify(command.requiredItems),
           command.target === null ? null : JSON.stringify(command.target),
@@ -382,7 +594,12 @@ export class PostgresTaskRepository {
         task,
         timestamp,
       });
+      let outbox: TaskOutboxRecord | undefined;
+      if (dispatchBotId !== null) {
+        outbox = await this.ensureDispatchOutbox(client, task, timestamp);
+      }
       await client.query("COMMIT");
+      if (outbox) return { task, created: wasCreated, outbox };
       return { task, created: wasCreated };
     } catch (error) {
       await this.rollback(client);
@@ -390,6 +607,94 @@ export class PostgresTaskRepository {
     } finally {
       client.release();
     }
+  }
+
+  private async ensureDispatchOutbox(
+    client: PostgresClientLike,
+    task: TaskRecord,
+    timestamp: string,
+  ): Promise<TaskOutboxRecord> {
+    const existing = await client.query(
+      `SELECT *
+       FROM studio_task_outbox
+       WHERE task_id = $1
+         AND expected_revision = $2
+         AND type = 'task.dispatch.v1'
+       FOR UPDATE`,
+      [task.taskId, task.revision],
+    );
+    const existingRow = existing.rows[0];
+    if (existingRow) {
+      const outbox = mapOutboxRow(existingRow);
+      if (
+        outbox.payload.botId !== task.dispatchBotId ||
+        outbox.payload.payload.taskType !== task.taskType
+      ) {
+        throw new TaskSystemError(
+          "TASK_OPERATION_CONFLICT",
+          "Task dispatch outbox payload conflicts with the task record.",
+        );
+      }
+      return outbox;
+    }
+
+    const payload = dispatchPayload(
+      task,
+      this.dispatchSourceInstanceId,
+      timestamp,
+    );
+    const inserted = await client.query(
+      `INSERT INTO studio_task_outbox (
+        message_id, task_id, expected_revision, type, payload,
+        status, attempt_count, available_at, claimed_by,
+        claim_expires_at, last_error, created_at, updated_at, delivered_at
+      ) VALUES (
+        $1, $2, $3, $4, $5::jsonb, 'pending', 0, $6,
+        NULL, NULL, NULL, $6, $6, NULL
+      )
+      ON CONFLICT (task_id, expected_revision, type) DO NOTHING`,
+      [
+        payload.messageId,
+        payload.taskId,
+        payload.payload.expectedRevision,
+        payload.type,
+        JSON.stringify(payload),
+        timestamp,
+      ],
+    );
+    if (inserted.rowCount !== 1) {
+      const concurrent = await client.query(
+        `SELECT *
+         FROM studio_task_outbox
+         WHERE task_id = $1
+           AND expected_revision = $2
+           AND type = 'task.dispatch.v1'
+         FOR UPDATE`,
+        [task.taskId, task.revision],
+      );
+      const concurrentRow = concurrent.rows[0];
+      if (concurrentRow) return mapOutboxRow(concurrentRow);
+      throw new TaskSystemError(
+        "TASK_PERSISTENCE_FAILED",
+        "Task dispatch outbox row disappeared after insertion.",
+      );
+    }
+    return taskOutboxRecordSchema.parse({
+      messageId: payload.messageId,
+      taskId: payload.taskId,
+      expectedRevision: payload.payload.expectedRevision,
+      type: payload.type,
+      payload,
+      status: "pending",
+      attemptCount: 0,
+      availableAt: timestamp,
+      claimedBy: null,
+      claimExpiresAt: null,
+      lastError: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      deliveredAt: null,
+    });
   }
 
   async getTask(taskId: string): Promise<TaskRecord | null> {
@@ -445,6 +750,340 @@ export class PostgresTaskRepository {
         );
       }
       return tasks;
+    } catch (error) {
+      throw this.persistenceError(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Claims a bounded batch using PostgreSQL row locks.  A delivered entry is
+   * intentionally eligible again while its task is still queued at the same
+   * revision: this lets reconciliation rebuild BullMQ jobs after Redis data
+   * loss without generating a new protocol message.
+   */
+  async claimTaskOutbox(
+    input: TaskOutboxClaimOptions,
+  ): Promise<readonly TaskOutboxRecord[]> {
+    const claimerId = identifierSchema.parse(input.claimerId);
+    const limit = input.limit ?? MAX_TASK_OUTBOX_BATCH_SIZE;
+    const leaseDurationMs = input.leaseDurationMs ?? DEFAULT_OUTBOX_CLAIM_MS;
+    if (
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > MAX_TASK_OUTBOX_BATCH_SIZE
+    ) {
+      throw new RangeError(
+        `Task outbox batch limit must be between 1 and ${MAX_TASK_OUTBOX_BATCH_SIZE}.`,
+      );
+    }
+    if (
+      !Number.isInteger(leaseDurationMs) ||
+      leaseDurationMs < 1_000 ||
+      leaseDurationMs > MAX_OUTBOX_CLAIM_MS
+    ) {
+      throw new RangeError(
+        `Task outbox claim lease must be between 1000 and ${MAX_OUTBOX_CLAIM_MS} milliseconds.`,
+      );
+    }
+    const client = await this.pool.connect();
+    try {
+      await this.beginTransaction(client);
+      const result = await client.query(
+        `WITH candidates AS (
+          SELECT outbox.message_id
+          FROM studio_task_outbox AS outbox
+          JOIN studio_tasks AS task ON task.task_id = outbox.task_id
+          WHERE (
+            outbox.status IN ('pending', 'delivered')
+            OR (
+              outbox.status = 'claimed'
+              AND outbox.claim_expires_at <= clock_timestamp()
+            )
+          )
+            AND outbox.available_at <= clock_timestamp()
+            AND task.status = 'queued'
+            AND task.revision = outbox.expected_revision
+          ORDER BY outbox.available_at ASC, outbox.created_at ASC,
+                   outbox.message_id ASC
+          LIMIT $1
+          FOR UPDATE OF outbox, task SKIP LOCKED
+        )
+        UPDATE studio_task_outbox AS outbox
+        SET status = 'claimed',
+            attempt_count = outbox.attempt_count + 1,
+            claimed_by = $2,
+            claim_expires_at = clock_timestamp() +
+              ($3 * interval '1 millisecond'),
+            updated_at = clock_timestamp()
+        FROM candidates
+        WHERE outbox.message_id = candidates.message_id
+        RETURNING outbox.*`,
+        [limit, claimerId, leaseDurationMs],
+      );
+      const entries = result.rows.map((row) => mapOutboxRow(row));
+      await client.query("COMMIT");
+      return entries;
+    } catch (error) {
+      await this.rollback(client);
+      throw this.persistenceError(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  claimOutbox(input: TaskOutboxClaimOptions): Promise<readonly TaskOutboxRecord[]> {
+    return this.claimTaskOutbox(input);
+  }
+
+  async getTaskOutbox(
+    taskId: string,
+    expectedRevision: number,
+  ): Promise<TaskOutboxRecord | null> {
+    const parsedTaskId = taskCreateCommandSchema.shape.taskId.parse(taskId);
+    if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
+      throw new RangeError("Task outbox revision must be a nonnegative integer.");
+    }
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(
+        `SELECT *
+         FROM studio_task_outbox
+         WHERE task_id = $1
+           AND expected_revision = $2
+           AND type = 'task.dispatch.v1'`,
+        [parsedTaskId, expectedRevision],
+      );
+      const row = result.rows[0];
+      return row ? mapOutboxRow(row) : null;
+    } catch (error) {
+      throw this.persistenceError(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  async markTaskOutboxDelivered(
+    input: TaskOutboxAckOptions,
+  ): Promise<boolean> {
+    const messageId = taskOutboxRecordSchema.shape.messageId.parse(
+      input.messageId,
+    );
+    const claimerId = identifierSchema.parse(input.claimerId);
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(
+        `UPDATE studio_task_outbox
+         SET status = 'delivered',
+             claimed_by = NULL,
+             claim_expires_at = NULL,
+             last_error = NULL,
+             available_at = clock_timestamp() +
+               ($3 * interval '1 millisecond'),
+             delivered_at = clock_timestamp(),
+             updated_at = clock_timestamp()
+         WHERE message_id = $1
+           AND status = 'claimed'
+           AND claimed_by = $2`,
+        [messageId, claimerId, OUTBOX_DELIVERY_RECHECK_MS],
+      );
+      return result.rowCount === 1;
+    } catch (error) {
+      throw this.persistenceError(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  markOutboxDelivered(input: TaskOutboxAckOptions): Promise<boolean> {
+    return this.markTaskOutboxDelivered(input);
+  }
+
+  async retryTaskOutbox(input: TaskOutboxRetryOptions): Promise<boolean> {
+    const messageId = taskOutboxRecordSchema.shape.messageId.parse(
+      input.messageId,
+    );
+    const claimerId = identifierSchema.parse(input.claimerId);
+    const errorMessage = input.error.trim();
+    if (errorMessage.length < 1 || errorMessage.length > 4_000) {
+      throw new RangeError("Task outbox retry error must be 1-4000 characters.");
+    }
+    const delayMs = input.delayMs ?? DEFAULT_OUTBOX_RETRY_MS;
+    if (
+      !Number.isInteger(delayMs) ||
+      delayMs < 0 ||
+      delayMs > MAX_OUTBOX_RETRY_MS
+    ) {
+      throw new RangeError(
+        `Task outbox retry delay must be between 0 and ${MAX_OUTBOX_RETRY_MS} milliseconds.`,
+      );
+    }
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(
+        `UPDATE studio_task_outbox
+         SET status = 'pending',
+             claimed_by = NULL,
+             claim_expires_at = NULL,
+             last_error = $3,
+             available_at = clock_timestamp() +
+               ($4 * interval '1 millisecond'),
+             updated_at = clock_timestamp()
+         WHERE message_id = $1
+           AND status = 'claimed'
+           AND claimed_by = $2`,
+        [messageId, claimerId, errorMessage, delayMs],
+      );
+      return result.rowCount === 1;
+    } catch (error) {
+      throw this.persistenceError(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  retryOutbox(input: TaskOutboxRetryOptions): Promise<boolean> {
+    return this.retryTaskOutbox(input);
+  }
+
+  async requestTaskCancellation(
+    input: TaskCancellationRequestInput,
+  ): Promise<TaskCancellationRequest> {
+    const operationId = taskCancelCommandSchema.shape.operationId.parse(
+      input.operationId,
+    );
+    const taskId = taskCancelCommandSchema.shape.taskId.parse(input.taskId);
+    const actorId = identifierSchema.parse(input.actorId);
+    const reasonCode = taskCancelCommandSchema.shape.reasonCode.parse(
+      input.reasonCode,
+    );
+    const operationFingerprint = taskOperationFingerprint({
+      schemaVersion: "1.0",
+      operationId,
+      taskId,
+      actorId,
+      leaseOwner: null,
+      reasonCode,
+    });
+    const client = await this.pool.connect();
+    try {
+      await this.beginTransaction(client);
+      await this.lockOperation(client, operationId);
+      const operationResult = await client.query(
+        `SELECT *
+         FROM studio_task_cancellation_requests
+         WHERE operation_id = $1
+         FOR UPDATE`,
+        [operationId],
+      );
+      const operationRow = operationResult.rows[0];
+      if (operationRow) {
+        const existing = mapCancellationRequestRow(operationRow);
+        if (
+          existing.operationFingerprint !== operationFingerprint ||
+          existing.taskId !== taskId
+        ) {
+          throw new TaskSystemError(
+            "TASK_OPERATION_CONFLICT",
+            "Cancellation operation ID was reused with different parameters.",
+          );
+        }
+        await client.query("COMMIT");
+        return existing;
+      }
+      const requestedAt = (await this.databaseNow(client)).toISOString();
+      const requestId = randomUUID();
+      await client.query(
+        `INSERT INTO studio_task_cancellation_requests (
+          request_id, operation_id, task_id, operation_fingerprint, actor_id,
+          reason_code, requested_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (task_id) DO NOTHING`,
+        [
+          requestId,
+          operationId,
+          taskId,
+          operationFingerprint,
+          actorId,
+          reasonCode,
+          requestedAt,
+        ],
+      );
+      const stored = await client.query(
+        `SELECT *
+         FROM studio_task_cancellation_requests
+         WHERE task_id = $1
+         FOR UPDATE`,
+        [taskId],
+      );
+      const row = stored.rows[0];
+      if (!row) {
+        throw new TaskSystemError(
+          "TASK_PERSISTENCE_FAILED",
+          "Cancellation request disappeared after insertion.",
+        );
+      }
+      const request = mapCancellationRequestRow(row);
+      if (
+        request.operationId !== operationId ||
+        request.operationFingerprint !== operationFingerprint
+      ) {
+        throw new TaskSystemError(
+          "TASK_OPERATION_CONFLICT",
+          "Task already has a cancellation request for a different operation.",
+        );
+      }
+      await client.query("COMMIT");
+      return request;
+    } catch (error) {
+      await this.rollback(client);
+      throw this.persistenceError(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  async acknowledgeTaskCancellation(
+    input: TaskCancellationAcknowledgeInput,
+  ): Promise<boolean> {
+    const taskId = taskCancelCommandSchema.shape.taskId.parse(input.taskId);
+    const leaseOwner = identifierSchema.parse(input.leaseOwner);
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(
+        `UPDATE studio_task_cancellation_requests AS request
+         SET acknowledged_at = clock_timestamp(), acknowledged_by = $2
+         FROM studio_tasks AS task
+         WHERE request.task_id = $1
+           AND request.acknowledged_at IS NULL
+           AND task.task_id = request.task_id
+           AND task.status IN ('assigned', 'running')
+           AND task.lease_owner = $2`,
+        [taskId, leaseOwner],
+      );
+      return result.rowCount === 1;
+    } catch (error) {
+      throw this.persistenceError(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  async getTaskCancellationRequest(
+    taskId: string,
+  ): Promise<TaskCancellationRequest | null> {
+    const parsedTaskId = taskCancelCommandSchema.shape.taskId.parse(taskId);
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(
+        `SELECT *
+         FROM studio_task_cancellation_requests
+         WHERE task_id = $1`,
+        [parsedTaskId],
+      );
+      const row = result.rows[0];
+      return row ? mapCancellationRequestRow(row) : null;
     } catch (error) {
       throw this.persistenceError(error);
     } finally {
