@@ -12,7 +12,7 @@
 1. `docs/anarchy-combat-design-2026-08-08.pdf`（或同名 .html）——**作战体系设计 v2，这是你的主蓝图**：六类角色、三层 AI 调度、正式服现实约束、面向作战的 MVP 路线（M0~M6）。
 2. `docs/architecture-review-2026-08-08.pdf`——v1 架构评审，其中协议/fail-closed/验收文化/Rust 触发原则/千行文件与 secure-link 重构点继续有效。
 3. `AGENTS.md`、`ROADMAP.md`、`CHANGELOG.md`——项目自身规则与进度事实源。
-4. `docs/combat-tactics-reference.md`——**全角色战术清单**（§0~§8 战斗反射+侦察，到 M3/M2 精读；§9~§12 突袭/防御/建造与生产/后勤，M2/M4 精读）。纯机制描述，非代码；战斗类实现须遵守 §0.6（只学打法、禁抄 GPL、先测时序）。
+4. `docs/combat-tactics-reference.md`——**全角色战术清单**（§0~§8 战斗反射+侦察，到 M3/M2 精读；§9~§12 突袭/防御/建造与生产/后勤，M2/M4 精读；§13 世界记忆服务器隔离硬规则；**§14 现成 Mineflayer 插件对照表——写采集/换甲/进食/工具类技能前先查表，MIT 插件直接依赖不重造轮子，GPL 只可参考**）。纯机制描述，非代码；战斗类实现须遵守 §0.6（只学打法、禁抄 GPL、先测时序）。
 5. `git log --oneline -10`——提交 `40b406e` 是未验证的 P1.3.2 WIP（outbox/reconciler），离线测试通过但真实基础设施集成测试未跑。
 
 ## 最高设计原则（违反即否决）
