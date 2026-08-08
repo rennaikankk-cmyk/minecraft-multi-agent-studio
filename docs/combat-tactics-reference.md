@@ -61,7 +61,7 @@
 - **换装时机**：避开正在承受连击的瞬间换（换装有短暂空档）；优先在拉开距离/无水晶威胁的间隙换。
 - **优先级**：低于 AutoTotem，高于主动进攻。
 
-**本项目对应**：技能 `manage.armor`。
+**本项目对应**：战斗时序换甲技能 `manage.armor`（M3，<50ms 反射级，避连击空档换装，须待 §0 时序探针通过后自研）。与已落地的 `inventory.equip-armor@1.0.0`（M2、非战斗、"每槽选最优"日常换甲）是**两个不同技能**：后者管"平时穿最好的"，前者管"打架中耐久崩了瞬间补"。
 
 ---
 
@@ -273,10 +273,10 @@
 | 插件 | 许可 | 功能 | 对应本项目技能 | 采用建议 |
 |---|---|---|---|---|
 | `mineflayer-pathfinder` | MIT | A* 寻路、复合目标 | `movement.goto`（已接入） | **已锁定 2.4.5**，继续用 |
-| `mineflayer-collectblock` | MIT | 寻路+选工具+挖掘+捡拾一体 | `collect.block`（采集类） | **直接用**，M2 建造与生产角色的采集底座 |
-| `mineflayer-tool` | MIT | 按任务自动选最优工具/武器 | `manage.tool` | **直接用**，collectblock 的依赖 |
+| `mineflayer-collectblock` | MIT | 寻路+选工具+挖掘+捡拾一体 | `collect.block@1.0.0`（**已接入**） | **已锁定 1.6.0**（SECURITY.md），技能层强制禁自动倒箱、与寻路互斥 |
+| `mineflayer-tool` | MIT | 按任务自动选最优工具/武器 | collectblock 依赖（随其加载） | **已锁定 1.2.0**，暂不单独暴露技能 |
 | `mineflayer-auto-eat` | MIT | 自动进食（注意：装无前缀版，`@nxg-org` 同名版是 GPL） | L0 安全层进食动作补强 | **可用**，但要与 P1.1 已有的确定性进食逻辑整合而非并存两套 |
-| `mineflayer-armor-manager` | MIT | 自动穿戴最优护甲 | `manage.armor` 的基础版 | **可用作 M2 生产角色的日常换甲**；战斗中换甲时序仍自研（§3） |
+| `mineflayer-armor-manager` | MIT | 自动穿戴最优护甲 | `inventory.equip-armor@1.0.0`（**已实现**，自研 TS） | 已作为**首个二档参考技能落地**：机制参考、代码自研；战斗中换甲时序仍自研（§3） |
 | `mineflayer-statemachine` | MIT | 行为状态机框架 | 冷启动/角色行为编排的备选框架 | **评估后可用**——若其模型与本项目技能框架冲突则弃用，不强融 |
 | `mineflayer-pvp` | MIT | 基础近战 PVP（依赖 pathfinder） | `combat.melee` 的参考底座 | **可用作隔离测试陪练**；正式近战反射按 §5 自研 |
 | `minecrafthawkeye` | MIT | 弓箭弹道预测自动瞄准 | `combat.bow`（远程，后补） | 低优先级，需要时直接用 |
@@ -288,7 +288,9 @@
 |---|---|---|
 | `@nxg-org/mineflayer-auto-crystal` | 水晶自动放置/引爆 | 放置点评分、break-place 循环节奏、与服务器 tick 对齐——§2 CrystalAura 自研的最直接参考（Mineflayer 语境比 Meteor 的 Java 更贴近） |
 | `@nxg-org/mineflayer-custom-pvp` | 剑技（暴击/走位/盾）+ 弓 | 暴击时机判定、CPS 控制、smooth rotation 类人化参数——§5/§7 参考 |
-| `@nxg-org/mineflayer-auto-armor` / `auto-eat` / `util-plugin` | 换甲/进食/工具库 | 时序处理细节；功能上第一档 MIT 版已覆盖，无必要依赖 |
+| `@nxg-org/mineflayer-auto-armor` / `auto-eat` / `util-plugin` | 换甲/进食/工具库 | 时序处理细节；换甲机制已被 `inventory.equip-armor@1.0.0` 自研落地（"每槽选最优、平手不换"，代码自研未拷贝 GPL），进食/工具第一档 MIT 版已覆盖 |
+
+> **首个二档技能落地记录**：`inventory.equip-armor@1.0.0` 是第一个"参考 GPL 机制、代码全自研"的技能，非战斗、确定性、可离线单测，作为整条能力接线（skill→capability→mineflayer op）与**日志可判定性**的首个验证目标。水晶/剑技等时序敏感项须在 §0 <50ms 探针通过后再依此路径推进。服务器验证方法见 `docs/skill-verification-runbook.md`。
 
 > **警惕同名坑**：`mineflayer-auto-eat`（MIT）与 `@nxg-org/mineflayer-auto-eat`(GPL) 是两个包。引入依赖时必须核对 npm `license` 字段 + LICENSE 文件，不能只看包名。
 

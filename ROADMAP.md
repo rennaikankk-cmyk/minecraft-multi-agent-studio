@@ -244,6 +244,16 @@
 ### P1.5 生产技能
 
 - 采集、合成、冶炼、箱子、物流、农业、建造和巡逻，逐项通过场景测试。
+- [x] `inventory.equip-armor@1.0.0`——首个二档（GPL 参考、代码自研）技能：每槽选最优护甲、平手不换；离线单测 + 遥测日志可判定（2026-08-08）。
+- [x] `collect.block@1.0.0`——MIT `mineflayer-collectblock` 1.6.0 + `mineflayer-tool` 1.2.0 供应链锁定接入；禁自动倒箱、与寻路互斥（2026-08-08）。
+- [x] `craft.item@1.0.0`——自研（原生 recipesFor+craft），2x2/3x3，craftedCount 读回不伪造（2026-08-08）。
+- [x] `world.place-block@1.0.0`——自研（原生 placeBlock），一次一块、放置后读回校验（2026-08-08）。
+- [x] `container.transfer@1.0.0`——自研（openContainer+deposit/withdraw），容器白名单、movedCount 读回（2026-08-08）。
+- [ ] `smelt.item`（熔炉冶炼）——铁锭必经之路；原生 `openFurnace` 可做，需处理燃料管理与冶炼进度异步等待。**下一个优先**：补齐"石器→铁器"档位跃迁的最后缺口。
+- [ ] `interact.sleep`（床/重生点）——防夜怪+锚定重生，原生 API 简单。
+- [ ] 评估 `mineflayer-statemachine`（MIT）作为冷启动 8 步协议的编排框架——若与现有技能框架冲突则弃用（§14 约定）。
+- [ ] 农业（种植/收割）、冶炼批量化、巡逻——待上面底座在隔离服过场景测试后推进。
+- [ ] 隔离服场景测试：6 个已注册技能按 `docs/skill-verification-runbook.md` 逐个跑通并留档日志。
 
 ### P1.6 基础设施
 

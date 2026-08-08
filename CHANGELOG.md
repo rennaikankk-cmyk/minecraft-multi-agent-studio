@@ -6,6 +6,17 @@
 
 ### 新增
 
+- 新增 `inventory.equip-armor@1.0.0`——首个"参考 GPL 机制、代码全自研"技能（每槽选最优护甲、平手不换）；决策为可离线单测的纯函数，Runtime 只提供 `armor.snapshot`/`armor.equip` 原子能力，client 硬护栏拒绝非该槽护甲与背包没有的护甲。
+- 新增生存链四技能：`collect.block@1.0.0`（MIT `mineflayer-collectblock` 1.6.0 + `mineflayer-tool` 1.2.0 供应链锁定接入，禁自动倒箱、与寻路互斥）、`craft.item@1.0.0`（自研，原生 recipesFor+craft，2x2/3x3）、`world.place-block@1.0.0`（自研，一次一块、放置后读回校验）、`container.transfer@1.0.0`（自研，openContainer+deposit/withdraw，容器白名单仅箱子/木桶/潜影盒）。裸装冷启动第一循环（走→撸木→合成→放置→撸石→穿甲→入库）技能层闭环。
+- 技能结果日志 `bot_runtime_skill_result` 新增 `durationMs` 与白名单标量遥测摘要（`craftedCount`/`movedCount`/`itemsCollected` 等 10 键），单行日志即可判定技能在隔离服上可不可用；新增 `docs/skill-verification-runbook.md`（grep 起手式 + 失败签名表）。
+- 所有产量类遥测（`craftedCount`/`movedCount`/`itemsCollected`）为操作后读回的实际值，部分成功如实上报；放置后读不回方块报 `PLACE_NOT_CONFIRMED`，可捕捉反作弊回滚。
+
+### 安全
+
+- 供应链新增 `mineflayer-collectblock` 1.6.0 与 `mineflayer-tool` 1.2.0（均 MIT，官方 npm Registry，精确版本+完整性哈希记入 SECURITY.md）；插件不直接暴露给 AI 或任务层，仅经技能接口包装。
+
+### 新增（较早）
+
 - 新增严格 Control Link v1 协议、Coordinator 回环服务端和 Control API 客户端，通过双向 HMAC 认证传输原子 Bot 状态快照、有序增量和固定优雅停止 RPC。
 - Control API 生产入口改为在 Control Link 首个完整快照后才启动；运行中断线会原子清空镜像、关闭 Bot 状态流，并让列表、详情和停止返回 `503 CONTROL_UNAVAILABLE`。
 - 新增 Dashboard → Control API → Coordinator → Runtime 四进程服务级验收。2026-08-07 由两位执行者独立各运行一次均退出码 0，覆盖 `空 → online → stop completed → offline`、固定 `traceId`、单次关闭、凭据扫描和无残留；使用测试专用 Runtime fixture，未连接 Minecraft，也不是浏览器 E2E。

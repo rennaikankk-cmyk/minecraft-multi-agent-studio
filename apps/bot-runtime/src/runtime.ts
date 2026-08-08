@@ -31,7 +31,12 @@ import {
   type L0SafetyDecision,
 } from "@minecraft-studio/safety";
 import {
+  collectBlockSkill,
+  containerTransferSkill,
+  craftItemSkill,
+  equipArmorSkill,
   movementGotoSkill,
+  placeBlockSkill,
   SkillExecutor,
   SkillFault,
   SkillRegistry,
@@ -84,6 +89,46 @@ export class RuntimeControlError extends Error {
   }
 }
 
+/**
+ * Build a compact, log-safe digest of a skill result so a single log line makes
+ * a server verification run judgeable. We surface only bounded scalar summary
+ * fields that skills expose on their validated output (counts, scores, latency
+ * signals) — never raw world state, inventory contents, or credentials. Unknown
+ * shapes degrade to `null` rather than dumping arbitrary output.
+ */
+function skillResultTelemetryDigest(
+  result: SkillExecutionResultV1,
+): Readonly<Record<string, number>> | null {
+  if (result.payload.outcome !== "completed") return null;
+  const output = result.payload.output;
+  if (typeof output !== "object" || output === null || Array.isArray(output)) {
+    return null;
+  }
+  const record = output as Record<string, unknown>;
+  // Allow-list of scalar summary keys skills may publish for verifiability.
+  const summaryKeys = [
+    "changedCount",
+    "capabilityCallCount",
+    "totalScoreBefore",
+    "totalScoreAfter",
+    "distanceToTarget",
+    "targetsFound",
+    "itemsCollected",
+    "requestedCount",
+    "craftedCount",
+    "movedCount",
+  ] as const;
+  const digest: Record<string, number> = {};
+  for (const key of summaryKeys) {
+    const value = record[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      digest[key] = value;
+    }
+  }
+  return Object.keys(digest).length > 0 ? digest : null;
+}
+
+
 export class SingleBotRuntime {
   private readonly runtimeInstanceId: string;
   private readonly metrics: MetricRecorder;
@@ -134,6 +179,11 @@ export class SingleBotRuntime {
     const skillRegistry = dependencies.skillRegistry ?? new SkillRegistry();
     if (!dependencies.skillRegistry) {
       skillRegistry.register(movementGotoSkill);
+      skillRegistry.register(equipArmorSkill);
+      skillRegistry.register(collectBlockSkill);
+      skillRegistry.register(craftItemSkill);
+      skillRegistry.register(placeBlockSkill);
+      skillRegistry.register(containerTransferSkill);
     }
     this.skillExecutor = new SkillExecutor(skillRegistry, {
       runtimeInstanceId: this.runtimeInstanceId,
@@ -252,12 +302,14 @@ export class SingleBotRuntime {
     this.activeSkillControllers.add(controller);
 
     try {
+      const startedAtMs = this.now().getTime();
       const result = await this.skillExecutor.execute(
         input,
         authorization,
         this.skillState(),
         controller.signal,
       );
+      const durationMs = Math.max(0, this.now().getTime() - startedAtMs);
       this.metrics.increment("bot_skill_results_total", {
         bot_id: this.profile.botId,
         outcome: result.payload.outcome,
@@ -274,6 +326,11 @@ export class SingleBotRuntime {
             skillVersion: result.payload.skillVersion,
             outcome: result.payload.outcome,
             attempts: result.payload.attempts,
+            durationMs,
+            // A compact, non-sensitive digest of the validated skill output so
+            // a single log line reveals whether a verification run actually did
+            // useful work. Never contains credentials or raw world state.
+            telemetry: skillResultTelemetryDigest(result),
             ...("errorCode" in result.payload
               ? { errorCode: result.payload.errorCode }
               : {}),
