@@ -704,6 +704,68 @@ describe("TaskOutboxReconciler", () => {
     expect(repository.entries.get(second.messageId)?.attemptCount).toBe(0);
   });
 
+  it("re-drives a completed BullMQ job instead of acknowledging an orphaned queued task", async () => {
+    // The durable task is still 'queued' (the claim query only offers queued
+    // tasks), yet a stale job sits in the terminal 'completed' state — e.g. the
+    // worker finished but the DB status write was lost. Acknowledging delivery
+    // here would fabricate success and orphan a task with no runnable job.
+    const repository = new FakeOutboxRepository();
+    const queue = new FakeQueue();
+    const entry = outbox(TASK_A, 0, "88888888-8888-4888-8888-888888888888");
+    repository.entries.set(entry.messageId, entry);
+    queue.jobs.set(`${TASK_A}:0`, { getState: async () => "completed" });
+
+    await expect(reconciler(repository, queue).reconcileOnce()).resolves.toEqual({
+      claimed: 1,
+      enqueued: 1,
+      skipped: 0,
+      failed: 0,
+    });
+    // The terminal job is removed and a fresh dispatch is re-enqueued.
+    expect(queue.removed).toEqual([{ taskId: TASK_A, revision: 0 }]);
+    expect(queue.enqueued).toEqual([entry.payload]);
+    expect(repository.entries.get(entry.messageId)?.status).toBe("delivered");
+  });
+
+  it("treats an unrecognized BullMQ job state as not-live and re-drives it", async () => {
+    // Fail-closed: an unknown state must not be assumed runnable.
+    const repository = new FakeOutboxRepository();
+    const queue = new FakeQueue();
+    const entry = outbox(TASK_A, 0, "99999999-9999-4999-8999-999999999999");
+    repository.entries.set(entry.messageId, entry);
+    queue.jobs.set(`${TASK_A}:0`, { getState: async () => "unknown" });
+
+    await expect(reconciler(repository, queue).reconcileOnce()).resolves.toEqual({
+      claimed: 1,
+      enqueued: 1,
+      skipped: 0,
+      failed: 0,
+    });
+    expect(queue.removed).toEqual([{ taskId: TASK_A, revision: 0 }]);
+    expect(queue.enqueued).toEqual([entry.payload]);
+  });
+
+  it("keeps a live (active) BullMQ job without removing it", async () => {
+    // A genuinely live job must be left in place and the outbox acknowledged;
+    // removing/re-driving it would be needless churn on a runnable dispatch.
+    const repository = new FakeOutboxRepository();
+    const queue = new FakeQueue();
+    const entry = outbox(TASK_A, 0, "a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1");
+    repository.entries.set(entry.messageId, entry);
+    queue.jobs.set(`${TASK_A}:0`, { getState: async () => "active" });
+
+    await expect(reconciler(repository, queue).reconcileOnce()).resolves.toEqual({
+      claimed: 1,
+      enqueued: 1,
+      skipped: 0,
+      failed: 0,
+    });
+    // Live job left in place (no removal); enqueue no-ops on the existing job.
+    expect(queue.removed).toEqual([]);
+    expect(queue.enqueued).toEqual([]);
+    expect(repository.entries.get(entry.messageId)?.status).toBe("delivered");
+  });
+
   it("reclaims an expired claim without consuming the failure budget", async () => {
     const repository = new FakeOutboxRepository();
     const entry = {

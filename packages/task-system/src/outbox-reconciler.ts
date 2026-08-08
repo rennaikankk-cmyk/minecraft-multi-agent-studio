@@ -12,6 +12,19 @@ const DEFAULT_RETRY_BASE_MS = 250;
 const DEFAULT_RETRY_MAX_MS = 60_000;
 const MAX_RETRY_DELAY_MS = 5 * 60_000;
 
+// BullMQ job states that mean a dispatch is still runnable for this exact task
+// revision. Only these are safe to acknowledge as delivered without re-driving.
+// Terminal states (completed, failed) and any unrecognized state must trigger a
+// fresh re-enqueue so the still-queued durable task never ends up with no
+// runnable job (fail-closed: unknown state is treated as not-live).
+const LIVE_DISPATCH_JOB_STATES: ReadonlySet<string> = new Set([
+  "waiting",
+  "waiting-children",
+  "prioritized",
+  "active",
+  "delayed",
+]);
+
 export type TaskDispatchQueueLike = Readonly<{
   enqueue(input: unknown): Promise<unknown>;
   getJob(
@@ -205,14 +218,18 @@ export class TaskOutboxReconciler {
     );
     if (existing) {
       const state = await existing.getState();
-      if (state === "failed") {
-        await this.options.queue.remove(entry.taskId, entry.expectedRevision);
-      } else {
-        // Let the queue adapter compare the existing job payload before
-        // acknowledging the durable outbox record.
+      if (LIVE_DISPATCH_JOB_STATES.has(state)) {
+        // A live job is already runnable for this exact task revision. Let the
+        // queue adapter compare the existing payload before we acknowledge the
+        // durable outbox record.
         await this.options.queue.enqueue(entry.payload);
         return;
       }
+      // Any terminal or unrecognized state (completed, failed, unknown, ...)
+      // must not be acknowledged as delivered: the durable task is still
+      // queued, so a completed/failed job leaves no runnable dispatch. Remove
+      // the stale job and re-drive a fresh one (fail-closed on unknown states).
+      await this.options.queue.remove(entry.taskId, entry.expectedRevision);
     }
     await this.options.queue.enqueue(entry.payload);
   }
