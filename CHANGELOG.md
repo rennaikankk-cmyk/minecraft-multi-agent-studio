@@ -19,6 +19,8 @@
 - 新增 PostgreSQL 租约一致性迁移、事务级操作 ID 串行化、数据库权威时钟和有界过期租约查询。
 - 新增隔离 PostgreSQL/Redis 真实集成测试及 GitHub Actions 工作流，覆盖迁移、只追加约束、并发重放/领取、队列去重、成功、取消、超时和幂等恢复。
 - 新增不合作处理器超时、截止时间跨界、精确版本恢复和 UTC 截止时间规范化边界。
+- 新增任务创建、历史与派发 outbox 的同事务提交、PostgreSQL→BullMQ 有界对账，以及 Redis job 丢失后的同一版本化消息重建。
+- 新增严格 `TaskDispatchRetryCommand` 和原子重派操作：仅允许未过期的 `blocked` 任务生成新修订与新 outbox，相同操作精确重放，任何 outbox 写入失败回滚任务与历史。
 
 ### 安全
 
@@ -38,6 +40,8 @@
 - 本地并发取消采用首个请求优先，相同操作可重放，不同操作不会覆盖已有取消意图。
 - 隔离测试只接受回环服务、专用 PostgreSQL Schema 和独立 Redis 前缀，不使用 `FLUSHALL`，不连接 Minecraft。
 - CI 服务镜像和官方 Action 均固定版本及不可变摘要/提交；迁移执行前校验项目记录的 SHA-256。
+- 新增前向 `0004` outbox 硬化迁移；旧坏行会在升级事务内封存，并将同修订任务按 PostgreSQL 时钟转为 `blocked` 或 `expired` 后追加历史，不改写已发布的 `0003`。
+- Outbox 对缺失身份、未知协议结构、Bot 目标和任务执行合同不匹配采用 fail-closed；连续投递失败有界封存，成功确认清零失败预算，显式重派使用新修订和新消息，不伪造成功。
 
 ### 依赖
 
@@ -56,7 +60,7 @@
 - Control Link 当前只支持同机回环，状态、停止幂等缓存和审计仍在内存中；跨主机 TLS、密钥轮换、用户登录和持久化停止审计尚未完成。
 - 本机未检测到 PostgreSQL、Redis 或 Docker；2026-07-28 的 GitHub Actions 运行 `30315095898` 已通过真实临时 PostgreSQL/Redis 集成门，该结果不代表生产服务在线。
 - 当前提供可嵌入 Worker 库，尚未提供独立生产 Worker 应用、Coordinator 任务调度、任务 Control API 或 Dashboard 任务看板。
-- 当前没有事务 outbox、自动 PostgreSQL→BullMQ 对账重投或跨 Worker 取消；数据库提交和入队不是原子事务。
+- 当前已实现事务 outbox、PostgreSQL→BullMQ 对账和显式失败重派，但本机没有 PostgreSQL/Redis；新增升级、回滚、并发对账、异常封存和恢复场景已写入真实基础设施门禁，尚待 CI 验证。自动过期租约恢复、持久取消消费和跨 Worker 取消仍未完成。
 - 任务处理器是受信任的进程内代码，并非强隔离沙盒；不合作响应 `AbortSignal` 的代码在失去租约后仍可能继续运行自身副作用，硬终止需后续独立进程隔离。
 - 没有注册生产任务处理器，本模块不会执行模型输出，也不会连接 Minecraft。
 

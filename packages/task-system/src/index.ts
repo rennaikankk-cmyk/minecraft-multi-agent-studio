@@ -6,6 +6,7 @@ export {
   taskCancelCommandSchema,
   taskCancellationRequestSchema,
   taskCreateCommandSchema,
+  taskDispatchRetryCommandSchema,
   taskEvidenceSchema,
   taskLeaseAcquireCommandSchema,
   taskLeaseExpireCommandSchema,
@@ -25,6 +26,7 @@ export {
   type TaskCancellationRequest,
   type TaskCreateCommand,
   type TaskDispatch,
+  type TaskDispatchRetryCommand,
   type TaskLeaseAcquireCommand,
   type TaskLeaseExpireCommand,
   type TaskLeaseReleaseCommand,
@@ -38,6 +40,7 @@ export {
 } from "./model.js";
 export {
   MAX_EXPIRED_LEASE_BATCH_SIZE,
+  MAX_TASK_OUTBOX_ATTEMPTS,
   MAX_TASK_OUTBOX_BATCH_SIZE,
   PostgresTaskRepository,
   taskOperationFingerprint,
@@ -47,11 +50,13 @@ export {
   type PostgresPoolLike,
   type SqlQueryResult,
   type SubmitTaskResult,
+  type RetryTaskDispatchResult,
   type TaskCancellationAcknowledgeInput,
   type TaskCancellationRequestInput,
   type TaskOutboxAckOptions,
   type TaskOutboxClaimOptions,
   type TaskOutboxRetryOptions,
+  type TaskOutboxFailureRecord,
 } from "./postgres-repository.js";
 export {
   TaskOutboxReconciler,

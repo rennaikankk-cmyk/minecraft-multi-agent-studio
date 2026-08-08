@@ -1,11 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import type { TaskOutboxRecord } from "../src/model.js";
+import {
+  taskDispatchRetryCommandSchema,
+  taskOutboxRecordSchema,
+  type TaskOutboxRecord,
+} from "../src/model.js";
 import {
   TaskOutboxReconciler,
   type TaskOutboxRepositoryLike,
 } from "../src/outbox-reconciler.js";
 import {
+  MAX_TASK_OUTBOX_ATTEMPTS,
   PostgresTaskRepository,
   type PostgresClientLike,
   type PostgresPoolLike,
@@ -40,6 +45,15 @@ const submitCommand = {
   traceId: "trace-task-001",
   actorId: "coordinator-agent",
   dispatchBotId: "worker-01",
+};
+
+const retryDispatchCommand = {
+  schemaVersion: "1.0" as const,
+  operationId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  taskId: TASK_A,
+  expectedRevision: 1,
+  actorId: "coordinator-agent",
+  reasonCode: "TASK_DISPATCH_RETRY_REQUESTED",
 };
 
 function outbox(
@@ -93,7 +107,12 @@ class FakeOutboxRepository implements TaskOutboxRepositoryLike {
     for (const [messageId, entry] of this.entries) {
       if (claimed.length >= (input.limit ?? 100)) break;
       if (
-        entry.status === "claimed" ||
+        !(
+          entry.status === "pending" ||
+          entry.status === "delivered" ||
+          (entry.status === "claimed" &&
+            Date.parse(entry.claimExpiresAt ?? "") <= this.now.getTime())
+        ) ||
         Date.parse(entry.availableAt) > this.now.getTime()
       ) {
         continue;
@@ -101,7 +120,6 @@ class FakeOutboxRepository implements TaskOutboxRepositoryLike {
       const next: TaskOutboxRecord = {
         ...entry,
         status: "claimed",
-        attemptCount: entry.attemptCount + 1,
         claimedBy: input.claimerId,
         claimExpiresAt: new Date(
           this.now.getTime() + (input.leaseDurationMs ?? 30_000),
@@ -125,9 +143,11 @@ class FakeOutboxRepository implements TaskOutboxRepositoryLike {
     this.entries.set(input.messageId, {
       ...entry,
       status: "delivered",
+      attemptCount: 0,
       claimedBy: null,
       claimExpiresAt: null,
       lastError: null,
+      availableAt: new Date(this.now.getTime() + 30_000).toISOString(),
       deliveredAt: this.now.toISOString(),
       updatedAt: this.now.toISOString(),
     });
@@ -144,15 +164,25 @@ class FakeOutboxRepository implements TaskOutboxRepositoryLike {
     if (!entry || entry.status !== "claimed" || entry.claimedBy !== input.claimerId) {
       return false;
     }
+    const attemptCount = Math.min(
+      entry.attemptCount + 1,
+      MAX_TASK_OUTBOX_ATTEMPTS,
+    );
+    const status =
+      attemptCount >= MAX_TASK_OUTBOX_ATTEMPTS ? "failed" : "pending";
     this.entries.set(input.messageId, {
       ...entry,
-      status: "pending",
+      status,
+      attemptCount,
       claimedBy: null,
       claimExpiresAt: null,
       lastError: input.error,
-      availableAt: new Date(
-        this.now.getTime() + (input.delayMs ?? 0),
-      ).toISOString(),
+      availableAt:
+        status === "failed"
+          ? this.now.toISOString()
+          : new Date(
+              this.now.getTime() + (input.delayMs ?? 0),
+            ).toISOString(),
       updatedAt: this.now.toISOString(),
     });
     return true;
@@ -292,6 +322,279 @@ class RecordingSubmitPool implements PostgresPoolLike {
   }
 }
 
+function recordingTaskRow(
+  overrides: Readonly<Record<string, unknown>> = {},
+): Record<string, unknown> {
+  return {
+    task_id: TASK_A,
+    schema_version: "1.0",
+    idempotency_scope: submitCommand.idempotencyScope,
+    idempotency_key: submitCommand.idempotencyKey,
+    request_fingerprint: "a".repeat(64),
+    task_type: submitCommand.taskType,
+    handler_version: submitCommand.handlerVersion,
+    execution_idempotent: submitCommand.executionIdempotent,
+    title: submitCommand.title,
+    description: submitCommand.description,
+    priority: submitCommand.priority,
+    status: "queued",
+    dispatch_bot_id: submitCommand.dispatchBotId,
+    assigned_bot_id: null,
+    required_skills: [],
+    required_items: [],
+    target: null,
+    parent_task_id: null,
+    deadline: submitCommand.deadline,
+    timeout_ms: submitCommand.timeoutMs,
+    retry_count: 0,
+    max_retries: submitCommand.maxRetries,
+    lease_owner: null,
+    lease_expires_at: null,
+    risk_level: submitCommand.riskLevel,
+    failure_reason: null,
+    result: null,
+    evidence: [],
+    trace_id: submitCommand.traceId,
+    revision: 0,
+    created_at: NOW,
+    updated_at: NOW,
+    started_at: null,
+    finished_at: null,
+    ...overrides,
+  };
+}
+
+class RecordingClaimClient implements PostgresClientLike {
+  readonly calls: Array<{ text: string; values: readonly unknown[] }> = [];
+
+  constructor(
+    readonly claimedRow: Record<string, unknown>,
+    readonly taskRow: Record<string, unknown> = recordingTaskRow(),
+    readonly databaseTimestamp: string = NOW,
+  ) {}
+
+  async query<TRow extends Record<string, unknown> = Record<string, unknown>>(
+    text: string,
+    values: readonly unknown[] = [],
+  ): Promise<SqlQueryResult<TRow>> {
+    this.calls.push({ text, values });
+    if (text.includes("WITH candidates AS")) {
+      return {
+        rows: [this.claimedRow as TRow],
+        rowCount: 1,
+      };
+    }
+    if (
+      text.includes("UPDATE studio_task_outbox") &&
+      text.includes("SET status = 'failed'")
+    ) {
+      return { rows: [], rowCount: 1 };
+    }
+    if (text.includes("SELECT * FROM studio_tasks")) {
+      return {
+        rows: [this.taskRow as TRow],
+        rowCount: 1,
+      };
+    }
+    if (text.includes("FROM studio_task_dependencies")) {
+      return { rows: [], rowCount: 0 };
+    }
+    if (text.includes("clock_timestamp() AS database_now")) {
+      return {
+        rows: [
+          { database_now: this.databaseTimestamp } as unknown as TRow,
+        ],
+        rowCount: 1,
+      };
+    }
+    if (text.includes("UPDATE studio_tasks SET")) {
+      return { rows: [], rowCount: 1 };
+    }
+    if (text.includes("INSERT INTO studio_task_history")) {
+      return { rows: [], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 0 };
+  }
+
+  release(): void {}
+}
+
+class RecordingClaimPool implements PostgresPoolLike {
+  constructor(readonly client: RecordingClaimClient) {}
+
+  async connect(): Promise<PostgresClientLike> {
+    return this.client;
+  }
+}
+
+type RecordedOperation = Readonly<{
+  operationFingerprint: string;
+  taskId: string;
+  taskSnapshot: unknown;
+}>;
+
+class RecordingDispatchRetryClient implements PostgresClientLike {
+  readonly calls: Array<{ text: string; values: readonly unknown[] }> = [];
+  readonly operationHistory = new Map<string, RecordedOperation>();
+  readonly outboxRows = new Map<string, Record<string, unknown>>();
+  taskRow: Record<string, unknown>;
+  outboxInsertCount = 0;
+  failOutboxInsert = false;
+  private transactionSnapshot:
+    | Readonly<{
+        taskRow: Record<string, unknown>;
+        operationHistory: Map<string, RecordedOperation>;
+        outboxRows: Map<string, Record<string, unknown>>;
+      }>
+    | undefined;
+
+  constructor(
+    taskRow: Record<string, unknown> = recordingTaskRow({
+      status: "blocked",
+      failure_reason: "TASK_OUTBOX_DELIVERY_EXHAUSTED",
+      revision: 1,
+    }),
+    readonly databaseTimestamp: string = NOW,
+  ) {
+    this.taskRow = taskRow;
+  }
+
+  async query<TRow extends Record<string, unknown> = Record<string, unknown>>(
+    text: string,
+    values: readonly unknown[] = [],
+  ): Promise<SqlQueryResult<TRow>> {
+    this.calls.push({ text, values });
+    if (text === "BEGIN") {
+      this.transactionSnapshot = {
+        taskRow: { ...this.taskRow },
+        operationHistory: new Map(this.operationHistory),
+        outboxRows: new Map(
+          [...this.outboxRows].map(([key, row]) => [key, { ...row }]),
+        ),
+      };
+      return { rows: [], rowCount: null };
+    }
+    if (text === "COMMIT") {
+      this.transactionSnapshot = undefined;
+      return { rows: [], rowCount: null };
+    }
+    if (text === "ROLLBACK") {
+      if (this.transactionSnapshot) {
+        this.taskRow = { ...this.transactionSnapshot.taskRow };
+        this.operationHistory.clear();
+        for (const entry of this.transactionSnapshot.operationHistory) {
+          this.operationHistory.set(...entry);
+        }
+        this.outboxRows.clear();
+        for (const [key, row] of this.transactionSnapshot.outboxRows) {
+          this.outboxRows.set(key, { ...row });
+        }
+      }
+      this.transactionSnapshot = undefined;
+      return { rows: [], rowCount: null };
+    }
+    if (text.includes("FROM studio_task_history")) {
+      const replay = this.operationHistory.get(String(values[0]));
+      return {
+        rows: replay
+          ? [
+              {
+                operation_fingerprint: replay.operationFingerprint,
+                task_id: replay.taskId,
+                task_snapshot: replay.taskSnapshot,
+              } as unknown as TRow,
+            ]
+          : [],
+        rowCount: replay ? 1 : 0,
+      };
+    }
+    if (text.includes("SELECT * FROM studio_tasks")) {
+      return { rows: [this.taskRow as TRow], rowCount: 1 };
+    }
+    if (text.includes("FROM studio_task_dependencies")) {
+      return { rows: [], rowCount: 0 };
+    }
+    if (text.includes("clock_timestamp() AS database_now")) {
+      return {
+        rows: [
+          { database_now: this.databaseTimestamp } as unknown as TRow,
+        ],
+        rowCount: 1,
+      };
+    }
+    if (text.includes("UPDATE studio_tasks SET")) {
+      this.taskRow = {
+        ...this.taskRow,
+        status: values[1],
+        assigned_bot_id: values[2],
+        retry_count: values[3],
+        lease_owner: values[4],
+        lease_expires_at: values[5],
+        failure_reason: values[6],
+        result: values[7] === null ? null : JSON.parse(String(values[7])),
+        evidence: JSON.parse(String(values[8])),
+        revision: values[9],
+        updated_at: values[10],
+        started_at: values[11],
+        finished_at: values[12],
+      };
+      return { rows: [], rowCount: 1 };
+    }
+    if (text.includes("INSERT INTO studio_task_history")) {
+      this.operationHistory.set(String(values[0]), {
+        operationFingerprint: String(values[1]),
+        taskId: String(values[2]),
+        taskSnapshot: JSON.parse(String(values[8])),
+      });
+      return { rows: [], rowCount: 1 };
+    }
+    if (text.includes("FROM studio_task_outbox")) {
+      const key = `${String(values[0])}:${String(values[1])}`;
+      const row = this.outboxRows.get(key);
+      return {
+        rows: row ? [row as TRow] : [],
+        rowCount: row ? 1 : 0,
+      };
+    }
+    if (text.includes("INSERT INTO studio_task_outbox")) {
+      if (this.failOutboxInsert) throw new Error("outbox insert failed");
+      const payload = JSON.parse(
+        String(values[4]),
+      ) as TaskOutboxRecord["payload"];
+      const row = {
+        message_id: values[0],
+        task_id: values[1],
+        expected_revision: values[2],
+        type: values[3],
+        payload,
+        status: "pending",
+        attempt_count: 0,
+        available_at: values[5],
+        claimed_by: null,
+        claim_expires_at: null,
+        last_error: null,
+        created_at: values[5],
+        updated_at: values[5],
+        delivered_at: null,
+      };
+      this.outboxRows.set(`${String(values[1])}:${String(values[2])}`, row);
+      this.outboxInsertCount += 1;
+      return { rows: [], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 0 };
+  }
+
+  release(): void {}
+}
+
+class RecordingDispatchRetryPool implements PostgresPoolLike {
+  constructor(readonly client: RecordingDispatchRetryClient) {}
+
+  async connect(): Promise<PostgresClientLike> {
+    return this.client;
+  }
+}
+
 describe("TaskOutboxReconciler", () => {
   it("keeps the durable messageId across Redis retry and reconciliation replay", async () => {
     const repository = new FakeOutboxRepository();
@@ -320,6 +623,7 @@ describe("TaskOutboxReconciler", () => {
     expect(repository.entries.get(entry.messageId)?.availableAt).toBe(
       "2026-07-27T12:00:00.100Z",
     );
+    expect(repository.entries.get(entry.messageId)?.attemptCount).toBe(1);
 
     repository.now = new Date("2026-07-27T12:00:00.100Z");
     await expect(runner.reconcileOnce()).resolves.toEqual({
@@ -332,12 +636,21 @@ describe("TaskOutboxReconciler", () => {
     expect(queue.enqueued[0]?.messageId).toBe(entry.messageId);
 
     await expect(runner.reconcileOnce()).resolves.toEqual({
+      claimed: 0,
+      enqueued: 0,
+      skipped: 0,
+      failed: 0,
+    });
+
+    repository.now = new Date("2026-07-27T12:00:30.100Z");
+    await expect(runner.reconcileOnce()).resolves.toEqual({
       claimed: 1,
       enqueued: 1,
       skipped: 0,
       failed: 0,
     });
     expect(queue.enqueued).toHaveLength(1);
+    expect(repository.entries.get(entry.messageId)?.attemptCount).toBe(0);
   });
 
   it("does not enqueue stale events that the PostgreSQL claim query excludes", async () => {
@@ -387,8 +700,218 @@ describe("TaskOutboxReconciler", () => {
     });
     expect(queue.removed).toEqual([{ taskId: TASK_A, revision: 0 }]);
     expect(queue.enqueued).toEqual([first.payload]);
-    expect(repository.entries.get(first.messageId)?.attemptCount).toBe(1);
+    expect(repository.entries.get(first.messageId)?.attemptCount).toBe(0);
     expect(repository.entries.get(second.messageId)?.attemptCount).toBe(0);
+  });
+
+  it("reclaims an expired claim without consuming the failure budget", async () => {
+    const repository = new FakeOutboxRepository();
+    const entry = {
+      ...outbox(
+        TASK_A,
+        0,
+        "77777777-7777-4777-8777-777777777777",
+      ),
+      status: "claimed" as const,
+      attemptCount: 7,
+      claimedBy: "reconciler-before-crash",
+      claimExpiresAt: "2026-07-27T11:59:59.000Z",
+    };
+    repository.entries.set(entry.messageId, entry);
+
+    const claimed = await repository.claimTaskOutbox({
+      claimerId: "reconciler-after-crash",
+      leaseDurationMs: 1_000,
+    });
+
+    expect(claimed).toHaveLength(1);
+    expect(claimed[0]).toMatchObject({
+      messageId: entry.messageId,
+      attemptCount: 7,
+      claimedBy: "reconciler-after-crash",
+    });
+  });
+
+  it("moves an exhausted delivery to a terminal outbox state", async () => {
+    const repository = new FakeOutboxRepository();
+    const queue = new FakeQueue();
+    const entry = {
+      ...outbox(
+        TASK_A,
+        0,
+        "88888888-8888-4888-8888-888888888888",
+      ),
+      attemptCount: MAX_TASK_OUTBOX_ATTEMPTS - 1,
+    };
+    repository.entries.set(entry.messageId, entry);
+    queue.failNext = true;
+
+    await expect(reconciler(repository, queue).reconcileOnce()).resolves.toEqual({
+      claimed: 1,
+      enqueued: 0,
+      skipped: 0,
+      failed: 1,
+    });
+    expect(repository.entries.get(entry.messageId)).toMatchObject({
+      status: "failed",
+      attemptCount: MAX_TASK_OUTBOX_ATTEMPTS,
+      lastError: "Redis unavailable",
+    });
+    await expect(reconciler(repository, queue).reconcileOnce()).resolves.toEqual({
+      claimed: 0,
+      enqueued: 0,
+      skipped: 0,
+      failed: 0,
+    });
+  });
+});
+
+describe("PostgresTaskRepository dispatch delivery accounting", () => {
+  it("resets attempt_count after a successful delivery acknowledgement", async () => {
+    const calls: Array<{ text: string; values: readonly unknown[] }> = [];
+    const client: PostgresClientLike = {
+      async query<
+        TRow extends Record<string, unknown> = Record<string, unknown>,
+      >(
+        text: string,
+        values: readonly unknown[] = [],
+      ): Promise<SqlQueryResult<TRow>> {
+        calls.push({ text, values });
+        return { rows: [], rowCount: 1 };
+      },
+      release() {},
+    };
+    const repository = new PostgresTaskRepository({
+      connect: async () => client,
+    });
+
+    await expect(
+      repository.markTaskOutboxDelivered({
+        messageId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        claimerId: "reconciler-01",
+      }),
+    ).resolves.toBe(true);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.text).toContain("attempt_count = 0");
+  });
+});
+
+describe("PostgresTaskRepository retryTaskDispatch", () => {
+  it("strictly validates the versioned retry command", () => {
+    expect(
+      taskDispatchRetryCommandSchema.safeParse({
+        ...retryDispatchCommand,
+        unexpected: true,
+      }).success,
+    ).toBe(false);
+    expect(
+      taskDispatchRetryCommandSchema.parse(retryDispatchCommand),
+    ).toEqual(retryDispatchCommand);
+  });
+
+  it("atomically requeues a blocked task and replays the same outbox", async () => {
+    const client = new RecordingDispatchRetryClient();
+    const repository = new PostgresTaskRepository(
+      new RecordingDispatchRetryPool(client),
+      { dispatchSourceInstanceId: "coordinator-test" },
+    );
+
+    const first = await repository.retryTaskDispatch(retryDispatchCommand);
+    const replay = await repository.retryTaskDispatch(retryDispatchCommand);
+
+    expect(first).toMatchObject({
+      task: {
+        status: "queued",
+        revision: 2,
+        failureReason: null,
+      },
+      dispatch: {
+        taskId: TASK_A,
+        botId: submitCommand.dispatchBotId,
+        payload: { expectedRevision: 2 },
+      },
+      outbox: {
+        taskId: TASK_A,
+        expectedRevision: 2,
+        status: "pending",
+        attemptCount: 0,
+      },
+    });
+    expect(replay).toEqual(first);
+    expect(client.outboxInsertCount).toBe(1);
+    expect(
+      client.calls.filter((call) => call.text.includes("UPDATE studio_tasks SET")),
+    ).toHaveLength(1);
+    const history = client.calls.filter((call) =>
+      call.text.includes("INSERT INTO studio_task_history"),
+    );
+    expect(history).toHaveLength(1);
+    expect(history[0]?.values.slice(3, 8)).toEqual([
+      "task.dispatch-retried",
+      "blocked",
+      "queued",
+      retryDispatchCommand.actorId,
+      retryDispatchCommand.reasonCode,
+    ]);
+    await expect(
+      repository.retryTaskDispatch({
+        ...retryDispatchCommand,
+        reasonCode: "TASK_DISPATCH_RETRY_PARAMETERS_CHANGED",
+      }),
+    ).rejects.toMatchObject({ code: "TASK_OPERATION_CONFLICT" });
+    expect(client.outboxInsertCount).toBe(1);
+  });
+
+  it("rejects non-blocked and deadline-expired retry targets", async () => {
+    const queued = new PostgresTaskRepository(
+      new RecordingDispatchRetryPool(
+        new RecordingDispatchRetryClient(
+          recordingTaskRow({ status: "queued", revision: 1 }),
+        ),
+      ),
+    );
+    await expect(
+      queued.retryTaskDispatch(retryDispatchCommand),
+    ).rejects.toMatchObject({ code: "TASK_TRANSITION_INVALID" });
+
+    const expired = new PostgresTaskRepository(
+      new RecordingDispatchRetryPool(
+        new RecordingDispatchRetryClient(
+          recordingTaskRow({
+            status: "blocked",
+            failure_reason: "TASK_OUTBOX_DELIVERY_EXHAUSTED",
+            revision: 1,
+            deadline: NOW,
+          }),
+        ),
+      ),
+    );
+    await expect(
+      expired.retryTaskDispatch(retryDispatchCommand),
+    ).rejects.toMatchObject({ code: "TASK_DEADLINE_EXPIRED" });
+  });
+
+  it("rolls back task and history when the new outbox insert fails", async () => {
+    const client = new RecordingDispatchRetryClient();
+    client.failOutboxInsert = true;
+    const repository = new PostgresTaskRepository(
+      new RecordingDispatchRetryPool(client),
+    );
+
+    await expect(
+      repository.retryTaskDispatch(retryDispatchCommand),
+    ).rejects.toMatchObject({ code: "TASK_PERSISTENCE_FAILED" });
+
+    expect(client.taskRow).toMatchObject({
+      status: "blocked",
+      revision: 1,
+      failure_reason: "TASK_OUTBOX_DELIVERY_EXHAUSTED",
+    });
+    expect(client.operationHistory.size).toBe(0);
+    expect(client.outboxRows.size).toBe(0);
+    expect(client.calls.at(-1)?.text).toBe("ROLLBACK");
+    expect(client.calls.some((call) => call.text === "COMMIT")).toBe(false);
   });
 });
 
@@ -440,5 +963,173 @@ describe("PostgresTaskRepository submitTask", () => {
     expect(historyIndex).toBeGreaterThan(-1);
     expect(outboxIndex).toBeGreaterThan(historyIndex);
     expect(firstCommitIndex).toBeGreaterThan(outboxIndex);
+  });
+});
+
+describe("PostgresTaskRepository outbox claims", () => {
+  it("commits quarantine for a durable row that fails the protocol schema", async () => {
+    const messageId = "99999999-9999-4999-8999-999999999999";
+    const client = new RecordingClaimClient({
+      message_id: messageId,
+      task_id: TASK_A,
+      expected_revision: 0,
+      type: "task.dispatch.v1",
+      payload: {
+        schemaVersion: "1.0",
+        messageId,
+        taskId: TASK_A,
+        type: "task.dispatch.v1",
+        payload: { expectedRevision: 0 },
+      },
+      status: "claimed",
+      attempt_count: 0,
+      available_at: NOW,
+      claimed_by: "reconciler-01",
+      claim_expires_at: "2026-07-27T12:00:30.000Z",
+      last_error: null,
+      created_at: NOW,
+      updated_at: NOW,
+      delivered_at: null,
+    });
+    const repository = new PostgresTaskRepository(
+      new RecordingClaimPool(client),
+    );
+
+    await expect(
+      repository.claimTaskOutbox({
+        claimerId: "reconciler-01",
+        leaseDurationMs: 1_000,
+      }),
+    ).resolves.toEqual([]);
+    const quarantine = client.calls.find((call) =>
+      call.text.includes("SET status = 'failed'"),
+    );
+    expect(quarantine?.values).toEqual([
+      messageId,
+      "reconciler-01",
+      "TASK_OUTBOX_RECORD_INVALID",
+    ]);
+    expect(
+      client.calls.some((call) => call.text.includes("UPDATE studio_tasks SET")),
+    ).toBe(true);
+    const taskUpdate = client.calls.find((call) =>
+      call.text.includes("UPDATE studio_tasks SET"),
+    );
+    expect(taskUpdate?.values[1]).toBe("blocked");
+    expect(taskUpdate?.values[6]).toBe("TASK_OUTBOX_RECORD_INVALID");
+    const history = client.calls.find((call) =>
+      call.text.includes("INSERT INTO studio_task_history"),
+    );
+    expect(history?.values[3]).toBe("task.dispatch-blocked");
+    expect(history?.values[5]).toBe("blocked");
+    expect(history?.values[7]).toBe("TASK_OUTBOX_RECORD_INVALID");
+    expect(client.calls.some((call) => call.text === "COMMIT")).toBe(true);
+    expect(client.calls.some((call) => call.text === "ROLLBACK")).toBe(false);
+  });
+
+  it("quarantines a protocol-valid dispatch with the wrong Bot contract", async () => {
+    const entry = outbox(
+      TASK_A,
+      0,
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    );
+    const client = new RecordingClaimClient({
+      message_id: entry.messageId,
+      task_id: entry.taskId,
+      expected_revision: entry.expectedRevision,
+      type: entry.type,
+      payload: entry.payload,
+      status: "claimed",
+      attempt_count: 0,
+      available_at: NOW,
+      claimed_by: "reconciler-01",
+      claim_expires_at: "2026-07-27T12:00:30.000Z",
+      last_error: null,
+      created_at: NOW,
+      updated_at: NOW,
+      delivered_at: null,
+      task_dispatch_bot_id: "worker-02",
+      task_type: submitCommand.taskType,
+      task_handler_version: submitCommand.handlerVersion,
+      task_execution_idempotent: submitCommand.executionIdempotent,
+      task_trace_id: submitCommand.traceId,
+    });
+    const repository = new PostgresTaskRepository(
+      new RecordingClaimPool(client),
+    );
+
+    await expect(
+      repository.claimTaskOutbox({
+        claimerId: "reconciler-01",
+        leaseDurationMs: 1_000,
+      }),
+    ).resolves.toEqual([]);
+    const quarantine = client.calls.find((call) =>
+      call.text.includes("SET status = 'failed'"),
+    );
+    expect(quarantine?.values).toEqual([
+      entry.messageId,
+      "reconciler-01",
+      "TASK_OUTBOX_TASK_CONTRACT_MISMATCH",
+    ]);
+  });
+
+  it("expires an invalid dispatch when the task deadline has arrived", async () => {
+    const messageId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const client = new RecordingClaimClient(
+      {
+        message_id: messageId,
+        task_id: TASK_A,
+        expected_revision: 0,
+        type: "task.dispatch.v1",
+        payload: {},
+        status: "claimed",
+        attempt_count: 0,
+        available_at: NOW,
+        claimed_by: "reconciler-01",
+        claim_expires_at: "2026-07-27T12:00:30.000Z",
+        last_error: null,
+        created_at: NOW,
+        updated_at: NOW,
+        delivered_at: null,
+      },
+      recordingTaskRow({ deadline: NOW }),
+    );
+    const repository = new PostgresTaskRepository(
+      new RecordingClaimPool(client),
+    );
+
+    await expect(
+      repository.claimTaskOutbox({
+        claimerId: "reconciler-01",
+        leaseDurationMs: 1_000,
+      }),
+    ).resolves.toEqual([]);
+
+    const taskUpdate = client.calls.find((call) =>
+      call.text.includes("UPDATE studio_tasks SET"),
+    );
+    expect(taskUpdate?.values[1]).toBe("expired");
+    expect(taskUpdate?.values[6]).toBe("TASK_OUTBOX_RECORD_INVALID");
+    expect(taskUpdate?.values[12]).toBe(NOW);
+    const history = client.calls.find((call) =>
+      call.text.includes("INSERT INTO studio_task_history"),
+    );
+    expect(history?.values[3]).toBe("task.dispatch-expired");
+    expect(history?.values[5]).toBe("expired");
+    expect(history?.values[7]).toBe("TASK_OUTBOX_RECORD_INVALID");
+  });
+
+  it("requires a durable error for terminal failed outbox records", () => {
+    expect(
+      taskOutboxRecordSchema.safeParse({
+        ...outbox(
+          TASK_A,
+          0,
+          "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        ),
+        status: "failed",
+      }).success,
+    ).toBe(false);
   });
 });

@@ -25,8 +25,15 @@ import {
   type IsolatedTaskInfrastructureConfig,
 } from "../src/infrastructure-config.js";
 import { PgTaskPoolAdapter } from "../src/pg-pool-adapter.js";
-import { PostgresTaskRepository } from "../src/postgres-repository.js";
-import type { TaskRecord } from "../src/model.js";
+import { TaskOutboxReconciler } from "../src/outbox-reconciler.js";
+import {
+  MAX_TASK_OUTBOX_ATTEMPTS,
+  PostgresTaskRepository,
+} from "../src/postgres-repository.js";
+import {
+  taskRecordSchema,
+  type TaskRecord,
+} from "../src/model.js";
 
 const runRealInfrastructure =
   process.env.RUN_REAL_TASK_INFRA_TEST === "1";
@@ -56,7 +63,17 @@ const migrationFiles = [
       new URL("../migrations/0003_task_delivery.sql", import.meta.url),
     ),
     sha256:
-      "02429755277df4c7d6dbd32a6dc4769a305c8bad4cea559b1fbbf5151e3d2918",
+      "0c12859e03273ea6f3940cded8828989d7f82b6ed8208dfd40d31be1a29482b0",
+  },
+  {
+    path: fileURLToPath(
+      new URL(
+        "../migrations/0004_task_delivery_hardening.sql",
+        import.meta.url,
+      ),
+    ),
+    sha256:
+      "f4f5de71e67fbbd7037678127724ba5be6dbc939a6262f476dc35edd92f395f2",
   },
 ] as const;
 
@@ -106,6 +123,13 @@ function taskCreateCommand(
   };
 }
 
+function taskSubmitCommand(taskType: string) {
+  return {
+    ...taskCreateCommand(taskType),
+    dispatchBotId: "isolated-test-bot",
+  };
+}
+
 function dispatchFor(task: TaskRecord) {
   return {
     schemaVersion: "1.0" as const,
@@ -141,6 +165,20 @@ async function waitForTask(
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error("Timed out waiting for a persisted task state.");
+}
+
+async function cancelQueuedTask(
+  repository: PostgresTaskRepository,
+  taskId: string,
+): Promise<void> {
+  await repository.cancelTask({
+    schemaVersion: "1.0",
+    operationId: randomUUID(),
+    taskId,
+    actorId: "integration-cleanup",
+    leaseOwner: null,
+    reasonCode: "TEST_TASK_CLEANUP",
+  });
 }
 
 async function boundedCleanup(
@@ -287,6 +325,171 @@ describeReal.sequential(
       return worker;
     }
 
+    it("upgrades an applied 0003 schema without orphaning legacy outbox rows", async () => {
+      const upgradeSchema = `${schemaName}_upgrade`;
+      await adminPool.query(`CREATE SCHEMA "${upgradeSchema}"`);
+      const upgradePoolConfig = {
+        connectionString: config.postgresUrl,
+        options: `-c search_path=${upgradeSchema}`,
+      };
+      const upgradePool = new Pool(upgradePoolConfig);
+      const upgradeAdapter = new PgTaskPoolAdapter(upgradePoolConfig);
+      try {
+        for (const migrationFile of migrationFiles.slice(0, 3)) {
+          const sql = await readFile(migrationFile.path, "utf8");
+          await upgradePool.query(sql);
+        }
+        const upgradeRepository = new PostgresTaskRepository(upgradeAdapter);
+        const blocked = (
+          await upgradeRepository.createTask(
+            taskCreateCommand("test.upgrade-invalid-blocked"),
+          )
+        ).task;
+        const expiresLater = {
+          ...taskCreateCommand("test.upgrade-invalid-expired"),
+          deadline: new Date(Date.now() + 60_000).toISOString(),
+        };
+        const expired = (
+          await upgradeRepository.createTask(expiresLater)
+        ).task;
+        const numericRevision = (
+          await upgradeRepository.createTask(
+            taskCreateCommand("test.upgrade-numeric-revision"),
+          )
+        ).task;
+        await upgradePool.query(
+          `UPDATE studio_tasks
+           SET deadline = CASE WHEN task_id = $1
+             THEN clock_timestamp() - interval '1 second'
+             ELSE deadline
+           END,
+               dispatch_bot_id = CASE WHEN task_id = $2
+                 THEN 'isolated-test-bot'
+                 ELSE dispatch_bot_id
+               END
+           WHERE task_id IN ($1, $2)`,
+          [expired.taskId, numericRevision.taskId],
+        );
+        const blockedMessageId = randomUUID();
+        const expiredMessageId = randomUUID();
+        for (const [messageId, task] of [
+          [blockedMessageId, blocked],
+          [expiredMessageId, expired],
+        ] as const) {
+          await upgradePool.query(
+            `INSERT INTO studio_task_outbox (
+               message_id, task_id, expected_revision, type, payload,
+               available_at, created_at, updated_at
+             ) VALUES (
+               $1, $2, $3, 'task.dispatch.v1', '{}'::jsonb,
+               clock_timestamp(), clock_timestamp(), clock_timestamp()
+             )`,
+            [messageId, task.taskId, task.revision],
+          );
+        }
+        const numericMessage = dispatchFor(numericRevision);
+        const numericPayload = JSON.stringify(numericMessage).replace(
+          '"expectedRevision":0',
+          '"expectedRevision":0.0',
+        );
+        expect(numericPayload).toContain('"expectedRevision":0.0');
+        await upgradePool.query(
+          `INSERT INTO studio_task_outbox (
+             message_id, task_id, expected_revision, type, payload,
+             available_at, created_at, updated_at
+           ) VALUES (
+             $1, $2, 0, 'task.dispatch.v1', $3::jsonb,
+             clock_timestamp(), clock_timestamp(), clock_timestamp()
+           )`,
+          [numericMessage.messageId, numericRevision.taskId, numericPayload],
+        );
+
+        const hardeningSql = await readFile(migrationFiles[3].path, "utf8");
+        await upgradePool.query(hardeningSql);
+
+        const upgradedTasks = await upgradePool.query<{
+          task_id: string;
+          status: string;
+          revision: number;
+          failure_reason: string | null;
+          finished_at: Date | null;
+        }>(
+          `SELECT task_id::text, status, revision, failure_reason, finished_at
+           FROM studio_tasks
+           WHERE task_id IN ($1, $2, $3)`,
+          [blocked.taskId, expired.taskId, numericRevision.taskId],
+        );
+        const byTaskId = new Map(
+          upgradedTasks.rows.map((task) => [task.task_id, task]),
+        );
+        expect(byTaskId.get(blocked.taskId)).toMatchObject({
+          status: "blocked",
+          revision: 1,
+          failure_reason: "TASK_OUTBOX_RECORD_INVALID",
+          finished_at: null,
+        });
+        expect(byTaskId.get(expired.taskId)).toMatchObject({
+          status: "expired",
+          revision: 1,
+          failure_reason: "TASK_OUTBOX_RECORD_INVALID",
+        });
+        expect(byTaskId.get(expired.taskId)?.finished_at).not.toBeNull();
+        expect(byTaskId.get(numericRevision.taskId)).toMatchObject({
+          status: "queued",
+          revision: 0,
+          failure_reason: null,
+        });
+
+        const upgradedOutbox = await upgradePool.query<{
+          message_id: string;
+          status: string;
+          last_error: string | null;
+        }>(
+          `SELECT message_id::text, status, last_error
+           FROM studio_task_outbox
+           WHERE message_id IN ($1, $2, $3)`,
+          [blockedMessageId, expiredMessageId, numericMessage.messageId],
+        );
+        const byMessageId = new Map(
+          upgradedOutbox.rows.map((entry) => [entry.message_id, entry]),
+        );
+        expect(byMessageId.get(blockedMessageId)).toMatchObject({
+          status: "failed",
+          last_error: "TASK_OUTBOX_RECORD_INVALID",
+        });
+        expect(byMessageId.get(expiredMessageId)).toMatchObject({
+          status: "failed",
+          last_error: "TASK_OUTBOX_RECORD_INVALID",
+        });
+        expect(byMessageId.get(numericMessage.messageId)).toMatchObject({
+          status: "pending",
+          last_error: null,
+        });
+
+        const migrationHistory = await upgradePool.query<{
+          event_type: string;
+          task_snapshot: unknown;
+        }>(
+          `SELECT event_type, task_snapshot
+           FROM studio_task_history
+           WHERE operation_id IN ($1, $2)
+           ORDER BY event_type`,
+          [blockedMessageId, expiredMessageId],
+        );
+        expect(migrationHistory.rows.map(({ event_type }) => event_type)).toEqual([
+          "task.dispatch-blocked",
+          "task.dispatch-expired",
+        ]);
+        for (const { task_snapshot } of migrationHistory.rows) {
+          expect(taskRecordSchema.safeParse(task_snapshot).success).toBe(true);
+        }
+      } finally {
+        await upgradeAdapter.close();
+        await upgradePool.end();
+        await adminPool.query(`DROP SCHEMA "${upgradeSchema}" CASCADE`);
+      }
+    }, REAL_TEST_TIMEOUT_MS);
+
     it("applies migrations and enforces append-only database triggers", async () => {
       const tables = await assertionPool.query<{ table_name: string }>(
         `SELECT table_name
@@ -320,6 +523,636 @@ describeReal.sequential(
           [created.task.taskId],
         ),
       ).rejects.toThrow();
+    }, REAL_TEST_TIMEOUT_MS);
+
+    it("rolls back task and history when the transactional outbox insert fails", async () => {
+      const command = taskSubmitCommand("test.outbox-atomic-rollback");
+      await assertionPool.query(
+        `CREATE OR REPLACE FUNCTION studio_test_reject_outbox_insert()
+         RETURNS trigger
+         LANGUAGE plpgsql
+         AS $$
+         BEGIN
+           RAISE EXCEPTION 'injected outbox insert failure';
+         END;
+         $$`,
+      );
+      await assertionPool.query(
+        `CREATE TRIGGER studio_test_outbox_insert_failure
+         BEFORE INSERT ON studio_task_outbox
+         FOR EACH ROW EXECUTE FUNCTION studio_test_reject_outbox_insert()`,
+      );
+      try {
+        await expect(repository.submitTask(command)).rejects.toThrow();
+      } finally {
+        await assertionPool.query(
+          `DROP TRIGGER studio_test_outbox_insert_failure
+           ON studio_task_outbox`,
+        );
+        await assertionPool.query(
+          "DROP FUNCTION studio_test_reject_outbox_insert()",
+        );
+      }
+      const persisted = await assertionPool.query<{
+        task_count: number;
+        history_count: number;
+        outbox_count: number;
+      }>(
+        `SELECT
+           (SELECT COUNT(*)::integer FROM studio_tasks
+             WHERE task_id = $1) AS task_count,
+           (SELECT COUNT(*)::integer FROM studio_task_history
+             WHERE task_id = $1) AS history_count,
+           (SELECT COUNT(*)::integer FROM studio_task_outbox
+             WHERE task_id = $1) AS outbox_count`,
+        [command.taskId],
+      );
+      expect(persisted.rows[0]).toEqual({
+        task_count: 0,
+        history_count: 0,
+        outbox_count: 0,
+      });
+    }, REAL_TEST_TIMEOUT_MS);
+
+    it("rejects missing identities and fail-closes invalid protocol payloads", async () => {
+      const task = (
+        await repository.createTask(
+          taskCreateCommand("test.outbox-invalid-payload"),
+        )
+      ).task;
+      await expect(
+        assertionPool.query(
+          `INSERT INTO studio_task_outbox (
+             message_id, task_id, expected_revision, type, payload,
+             available_at, created_at, updated_at
+           ) VALUES (
+             $1, $2, $3, 'task.dispatch.v1', $4::jsonb,
+             clock_timestamp(), clock_timestamp(), clock_timestamp()
+           )`,
+          [randomUUID(), task.taskId, task.revision, JSON.stringify({})],
+        ),
+      ).rejects.toThrow();
+
+      const invalidMessageId = randomUUID();
+      const invalidPayload = {
+        schemaVersion: "1.0",
+        messageId: invalidMessageId,
+        taskId: task.taskId,
+        type: "task.dispatch.v1",
+        payload: { expectedRevision: task.revision },
+      };
+      await assertionPool.query(
+        `INSERT INTO studio_task_outbox (
+           message_id, task_id, expected_revision, type, payload,
+           available_at, created_at, updated_at
+         ) VALUES (
+           $1, $2, $3, 'task.dispatch.v1', $4::jsonb,
+           clock_timestamp(), clock_timestamp(), clock_timestamp()
+         )`,
+        [
+          invalidMessageId,
+          task.taskId,
+          task.revision,
+          JSON.stringify(invalidPayload),
+        ],
+      );
+      const expiringCommand = {
+        ...taskCreateCommand("test.outbox-invalid-payload-expired"),
+        deadline: new Date(Date.now() + 60_000).toISOString(),
+      };
+      const expiredTask = (
+        await repository.createTask(expiringCommand)
+      ).task;
+      const expiredMessageId = randomUUID();
+      await assertionPool.query(
+        `UPDATE studio_tasks
+         SET deadline = clock_timestamp() - interval '1 second'
+         WHERE task_id = $1`,
+        [expiredTask.taskId],
+      );
+      await assertionPool.query(
+        `INSERT INTO studio_task_outbox (
+           message_id, task_id, expected_revision, type, payload,
+           available_at, created_at, updated_at
+         ) VALUES (
+           $1, $2, $3, 'task.dispatch.v1', $4::jsonb,
+           clock_timestamp(), clock_timestamp(), clock_timestamp()
+         )`,
+        [
+          expiredMessageId,
+          expiredTask.taskId,
+          expiredTask.revision,
+          JSON.stringify({
+            ...invalidPayload,
+            messageId: expiredMessageId,
+            taskId: expiredTask.taskId,
+          }),
+        ],
+      );
+
+      await expect(
+        repository.claimTaskOutbox({
+          claimerId: "invalid-record-quarantine",
+          leaseDurationMs: 1_000,
+        }),
+      ).resolves.toEqual([]);
+      const quarantined = await assertionPool.query<{
+        message_id: string;
+        status: string;
+        attempt_count: number;
+        last_error: string | null;
+      }>(
+        `SELECT message_id::text, status, attempt_count, last_error
+         FROM studio_task_outbox
+         WHERE message_id IN ($1, $2)
+         ORDER BY message_id`,
+        [invalidMessageId, expiredMessageId],
+      );
+      expect(quarantined.rows).toHaveLength(2);
+      for (const entry of quarantined.rows) {
+        expect(entry).toMatchObject({
+          status: "failed",
+          attempt_count: 0,
+          last_error: "TASK_OUTBOX_RECORD_INVALID",
+        });
+      }
+      await expect(
+        repository.getTaskOutbox(task.taskId, task.revision),
+      ).resolves.toBeNull();
+      await expect(
+        repository.getTaskOutboxFailure(task.taskId, task.revision),
+      ).resolves.toMatchObject({
+        messageId: invalidMessageId,
+        status: "failed",
+        lastError: "TASK_OUTBOX_RECORD_INVALID",
+        payload: invalidPayload,
+      });
+      await expect(repository.getTask(task.taskId)).resolves.toMatchObject({
+        status: "blocked",
+        revision: 1,
+        failureReason: "TASK_OUTBOX_RECORD_INVALID",
+        finishedAt: null,
+      });
+      await expect(repository.getTask(expiredTask.taskId)).resolves.toMatchObject({
+        status: "expired",
+        revision: 1,
+        failureReason: "TASK_OUTBOX_RECORD_INVALID",
+      });
+      const quarantineHistory = await assertionPool.query<{
+        event_type: string;
+        to_status: string;
+      }>(
+        `SELECT event_type, to_status
+         FROM studio_task_history
+         WHERE operation_id IN ($1, $2)
+         ORDER BY event_type`,
+        [invalidMessageId, expiredMessageId],
+      );
+      expect(quarantineHistory.rows).toEqual([
+        {
+          event_type: "task.dispatch-blocked",
+          to_status: "blocked",
+        },
+        {
+          event_type: "task.dispatch-expired",
+          to_status: "expired",
+        },
+      ]);
+      await cancelQueuedTask(repository, task.taskId);
+    }, REAL_TEST_TIMEOUT_MS);
+
+    it("atomically submits and reconciles one durable dispatch across competing instances", async () => {
+      const queue = createQueue();
+      await queue.verifyConnection();
+      const submitted = await repository.submitTask(
+        taskSubmitCommand("test.outbox-delivery"),
+      );
+      const firstRunner = new TaskOutboxReconciler({
+        repository,
+        queue,
+        instanceId: "integration-reconciler-a",
+      });
+      const secondRunner = new TaskOutboxReconciler({
+        repository,
+        queue,
+        instanceId: "integration-reconciler-b",
+      });
+
+      const firstPass = await Promise.all([
+        firstRunner.reconcileOnce(),
+        secondRunner.reconcileOnce(),
+      ]);
+      expect(
+        firstPass.reduce(
+          (total, result) => ({
+            claimed: total.claimed + result.claimed,
+            enqueued: total.enqueued + result.enqueued,
+            skipped: total.skipped + result.skipped,
+            failed: total.failed + result.failed,
+          }),
+          { claimed: 0, enqueued: 0, skipped: 0, failed: 0 },
+        ),
+      ).toEqual({ claimed: 1, enqueued: 1, skipped: 0, failed: 0 });
+      const firstJob = await queue.getJob(
+        submitted.task.taskId,
+        submitted.task.revision,
+      );
+      expect(firstJob).not.toBeNull();
+      expect(await firstJob?.getState()).toBe("waiting");
+      expect(firstJob?.data.messageId).toBe(submitted.outbox.messageId);
+
+      const delivered = await repository.getTaskOutbox(
+        submitted.task.taskId,
+        submitted.task.revision,
+      );
+      expect(delivered).toMatchObject({
+        messageId: submitted.outbox.messageId,
+        status: "delivered",
+        attemptCount: 0,
+      });
+      await expect(
+        assertionPool.query(
+          `UPDATE studio_task_outbox
+           SET payload = payload || '{"botId":"tampered-bot"}'::jsonb
+           WHERE message_id = $1`,
+          [submitted.outbox.messageId],
+        ),
+      ).rejects.toThrow();
+
+      expect(
+        await queue.remove(submitted.task.taskId, submitted.task.revision),
+      ).toBe(true);
+      await assertionPool.query(
+        `UPDATE studio_task_outbox
+         SET available_at = clock_timestamp(),
+             updated_at = clock_timestamp()
+         WHERE message_id = $1`,
+        [submitted.outbox.messageId],
+      );
+      const replayPass = await Promise.all([
+        firstRunner.reconcileOnce(),
+        secondRunner.reconcileOnce(),
+      ]);
+      expect(
+        replayPass.reduce(
+          (total, result) => ({
+            claimed: total.claimed + result.claimed,
+            enqueued: total.enqueued + result.enqueued,
+            skipped: total.skipped + result.skipped,
+            failed: total.failed + result.failed,
+          }),
+          { claimed: 0, enqueued: 0, skipped: 0, failed: 0 },
+        ),
+      ).toEqual({ claimed: 1, enqueued: 1, skipped: 0, failed: 0 });
+      const replayed = await repository.getTaskOutbox(
+        submitted.task.taskId,
+        submitted.task.revision,
+      );
+      expect(replayed).toMatchObject({
+        messageId: submitted.outbox.messageId,
+        status: "delivered",
+        attemptCount: 0,
+      });
+      expect(
+        await queue.getJob(submitted.task.taskId, submitted.task.revision),
+      ).not.toBeNull();
+      expect(
+        await queue.remove(submitted.task.taskId, submitted.task.revision),
+      ).toBe(true);
+      await cancelQueuedTask(repository, submitted.task.taskId);
+    }, REAL_TEST_TIMEOUT_MS);
+
+    it("records a failed queue delivery and resets its consecutive budget after recovery", async () => {
+      const submitted = await repository.submitTask(
+        taskSubmitCommand("test.outbox-reconciler-recovery"),
+      );
+      const failingRunner = new TaskOutboxReconciler({
+        repository,
+        queue: {
+          enqueue: async () => {
+            throw new Error("Injected Redis delivery failure");
+          },
+          getJob: async () => null,
+          remove: async () => false,
+        },
+        instanceId: "integration-reconciler-failing-queue",
+        retryBaseMs: 10,
+        retryMaxMs: 100,
+      });
+      await expect(failingRunner.reconcileOnce()).resolves.toEqual({
+        claimed: 1,
+        enqueued: 0,
+        skipped: 0,
+        failed: 1,
+      });
+      await expect(
+        repository.getTaskOutbox(
+          submitted.task.taskId,
+          submitted.task.revision,
+        ),
+      ).resolves.toMatchObject({
+        status: "pending",
+        attemptCount: 1,
+        lastError: "Injected Redis delivery failure",
+      });
+
+      await assertionPool.query(
+        `UPDATE studio_task_outbox
+         SET available_at = clock_timestamp()
+         WHERE message_id = $1`,
+        [submitted.outbox.messageId],
+      );
+      const queue = createQueue();
+      await queue.verifyConnection();
+      const recoveryRunner = new TaskOutboxReconciler({
+        repository,
+        queue,
+        instanceId: "integration-reconciler-recovered-queue",
+      });
+      await expect(recoveryRunner.reconcileOnce()).resolves.toEqual({
+        claimed: 1,
+        enqueued: 1,
+        skipped: 0,
+        failed: 0,
+      });
+      await expect(
+        repository.getTaskOutbox(
+          submitted.task.taskId,
+          submitted.task.revision,
+        ),
+      ).resolves.toMatchObject({
+        status: "delivered",
+        attemptCount: 0,
+        lastError: null,
+      });
+      expect(
+        await queue.remove(submitted.task.taskId, submitted.task.revision),
+      ).toBe(true);
+      await cancelQueuedTask(repository, submitted.task.taskId);
+    }, REAL_TEST_TIMEOUT_MS);
+
+    it("quarantines a contract mismatch without rolling back a valid sibling claim", async () => {
+      const mismatchedTask = (
+        await repository.createTask(
+          taskCreateCommand("test.outbox-contract-mismatch"),
+        )
+      ).task;
+      await assertionPool.query(
+        `UPDATE studio_tasks
+         SET dispatch_bot_id = 'expected-isolated-bot'
+         WHERE task_id = $1`,
+        [mismatchedTask.taskId],
+      );
+      const mismatchedDispatch = {
+        ...dispatchFor(mismatchedTask),
+        botId: "wrong-isolated-bot",
+      };
+      await assertionPool.query(
+        `INSERT INTO studio_task_outbox (
+           message_id, task_id, expected_revision, type, payload,
+           available_at, created_at, updated_at
+         ) VALUES (
+           $1, $2, $3, 'task.dispatch.v1', $4::jsonb,
+           clock_timestamp(), clock_timestamp(), clock_timestamp()
+         )`,
+        [
+          mismatchedDispatch.messageId,
+          mismatchedTask.taskId,
+          mismatchedTask.revision,
+          JSON.stringify(mismatchedDispatch),
+        ],
+      );
+      const validSibling = await repository.submitTask(
+        taskSubmitCommand("test.outbox-valid-sibling"),
+      );
+
+      const claimed = await repository.claimTaskOutbox({
+        claimerId: "integration-reconciler-mixed-batch",
+        limit: 2,
+        leaseDurationMs: 1_000,
+      });
+      expect(claimed.map(({ messageId }) => messageId)).toEqual([
+        validSibling.outbox.messageId,
+      ]);
+      await expect(
+        repository.getTaskOutboxFailure(
+          mismatchedTask.taskId,
+          mismatchedTask.revision,
+        ),
+      ).resolves.toMatchObject({
+        messageId: mismatchedDispatch.messageId,
+        lastError: "TASK_OUTBOX_TASK_CONTRACT_MISMATCH",
+      });
+      await expect(repository.getTask(mismatchedTask.taskId)).resolves.toMatchObject({
+        status: "blocked",
+        revision: 1,
+        failureReason: "TASK_OUTBOX_TASK_CONTRACT_MISMATCH",
+      });
+      await expect(
+        repository.markTaskOutboxDelivered({
+          messageId: validSibling.outbox.messageId,
+          claimerId: "integration-reconciler-mixed-batch",
+        }),
+      ).resolves.toBe(true);
+      await cancelQueuedTask(repository, mismatchedTask.taskId);
+      await cancelQueuedTask(repository, validSibling.task.taskId);
+    }, REAL_TEST_TIMEOUT_MS);
+
+    it("reclaims an expired delivery claim without incrementing failures", async () => {
+      const submitted = await repository.submitTask(
+        taskSubmitCommand("test.outbox-expired-claim"),
+      );
+      const firstClaim = await repository.claimTaskOutbox({
+        claimerId: "integration-reconciler-before-crash",
+        limit: 1,
+        leaseDurationMs: 1_000,
+      });
+      expect(firstClaim).toHaveLength(1);
+      expect(firstClaim[0]).toMatchObject({
+        messageId: submitted.outbox.messageId,
+        attemptCount: 0,
+      });
+      await assertionPool.query(
+        `UPDATE studio_task_outbox
+         SET attempt_count = 7,
+             claim_expires_at = clock_timestamp() - interval '1 second'
+         WHERE message_id = $1`,
+        [submitted.outbox.messageId],
+      );
+
+      const recovered = await repository.claimTaskOutbox({
+        claimerId: "integration-reconciler-after-crash",
+        limit: 1,
+        leaseDurationMs: 1_000,
+      });
+      expect(recovered).toHaveLength(1);
+      expect(recovered[0]).toMatchObject({
+        messageId: submitted.outbox.messageId,
+        attemptCount: 7,
+        claimedBy: "integration-reconciler-after-crash",
+      });
+      await expect(
+        repository.markTaskOutboxDelivered({
+          messageId: submitted.outbox.messageId,
+          claimerId: "integration-reconciler-after-crash",
+        }),
+      ).resolves.toBe(true);
+      await expect(
+        repository.getTaskOutbox(
+          submitted.task.taskId,
+          submitted.task.revision,
+        ),
+      ).resolves.toMatchObject({
+        status: "delivered",
+        attemptCount: 0,
+      });
+      await cancelQueuedTask(repository, submitted.task.taskId);
+    }, REAL_TEST_TIMEOUT_MS);
+
+    it("dead-letters an exhausted delivery without starving later messages", async () => {
+      const exhausted = await repository.submitTask(
+        taskSubmitCommand("test.outbox-retry-exhausted"),
+      );
+      const claim = await repository.claimTaskOutbox({
+        claimerId: "integration-reconciler-exhausted",
+        limit: 1,
+        leaseDurationMs: 1_000,
+      });
+      expect(claim[0]?.messageId).toBe(exhausted.outbox.messageId);
+      await assertionPool.query(
+        `UPDATE studio_task_outbox
+         SET attempt_count = $2
+         WHERE message_id = $1`,
+        [exhausted.outbox.messageId, MAX_TASK_OUTBOX_ATTEMPTS - 1],
+      );
+      await expect(
+        repository.retryTaskOutbox({
+          messageId: exhausted.outbox.messageId,
+          claimerId: "integration-reconciler-exhausted",
+          error: "Redis unavailable at retry ceiling",
+          delayMs: 0,
+        }),
+      ).resolves.toBe(true);
+      await expect(
+        repository.getTaskOutbox(
+          exhausted.task.taskId,
+          exhausted.task.revision,
+        ),
+      ).resolves.toMatchObject({
+        status: "failed",
+        attemptCount: MAX_TASK_OUTBOX_ATTEMPTS,
+        lastError: "Redis unavailable at retry ceiling",
+      });
+      await expect(repository.getTask(exhausted.task.taskId)).resolves.toMatchObject({
+        status: "blocked",
+        revision: 1,
+        failureReason: "TASK_OUTBOX_DELIVERY_EXHAUSTED",
+      });
+      const exhaustionHistory = await assertionPool.query<{
+        event_type: string;
+        to_status: string;
+        reason_code: string;
+      }>(
+        `SELECT event_type, to_status, reason_code
+         FROM studio_task_history
+         WHERE operation_id = $1`,
+        [exhausted.outbox.messageId],
+      );
+      expect(exhaustionHistory.rows[0]).toEqual({
+        event_type: "task.dispatch-blocked",
+        to_status: "blocked",
+        reason_code: "TASK_OUTBOX_DELIVERY_EXHAUSTED",
+      });
+      const retryCommand = {
+        schemaVersion: "1.0" as const,
+        operationId: randomUUID(),
+        taskId: exhausted.task.taskId,
+        expectedRevision: 1,
+        actorId: "integration-operator",
+        reasonCode: "TASK_OUTBOX_OPERATOR_RETRY",
+      };
+      const retried = await repository.retryTaskDispatch(retryCommand);
+      expect(retried).toMatchObject({
+        task: {
+          status: "queued",
+          revision: 2,
+          failureReason: null,
+        },
+        outbox: {
+          taskId: exhausted.task.taskId,
+          expectedRevision: 2,
+          status: "pending",
+          attemptCount: 0,
+        },
+        dispatch: {
+          botId: exhausted.task.dispatchBotId,
+          payload: { expectedRevision: 2 },
+        },
+      });
+      await expect(
+        repository.retryTaskDispatch(retryCommand),
+      ).resolves.toEqual(retried);
+      const retryClaim = await repository.claimTaskOutbox({
+        claimerId: "integration-reconciler-operator-retry",
+        limit: 1,
+        leaseDurationMs: 1_000,
+      });
+      expect(retryClaim[0]?.messageId).toBe(retried.outbox.messageId);
+      await expect(
+        repository.markTaskOutboxDelivered({
+          messageId: retried.outbox.messageId,
+          claimerId: "integration-reconciler-operator-retry",
+        }),
+      ).resolves.toBe(true);
+      await cancelQueuedTask(repository, exhausted.task.taskId);
+
+      const expiresLater = {
+        ...taskSubmitCommand("test.outbox-retry-exhausted-expired"),
+        deadline: new Date(Date.now() + 60_000).toISOString(),
+      };
+      const expired = await repository.submitTask(expiresLater);
+      const expiredClaim = await repository.claimTaskOutbox({
+        claimerId: "integration-reconciler-exhausted-expired",
+        limit: 1,
+        leaseDurationMs: 1_000,
+      });
+      expect(expiredClaim[0]?.messageId).toBe(expired.outbox.messageId);
+      await assertionPool.query(
+        `UPDATE studio_tasks
+         SET deadline = clock_timestamp() - interval '1 second'
+         WHERE task_id = $1`,
+        [expired.task.taskId],
+      );
+      await assertionPool.query(
+        `UPDATE studio_task_outbox
+         SET attempt_count = $2
+         WHERE message_id = $1`,
+        [expired.outbox.messageId, MAX_TASK_OUTBOX_ATTEMPTS - 1],
+      );
+      await expect(
+        repository.retryTaskOutbox({
+          messageId: expired.outbox.messageId,
+          claimerId: "integration-reconciler-exhausted-expired",
+          error: "Redis unavailable after task deadline",
+          delayMs: 0,
+        }),
+      ).resolves.toBe(true);
+      await expect(repository.getTask(expired.task.taskId)).resolves.toMatchObject({
+        status: "expired",
+        revision: 1,
+        failureReason: "TASK_OUTBOX_DELIVERY_EXHAUSTED",
+      });
+
+      const later = await repository.submitTask(
+        taskSubmitCommand("test.outbox-after-dead-letter"),
+      );
+      const laterClaim = await repository.claimTaskOutbox({
+        claimerId: "integration-reconciler-after-dead-letter",
+        limit: 1,
+        leaseDurationMs: 1_000,
+      });
+      expect(laterClaim[0]?.messageId).toBe(later.outbox.messageId);
+      await cancelQueuedTask(repository, later.task.taskId);
     }, REAL_TEST_TIMEOUT_MS);
 
     it("serializes operation replay and concurrent lease claims", async () => {

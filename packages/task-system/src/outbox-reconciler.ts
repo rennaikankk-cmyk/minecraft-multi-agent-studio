@@ -142,7 +142,7 @@ export class TaskOutboxReconciler {
           messageId: entry.messageId,
           claimerId: this.options.instanceId,
           error: errorMessage(error),
-          delayMs: this.retryDelay(entry.attemptCount),
+          delayMs: this.retryDelay(entry.attemptCount + 1),
         });
         if (!retryRecorded) {
           throw new Error(
@@ -217,10 +217,11 @@ export class TaskOutboxReconciler {
     await this.options.queue.enqueue(entry.payload);
   }
 
-  private retryDelay(attemptCount: number): number {
+  private retryDelay(failureCount: number): number {
     return Math.min(
       this.options.retryMaxMs,
-      this.options.retryBaseMs * 2 ** Math.min(Math.max(0, attemptCount - 1), 20),
+      this.options.retryBaseMs *
+        2 ** Math.min(Math.max(0, failureCount - 1), 20),
     );
   }
 }

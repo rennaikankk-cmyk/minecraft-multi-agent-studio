@@ -485,6 +485,15 @@ export class BullMqTaskWorker {
         );
       }
       if (
+        task.dispatchBotId !== null &&
+        task.dispatchBotId !== dispatch.botId
+      ) {
+        throw new TaskWorkerError(
+          "TASK_DISPATCH_STALE",
+          "Task dispatch Bot target does not match PostgreSQL.",
+        );
+      }
+      if (
         task.handlerVersion !== dispatch.payload.handlerVersion ||
         task.executionIdempotent !==
           dispatch.payload.executionIdempotent

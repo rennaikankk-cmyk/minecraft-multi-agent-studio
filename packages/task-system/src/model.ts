@@ -161,6 +161,7 @@ export const taskOutboxStatusSchema = z.enum([
   "pending",
   "claimed",
   "delivered",
+  "failed",
 ]);
 
 export const taskOutboxRecordSchema = z
@@ -212,6 +213,13 @@ export const taskOutboxRecordSchema = z
         code: "custom",
         path: ["claimedBy"],
         message: "Unclaimed outbox entries cannot retain a claim owner.",
+      });
+    }
+    if (record.status === "failed" && record.lastError === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["lastError"],
+        message: "Failed outbox entries require a recorded error.",
       });
     }
   });
@@ -290,6 +298,13 @@ const operationBaseShape = {
   actorId: identifierSchema,
 };
 
+export const taskDispatchRetryCommandSchema = z
+  .object({
+    ...operationBaseShape,
+    reasonCode: reasonCodeSchema,
+  })
+  .strict();
+
 export const taskTransitionCommandSchema = z
   .object({
     ...operationBaseShape,
@@ -355,6 +370,9 @@ export type TaskCancellationRequest = z.infer<
   typeof taskCancellationRequestSchema
 >;
 export type TaskDispatch = TaskDispatchV1;
+export type TaskDispatchRetryCommand = z.infer<
+  typeof taskDispatchRetryCommandSchema
+>;
 export type TaskTransitionCommand = z.infer<
   typeof taskTransitionCommandSchema
 >;

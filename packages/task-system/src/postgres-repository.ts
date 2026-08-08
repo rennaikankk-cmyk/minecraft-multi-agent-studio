@@ -10,6 +10,7 @@ import { TaskSystemError } from "./errors.js";
 import {
   taskCancelCommandSchema,
   taskCreateCommandSchema,
+  taskDispatchRetryCommandSchema,
   taskLeaseAcquireCommandSchema,
   taskLeaseExpireCommandSchema,
   taskLeaseReleaseCommandSchema,
@@ -20,6 +21,7 @@ import {
   taskRecordSchema,
   taskTransitionCommandSchema,
   type TaskCreateCommand,
+  type TaskDispatchRetryCommand,
   type TaskOutboxRecord,
   type TaskCancellationRequest,
   type TaskSubmitCommand,
@@ -91,6 +93,27 @@ export type TaskOutboxRetryOptions = Readonly<{
   delayMs?: number;
 }>;
 
+export type RetryTaskDispatchResult = Readonly<{
+  task: TaskRecord;
+  dispatch: TaskDispatchV1;
+  outbox: TaskOutboxRecord;
+}>;
+
+export type TaskOutboxFailureRecord = Readonly<{
+  messageId: string;
+  taskId: string;
+  expectedRevision: number;
+  type: "task.dispatch.v1";
+  payload: unknown;
+  status: "failed";
+  attemptCount: number;
+  availableAt: string;
+  lastError: string;
+  createdAt: string;
+  updatedAt: string;
+  deliveredAt: string | null;
+}>;
+
 export type TaskCancellationRequestInput = Readonly<{
   operationId: string;
   taskId: string;
@@ -111,7 +134,9 @@ const TRANSACTION_STATEMENT_TIMEOUT_SQL =
   "SET LOCAL statement_timeout = '10000ms'";
 
 const DEFAULT_DISPATCH_SOURCE_INSTANCE_ID = "coordinator-main";
+const TASK_DISPATCH_RETRY_OPERATION_KIND = "task.dispatch-retry.v1";
 export const MAX_TASK_OUTBOX_BATCH_SIZE = 100;
+export const MAX_TASK_OUTBOX_ATTEMPTS = 1_000;
 const DEFAULT_OUTBOX_CLAIM_MS = 30_000;
 const MAX_OUTBOX_CLAIM_MS = 5 * 60_000;
 const DEFAULT_OUTBOX_RETRY_MS = 1_000;
@@ -335,6 +360,53 @@ function mapOutboxRow(row: SqlRow): TaskOutboxRecord {
     updatedAt: iso(row.updated_at),
     deliveredAt: iso(row.delivered_at),
   });
+}
+
+function mapOutboxFailureRow(row: SqlRow): TaskOutboxFailureRecord {
+  if (row.status !== "failed") {
+    throw new TaskSystemError(
+      "TASK_PERSISTENCE_FAILED",
+      "PostgreSQL returned a non-failed outbox inspection record.",
+    );
+  }
+  const availableAt = iso(row.available_at);
+  const createdAt = iso(row.created_at);
+  const updatedAt = iso(row.updated_at);
+  if (availableAt === null || createdAt === null || updatedAt === null) {
+    throw new TaskSystemError(
+      "TASK_PERSISTENCE_FAILED",
+      "PostgreSQL returned an incomplete outbox failure timestamp.",
+    );
+  }
+  return {
+    messageId: taskOutboxRecordSchema.shape.messageId.parse(row.message_id),
+    taskId: taskOutboxRecordSchema.shape.taskId.parse(row.task_id),
+    expectedRevision: integer(row.expected_revision),
+    type: taskOutboxRecordSchema.shape.type.parse(row.type),
+    payload: row.payload,
+    status: "failed",
+    attemptCount: integer(row.attempt_count),
+    availableAt,
+    lastError: text(row.last_error),
+    createdAt,
+    updatedAt,
+    deliveredAt: iso(row.delivered_at),
+  };
+}
+
+function outboxMatchesTaskContract(
+  row: SqlRow,
+  outbox: TaskOutboxRecord,
+): boolean {
+  return (
+    nullableText(row.task_dispatch_bot_id) === outbox.payload.botId &&
+    nullableText(row.task_type) === outbox.payload.payload.taskType &&
+    nullableText(row.task_handler_version) ===
+      outbox.payload.payload.handlerVersion &&
+    row.task_execution_idempotent ===
+      outbox.payload.payload.executionIdempotent &&
+    nullableText(row.task_trace_id) === outbox.payload.traceId
+  );
 }
 
 function mapCancellationRequestRow(row: SqlRow): TaskCancellationRequest {
@@ -626,15 +698,7 @@ export class PostgresTaskRepository {
     const existingRow = existing.rows[0];
     if (existingRow) {
       const outbox = mapOutboxRow(existingRow);
-      if (
-        outbox.payload.botId !== task.dispatchBotId ||
-        outbox.payload.payload.taskType !== task.taskType
-      ) {
-        throw new TaskSystemError(
-          "TASK_OPERATION_CONFLICT",
-          "Task dispatch outbox payload conflicts with the task record.",
-        );
-      }
+      this.assertOutboxMatchesTask(task, outbox);
       return outbox;
     }
 
@@ -673,7 +737,11 @@ export class PostgresTaskRepository {
         [task.taskId, task.revision],
       );
       const concurrentRow = concurrent.rows[0];
-      if (concurrentRow) return mapOutboxRow(concurrentRow);
+      if (concurrentRow) {
+        const outbox = mapOutboxRow(concurrentRow);
+        this.assertOutboxMatchesTask(task, outbox);
+        return outbox;
+      }
       throw new TaskSystemError(
         "TASK_PERSISTENCE_FAILED",
         "Task dispatch outbox row disappeared after insertion.",
@@ -758,10 +826,12 @@ export class PostgresTaskRepository {
   }
 
   /**
-   * Claims a bounded batch using PostgreSQL row locks.  A delivered entry is
+   * Claims a bounded batch using PostgreSQL row locks. A delivered entry is
    * intentionally eligible again while its task is still queued at the same
    * revision: this lets reconciliation rebuild BullMQ jobs after Redis data
-   * loss without generating a new protocol message.
+   * loss without generating a new protocol message. attempt_count is the
+   * consecutive failure count since the last successful acknowledgement;
+   * claims and successful reconciliation audits do not consume that budget.
    */
   async claimTaskOutbox(
     input: TaskOutboxClaimOptions,
@@ -809,20 +879,68 @@ export class PostgresTaskRepository {
                    outbox.message_id ASC
           LIMIT $1
           FOR UPDATE OF outbox, task SKIP LOCKED
+        ), claimed AS (
+          UPDATE studio_task_outbox AS outbox
+          SET status = 'claimed',
+              claimed_by = $2,
+              claim_expires_at = clock_timestamp() +
+                ($3 * interval '1 millisecond'),
+              updated_at = clock_timestamp()
+          FROM candidates
+          WHERE outbox.message_id = candidates.message_id
+          RETURNING outbox.*
         )
-        UPDATE studio_task_outbox AS outbox
-        SET status = 'claimed',
-            attempt_count = outbox.attempt_count + 1,
-            claimed_by = $2,
-            claim_expires_at = clock_timestamp() +
-              ($3 * interval '1 millisecond'),
-            updated_at = clock_timestamp()
-        FROM candidates
-        WHERE outbox.message_id = candidates.message_id
-        RETURNING outbox.*`,
+        SELECT claimed.*,
+               task.dispatch_bot_id AS task_dispatch_bot_id,
+               task.task_type,
+               task.handler_version AS task_handler_version,
+               task.execution_idempotent AS task_execution_idempotent,
+               task.trace_id AS task_trace_id
+        FROM claimed
+        JOIN studio_tasks AS task ON task.task_id = claimed.task_id`,
         [limit, claimerId, leaseDurationMs],
       );
-      const entries = result.rows.map((row) => mapOutboxRow(row));
+      const entries: TaskOutboxRecord[] = [];
+      for (const row of result.rows) {
+        let failureReason: string | null = null;
+        try {
+          const entry = mapOutboxRow(row);
+          if (outboxMatchesTaskContract(row, entry)) {
+            entries.push(entry);
+          } else {
+            failureReason = "TASK_OUTBOX_TASK_CONTRACT_MISMATCH";
+          }
+        } catch {
+          failureReason = "TASK_OUTBOX_RECORD_INVALID";
+        }
+        if (failureReason !== null) {
+          const quarantined = await client.query(
+            `UPDATE studio_task_outbox
+             SET status = 'failed',
+                 claimed_by = NULL,
+                 claim_expires_at = NULL,
+                 last_error = $3,
+                 updated_at = clock_timestamp()
+             WHERE message_id = $1
+               AND status = 'claimed'
+               AND claimed_by = $2`,
+            [text(row.message_id), claimerId, failureReason],
+          );
+          if (quarantined.rowCount !== 1) {
+            throw new TaskSystemError(
+              "TASK_PERSISTENCE_FAILED",
+              "Invalid task outbox record could not be quarantined.",
+            );
+          }
+          await this.blockTaskAfterOutboxFailure(client, {
+            messageId: text(row.message_id),
+            taskId: text(row.task_id),
+            expectedRevision: integer(row.expected_revision),
+            actorId: claimerId,
+            reasonCode: failureReason,
+          });
+        }
+      }
       await client.query("COMMIT");
       return entries;
     } catch (error) {
@@ -856,7 +974,41 @@ export class PostgresTaskRepository {
         [parsedTaskId, expectedRevision],
       );
       const row = result.rows[0];
-      return row ? mapOutboxRow(row) : null;
+      if (!row) return null;
+      try {
+        return mapOutboxRow(row);
+      } catch (error) {
+        if (row.status === "failed") return null;
+        throw error;
+      }
+    } catch (error) {
+      throw this.persistenceError(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  async getTaskOutboxFailure(
+    taskId: string,
+    expectedRevision: number,
+  ): Promise<TaskOutboxFailureRecord | null> {
+    const parsedTaskId = taskCreateCommandSchema.shape.taskId.parse(taskId);
+    if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
+      throw new RangeError("Task outbox revision must be a nonnegative integer.");
+    }
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(
+        `SELECT *
+         FROM studio_task_outbox
+         WHERE task_id = $1
+           AND expected_revision = $2
+           AND type = 'task.dispatch.v1'
+           AND status = 'failed'`,
+        [parsedTaskId, expectedRevision],
+      );
+      const row = result.rows[0];
+      return row ? mapOutboxFailureRow(row) : null;
     } catch (error) {
       throw this.persistenceError(error);
     } finally {
@@ -876,6 +1028,7 @@ export class PostgresTaskRepository {
       const result = await client.query(
         `UPDATE studio_task_outbox
          SET status = 'delivered',
+             attempt_count = 0,
              claimed_by = NULL,
              claim_expires_at = NULL,
              last_error = NULL,
@@ -921,22 +1074,52 @@ export class PostgresTaskRepository {
     }
     const client = await this.pool.connect();
     try {
+      await this.beginTransaction(client);
       const result = await client.query(
         `UPDATE studio_task_outbox
-         SET status = 'pending',
+         SET status = CASE
+               WHEN attempt_count + 1 >= $5 THEN 'failed'
+               ELSE 'pending'
+             END,
+             attempt_count = LEAST(attempt_count + 1, $5),
              claimed_by = NULL,
              claim_expires_at = NULL,
              last_error = $3,
-             available_at = clock_timestamp() +
-               ($4 * interval '1 millisecond'),
+             available_at = CASE
+               WHEN attempt_count + 1 >= $5 THEN clock_timestamp()
+               ELSE clock_timestamp() + ($4 * interval '1 millisecond')
+             END,
              updated_at = clock_timestamp()
          WHERE message_id = $1
            AND status = 'claimed'
-           AND claimed_by = $2`,
-        [messageId, claimerId, errorMessage, delayMs],
+           AND claimed_by = $2
+         RETURNING task_id, expected_revision, status`,
+        [
+          messageId,
+          claimerId,
+          errorMessage,
+          delayMs,
+          MAX_TASK_OUTBOX_ATTEMPTS,
+        ],
       );
-      return result.rowCount === 1;
+      const row = result.rows[0];
+      if (!row) {
+        await client.query("COMMIT");
+        return false;
+      }
+      if (row.status === "failed") {
+        await this.blockTaskAfterOutboxFailure(client, {
+          messageId,
+          taskId: text(row.task_id),
+          expectedRevision: integer(row.expected_revision),
+          actorId: claimerId,
+          reasonCode: "TASK_OUTBOX_DELIVERY_EXHAUSTED",
+        });
+      }
+      await client.query("COMMIT");
+      return true;
     } catch (error) {
+      await this.rollback(client);
       throw this.persistenceError(error);
     } finally {
       client.release();
@@ -945,6 +1128,133 @@ export class PostgresTaskRepository {
 
   retryOutbox(input: TaskOutboxRetryOptions): Promise<boolean> {
     return this.retryTaskOutbox(input);
+  }
+
+  async retryTaskDispatch(input: unknown): Promise<RetryTaskDispatchResult> {
+    const command: TaskDispatchRetryCommand =
+      taskDispatchRetryCommandSchema.parse(input);
+    const operationFingerprint = taskOperationFingerprint({
+      kind: TASK_DISPATCH_RETRY_OPERATION_KIND,
+      command,
+    });
+    const client = await this.pool.connect();
+    try {
+      await this.beginTransaction(client);
+      await this.lockOperation(client, command.operationId);
+      const replay = await this.findOperationReplay(
+        client,
+        command,
+        operationFingerprint,
+      );
+      if (replay) {
+        if (
+          replay.status !== "queued" ||
+          replay.revision !== command.expectedRevision + 1
+        ) {
+          throw new TaskSystemError(
+            "TASK_PERSISTENCE_FAILED",
+            "Task dispatch retry history contains an invalid snapshot.",
+          );
+        }
+        const outbox = await this.ensureDispatchOutbox(
+          client,
+          replay,
+          replay.updatedAt,
+        );
+        await client.query("COMMIT");
+        return { task: replay, dispatch: outbox.payload, outbox };
+      }
+
+      const current = await this.loadTask(client, command.taskId, true);
+      if (!current) {
+        throw new TaskSystemError("TASK_NOT_FOUND", "Task does not exist.");
+      }
+      if (current.status !== "blocked") {
+        throw new TaskSystemError(
+          "TASK_TRANSITION_INVALID",
+          "Only a blocked task can retry durable dispatch.",
+        );
+      }
+      const now = await this.databaseNow(client);
+      if (
+        current.deadline !== null &&
+        Date.parse(current.deadline) <= now.getTime()
+      ) {
+        throw new TaskSystemError(
+          "TASK_DEADLINE_EXPIRED",
+          "Task deadline has already expired.",
+        );
+      }
+      const transitionCommand = taskTransitionCommandSchema.parse({
+        ...command,
+        to: "queued",
+        leaseOwner: null,
+        failureReason: null,
+        result: null,
+        evidence: [],
+      });
+      const next = transitionTask(current, transitionCommand, now);
+      const updated = await client.query(
+        `UPDATE studio_tasks SET
+          status = $2,
+          assigned_bot_id = $3,
+          retry_count = $4,
+          lease_owner = $5,
+          lease_expires_at = $6,
+          failure_reason = $7,
+          result = $8::jsonb,
+          evidence = $9::jsonb,
+          revision = $10,
+          updated_at = $11,
+          started_at = $12,
+          finished_at = $13
+        WHERE task_id = $1 AND revision = $14`,
+        [
+          next.taskId,
+          next.status,
+          next.assignedBotId,
+          next.retryCount,
+          next.leaseOwner,
+          next.leaseExpiresAt,
+          next.failureReason,
+          next.result === null ? null : JSON.stringify(next.result),
+          JSON.stringify(next.evidence),
+          next.revision,
+          next.updatedAt,
+          next.startedAt,
+          next.finishedAt,
+          current.revision,
+        ],
+      );
+      if (updated.rowCount !== 1) {
+        throw new TaskSystemError(
+          "TASK_REVISION_CONFLICT",
+          "Task changed while retrying durable dispatch.",
+        );
+      }
+      await this.appendHistory(client, {
+        command,
+        operationFingerprint,
+        eventType: "task.dispatch-retried",
+        fromStatus: current.status,
+        toStatus: next.status,
+        reasonCode: command.reasonCode,
+        task: next,
+        timestamp: next.updatedAt,
+      });
+      const outbox = await this.ensureDispatchOutbox(
+        client,
+        next,
+        next.updatedAt,
+      );
+      await client.query("COMMIT");
+      return { task: next, dispatch: outbox.payload, outbox };
+    } catch (error) {
+      await this.rollback(client);
+      throw this.persistenceError(error);
+    } finally {
+      client.release();
+    }
   }
 
   async requestTaskCancellation(
@@ -1173,6 +1483,124 @@ export class PostgresTaskRepository {
       command.reasonCode,
       (task, now) => expireTaskLease(task, command, now),
     );
+  }
+
+  private async blockTaskAfterOutboxFailure(
+    client: PostgresClientLike,
+    input: Readonly<{
+      messageId: string;
+      taskId: string;
+      expectedRevision: number;
+      actorId: string;
+      reasonCode: string;
+    }>,
+  ): Promise<void> {
+    const current = await this.loadTask(client, input.taskId, true);
+    if (!current) {
+      throw new TaskSystemError(
+        "TASK_NOT_FOUND",
+        "Outbox failure references a task that does not exist.",
+      );
+    }
+    if (
+      current.status !== "queued" ||
+      current.revision !== input.expectedRevision
+    ) {
+      return;
+    }
+    const now = await this.databaseNow(client);
+    const targetStatus =
+      current.deadline !== null && Date.parse(current.deadline) <= now.getTime()
+        ? "expired"
+        : "blocked";
+    const command = taskTransitionCommandSchema.parse({
+      schemaVersion: "1.0",
+      operationId: input.messageId,
+      taskId: input.taskId,
+      expectedRevision: input.expectedRevision,
+      actorId: input.actorId,
+      to: targetStatus,
+      reasonCode: input.reasonCode,
+      leaseOwner: null,
+      failureReason: input.reasonCode,
+      result: null,
+      evidence: [],
+    });
+    const next = taskRecordSchema.parse({
+      ...transitionTask(current, command, now),
+      failureReason: input.reasonCode,
+    });
+    const updated = await client.query(
+      `UPDATE studio_tasks SET
+        status = $2,
+        assigned_bot_id = $3,
+        retry_count = $4,
+        lease_owner = $5,
+        lease_expires_at = $6,
+        failure_reason = $7,
+        result = $8::jsonb,
+        evidence = $9::jsonb,
+        revision = $10,
+        updated_at = $11,
+        started_at = $12,
+        finished_at = $13
+      WHERE task_id = $1 AND revision = $14`,
+      [
+        next.taskId,
+        next.status,
+        next.assignedBotId,
+        next.retryCount,
+        next.leaseOwner,
+        next.leaseExpiresAt,
+        next.failureReason,
+        next.result === null ? null : JSON.stringify(next.result),
+        JSON.stringify(next.evidence),
+        next.revision,
+        next.updatedAt,
+        next.startedAt,
+        next.finishedAt,
+        current.revision,
+      ],
+    );
+    if (updated.rowCount !== 1) {
+      throw new TaskSystemError(
+        "TASK_REVISION_CONFLICT",
+        "Task changed while recording an outbox failure.",
+      );
+    }
+    await this.appendHistory(client, {
+      command,
+      operationFingerprint: taskOperationFingerprint(command),
+      eventType:
+        targetStatus === "expired"
+          ? "task.dispatch-expired"
+          : "task.dispatch-blocked",
+      fromStatus: current.status,
+      toStatus: next.status,
+      reasonCode: input.reasonCode,
+      task: next,
+      timestamp: next.updatedAt,
+    });
+  }
+
+  private assertOutboxMatchesTask(
+    task: TaskRecord,
+    outbox: TaskOutboxRecord,
+  ): void {
+    if (
+      outbox.taskId !== task.taskId ||
+      outbox.expectedRevision !== task.revision ||
+      outbox.payload.traceId !== task.traceId ||
+      outbox.payload.botId !== task.dispatchBotId ||
+      outbox.payload.payload.taskType !== task.taskType ||
+      outbox.payload.payload.handlerVersion !== task.handlerVersion ||
+      outbox.payload.payload.executionIdempotent !== task.executionIdempotent
+    ) {
+      throw new TaskSystemError(
+        "TASK_OPERATION_CONFLICT",
+        "Task dispatch outbox payload conflicts with the task record.",
+      );
+    }
   }
 
   private async mutate<TCommand extends OperationCommand>(
