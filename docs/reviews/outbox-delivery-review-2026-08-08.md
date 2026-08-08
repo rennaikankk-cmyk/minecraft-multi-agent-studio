@@ -37,12 +37,12 @@ unknown / active。
 
 ## 待办（留给后续，未改）
 
-- **[CONCERN] `claimTaskOutbox` 把 `status='delivered'` 也纳入认领**
-  （`postgres-repository.ts` 认领查询 `outbox.status IN ('pending','delivered')`）。
-  Redis 长时间不可用时，一条**已投递**的行可能在重复对账中累计失败直到预算耗尽而翻
-  `failed`，进而 `blockTaskAfterOutboxFailure` 阻塞/过期一个其实已投递的任务。
-  需要区分"已投递待确认 worker 消费" vs "待投递"，或给 delivered 行单独的确认对账
-  路径而非计入投递失败预算。**牵涉迁移与 CHECK 约束，需专门设计，不在本轮草率改。**
+- ~~**[CONCERN]** `claimTaskOutbox` 把 `status='delivered'` 也纳入认领~~ **已修
+  （后续提交）**：`retryTaskOutbox` 的死信判定加 `delivered_at IS NULL` 条件——
+  已投递过的行投递重查失败时只回 `pending` 等待下次重查，永不翻 `failed`、
+  永不触发 `blockTaskAfterOutboxFailure`；失败预算只约束**从未投递成功**的消息。
+  纯查询语义修正，无迁移、无 CHECK 约束改动（`delivered_at` 列 0003 已有）。
+  新增回归：`never dead-letters an already-delivered row during a Redis outage`。
 
 - **[NIT] 迁移 0004 历史 INSERT 无去重**：同 `task_id/expected_revision` 的两条失败
   outbox 会各发一条 `dispatch-blocked` 历史，且 `operation_id = message_id` 可能与运行时

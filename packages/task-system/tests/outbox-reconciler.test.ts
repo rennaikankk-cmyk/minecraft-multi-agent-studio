@@ -168,8 +168,12 @@ class FakeOutboxRepository implements TaskOutboxRepositoryLike {
       entry.attemptCount + 1,
       MAX_TASK_OUTBOX_ATTEMPTS,
     );
+    // Mirrors the PostgreSQL semantics: an already-delivered row is exempt
+    // from the delivery failure budget and can never dead-letter.
     const status =
-      attemptCount >= MAX_TASK_OUTBOX_ATTEMPTS ? "failed" : "pending";
+      entry.deliveredAt === null && attemptCount >= MAX_TASK_OUTBOX_ATTEMPTS
+        ? "failed"
+        : "pending";
     this.entries.set(input.messageId, {
       ...entry,
       status,
@@ -824,6 +828,41 @@ describe("TaskOutboxReconciler", () => {
       enqueued: 0,
       skipped: 0,
       failed: 0,
+    });
+  });
+
+  it("never dead-letters an already-delivered row during a Redis outage", async () => {
+    // A delivered outbox row is periodically re-checked while its task stays
+    // queued. A prolonged Redis outage must not consume the delivery failure
+    // budget of a message that was already delivered once — flipping it to
+    // 'failed' would block/expire a task whose dispatch already succeeded.
+    const repository = new FakeOutboxRepository();
+    const queue = new FakeQueue();
+    const entry = {
+      ...outbox(
+        TASK_A,
+        0,
+        "b2b2b2b2-b2b2-4b2b-8b2b-b2b2b2b2b2b2",
+      ),
+      status: "delivered" as const,
+      attemptCount: MAX_TASK_OUTBOX_ATTEMPTS - 1,
+      deliveredAt: NOW,
+    };
+    repository.entries.set(entry.messageId, entry);
+    queue.failNext = true;
+
+    await expect(reconciler(repository, queue).reconcileOnce()).resolves.toEqual({
+      claimed: 1,
+      enqueued: 0,
+      skipped: 0,
+      failed: 1,
+    });
+    // The row goes back to 'pending' for a later recheck instead of 'failed'.
+    expect(repository.entries.get(entry.messageId)).toMatchObject({
+      status: "pending",
+      attemptCount: MAX_TASK_OUTBOX_ATTEMPTS,
+      lastError: "Redis unavailable",
+      deliveredAt: NOW,
     });
   });
 });

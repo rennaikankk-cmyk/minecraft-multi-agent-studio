@@ -1078,7 +1078,8 @@ export class PostgresTaskRepository {
       const result = await client.query(
         `UPDATE studio_task_outbox
          SET status = CASE
-               WHEN attempt_count + 1 >= $5 THEN 'failed'
+               WHEN delivered_at IS NULL AND attempt_count + 1 >= $5
+                 THEN 'failed'
                ELSE 'pending'
              END,
              attempt_count = LEAST(attempt_count + 1, $5),
@@ -1086,7 +1087,8 @@ export class PostgresTaskRepository {
              claim_expires_at = NULL,
              last_error = $3,
              available_at = CASE
-               WHEN attempt_count + 1 >= $5 THEN clock_timestamp()
+               WHEN delivered_at IS NULL AND attempt_count + 1 >= $5
+                 THEN clock_timestamp()
                ELSE clock_timestamp() + ($4 * interval '1 millisecond')
              END,
              updated_at = clock_timestamp()
