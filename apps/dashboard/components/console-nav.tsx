@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
+import { ThemeSwitcher } from "@/components/theme-switcher";
+
 const links = [
   { href: "/", label: "总览" },
   { href: "/bots", label: "机器人" },
@@ -38,6 +40,7 @@ export function ConsoleNav() {
             );
           })}
         </ul>
+        <ThemeSwitcher />
       </div>
     </nav>
   );

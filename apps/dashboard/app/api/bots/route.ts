@@ -62,7 +62,11 @@ function normalizeError(cause: unknown): {
   code: DashboardApiErrorCode;
   message: string;
 } {
-  if (cause instanceof DashboardControlError) return cause;
+  if (cause instanceof DashboardControlError) {
+    // Return a plain object: the Error instance carries an own enumerable
+    // `name` property that the strict response schema rejects.
+    return { code: cause.code, message: cause.message };
+  }
   return {
     code: "INVALID_CONTROL_RESPONSE",
     message: "机器人状态接口返回了无法识别的数据。",

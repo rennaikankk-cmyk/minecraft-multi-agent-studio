@@ -106,6 +106,26 @@ test("bots page renders a bot pushed over the live stream", async ({ page }) => 
   await expect(page.getByTestId("bot-state-stream-bot-01")).toHaveText("在线");
 });
 
+test("theme switcher applies and persists the selected style", async ({ page }) => {
+  await routeEmptyBots(page);
+  await page.goto("/");
+  // Default tactical theme has no data-theme attribute.
+  await expect(page.locator("html")).not.toHaveAttribute("data-theme", /.+/);
+
+  await page.getByTestId("theme-modern").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "modern");
+
+  await page.getByTestId("theme-pixel").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "pixel");
+
+  // Survives reload via localStorage + inline init script.
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "pixel");
+
+  await page.getByTestId("theme-tactical").click();
+  await expect(page.locator("html")).not.toHaveAttribute("data-theme", /.+/);
+});
+
 async function routeEmptyBots(page: Page) {
   await page.route(/\/api\/bots$/, async (route) => {
     await route.fulfill({
