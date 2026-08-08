@@ -5,7 +5,7 @@ const UUID = "11111111-1111-4111-8111-111111111111";
 
 test("shows an online Bot with real telemetry fields", async ({ page }) => {
   await routeBots(page, "online");
-  await page.goto("/");
+  await page.goto("/bots");
   await expect(page.getByTestId("bot-card-worker-01")).toBeVisible();
   await expect(page.getByTestId("bot-state-worker-01")).toHaveText("在线");
   await expect(page.getByTestId("bot-card-worker-01")).toContainText("18 / 20");
@@ -16,13 +16,13 @@ test("shows an online Bot with real telemetry fields", async ({ page }) => {
 
 test("shows a disconnected Bot as offline", async ({ page }) => {
   await routeBots(page, "offline");
-  await page.goto("/");
+  await page.goto("/bots");
   await expect(page.getByTestId("bot-state-worker-01")).toHaveText("离线");
 });
 
 test("shows stale as 失联 and disables stop", async ({ page }) => {
   await routeBots(page, "stale");
-  await page.goto("/");
+  await page.goto("/bots");
   await expect(page.getByTestId("bot-state-worker-01")).toHaveText("失联");
   await expect(page.getByRole("button", { name: "失联不可停止" })).toBeDisabled();
 });
@@ -39,7 +39,7 @@ test("shows backend failure without fake Bot fallback", async ({ page }) => {
       }),
     });
   });
-  await page.goto("/");
+  await page.goto("/bots");
   await expect(page.getByTestId("bot-backend-error")).toContainText("Control API 当前不可用");
   await expect(page.getByTestId("bot-grid")).toHaveCount(0);
 });
@@ -72,7 +72,7 @@ test("requires confirmation and shows the confirmed stop result", async ({ page 
     });
   });
 
-  await page.goto("/");
+  await page.goto("/bots");
   await page.getByRole("button", { name: "安全停止" }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
   await page.getByLabel("本地停止确认码").fill("safe-stop-123");

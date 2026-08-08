@@ -313,3 +313,184 @@ footer { display: flex; justify-content: space-between; gap: 20px; margin-top: 3
   .secondaryButton, .dangerButton { width: 100%; }
   footer { flex-direction: column; }
 }
+
+/* ---- console shell (nav, overview strip, pages, drawer) ---- */
+
+.consoleNav {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  background: rgba(7, 11, 10, 0.92);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line);
+}
+
+.consoleNavInner {
+  width: min(1180px, calc(100% - 40px));
+  margin: 0 auto;
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  gap: 22px;
+}
+
+.consoleNavBrand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+  text-decoration: none;
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+
+.brandMark.small { width: 26px; height: 26px; border-radius: 7px; font-size: 13px; }
+
+.consoleNav ul {
+  display: flex;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.consoleNav ul a {
+  display: inline-block;
+  padding: 8px 14px;
+  border-radius: 9px;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.consoleNav ul a:hover { color: var(--text); background: rgba(170, 203, 186, 0.08); }
+
+.consoleNav ul a.active {
+  color: #07100b;
+  background: var(--green);
+}
+
+.botOverviewStrip {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  margin-top: 26px;
+  padding: 18px 22px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+}
+
+.stripEyebrow { font-size: 11px; letter-spacing: 0.14em; color: var(--muted); }
+.botOverviewStrip h3 { margin: 4px 0 0; font-size: 17px; }
+
+.stripFacts { display: flex; gap: 18px; flex: 1; color: var(--muted); font-size: 13px; }
+.stripFacts strong { color: var(--text); font-size: 17px; margin-right: 4px; }
+.stripError { color: var(--red); }
+
+.stripLink {
+  color: var(--green);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.pageHeader { padding: 34px 0 8px; }
+.pageHeader .eyebrow { margin: 0 0 6px; font-size: 12px; letter-spacing: 0.16em; color: var(--muted); }
+.pageHeader h2 { margin: 0; font-size: 30px; }
+.pageHeader p { margin: 10px 0 0; max-width: 640px; color: var(--muted); font-size: 14px; line-height: 1.6; }
+
+.streamBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.streamBadge i { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.streamBadge.live { color: var(--green); border-color: rgba(110, 231, 162, 0.35); }
+.streamBadge.live i { background: var(--green); box-shadow: 0 0 8px rgba(110, 231, 162, 0.8); }
+.streamBadge.fallback-polling { color: var(--amber); border-color: rgba(244, 197, 107, 0.35); }
+.streamBadge.fallback-polling i { background: var(--amber); }
+.streamBadge.error { color: var(--red); border-color: rgba(255, 133, 125, 0.35); }
+.streamBadge.error i { background: var(--red); }
+
+.notConnectedPanel {
+  margin-top: 26px;
+  padding: 26px;
+  border: 1px dashed rgba(244, 197, 107, 0.4);
+  border-radius: 16px;
+  background: rgba(244, 197, 107, 0.05);
+}
+.notConnectedPanel strong { display: block; color: var(--amber); margin-bottom: 8px; }
+.notConnectedPanel p { margin: 0 0 10px; color: var(--muted); font-size: 14px; line-height: 1.65; }
+.notConnectedPanel ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 13px; line-height: 1.9; }
+
+.roleGrid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  margin-top: 22px;
+}
+
+.roleCard {
+  padding: 18px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+.roleCard h4 { margin: 0 0 8px; font-size: 15px; }
+.roleCard p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.65; }
+.roleCard .roleTag { display: inline-block; margin-bottom: 10px; padding: 3px 9px; border-radius: 999px; background: rgba(110, 231, 162, 0.12); color: var(--green); font-size: 11px; font-weight: 700; letter-spacing: 0.06em; }
+
+.drawerBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(4, 7, 6, 0.6);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.botDrawer {
+  width: min(420px, 92vw);
+  height: 100%;
+  overflow-y: auto;
+  padding: 26px;
+  background: var(--panel-2);
+  border-left: 1px solid var(--line);
+}
+.botDrawer header { display: flex; align-items: start; justify-content: space-between; margin-bottom: 18px; }
+.botDrawer h4 { margin: 2px 0 0; font-size: 20px; }
+.botDrawer .drawerEyebrow { font-size: 11px; letter-spacing: 0.14em; color: var(--muted); }
+.drawerClose {
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.drawerClose:hover { color: var(--text); }
+
+.drawerFacts { display: grid; grid-template-columns: 1fr; gap: 0; margin: 0; }
+.drawerFacts > div { display: flex; justify-content: space-between; gap: 14px; padding: 10px 2px; border-bottom: 1px solid var(--line); }
+.drawerFacts dt { color: var(--muted); font-size: 13px; }
+.drawerFacts dd { margin: 0; font-size: 13px; text-align: right; word-break: break-all; }
+
+@media (max-width: 860px) {
+  .roleGrid { grid-template-columns: 1fr; }
+  .botOverviewStrip { flex-direction: column; align-items: start; gap: 10px; }
+}
+
+.botCardActions { display: flex; gap: 8px; }
+@media (max-width: 560px) {
+  .botCardActions { width: 100%; flex-direction: column; }
+}

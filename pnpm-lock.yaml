@@ -109,6 +109,9 @@ importers:
       react-dom:
         specifier: 19.2.7
         version: 19.2.7(react@19.2.7)
+      ws:
+        specifier: 8.21.1
+        version: 8.21.1
       zustand:
         specifier: 5.0.14
         version: 5.0.14(@types/react@19.2.17)(react@19.2.7)
@@ -125,6 +128,9 @@ importers:
       '@types/react-dom':
         specifier: 19.2.3
         version: 19.2.3(@types/react@19.2.17)
+      '@types/ws':
+        specifier: 8.18.1
+        version: 8.18.1
       typescript:
         specifier: 6.0.3
         version: 6.0.3

@@ -7,7 +7,7 @@ import {
 } from "@minecraft-studio/protocol";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { BotDashboard } from "@/components/bot-dashboard";
+import { BotOverviewStrip } from "@/components/bot-overview-strip";
 
 type EnvironmentResponse = {
   requestId: string;
@@ -238,7 +238,7 @@ export default function HomePage() {
         </div>
       </section>
 
-      <BotDashboard />
+      <BotOverviewStrip />
 
       {error ? (
         <section className="errorPanel" role="alert">
