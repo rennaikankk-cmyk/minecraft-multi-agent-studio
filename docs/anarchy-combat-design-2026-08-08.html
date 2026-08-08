@@ -108,6 +108,7 @@
 <p><span class="ai">AI 决策</span>：<b>仅</b>是否交战/脱离、撤退阈值——战略级。<br>
 <span class="det">确定性（必须）</span>：敌我识别与目标选择（白名单外即目标）、图腾自动弹出（亚 tick 反应）、水晶摆放/引爆时序、护甲耐久换装、快捷栏管理、瞄准。</p>
 <div class="box warn"><b>本项目最重要的技术判断</b>：战斗机制必须 100% 确定性代码，且要跑在延迟最低的路径上。AI 的最快反应也在 100ms 以上，而水晶 PvP 的图腾弹出、连锁爆破需要 &lt;50ms 反应——让 AI 参与战斗动作等于必输。这也是下文 Rust/网络延迟讨论的核心动因。</div>
+<div class="box key"><b>打法来源：参考开源、自研反射层</b>。水晶 PvP、AutoTotem、AutoArmor、Surround 等算法以成熟开源实现（Meteor Client、Baritone、mineflayer-pvp）为<b>打法参考</b>，在本项目自研，三条硬线：① <b>只学机制与参数、重写为本项目 TS，禁止逐行翻译/复制 GPL 源码</b>（算法思路不受版权保护，逐行翻译属衍生作品受 GPL 约束）；② Meteor 等为 GPL-3.0，<b>仅在不分发时无约束，分发前必做许可评审</b>，默认按本地自用处理；③ <b>继续用 Mineflayer 无头 bot，不引入 MC 客户端模组栈</b>（Meteor 是 Java 客户端 Fabric 模组，架构不兼容且资源开销涨一到两个数量级）。Mineflayer 无头能否达到 &lt;50ms 时序是<b>未验证假设</b>，由 M3 单独实测硬化；扛不住才评估双栈或 Rust。</div>
 <p><b>技能</b>：<code>combat.crystal</code> · <code>combat.melee</code> · <code>manage.totem</code> · <code>manage.armor</code></p>
 </div>
 
@@ -236,6 +237,7 @@
 <li>目标是无规则服多智能体作战集群，但<b>开发/验收严格遵循"隔离测试服 → 私有测试 anarchy → 灰度正式服"</b>三段式，不跳级。</li>
 <li>牢记三层职责：<b>敌我识别是确定性白名单（白名单外一律视为敌人），AI 只决定去哪/是否开打，代码决定打谁/怎么打</b>。任何让模型直接控制战斗、tick 动作或敌我识别的设计一律否决。</li>
 <li>战斗（M3）必须作为独立里程碑单独硬化，先在隔离 PvP 环境验证反应时序，达标前不上任何真实对抗。</li>
+<li>战斗打法参考开源实现（Meteor/Baritone/mineflayer-pvp）但<b>只学机制参数、重写为本项目 TS，禁止逐行翻译/复制 GPL 源码</b>；GPL 仅不分发时无约束，分发前必做许可评审；不引入 MC 客户端模组栈，继续用 Mineflayer 无头 bot。</li>
 <li>online-mode 认证与隔离测试 offline 认证<b>并存并由 ServerProfile 显式区分</b>，严禁把测试捷径带上正式服；账号凭据加密、不落仓库/日志。</li>
 <li>封号风险如实记录，不假装已解决；"类人化"是降低破绽不是免疫。</li>
 <li>其余 v1 铁律不变：协议先行、fail-closed、不重写已验收模块、不无测量写 Rust、<code>pnpm check</code> 全绿才算完成、不冒充验收。</li>

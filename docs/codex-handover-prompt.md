@@ -30,7 +30,7 @@
 1. **M0 闭环底座**：完成 v1 遗留的 P1.3.2 持久任务闭环（在 `40b406e` 上继续）+ 独立 Worker 应用 + Coordinator 任务调度接入（PG 任务 → TaskDispatchV1 → Worker → SkillInvocationV1 → Runtime）+ 审计落 PostgreSQL。验收：杀任意进程任务不丢不重；Dashboard 建任务能驱动 Bot 动作。
 2. **M1 存活与旅行**：online-mode 正版账号认证适配（**与隔离测试 offline 路径并存，由 ServerProfile 显式区分**）；L0 存活升级（死前断线保号、贵重装备暂存）；`travel.highway` + 鞘翅飞行。
 3. **M2 首个生产角色**：侦察角色（探索+坐标记录+写共享世界记忆）或农场角色（一个稳定自动农场）——二选一先做，连续运行数小时无人干预。
-4. **M3 战斗反射（独立里程碑，单独硬化）**：确定性水晶 PvP/图腾/换甲，在隔离 PvP 测试环境反复验证反应时序与事件循环抖动。达标前不上任何真实对抗。
+4. **M3 战斗反射（独立里程碑，单独硬化）**：确定性水晶 PvP/图腾/换甲，在隔离 PvP 测试环境反复验证反应时序与事件循环抖动。达标前不上任何真实对抗。战斗打法以开源实现（Meteor Client、Baritone、mineflayer-pvp 等）为**参考**——**只学机制与参数、重写为本项目 TS，禁止逐行翻译/复制 GPL 源码；GPL 仅在不分发时无约束，分发前必做许可评审；继续用 Mineflayer 无头 bot，不引入 MC 客户端模组栈**。Mineflayer 无头能否达到 <50ms 时序是未验证假设，M3 实测扛不住才评估换栈/Rust。（详见 AGENTS.md §0.6）
 5. **M4 多角色协调**：Coordinator 进程编排（拉起/回收多 Bot）+ 动态角色分配 + 共享世界记忆（pgvector）+ 分布式部署（家用节点跑农场/建造/后勤，靠近目标服的 VPS 跑战斗/突袭/侦察）。
 6. **M5 收敛重构**：抽 `packages/secure-link` 消灭约 3700 行重复；拆三个千行文件（postgres-repository / bullmq-worker / control-link-server）。趁规模可控时做，排在多 Bot 稳定后、上正式服前。
 7. **M6 智能层 & 上正式服**：AI Router 接战略/战术（**先用云 API 验证分工调度的价值，再决定是否上本地大模型**）；灰度上目标服，先小规模、评估封号风险后再扩张。
