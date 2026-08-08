@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Minecraft Multi-Agent Studio 架构评审报告</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+    color: #1a202c; line-height: 1.75; font-size: 10.5pt; margin: 0;
+  }
+  h1 { font-size: 20pt; border-bottom: 3px solid #2b6cb0; padding-bottom: 8px; margin-bottom: 4px; }
+  h2 { font-size: 14pt; color: #2b6cb0; margin-top: 28px; border-left: 5px solid #2b6cb0; padding-left: 10px; page-break-after: avoid; }
+  h3 { font-size: 11.5pt; color: #2c5282; margin-top: 18px; page-break-after: avoid; }
+  .meta { color: #718096; font-size: 9pt; margin-bottom: 24px; }
+  .summary-box {
+    background: #ebf8ff; border: 1px solid #90cdf4; border-radius: 6px;
+    padding: 12px 16px; margin: 16px 0;
+  }
+  .warn-box {
+    background: #fffaf0; border: 1px solid #f6ad55; border-radius: 6px;
+    padding: 12px 16px; margin: 16px 0;
+  }
+  .good { color: #276749; font-weight: bold; }
+  .bad { color: #c53030; font-weight: bold; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 9.5pt; page-break-inside: avoid; }
+  th { background: #2b6cb0; color: white; padding: 6px 10px; text-align: left; }
+  td { border: 1px solid #cbd5e0; padding: 6px 10px; vertical-align: top; }
+  tr:nth-child(even) td { background: #f7fafc; }
+  pre {
+    background: #1a202c; color: #e2e8f0; padding: 14px; border-radius: 6px;
+    font-family: "Consolas", monospace; font-size: 8.5pt; line-height: 1.5;
+    overflow-x: hidden; white-space: pre; page-break-inside: avoid;
+  }
+  code { background: #edf2f7; padding: 1px 5px; border-radius: 3px; font-family: "Consolas", monospace; font-size: 9pt; }
+  pre code { background: none; padding: 0; }
+  ul, ol { padding-left: 22px; }
+  li { margin: 4px 0; }
+  .page-break { page-break-before: always; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 8.5pt; font-weight: bold; margin-right: 4px; }
+  .tag-ts { background: #bee3f8; color: #2a4365; }
+  .tag-rust { background: #fed7aa; color: #7b341e; }
+  .tag-done { background: #c6f6d5; color: #22543d; }
+  .tag-todo { background: #fed7d7; color: #742a2a; }
+  .footer-note { color: #718096; font-size: 8.5pt; margin-top: 30px; border-top: 1px solid #e2e8f0; padding-top: 10px; }
+</style>
+</head>
+<body>
+
+<h1>Minecraft Multi-Agent Studio 架构评审报告</h1>
+<div class="meta">
+  评审日期：2026-08-08 ｜ 评审对象：<code>C:\Users\baichengbo\Documents\minecraft-agents</code>（分支 agent/control-api-coordinator-bridge，提交 40b406e）｜
+  评审依据：ARCHITECTURE.md / ROADMAP.md / CHANGELOG.md + 全部源码结构扫描 ｜ 用途：Codex 接管开发前的基线评审
+</div>
+
+<div class="summary-box">
+<b>一页结论</b>：架构方向正确、安全边界严谨（同类项目中少见），主要债务是<b>约 3700 行重复的链路代码</b>、<b>权威状态不持久化</b>和<b>三个千行巨型文件</b>。属于"结构良好、需要一次收敛重构"的状态，<b>不需要推翻重来</b>。当前阶段<b>不建议引入 Rust</b>（无任何已测量的性能瓶颈，且核心依赖 Mineflayer 锁定 Node 生态），但为寻路计算和接入网关预留了两个未来的 Rust 位置及明确触发条件。MVP 定义为"单 Bot 自主完成一件真实任务、全程可观测可停止、崩溃可恢复"，现有代码已完成约 70%。
+</div>
+
+<h2>一、项目现状快照</h2>
+<p>pnpm TypeScript monorepo，四个应用 + 六个共享包，共约 1.2 万行业务源码（不含测试）。Node 22、Mineflayer 4.37.1、Next.js 16、PostgreSQL + BullMQ。</p>
+<table>
+<tr><th>层</th><th>模块</th><th>核心文件（行数）</th><th>状态</th></tr>
+<tr><td>前端</td><td>apps/dashboard</td><td>Next.js 页面 + 服务端代理 + Zustand Store</td><td><span class="tag tag-done">完成</span>浏览器 E2E 通过</td></tr>
+<tr><td>API 层</td><td>apps/control-api</td><td>server.ts (912) / coordinator-link-client.ts (1036)</td><td><span class="tag tag-done">完成</span>四进程验收通过</td></tr>
+<tr><td>控制平面</td><td>apps/coordinator</td><td>control-link-server.ts (1068) / runtime-link-server.ts (790) / bot-registry.ts (416) / stop-controller.ts (455)</td><td><span class="tag tag-done">完成</span>但状态全在内存</td></tr>
+<tr><td>执行层</td><td>apps/bot-runtime</td><td>runtime.ts (971) / runtime-link-client.ts (853) / mineflayer-client.ts (565)</td><td><span class="tag tag-done">完成</span>真实联机验收通过（1.21.8）</td></tr>
+<tr><td>协议</td><td>packages/protocol</td><td>bot-messages.ts (604) 等，全部 Zod v1 Schema</td><td><span class="tag tag-done">完成</span>项目最有价值资产</td></tr>
+<tr><td>安全</td><td>packages/safety</td><td>index.ts (248)，确定性 L0 反射</td><td><span class="tag tag-todo">离线完成</span>实机危险矩阵未做</td></tr>
+<tr><td>技能</td><td>packages/skills</td><td>executor.ts (416)，仅 movement.goto@1.0.0</td><td><span class="tag tag-todo">离线完成</span>实机寻路未验收</td></tr>
+<tr><td>任务</td><td>packages/task-system</td><td>postgres-repository.ts (1420) / bullmq-worker.ts (1125) / outbox-reconciler.ts (226, WIP)</td><td><span class="tag tag-todo">进行中</span>P1.3.2 起步代码已提交</td></tr>
+</table>
+<p>验收基线（截至 2026-08-07）：224 项离线测试通过、生产构建通过、四进程服务级验收两名执行者独立通过、GitHub Actions 真实 PostgreSQL/Redis 集成门通过（运行 30315095898）。</p>
+
+<h2>二、整体架构合理性分析</h2>
+
+<h3>2.1 应保留的设计基因（不许任何重构破坏）</h3>
+<ul>
+<li><span class="good">协议先行 + fail-closed</span>：所有跨进程消息在 packages/protocol 用 Zod 严格校验，显式 schemaVersion，未知字段/版本默认拒绝；链路断开时返回 503 并清空镜像，绝不沿用旧状态或伪造成功。</li>
+<li><span class="good">控制平面分层清晰</span>：Browser → Dashboard → Control API → Coordinator → Runtime 五层职责单一，权限逐层收窄；浏览器拿不到长期令牌，坐标读取需单独权限，停止命令需二次确认 + 本地确认码 + Runtime 真实回执。</li>
+<li><span class="good">确定性优先的 AI 边界</span>：L0 安全层和技能执行器不接受模型文本；未来模型只能输出白名单技能调用 JSON，且经 Schema、Policy、参数边界三重验证。这为 P2 智能层预留了安全接口。</li>
+<li><span class="good">诚实的验收文化</span>：文档明确区分"已测试/兼容未测试/不支持"、"离线验收/实机验收"，不冒充完成。</li>
+</ul>
+
+<h3>2.2 存在的问题（按严重度排序）</h3>
+<table>
+<tr><th>#</th><th>问题</th><th>证据</th><th>影响</th></tr>
+<tr><td>1</td><td><span class="bad">同一个"认证 WS 链路"模式手写了两遍</span></td><td>runtime-link-server(790) + runtime-link-client(853) 与 control-link-server(1068) + coordinator-link-client(1036)，共约 3700 行；HMAC/timingSafeEqual 逻辑散布在 6 个文件</td><td>修一个握手 bug 要改四处；是 AI 接管后最容易改错的地方</td></tr>
+<tr><td>2</td><td><span class="bad">权威状态全在内存</span></td><td>Bot 注册表、停止幂等缓存、审计记录随 Coordinator 重启蒸发</td><td>审计不落盘与项目安全叙事自相矛盾；重启后 Bot 必须重新上报</td></tr>
+<tr><td>3</td><td><span class="bad">三个千行巨型文件</span></td><td>postgres-repository.ts (1420)、bullmq-worker.ts (1125)、control-link-server.ts (1068)</td><td>AI 在此类文件上做局部修改的出错率显著上升</td></tr>
+<tr><td>4</td><td>任务系统与技能系统未接通</td><td>Coordinator 尚无任务调度入口；TaskDispatchV1 → SkillInvocationV1 的链路缺失</td><td>两套已验收的系统各自孤立，无法产生业务价值</td></tr>
+<tr><td>5</td><td>多 Bot 无进程编排概念</td><td>SingleBotRuntime 一进程一 Bot（设计正确），但无 supervisor</td><td>10 个 Bot = 10 次手动启动</td></tr>
+<tr><td>6</td><td>验收碎片化</td><td>双进程/四进程/浏览器 E2E/真实联机各自独立</td><td>始终没有一条"全真"端到端路径</td></tr>
+<tr><td>7</td><td>开发体验摩擦</td><td>启动四进程需手工跑多段 PowerShell 生成密钥/哈希并跨窗口复制</td><td>诱使使用者走捷径存明文密钥，反而降低安全</td></tr>
+</table>
+
+<div class="page-break"></div>
+<h2>三、目标系统架构图（最终态）</h2>
+<pre>
+                     ┌─────────────────────────────────┐
+                     │   Browser (Dashboard UI)         │
+                     └───────────────┬─────────────────┘
+                                     │ 同源请求，无长期令牌
+                     ┌───────────────▼─────────────────┐
+                     │   Dashboard Server (Next.js)  TS │
+                     └───────────────┬─────────────────┘
+                                     │ 回环 HTTP + Bearer(SHA-256)
+                     ┌───────────────▼─────────────────┐
+                     │   Control API                 TS │
+                     │   bots / tasks / audit 只读+停止  │
+                     └───────────────┬─────────────────┘
+                                     │ secure-link（共享库，双向HMAC）
+                     ┌───────────────▼─────────────────┐
+        ┌────────────│   Coordinator / Policy Engine TS │
+        │            │   ├ Bot 注册表（内存 + PG 投影）   │
+        │            │   ├ 任务调度器 → TaskDispatchV1   │
+        │            │   ├ 多Bot进程编排 (supervisor)    │
+        │            │   └ 审计（PG append-only）        │
+        │            └──────┬──────────────┬────────────┘
+        │                   │ secure-link  │ secure-link
+ ┌──────▼───────┐    ┌──────▼──────┐  ┌────▼─────────┐
+ │ PostgreSQL    │    │ Bot Runtime │  │ Bot Runtime  │ TS (Mineflayer)
+ │ 任务事实源     │    │  #1         │  │  #N          │ 每 Bot 一进程
+ │ + outbox      │    │ ├ L0 安全层  │  └────┬─────────┘
+ │ + 审计        │    │ ├ 技能执行器 │       │
+ └──────┬───────┘    │ └ Pathfinder─┼───────┼──► [Rust: 寻路/几何服务]
+        │            └──────┬──────┘       │     （达到触发条件才建）
+ ┌──────▼───────┐           │              │
+ │ Redis/BullMQ  │    ┌──────▼──────────────▼──────┐
+ │ 派发+临时锁    │    │   隔离 Minecraft 测试服      │
+ └──────────────┘    └────────────────────────────┘
+
+ ┌────────────────────────────────────────────────┐
+ │  AI Router（P2 旁路，不在主链路上）            TS │
+ │  ├ Local AI Hub 适配器（本地推理）                │
+ │  └ 云专家适配器（仅失败升级时调用）                │
+ │  输出 → Schema 校验 → 技能白名单 → 参数边界        │
+ └────────────────────────────────────────────────┘
+</pre>
+<p>与现状的差异：① 新增 <code>packages/secure-link</code> 共享库，合并两条链路的重复实现；② Coordinator 增加任务调度器、多 Bot 进程编排、PG 持久化审计；③ 新增独立任务 Worker 应用（apps/task-worker）；④ AI Router 作为旁路而非链路中的一环——它宕机不影响手动控制。</p>
+
+<h2>四、Rust vs TypeScript 决策</h2>
+
+<h3>4.1 结论：当前阶段全部保持 TypeScript</h3>
+<p>这个系统 95% 是 <b>I/O 密集的控制平面</b>（WebSocket 转发、JSON 校验、数据库读写）。Rust 在这些场景的收益接近零，而成本很实际：</p>
+<ul>
+<li><b>Bot Runtime 被 Mineflayer 锁死在 Node</b>。27 个 Minecraft 版本的协议适配全靠它；Rust 对应物 azalea 在成熟度、版本覆盖、插件生态上差距很大，迁移等于重写并作废所有已通过的联机验收。</li>
+<li>每秒几十条心跳/状态消息的吞吐对 Node 毫无压力，<b>当前没有任何一个已测量的性能瓶颈</b>。</li>
+<li>Zod Schema 是全链路的单一事实源，TS 类型自动推导；引入第二语言即产生协议双重维护。</li>
+<li>对 AI 接管而言，单语言栈的修改出错率远低于混合栈。</li>
+</ul>
+
+<h3>4.2 预留的两个 Rust 位置（含触发条件）</h3>
+<table>
+<tr><th>模块</th><th>触发条件（必须先测量）</th><th>接口边界</th><th>理由</th></tr>
+<tr><td><span class="tag tag-rust">Rust</span>寻路/世界几何服务</td><td>多 Bot 后寻路计算开始阻塞 Runtime 事件循环（事件循环延迟 &gt; 50ms 可测量）</td><td>独立进程，结构化 JSON/gRPC，作为一个"能力适配器"接入</td><td>A*/体素几何是纯 CPU 计算，是 Rust 的甜点区；不碰 Mineflayer</td></tr>
+<tr><td><span class="tag tag-rust">Rust</span>接入网关</td><td>Bot 数量 50+ 且 Coordinator 单进程成为已测量瓶颈</td><td>无状态 WS 终结/转发，协议已版本化可独立替换</td><td>高并发连接管理，无业务规则</td></tr>
+</table>
+<div class="warn-box"><b>原则</b>：Rust 只放在有清晰 JSON 协议边界、纯计算或纯转发、可独立验收的<b>叶子位置</b>，绝不进入含业务规则的控制平面。在有性能测量数据之前写 Rust 是徒增复杂度。</div>
+
+<h3>4.3 保持 TypeScript 的模块清单</h3>
+<table>
+<tr><th>模块</th><th>语言</th><th>理由</th></tr>
+<tr><td>packages/protocol</td><td><span class="tag tag-ts">TS</span></td><td>Zod 是校验基石，全链路共享类型推导，换语言即失去单一事实源</td></tr>
+<tr><td>apps/bot-runtime</td><td><span class="tag tag-ts">TS</span></td><td>Mineflayer 硬依赖，不可移</td></tr>
+<tr><td>apps/coordinator / control-api</td><td><span class="tag tag-ts">TS</span></td><td>I/O + 业务规则密集，与 protocol 同语言收益最大</td></tr>
+<tr><td>apps/dashboard</td><td><span class="tag tag-ts">TS</span></td><td>Next.js 生态</td></tr>
+<tr><td>packages/task-system</td><td><span class="tag tag-ts">TS</span></td><td>pg/BullMQ 都是 Node 原生生态，逻辑复杂但不吃 CPU</td></tr>
+<tr><td>packages/safety / skills / observability / environment</td><td><span class="tag tag-ts">TS</span></td><td>safety 每 tick 只做阈值比较（纳秒级），无性能议题</td></tr>
+</table>
+
+<div class="page-break"></div>
+<h2>五、第一版 MVP 设计</h2>
+
+<h3>5.1 MVP 定义</h3>
+<div class="summary-box"><b>一个 Bot 在隔离测试服自主完成一件真实有用的事，全程可观测、可停止、崩溃可恢复。</b><br>现有代码已完成约 70%——MVP 是补全闭环，不是新起炉灶。</div>
+
+<h3>5.2 范围内工作（按依赖顺序）</h3>
+<table>
+<tr><th>#</th><th>工作项</th><th>说明</th><th>验收标准</th></tr>
+<tr><td>1</td><td>P1.3.2 持久任务闭环</td><td>事务 outbox + reconciler（已有 WIP 提交 40b406e）、独立 Worker 应用、跨 Worker 取消、自动过期租约恢复</td><td>杀掉任意进程后任务不丢、不重、可恢复</td></tr>
+<tr><td>2</td><td>Coordinator 任务调度接入</td><td>Coordinator 从 PG 领取任务 → TaskDispatchV1 → Worker → SkillInvocationV1 → Runtime。<b>这是目前完全缺失的一环</b></td><td>Dashboard 创建的任务能驱动 Bot 真实动作</td></tr>
+<tr><td>3</td><td>审计与注册表快照落 PG</td><td>复用 task-system 连接层，append-only 审计表</td><td>Coordinator 重启后审计不丢</td></tr>
+<tr><td>4</td><td>2~3 个生产技能</td><td>gather.wood / craft.item 级别，走既有技能框架与能力适配器</td><td>每个技能独立离线 + 实机场景测试</td></tr>
+<tr><td>5</td><td>L0 实机危险场景矩阵</td><td>在真实隔离服构造溺水/岩浆/坠落/饥饿场景</td><td>L0 真实动作全部正确触发——自主执行任务前的安全前提</td></tr>
+<tr><td>6</td><td>Dashboard 任务看板</td><td>创建任务、看状态流转、取消任务</td><td>浏览器 E2E 覆盖</td></tr>
+</table>
+
+<h3>5.3 明确砍掉的范围</h3>
+<p>多 Bot 协调、AI/模型接入、Docker/便携/网吧模式、正式服务器、Rust、长期记忆、跨主机 TLS。</p>
+
+<h3>5.4 MVP 端到端验收场景</h3>
+<pre>
+Dashboard 创建"采集 16 个原木"任务
+   → Coordinator 从 PG 领取并派发（outbox 保证原子）
+   → Worker 领取 → SkillInvocationV1 → Bot 在隔离服真实执行
+   → 期间人为制造一次溺水，L0 正确救回并恢复任务
+   → 中途杀掉 Worker 进程，租约过期后任务被自动回收重派
+   → 完成后 Dashboard 显示结果与产物数量
+   → 全程同一 traceId 贯穿五个进程的结构化日志，审计可查
+</pre>
+
+<h2>六、未来扩展路线</h2>
+<table>
+<tr><th>阶段</th><th>内容</th><th>说明</th></tr>
+<tr><td><b>v1.1 收敛重构</b><br>（MVP 后立即做）</td><td>抽 packages/secure-link 消灭 3700 行重复；拆三个千行文件；加 .gitattributes 固定行尾；一键 dev-up 脚本（自动生成密钥并拉起四进程）</td><td>为 AI 长期接管降错误率，优先级高于新功能；趁规模小时做成本最低</td></tr>
+<tr><td><b>v2 多 Bot</b><br>（对应 P1.4~P1.6）</td><td>Coordinator 进程编排（supervisor 拉起/回收 Runtime）、资源/区域/箱子锁、角色分配、Prometheus + 集中日志、生产技能扩到 10+</td><td>编排是新的复杂度台阶，需要 v1.1 的干净底座</td></tr>
+<tr><td><b>v3 智能层</b><br>（对应 P2.1~P2.3）</td><td>AI Router + 本地模型规划（输出只能是技能调用 JSON）、pgvector 长期记忆、云专家失败升级</td><td>安全边界不变：模型永远不碰 tick、不出白名单</td></tr>
+<tr><td><b>v4 规模与硬化</b></td><td>按测量数据决定是否引入 Rust 寻路/网关；跨主机部署（TLS + 密钥轮换）；受监管自我改进、基地撤离、战斗模块</td><td>战斗与自我改进保持最后接入，与既有 ROADMAP 一致</td></tr>
+</table>
+
+<h2>七、给 Codex 接管的操作建议</h2>
+<ol>
+<li><b>更新 AGENTS.md</b>：把本报告的模块边界、"Rust 触发条件"和"不许破坏的设计基因"（第 2.1 节）写进去，防止 AI 自作主张重写已验收模块。</li>
+<li><b>顺序建议</b>：如果追求稳，先做 v1.1 的 secure-link 抽取再做 MVP；如果急于见效，MVP 第 1、2 项可以先行，但 v1.1 必须排在 v2 多 Bot 之前。</li>
+<li><b>第一天清理</b>：删掉 runtime-data 里的 e2e 日志和两份 PR 草稿（pr-1-body.md、pull-request-runtime-link.md）；加 .gitattributes。</li>
+<li><b>保持验收文化</b>：每个模块必须先过 pnpm check（类型 + 224 项测试 + 构建）才算完成；新功能必须附带测试；不冒充"已验证"。</li>
+<li><b>安全红线不动</b>：只连隔离测试服、不连正式服务器、密钥不落盘不进日志、模型输出不直接执行。</li>
+</ol>
+
+<div class="footer-note">
+本报告由 Claude（Fable 5）基于 2026-08-08 的代码库状态生成。数据来源：ARCHITECTURE.md、ROADMAP.md、CHANGELOG.md、README_CN.md、PROJECT_AUDIT.md 及 apps/、packages/ 全部源码的结构扫描（文件行数、跨包依赖、HMAC 实现分布）。验收数字（224 项测试、四进程验收）来自 2026-08-08 本机实际运行的 pnpm check。
+</div>
+
+</body>
+</html>
