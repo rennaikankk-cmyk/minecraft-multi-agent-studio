@@ -234,7 +234,8 @@
 - [x] 在真实 PostgreSQL 上运行迁移和并发集成测试。
 - [x] 在真实 Redis/BullMQ 上验证队列去重、续租、取消、超时和显式重投。
 - [ ] 完成事务 outbox 与 PostgreSQL→BullMQ 自动对账重投（同事务创建、连续失败预算、异常记录封存、显式重派和离线门禁已完成；新增真实基础设施场景待 CI 验证）。
-- [ ] 增加 Coordinator 所有的过期租约恢复、持久取消消费和跨 Worker 取消。
+- [x] 增加 Coordinator 所有的有界过期租约恢复；`assigned` 任务恢复与新修订 outbox 同事务提交，`running` 任务按稳定原因进入失败终态，并发扫描不重叠（真实 PostgreSQL 场景已加入门禁，待 CI 验证）。
+- [ ] 增加持久取消消费和跨 Worker 取消。
 - [ ] 接入 Coordinator、Control API 和 Dashboard 任务看板。
 
 ### P1.4 多机器人协调
@@ -291,7 +292,7 @@
 1. **已完成：P1.3.1 真实基础设施门禁**：GitHub Actions 中的 PostgreSQL/Redis 隔离测试已通过；测试没有连接 Minecraft。
 2. **已完成：P0 Runtime Link**：Runtime ↔ Coordinator 的认证遥测与停止传输已通过真实双进程回环验收；测试没有连接 Minecraft。
 3. **已完成：P0 Control Bridge**：Control API ↔ 独立 Coordinator 的原子状态镜像和固定停止 RPC 已通过不连接 Minecraft 的真实四进程回环服务验收。
-4. **P1.3.2 持久任务闭环**：先让新增 outbox/reconciler 真实基础设施门禁通过，再增加自动过期租约恢复、持久取消消费和独立 Worker，最后接入任务 API 与 Dashboard。
+4. **P1.3.2 持久任务闭环**：新增 outbox/reconciler 与自动过期租约恢复的真实基础设施场景待 CI 通过；下一步增加持久取消消费、跨 Worker 取消和独立 Worker，最后接入任务 API 与 Dashboard。
 5. **P1.1/P1.2 实机矩阵**：验证 L0 危险场景和 Pathfinder 多版本真实寻路，不扩大正式服务器权限。
 6. **P1.4 多 Bot 协调**：实现任务分配、资源/箱子/区域锁、替补执行和故障转移。
 7. **P1.5/P1.6 生产能力与基础设施**：按场景逐项增加生产技能，再完善指标、日志、备份与可回滚部署。
@@ -299,4 +300,4 @@
 
 ## 当前唯一下一步
 
-完成 P1.3.2 持久任务闭环：下一模块先实现 Coordinator 所有的原子过期租约恢复与新修订 outbox；随后实现跨 Worker 持久取消和独立 Worker，再接入任务 Control API 与 Dashboard。本步不扩大 Minecraft 连接权限。
+完成 P1.3.2 持久任务闭环：下一模块实现跨 Worker 持久取消和独立 Worker；随后接入任务 Control API 与 Dashboard。本步不扩大 Minecraft 连接权限。

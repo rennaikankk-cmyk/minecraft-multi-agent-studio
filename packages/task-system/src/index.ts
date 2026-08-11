@@ -51,6 +51,7 @@ export {
   type SqlQueryResult,
   type SubmitTaskResult,
   type RetryTaskDispatchResult,
+  type RecoverExpiredLeaseResult,
   type TaskCancellationAcknowledgeInput,
   type TaskCancellationRequestInput,
   type TaskOutboxAckOptions,

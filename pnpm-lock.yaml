@@ -90,6 +90,9 @@ importers:
       '@minecraft-studio/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+      '@minecraft-studio/task-system':
+        specifier: workspace:*
+        version: link:../../packages/task-system
       ws:
         specifier: 8.21.1
         version: 8.21.1

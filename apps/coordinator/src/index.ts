@@ -53,3 +53,10 @@ export {
   type ControlLinkAddress,
   type ControlLinkServerOptions,
 } from "./control-link-server.js";
+
+export {
+  ExpiredLeaseRecoveryController,
+  type ExpiredLeaseRecoveryOptions,
+  type ExpiredLeaseRecoveryRepository,
+  type ExpiredLeaseRecoveryResult,
+} from "./expired-lease-recovery.js";

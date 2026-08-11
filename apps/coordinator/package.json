@@ -21,6 +21,7 @@
   "dependencies": {
     "@minecraft-studio/observability": "workspace:*",
     "@minecraft-studio/protocol": "workspace:*",
+    "@minecraft-studio/task-system": "workspace:*",
     "ws": "8.21.1"
   },
   "devDependencies": {

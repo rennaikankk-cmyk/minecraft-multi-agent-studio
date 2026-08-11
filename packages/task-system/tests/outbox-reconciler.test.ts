@@ -56,6 +56,15 @@ const retryDispatchCommand = {
   reasonCode: "TASK_DISPATCH_RETRY_REQUESTED",
 };
 
+const recoverExpiredLeaseCommand = {
+  schemaVersion: "1.0" as const,
+  operationId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+  taskId: TASK_A,
+  expectedRevision: 1,
+  actorId: "coordinator-lease-recovery",
+  reasonCode: "TASK_LEASE_EXPIRED" as const,
+};
+
 function outbox(
   taskId: string,
   expectedRevision: number,
@@ -1008,6 +1017,129 @@ describe("PostgresTaskRepository retryTaskDispatch", () => {
       status: "blocked",
       revision: 1,
       failure_reason: "TASK_OUTBOX_DELIVERY_EXHAUSTED",
+    });
+    expect(client.operationHistory.size).toBe(0);
+    expect(client.outboxRows.size).toBe(0);
+    expect(client.calls.at(-1)?.text).toBe("ROLLBACK");
+    expect(client.calls.some((call) => call.text === "COMMIT")).toBe(false);
+  });
+});
+
+describe("PostgresTaskRepository recoverExpiredLease", () => {
+  it("atomically requeues an assigned task and replays the same new-revision outbox", async () => {
+    const client = new RecordingDispatchRetryClient(
+      recordingTaskRow({
+        status: "assigned",
+        assigned_bot_id: "worker-01",
+        lease_owner: "worker-lease-01",
+        lease_expires_at: "2026-07-27T11:59:00.000Z",
+        revision: 1,
+      }),
+    );
+    const repository = new PostgresTaskRepository(
+      new RecordingDispatchRetryPool(client),
+      { dispatchSourceInstanceId: "coordinator-test" },
+    );
+
+    const first = await repository.recoverExpiredLease(
+      recoverExpiredLeaseCommand,
+    );
+    const replay = await repository.recoverExpiredLease(
+      recoverExpiredLeaseCommand,
+    );
+
+    expect(first).toMatchObject({
+      task: {
+        status: "queued",
+        assignedBotId: null,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        revision: 2,
+      },
+      dispatch: {
+        taskId: TASK_A,
+        botId: submitCommand.dispatchBotId,
+        payload: { expectedRevision: 2 },
+      },
+      outbox: {
+        taskId: TASK_A,
+        expectedRevision: 2,
+        status: "pending",
+        attemptCount: 0,
+      },
+    });
+    expect(replay).toEqual(first);
+    expect(client.outboxInsertCount).toBe(1);
+    expect(client.operationHistory.size).toBe(1);
+    const history = client.calls.filter((call) =>
+      call.text.includes("INSERT INTO studio_task_history"),
+    );
+    expect(history).toHaveLength(1);
+    expect(history[0]?.values.slice(3, 8)).toEqual([
+      "task.lease-expired",
+      "assigned",
+      "queued",
+      recoverExpiredLeaseCommand.actorId,
+      recoverExpiredLeaseCommand.reasonCode,
+    ]);
+  });
+
+  it("makes an expired running task terminal without creating another dispatch", async () => {
+    const client = new RecordingDispatchRetryClient(
+      recordingTaskRow({
+        status: "running",
+        assigned_bot_id: "worker-01",
+        lease_owner: "worker-lease-01",
+        lease_expires_at: "2026-07-27T11:59:00.000Z",
+        revision: 1,
+        started_at: "2026-07-27T11:50:00.000Z",
+      }),
+    );
+    const repository = new PostgresTaskRepository(
+      new RecordingDispatchRetryPool(client),
+    );
+
+    await expect(
+      repository.recoverExpiredLease(recoverExpiredLeaseCommand),
+    ).resolves.toMatchObject({
+      task: {
+        status: "failed",
+        failureReason: "TASK_LEASE_EXPIRED",
+        revision: 2,
+        finishedAt: NOW,
+      },
+      dispatch: null,
+      outbox: null,
+    });
+    expect(client.outboxInsertCount).toBe(0);
+    expect(client.outboxRows.size).toBe(0);
+  });
+
+  it("rolls back the lease transition and history when outbox creation fails", async () => {
+    const client = new RecordingDispatchRetryClient(
+      recordingTaskRow({
+        status: "assigned",
+        assigned_bot_id: "worker-01",
+        lease_owner: "worker-lease-01",
+        lease_expires_at: "2026-07-27T11:59:00.000Z",
+        revision: 1,
+      }),
+    );
+    client.failOutboxInsert = true;
+    const repository = new PostgresTaskRepository(
+      new RecordingDispatchRetryPool(client),
+    );
+
+    await expect(
+      repository.recoverExpiredLease(recoverExpiredLeaseCommand),
+    ).rejects.toMatchObject({ code: "TASK_PERSISTENCE_FAILED" });
+
+    expect(client.taskRow).toMatchObject({
+      status: "assigned",
+      assigned_bot_id: "worker-01",
+      lease_owner: "worker-lease-01",
+      lease_expires_at: "2026-07-27T11:59:00.000Z",
+      revision: 1,
     });
     expect(client.operationHistory.size).toBe(0);
     expect(client.outboxRows.size).toBe(0);

@@ -99,6 +99,12 @@ export type RetryTaskDispatchResult = Readonly<{
   outbox: TaskOutboxRecord;
 }>;
 
+export type RecoverExpiredLeaseResult = Readonly<{
+  task: TaskRecord;
+  dispatch: TaskDispatchV1 | null;
+  outbox: TaskOutboxRecord | null;
+}>;
+
 export type TaskOutboxFailureRecord = Readonly<{
   messageId: string;
   taskId: string;
@@ -1487,6 +1493,34 @@ export class PostgresTaskRepository {
     );
   }
 
+  /**
+   * Coordinator recovery boundary. Expiring an assigned lease creates the
+   * next revision's durable dispatch outbox in the same PostgreSQL
+   * transaction. A running task becomes terminal and therefore produces no
+   * dispatch. Replaying the same operation returns the same task snapshot and
+   * outbox record.
+   */
+  recoverExpiredLease(input: unknown): Promise<RecoverExpiredLeaseResult> {
+    const command = taskLeaseExpireCommandSchema.parse(input);
+    return this.mutate(
+      command,
+      "task.lease-expired",
+      command.reasonCode,
+      (task, now) => expireTaskLease(task, command, now),
+      async (task, client) => {
+        if (task.status !== "queued") {
+          return { task, dispatch: null, outbox: null };
+        }
+        const outbox = await this.ensureDispatchOutbox(
+          client,
+          task,
+          task.updatedAt,
+        );
+        return { task, dispatch: outbox.payload, outbox };
+      },
+    );
+  }
+
   private async blockTaskAfterOutboxFailure(
     client: PostgresClientLike,
     input: Readonly<{
@@ -1605,7 +1639,10 @@ export class PostgresTaskRepository {
     }
   }
 
-  private async mutate<TCommand extends OperationCommand>(
+  private async mutate<
+    TCommand extends OperationCommand,
+    TResult = TaskRecord,
+  >(
     command: TCommand,
     eventType: string,
     reasonCode: string,
@@ -1614,7 +1651,11 @@ export class PostgresTaskRepository {
       now: Date,
       client: PostgresClientLike,
     ) => TaskRecord | Promise<TaskRecord>,
-  ): Promise<TaskRecord> {
+    resultBuilder?: (
+      task: TaskRecord,
+      client: PostgresClientLike,
+    ) => TResult | Promise<TResult>,
+  ): Promise<TResult> {
     const operationFingerprint = taskOperationFingerprint(command);
     const client = await this.pool.connect();
     try {
@@ -1626,8 +1667,11 @@ export class PostgresTaskRepository {
         operationFingerprint,
       );
       if (replay) {
+        const result = resultBuilder
+          ? await resultBuilder(replay, client)
+          : (replay as TResult);
         await client.query("COMMIT");
-        return replay;
+        return result;
       }
       const current = await this.loadTask(client, command.taskId, true);
       if (!current) {
@@ -1683,8 +1727,11 @@ export class PostgresTaskRepository {
         task: next,
         timestamp: next.updatedAt,
       });
+      const result = resultBuilder
+        ? await resultBuilder(next, client)
+        : (next as TResult);
       await client.query("COMMIT");
-      return next;
+      return result;
     } catch (error) {
       await this.rollback(client);
       throw this.persistenceError(error);

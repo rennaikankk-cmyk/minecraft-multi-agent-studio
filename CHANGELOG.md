@@ -32,6 +32,8 @@
 - 新增不合作处理器超时、截止时间跨界、精确版本恢复和 UTC 截止时间规范化边界。
 - 新增任务创建、历史与派发 outbox 的同事务提交、PostgreSQL→BullMQ 有界对账，以及 Redis job 丢失后的同一版本化消息重建。
 - 新增严格 `TaskDispatchRetryCommand` 和原子重派操作：仅允许未过期的 `blocked` 任务生成新修订与新 outbox，相同操作精确重放，任何 outbox 写入失败回滚任务与历史。
+- 新增 Coordinator 所有的有界过期租约恢复循环：启动即扫描、固定间隔运行且扫描不重叠；每项绑定任务修订号，预期并发冲突安全跳过，异常只记录稳定错误码。
+- 新增原子 `recoverExpiredLease` 仓储边界：过期 `assigned` 任务转回 `queued` 时在同一 PostgreSQL 事务创建新修订 outbox；过期 `running` 任务进入 `TASK_LEASE_EXPIRED` 失败终态且不重派；相同操作精确重放，outbox 失败会回滚任务与历史。
 - Dashboard 改版为多页面作战控制台：总览（环境检测 + 机器人计数摘要）、机器人、任务、作战四页导航。
 - 机器人页接入 Control API 实时推送流：新增服务端 SSE 代理（`/api/bots/stream`，服务端以 Bearer 令牌连接 Control API WebSocket 流，令牌不出现在浏览器或转发载荷），每帧经协议 Schema 校验后转发，首个无效帧即断流（fail-closed）。前端流驱动更新（快照全量、事件增量、按 `streamSequence` 拒绝乱序），流不可用时明确标注"已退回 3 秒轮询"并指数退避重连。
 - 机器人页新增详情抽屉，展示 `PublicBotDetailV1` 全部真实字段（护甲、饱和度、位置含脱敏提示、L0 风险、版本支持级别）；缺失字段一律显示"不可用"。
@@ -74,8 +76,8 @@
 - Runtime ↔ Coordinator 已通过真实双进程回环验收，Dashboard → Control API → Coordinator → 测试专用 Runtime 已通过四进程服务级回环验收；后者没有连接 Minecraft，也不等同于浏览器 E2E 或正式服务器验收。
 - Control Link 当前只支持同机回环，状态、停止幂等缓存和审计仍在内存中；跨主机 TLS、密钥轮换、用户登录和持久化停止审计尚未完成。
 - 本机未检测到 PostgreSQL、Redis 或 Docker；2026-07-28 的 GitHub Actions 运行 `30315095898` 已通过真实临时 PostgreSQL/Redis 集成门，该结果不代表生产服务在线。
-- 当前提供可嵌入 Worker 库，尚未提供独立生产 Worker 应用、Coordinator 任务调度、任务 Control API 或 Dashboard 任务看板。
-- 当前已实现事务 outbox、PostgreSQL→BullMQ 对账和显式失败重派，但本机没有 PostgreSQL/Redis；新增升级、回滚、并发对账、异常封存和恢复场景已写入真实基础设施门禁，尚待 CI 验证。自动过期租约恢复、持久取消消费和跨 Worker 取消仍未完成。
+- 当前提供可嵌入 Worker 库和 Coordinator 过期租约恢复控制器，尚未提供独立生产 Worker 应用、Coordinator 任务基础设施启动配置、任务 Control API 或 Dashboard 任务看板。
+- 当前已实现事务 outbox、PostgreSQL→BullMQ 对账、显式失败重派和自动过期租约恢复，但本机没有 PostgreSQL/Redis；新增升级、回滚、并发对账、异常封存和恢复场景已写入真实基础设施门禁，尚待 CI 验证。持久取消消费和跨 Worker 取消仍未完成。
 - 任务处理器是受信任的进程内代码，并非强隔离沙盒；不合作响应 `AbortSignal` 的代码在失去租约后仍可能继续运行自身副作用，硬终止需后续独立进程隔离。
 - 没有注册生产任务处理器，本模块不会执行模型输出，也不会连接 Minecraft。
 

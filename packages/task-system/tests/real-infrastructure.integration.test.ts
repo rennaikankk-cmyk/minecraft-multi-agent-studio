@@ -1208,6 +1208,85 @@ describeReal.sequential(
       expect(taskCount.rows[0]?.count).toBe(1);
     }, REAL_TEST_TIMEOUT_MS);
 
+    it("atomically recovers an expired assigned lease with one new-revision outbox", async () => {
+      const created = await repository.createTask(
+        taskCreateCommand("test.coordinator-expired-lease-recovery"),
+      );
+      await assertionPool.query(
+        `UPDATE studio_tasks
+         SET dispatch_bot_id = 'isolated-test-bot'
+         WHERE task_id = $1`,
+        [created.task.taskId],
+      );
+      const assigned = await repository.acquireLease({
+        schemaVersion: "1.0",
+        operationId: randomUUID(),
+        taskId: created.task.taskId,
+        expectedRevision: created.task.revision,
+        actorId: "integration-worker",
+        botId: "isolated-test-bot",
+        leaseOwner: "integration-worker-lease",
+        leaseDurationMs: 1_000,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+
+      const expired = await repository.listExpiredLeases(100);
+      expect(expired).toContainEqual(
+        expect.objectContaining({
+          taskId: assigned.taskId,
+          status: "assigned",
+          revision: assigned.revision,
+        }),
+      );
+      const command = {
+        schemaVersion: "1.0" as const,
+        operationId: randomUUID(),
+        taskId: assigned.taskId,
+        expectedRevision: assigned.revision,
+        actorId: "integration-coordinator-recovery",
+        reasonCode: "TASK_LEASE_EXPIRED" as const,
+      };
+
+      const first = await repository.recoverExpiredLease(command);
+      const replay = await repository.recoverExpiredLease(command);
+      expect(first).toMatchObject({
+        task: {
+          status: "queued",
+          assignedBotId: null,
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          revision: assigned.revision + 1,
+        },
+        dispatch: {
+          botId: "isolated-test-bot",
+          payload: { expectedRevision: assigned.revision + 1 },
+        },
+        outbox: {
+          taskId: assigned.taskId,
+          expectedRevision: assigned.revision + 1,
+          status: "pending",
+        },
+      });
+      expect(replay).toEqual(first);
+
+      const persisted = await assertionPool.query<{
+        history_count: number;
+        outbox_count: number;
+      }>(
+        `SELECT
+           (SELECT COUNT(*)::integer FROM studio_task_history
+             WHERE operation_id = $1) AS history_count,
+           (SELECT COUNT(*)::integer FROM studio_task_outbox
+             WHERE task_id = $2 AND expected_revision = $3) AS outbox_count`,
+        [command.operationId, assigned.taskId, assigned.revision + 1],
+      );
+      expect(persisted.rows[0]).toEqual({
+        history_count: 1,
+        outbox_count: 1,
+      });
+      await cancelQueuedTask(repository, assigned.taskId);
+    }, REAL_TEST_TIMEOUT_MS);
+
     it("deduplicates dispatch and proves lease renewal before completion", async () => {
       const queue = createQueue();
       await queue.verifyConnection();
