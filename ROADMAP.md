@@ -252,7 +252,7 @@
 - [x] `craft.item@1.0.0`——自研（原生 recipesFor+craft），2x2/3x3，craftedCount 读回不伪造（2026-08-08）。
 - [x] `world.place-block@1.0.0`——自研（原生 placeBlock），一次一块、放置后读回校验（2026-08-08）。
 - [x] `container.transfer@1.0.0`——自研（openContainer+deposit/withdraw），容器白名单、movedCount 读回（2026-08-08）。
-- [ ] `smelt.item`（熔炉冶炼）——铁锭必经之路；原生 `openFurnace` 可做，需处理燃料管理与冶炼进度异步等待。**下一个优先**：补齐"石器→铁器"档位跃迁的最后缺口。
+- [x] `smelt.item@1.0.0`（熔炉冶炼）——原生 `openFurnace`，显式燃料、空熔炉独占、异步等待、取消与真实产物读回；单次最多 5 件以遵守 60 秒技能硬超时（2026-08-11，离线测试通过，隔离服待验收）。
 - [ ] `interact.sleep`（床/重生点）——防夜怪+锚定重生，原生 API 简单。
 - [ ] 评估 `mineflayer-statemachine`（MIT）作为冷启动 8 步协议的编排框架——若与现有技能框架冲突则弃用（§14 约定）。
 - [ ] 农业（种植/收割）、冶炼批量化、巡逻——待上面底座在隔离服过场景测试后推进。
@@ -303,3 +303,4 @@
 ## 当前唯一下一步
 
 完成 P1.3.2 持久任务闭环：下一模块实现跨 Worker 持久取消和独立 Worker；随后接入任务 Control API 与 Dashboard。本步不扩大 Minecraft 连接权限。
+
