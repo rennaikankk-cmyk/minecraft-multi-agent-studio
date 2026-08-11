@@ -35,6 +35,8 @@ $serverJar = Join-Path $ServerDirectory "server.jar"
 $eulaPath = Join-Path $ServerDirectory "eula.txt"
 $propertiesPath = Join-Path $ServerDirectory "server.properties"
 $readyFile = Join-Path $runtimeRoot "acceptance\bot-ready.marker"
+$skillSetupRequest = Join-Path $runtimeRoot "acceptance\smelt-item.setup-request.marker"
+$skillSetupReady = Join-Path $runtimeRoot "acceptance\smelt-item.setup-ready.marker"
 $testStdout = Join-Path $runtimeRoot "acceptance\vitest.stdout.log"
 $testStderr = Join-Path $runtimeRoot "acceptance\vitest.stderr.log"
 $latestServerLog = Join-Path $ServerDirectory "logs\latest.log"
@@ -83,7 +85,7 @@ if ($null -ne $existingListener) {
 
 $acceptanceRoot = Split-Path -Parent $readyFile
 New-Item -ItemType Directory -Path $acceptanceRoot -Force | Out-Null
-foreach ($artifact in @($readyFile, $testStdout, $testStderr)) {
+foreach ($artifact in @($readyFile, $skillSetupRequest, $skillSetupReady, $testStdout, $testStderr)) {
   if (Test-Path -LiteralPath $artifact) {
     Remove-Item -LiteralPath $artifact -Force
   }
@@ -96,6 +98,8 @@ $serverStartedAt = [DateTime]::UtcNow
 $previousProfile = $env:BOT_SERVER_PROFILE_PATH
 $previousRealTest = $env:RUN_REAL_MC_TEST
 $previousReadyFile = $env:MC_TEST_READY_FILE
+$previousSkillSetupRequest = $env:MC_SKILL_SETUP_REQUEST_FILE
+$previousSkillSetupReady = $env:MC_SKILL_SETUP_READY_FILE
 
 try {
   $serverStart = [Diagnostics.ProcessStartInfo]::new()
@@ -131,6 +135,8 @@ try {
   $env:BOT_SERVER_PROFILE_PATH = $ServerProfilePath
   $env:RUN_REAL_MC_TEST = "1"
   $env:MC_TEST_READY_FILE = $readyFile
+  $env:MC_SKILL_SETUP_REQUEST_FILE = $skillSetupRequest
+  $env:MC_SKILL_SETUP_READY_FILE = $skillSetupReady
   $testStart = [Diagnostics.ProcessStartInfo]::new()
   $testStart.FileName = $env:ComSpec
   $testStart.Arguments = '/d /s /c ""{0}" --filter @minecraft-studio/bot-runtime test:integration"' -f $PnpmExecutable
@@ -146,6 +152,21 @@ try {
   }
 
   while (-not $testProcess.HasExited) {
+    if ((Test-Path -LiteralPath $skillSetupRequest) -and -not (Test-Path -LiteralPath $skillSetupReady)) {
+      # 固定场景，不读取 marker 内容为命令，避免把测试数据变成控制台注入入口。
+      foreach ($command in @(
+        "clear StudioBot",
+        "tp StudioBot 0 65 0",
+        "setblock 2 64 0 minecraft:furnace replace",
+        "give StudioBot minecraft:raw_iron 5",
+        "give StudioBot minecraft:coal 1"
+      )) {
+        $serverProcess.StandardInput.WriteLine($command)
+      }
+      $serverProcess.StandardInput.Flush()
+      Start-Sleep -Milliseconds 500
+      [IO.File]::WriteAllText($skillSetupReady, "ready`n", [Text.UTF8Encoding]::new($false))
+    }
     if (-not $serverStopSent -and (Test-Path -LiteralPath $readyFile)) {
       $serverProcess.StandardInput.WriteLine("stop")
       $serverProcess.StandardInput.Flush()
@@ -188,6 +209,10 @@ try {
   $env:BOT_SERVER_PROFILE_PATH = $previousProfile
   $env:RUN_REAL_MC_TEST = $previousRealTest
   $env:MC_TEST_READY_FILE = $previousReadyFile
+  $env:MC_SKILL_SETUP_REQUEST_FILE = $previousSkillSetupRequest
+  $env:MC_SKILL_SETUP_READY_FILE = $previousSkillSetupReady
 }
 
 Write-Output "REAL_MINECRAFT_INTEGRATION=PASS"
+Write-Output "MINECRAFT_SKILL_ACCEPTANCE=PASS"
+
