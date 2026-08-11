@@ -142,6 +142,16 @@ pnpm test:minecraft-skills
 
 当前第一版覆盖 `5 raw_iron + 1 coal → 5 iron_ingot`。后续技能应沿用同一入口增加固定场景，不另建启动器。
 
+### 版本化场景清单
+
+`@minecraft-studio/skills` 导出 `builtinSkillVerificationManifestsV1`。清单由严格的
+`skillVerificationManifestV1Schema` 校验，当前为 7 个内置技能固定 Minecraft 1.21.8
+的验收矩阵。每个技能必须包含成功、材料不足、权限/位置拒绝、L0 抢占、取消、断线和
+部分成功读回七类场景，否则校验失败。
+
+每个场景记录初始背包、世界方块、技能输入、预期背包与世界状态、稳定错误码、真实
+读回要求和不超过 60 秒的硬超时。未知字段会被拒绝，场景 ID 不允许重复。
+
 1. 准备隔离服 ServerProfile（`isolated-test` + loopback）。
 2. 给 bot 背包放几件不同材质的护甲（至少一件优于身上）。
 3. 触发 `inventory.equip-armor`，`serverProfileId` 填当前服。
@@ -150,4 +160,3 @@ pnpm test:minecraft-skills
    - `completed` + `telemetry` 自洽 → **可用**。
    - `warn` + `errorCode` → 查签名表定位。
 6. 把这一行贴给我，我据此给出"可用/不可用 + 根因"的判定。
-
