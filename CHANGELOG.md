@@ -6,6 +6,7 @@
 
 ### 新增
 
+- 新增 `smelt.item@1.0.0`：使用 Mineflayer 原生 `openFurnace`，显式指定原料、燃料及数量，只接管空熔炉，异步等待并逐次取回真实产物；单次最多 5 件以保持既有 60 秒技能硬超时，取消/L0 抢占时 fail-closed，不自动重试非幂等熔炼。
 - 新增 `inventory.equip-armor@1.0.0`——首个"参考 GPL 机制、代码全自研"技能（每槽选最优护甲、平手不换）；决策为可离线单测的纯函数，Runtime 只提供 `armor.snapshot`/`armor.equip` 原子能力，client 硬护栏拒绝非该槽护甲与背包没有的护甲。
 - 新增生存链四技能：`collect.block@1.0.0`（MIT `mineflayer-collectblock` 1.6.0 + `mineflayer-tool` 1.2.0 供应链锁定接入，禁自动倒箱、与寻路互斥）、`craft.item@1.0.0`（自研，原生 recipesFor+craft，2x2/3x3）、`world.place-block@1.0.0`（自研，一次一块、放置后读回校验）、`container.transfer@1.0.0`（自研，openContainer+deposit/withdraw，容器白名单仅箱子/木桶/潜影盒）。裸装冷启动第一循环（走→撸木→合成→放置→撸石→穿甲→入库）技能层闭环。
 - 技能结果日志 `bot_runtime_skill_result` 新增 `durationMs` 与白名单标量遥测摘要（`craftedCount`/`movedCount`/`itemsCollected` 等 10 键），单行日志即可判定技能在隔离服上可不可用；新增 `docs/skill-verification-runbook.md`（grep 起手式 + 失败签名表）。
@@ -356,3 +357,4 @@
 - Docker 镜像与一键安装器。
 - 便携模式数据迁移。
 - 网吧模式 API 训练、成果导出、断点恢复和安全清理。
+
