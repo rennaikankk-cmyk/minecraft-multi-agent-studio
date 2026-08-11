@@ -87,6 +87,14 @@ export {
 export { SkillExecutor } from "./executor.js";
 export { SkillRegistry } from "./registry.js";
 export {
+  builtinSkillVerificationManifestsV1,
+  skillScenarioCategories,
+  skillScenarioCategorySchema,
+  skillVerificationManifestV1Schema,
+  skillVerificationScenarioV1Schema,
+  type SkillVerificationManifestV1,
+} from "./verification-scenarios.js";
+export {
   defineSkill,
   type SkillCapabilityAdapter,
   type SkillCapabilityRequest,
@@ -98,4 +106,3 @@ export {
   type SkillPrecondition,
   type SkillRetryPolicy,
 } from "./types.js";
-
