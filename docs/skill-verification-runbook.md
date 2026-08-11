@@ -152,6 +152,18 @@ pnpm test:minecraft-skills
 每个场景记录初始背包、世界方块、技能输入、预期背包与世界状态、稳定错误码、真实
 读回要求和不超过 60 秒的硬超时。未知字段会被拒绝，场景 ID 不允许重复。
 
+### GitHub 隔离验收门禁
+
+普通 PR 仍只运行离线质量门禁。真实 Minecraft 技能验收仅通过以下两种方式启动：
+
+1. 在 GitHub Actions 中手动运行“Minecraft 技能隔离验收”，并勾选 EULA 人工确认；
+2. 仓库管理员先将 Actions 变量 `MINECRAFT_EULA_ACCEPTED` 设为 `true`，再给同仓库 PR
+   添加 `minecraft-acceptance` 标签。PR 更新后必须移除并重新添加标签，避免旧授权自动覆盖新提交。
+
+门禁拒绝 Fork PR，不读取任何 Secret，只授予 `contents: read`。它在 Windows GitHub Runner
+中下载固定 Mojang 官方 1.21.8 服务端并核对 SHA-1 与 SHA-256，只生成 `127.0.0.1:25565`、离线认证、
+禁用 RCON/Query 的临时世界。验收日志保留 7 天；流程不会连接私有测试服或正式服。
+
 1. 准备隔离服 ServerProfile（`isolated-test` + loopback）。
 2. 给 bot 背包放几件不同材质的护甲（至少一件优于身上）。
 3. 触发 `inventory.equip-armor`，`serverProfileId` 填当前服。
