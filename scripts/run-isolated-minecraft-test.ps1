@@ -52,6 +52,11 @@ $actualServerSha1 = (Get-FileHash -LiteralPath $serverJar -Algorithm SHA1).Hash.
 if ($actualServerSha1 -ne $expectedServerSha1) {
   throw "Minecraft 1.21.8 server SHA-1 validation failed."
 }
+$expectedServerSha256 = "2349d9a8f0d4be2c40e7692890ef46a4b07015e7955b075460d02793be7fbbe7"
+$actualServerSha256 = (Get-FileHash -LiteralPath $serverJar -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actualServerSha256 -ne $expectedServerSha256) {
+  throw "Minecraft 1.21.8 server SHA-256 validation failed."
+}
 
 $eulaText = Get-Content -LiteralPath $eulaPath -Raw -Encoding utf8
 if ($eulaText -notmatch "(?m)^eula=true\s*$") {
@@ -76,6 +81,29 @@ foreach ($entry in $requiredProperties.GetEnumerator()) {
   if ($properties[$entry.Key] -ne $entry.Value) {
     throw "Unsafe isolated server property: $($entry.Key)"
   }
+}
+
+try {
+  $serverProfile = Get-Content -LiteralPath $ServerProfilePath -Raw -Encoding utf8 | ConvertFrom-Json -ErrorAction Stop
+} catch {
+  throw "Isolated ServerProfile is not valid JSON."
+}
+$requiredProfile = @{
+  "schemaVersion" = "1.0"
+  "purpose" = "isolated-test"
+  "networkScope" = "loopback"
+  "host" = "127.0.0.1"
+  "port" = 25565
+  "username" = "StudioBot"
+  "auth" = "offline"
+}
+foreach ($entry in $requiredProfile.GetEnumerator()) {
+  if ($serverProfile.PSObject.Properties[$entry.Key].Value -ne $entry.Value) {
+    throw "Unsafe isolated ServerProfile field: $($entry.Key)"
+  }
+}
+if ($serverProfile.minecraftVersion -notin @("auto", "1.21.8")) {
+  throw "Unsafe isolated ServerProfile field: minecraftVersion"
 }
 
 $existingListener = Get-NetTCPConnection -LocalPort 25565 -State Listen -ErrorAction SilentlyContinue
@@ -215,4 +243,3 @@ try {
 
 Write-Output "REAL_MINECRAFT_INTEGRATION=PASS"
 Write-Output "MINECRAFT_SKILL_ACCEPTANCE=PASS"
-
