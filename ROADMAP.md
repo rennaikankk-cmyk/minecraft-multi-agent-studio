@@ -1,8 +1,8 @@
 # Minecraft 多智能体机器人项目路线图
 
-更新时间：2026-08-08
+更新时间：2026-08-11
 当前阶段：阶段 1（安全执行底座）
-当前状态：Runtime/Control Link 验收保持通过；P1.3.2a 持久派发 outbox 已通过离线门禁，新增真实 PostgreSQL/Redis 场景待 CI
+当前状态：Runtime/Control Link 验收保持通过；P1.3.2a 持久派发 outbox 与过期租约恢复已通过离线门禁和真实 PostgreSQL/Redis CI
 
 ## 当前进度总览
 
@@ -23,10 +23,12 @@
 - 2026-08-07 本机门禁：锁文件 258 个条目通过供应链策略，生产依赖审计无已知漏洞，`pnpm check` 通过，217 项测试通过、11 项外部环境测试按设计跳过，生产构建与 6 项 Dashboard E2E 通过；Runtime Link 双进程验收通过且 `minecraftConnected=false`。GitHub CI 结果等待本分支推送后验证。
 - 2026-08-07 四进程服务级验收由两位执行者独立各运行一次，均退出码 0：生产 Coordinator、Control API、Dashboard 与测试专用 Runtime fixture 完成 `空 → online → stop completed → offline`，固定 `traceId` 贯穿四进程、关闭调用一次、凭据扫描通过、`minecraftConnected=false` 且无残留进程。该结果不是浏览器 E2E，也不代表真实 Minecraft 联机。
 - 2026-08-08 本机隔离门禁：`pnpm check` 退出码 0，246 项离线测试通过、19 项外部环境测试按设计跳过，全部类型检查与生产构建通过；Runtime Link 双进程和四进程服务级验收均退出码 0、`minecraftConnected=false`。`test:task-infra` 因未提供专用 PostgreSQL/Redis/namespace 明确退出码 1，该文件的 17 项真实基础设施场景等待 CI，未冒充实机通过。
+- 2026-08-11 本机门禁：`pnpm check` 退出码 0，292 项测试通过、20 项外部环境测试按设计跳过，全部类型检查与生产构建通过；本次验证没有连接 Minecraft。
+- 2026-08-11 GitHub Actions 运行 `31480434428`：完整离线质量门和真实 PostgreSQL/Redis 隔离门均通过，18 项真实基础设施场景全部通过，包括 `0004` 前向升级、outbox 对账与自动过期租约恢复。
 
 ### 已完成并有真实基础设施验证
 
-- 既有 PostgreSQL 迁移、并发操作重放/租约领取和只追加约束已在临时真实服务上通过；新增 `0004` 前向升级场景尚待 CI。
+- PostgreSQL 迁移、`0004` 前向升级、并发操作重放/租约领取、outbox 对账、自动过期租约恢复和只追加约束已在 GitHub Actions 临时真实服务上通过。
 - Redis/BullMQ 去重、续租、取消、超时、截止时间和显式幂等恢复已在临时真实服务上通过。
 - 不合作处理器的有界 Worker 等待已通过真实超时场景；进程内处理器本身仍不是可强制终止的沙盒。
 
@@ -233,8 +235,8 @@
 - [x] 固定服务镜像/Action 摘要的隔离 PostgreSQL/Redis GitHub Actions 测试入口。
 - [x] 在真实 PostgreSQL 上运行迁移和并发集成测试。
 - [x] 在真实 Redis/BullMQ 上验证队列去重、续租、取消、超时和显式重投。
-- [ ] 完成事务 outbox 与 PostgreSQL→BullMQ 自动对账重投（同事务创建、连续失败预算、异常记录封存、显式重派和离线门禁已完成；新增真实基础设施场景待 CI 验证）。
-- [x] 增加 Coordinator 所有的有界过期租约恢复；`assigned` 任务恢复与新修订 outbox 同事务提交，`running` 任务按稳定原因进入失败终态，并发扫描不重叠（真实 PostgreSQL 场景已加入门禁，待 CI 验证）。
+- [x] 完成事务 outbox 与 PostgreSQL→BullMQ 自动对账重投；同事务创建、连续失败预算、异常记录封存和显式重派均已通过离线与真实基础设施门禁。
+- [x] 增加 Coordinator 所有的有界过期租约恢复；`assigned` 任务恢复与新修订 outbox 同事务提交，`running` 任务按稳定原因进入失败终态，并发扫描不重叠，真实 PostgreSQL 场景已通过。
 - [ ] 增加持久取消消费和跨 Worker 取消。
 - [ ] 接入 Coordinator、Control API 和 Dashboard 任务看板。
 
@@ -292,7 +294,7 @@
 1. **已完成：P1.3.1 真实基础设施门禁**：GitHub Actions 中的 PostgreSQL/Redis 隔离测试已通过；测试没有连接 Minecraft。
 2. **已完成：P0 Runtime Link**：Runtime ↔ Coordinator 的认证遥测与停止传输已通过真实双进程回环验收；测试没有连接 Minecraft。
 3. **已完成：P0 Control Bridge**：Control API ↔ 独立 Coordinator 的原子状态镜像和固定停止 RPC 已通过不连接 Minecraft 的真实四进程回环服务验收。
-4. **P1.3.2 持久任务闭环**：新增 outbox/reconciler 与自动过期租约恢复的真实基础设施场景待 CI 通过；下一步增加持久取消消费、跨 Worker 取消和独立 Worker，最后接入任务 API 与 Dashboard。
+4. **P1.3.2 持久任务闭环**：outbox/reconciler 与自动过期租约恢复的真实基础设施场景已通过；下一步增加持久取消消费、跨 Worker 取消和独立 Worker，最后接入任务 API 与 Dashboard。
 5. **P1.1/P1.2 实机矩阵**：验证 L0 危险场景和 Pathfinder 多版本真实寻路，不扩大正式服务器权限。
 6. **P1.4 多 Bot 协调**：实现任务分配、资源/箱子/区域锁、替补执行和故障转移。
 7. **P1.5/P1.6 生产能力与基础设施**：按场景逐项增加生产技能，再完善指标、日志、备份与可回滚部署。

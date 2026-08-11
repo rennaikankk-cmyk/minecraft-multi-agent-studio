@@ -77,7 +77,7 @@
 - Control Link 当前只支持同机回环，状态、停止幂等缓存和审计仍在内存中；跨主机 TLS、密钥轮换、用户登录和持久化停止审计尚未完成。
 - 本机未检测到 PostgreSQL、Redis 或 Docker；2026-07-28 的 GitHub Actions 运行 `30315095898` 已通过真实临时 PostgreSQL/Redis 集成门，该结果不代表生产服务在线。
 - 当前提供可嵌入 Worker 库和 Coordinator 过期租约恢复控制器，尚未提供独立生产 Worker 应用、Coordinator 任务基础设施启动配置、任务 Control API 或 Dashboard 任务看板。
-- 当前已实现事务 outbox、PostgreSQL→BullMQ 对账、显式失败重派和自动过期租约恢复，但本机没有 PostgreSQL/Redis；新增升级、回滚、并发对账、异常封存和恢复场景已写入真实基础设施门禁，尚待 CI 验证。持久取消消费和跨 Worker 取消仍未完成。
+- 当前已实现事务 outbox、PostgreSQL→BullMQ 对账、显式失败重派和自动过期租约恢复，但本机没有 PostgreSQL/Redis；新增升级、回滚、并发对账、异常封存和恢复场景已在 2026-08-11 GitHub Actions 运行 `31480434428` 的真实 PostgreSQL/Redis 门禁中 18/18 通过。持久取消消费和跨 Worker 取消仍未完成。
 - 任务处理器是受信任的进程内代码，并非强隔离沙盒；不合作响应 `AbortSignal` 的代码在失去租约后仍可能继续运行自身副作用，硬终止需后续独立进程隔离。
 - 没有注册生产任务处理器，本模块不会执行模型输出，也不会连接 Minecraft。
 
