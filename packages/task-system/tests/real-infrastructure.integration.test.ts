@@ -387,6 +387,12 @@ describeReal.sequential(
             [messageId, task.taskId, task.revision],
           );
         }
+        const hardeningSql = await readFile(migrationFiles[3].path, "utf8");
+        await upgradePool.query(hardeningSql);
+
+        // 0003 casts the JSON revision text directly to bigint and therefore
+        // cannot contain 0.0. Verify 0004's numeric-equivalence contract only
+        // after hardening instead of seeding an impossible legacy row.
         const numericMessage = dispatchFor(numericRevision);
         const numericPayload = JSON.stringify(numericMessage).replace(
           '"expectedRevision":0',
@@ -403,9 +409,6 @@ describeReal.sequential(
            )`,
           [numericMessage.messageId, numericRevision.taskId, numericPayload],
         );
-
-        const hardeningSql = await readFile(migrationFiles[3].path, "utf8");
-        await upgradePool.query(hardeningSql);
 
         const upgradedTasks = await upgradePool.query<{
           task_id: string;
