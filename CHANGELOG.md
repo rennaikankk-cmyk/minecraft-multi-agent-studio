@@ -6,6 +6,7 @@
 
 ### 新增
 
+- 新增“Minecraft 技能隔离验收”GitHub Actions 门禁：仅支持人工勾选 EULA 后手动运行，或由仓库变量确认 EULA 后通过 `minecraft-acceptance` 标签触发；拒绝 Fork、无 Secret、只读权限、固定 Mojang 官方 JAR 与 SHA-1、仅本机回环临时服。
 - 新增严格版本化的 Minecraft 技能验收场景清单，为 7 个内置技能统一定义成功、材料不足、权限/位置拒绝、L0 抢占、取消、断线和部分成功读回矩阵。
 - 新增 `pnpm test:minecraft-skills` 一键回环隔离验收入口；复用既有官方服务端哈希、人工 EULA、安全属性和未知端口进程拒绝检查，并加入真实 `smelt.item@1.0.0` 场景握手与中文通过标记。
 - 新增 `smelt.item@1.0.0`：使用 Mineflayer 原生 `openFurnace`，显式指定原料、燃料及数量，只接管空熔炉，异步等待并逐次取回真实产物；单次最多 5 件以保持既有 60 秒技能硬超时，取消/L0 抢占时 fail-closed，不自动重试非幂等熔炼。
