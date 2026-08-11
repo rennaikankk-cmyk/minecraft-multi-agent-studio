@@ -130,6 +130,18 @@ targetsFound, itemsCollected, requestedCount, craftedCount, movedCount
 
 ## 5. 一次典型验证流程
 
+### 推荐的一键入口
+
+在已准备并人工接受 EULA 的回环隔离服环境中运行：
+
+```powershell
+pnpm test:minecraft-skills
+```
+
+脚本会复用固定 Minecraft 1.21.8 服务端哈希、安全 `server.properties` 与本地 ServerProfile 校验，启动临时回环服，执行真实连接、断线恢复以及 `smelt.item@1.0.0` 场景，最后输出 `MINECRAFT_SKILL_ACCEPTANCE=PASS`。测试场景只触发脚本内硬编码的白名单控制台命令；marker 文件内容不会作为服务器命令执行。
+
+当前第一版覆盖 `5 raw_iron + 1 coal → 5 iron_ingot`。后续技能应沿用同一入口增加固定场景，不另建启动器。
+
 1. 准备隔离服 ServerProfile（`isolated-test` + loopback）。
 2. 给 bot 背包放几件不同材质的护甲（至少一件优于身上）。
 3. 触发 `inventory.equip-armor`，`serverProfileId` 填当前服。
@@ -138,3 +150,4 @@ targetsFound, itemsCollected, requestedCount, craftedCount, movedCount
    - `completed` + `telemetry` 自洽 → **可用**。
    - `warn` + `errorCode` → 查签名表定位。
 6. 把这一行贴给我，我据此给出"可用/不可用 + 根因"的判定。
+
