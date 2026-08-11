@@ -1,0 +1,74 @@
+import { randomUUID } from "node:crypto";
+
+import {
+  dashboardApiErrorV1Schema,
+  dashboardBotListResponseV1Schema,
+  type DashboardApiErrorCode,
+} from "@minecraft-studio/protocol";
+import { NextResponse } from "next/server";
+
+import {
+  DashboardControlError,
+  fetchDashboardBots,
+  loadDashboardControlConfig,
+} from "@/lib/control-api-client";
+import { dashboardLogger } from "@/lib/logger";
+
+export const dynamic = "force-dynamic";
+
+export async function GET() {
+  const requestId = randomUUID();
+  try {
+    const config = loadDashboardControlConfig();
+    const result = await fetchDashboardBots(config);
+    const body = dashboardBotListResponseV1Schema.parse({
+      schemaVersion: "1.0",
+      requestId,
+      data: {
+        source: "control-api",
+        generatedAt: result.generatedAt,
+        bots: result.bots,
+        capabilities: {
+          stopConfirmationConfigured: config.stopConfirmationSha256 !== null,
+        },
+      },
+    });
+    return NextResponse.json(body, { headers: { "Cache-Control": "no-store" } });
+  } catch (cause) {
+    const error = normalizeError(cause);
+    dashboardLogger.error("dashboard_bot_read_failed", {
+      traceId: requestId,
+      taskId: null,
+      botId: null,
+      skillId: null,
+      modelName: null,
+      code: error.code,
+    });
+    return NextResponse.json(
+      dashboardApiErrorV1Schema.parse({
+        schemaVersion: "1.0",
+        requestId,
+        error,
+      }),
+      {
+        status: error.code === "DASHBOARD_CONTROL_NOT_CONFIGURED" ? 503 : 502,
+        headers: { "Cache-Control": "no-store" },
+      },
+    );
+  }
+}
+
+function normalizeError(cause: unknown): {
+  code: DashboardApiErrorCode;
+  message: string;
+} {
+  if (cause instanceof DashboardControlError) {
+    // Return a plain object: the Error instance carries an own enumerable
+    // `name` property that the strict response schema rejects.
+    return { code: cause.code, message: cause.message };
+  }
+  return {
+    code: "INVALID_CONTROL_RESPONSE",
+    message: "机器人状态接口返回了无法识别的数据。",
+  };
+}

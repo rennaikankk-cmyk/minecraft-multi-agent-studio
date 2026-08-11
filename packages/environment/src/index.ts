@@ -5,8 +5,10 @@ import { promisify } from "node:util";
 
 import {
   deploymentModeSchema,
+  environmentMemorySampleSchema,
   environmentSnapshotSchema,
   type DeploymentMode,
+  type EnvironmentMemorySample,
   type EnvironmentSnapshot,
 } from "@minecraft-studio/protocol";
 
@@ -29,6 +31,17 @@ export type DetectionOptions = {
   now?: () => Date;
   commandRunner?: CommandRunner;
   dockerMarkerExists?: () => Promise<boolean>;
+  memoryReader?: MemoryReader;
+};
+
+export type MemoryReader = () => Readonly<{
+  totalBytes: number;
+  freeBytes: number;
+}>;
+
+export type MemorySampleOptions = {
+  now?: () => Date;
+  memoryReader?: MemoryReader;
 };
 
 const defaultCommandRunner: CommandRunner = async (executable, args) => {
@@ -220,6 +233,22 @@ function normalizeCpuModel(value: string | undefined): string {
   return model || "Unknown CPU reported by operating system";
 }
 
+export function captureMemorySample(
+  options: MemorySampleOptions = {},
+): EnvironmentMemorySample {
+  const memory = (options.memoryReader ?? (() => ({
+    totalBytes: os.totalmem(),
+    freeBytes: os.freemem(),
+  })))();
+
+  return environmentMemorySampleSchema.parse({
+    schemaVersion: "1.0",
+    capturedAt: (options.now ?? (() => new Date()))().toISOString(),
+    source: "node-os",
+    memory,
+  });
+}
+
 export async function detectEnvironment(
   options: DetectionOptions = {},
 ): Promise<EnvironmentSnapshot> {
@@ -243,10 +272,14 @@ export async function detectEnvironment(
   if (mode.value === "netcafe") {
     warnings.push("网吧模式的数据导出、断点恢复和安全清理尚未接入。当前只完成模式识别。");
   }
+  const memorySample = captureMemorySample({
+    ...(options.now ? { now: options.now } : {}),
+    ...(options.memoryReader ? { memoryReader: options.memoryReader } : {}),
+  });
 
   return environmentSnapshotSchema.parse({
     schemaVersion: "1.0",
-    capturedAt: (options.now ?? (() => new Date()))().toISOString(),
+    capturedAt: memorySample.capturedAt,
     mode,
     hardware: {
       platform,
@@ -256,10 +289,7 @@ export async function detectEnvironment(
         model: normalizeCpuModel(cpuList[0]?.model),
         logicalCores: Math.max(1, cpuList.length),
       },
-      memory: {
-        totalBytes: os.totalmem(),
-        freeBytes: os.freemem(),
-      },
+      memory: memorySample.memory,
       gpu: gpuResult.gpu,
     },
     software,
@@ -267,4 +297,8 @@ export async function detectEnvironment(
   });
 }
 
-export type { DeploymentMode, EnvironmentSnapshot } from "@minecraft-studio/protocol";
+export type {
+  DeploymentMode,
+  EnvironmentMemorySample,
+  EnvironmentSnapshot,
+} from "@minecraft-studio/protocol";

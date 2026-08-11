@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-const identifierSchema = z
+export const identifierSchema = z
   .string()
   .min(1)
   .max(128)
@@ -24,6 +24,55 @@ export const botConnectionStateSchema = z.enum([
   "stopping",
   "error",
 ]);
+
+export const minecraftVersionStringSchema = z
+  .string()
+  .regex(/^1\.\d+(?:\.\d+)?$/u);
+
+export const minecraftVersionCompatibilitySchema = z
+  .object({
+    selection: z.enum(["auto", "fixed"]),
+    requestedVersion: minecraftVersionStringSchema.nullable(),
+    resolvedVersion: minecraftVersionStringSchema.nullable(),
+    supportLevel: z.enum(["tested", "compatible-untested", "unsupported"]),
+    supportedRange: z
+      .object({
+        oldest: minecraftVersionStringSchema,
+        latest: minecraftVersionStringSchema,
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.selection === "auto" && value.requestedVersion !== null) {
+      context.addIssue({
+        code: "custom",
+        path: ["requestedVersion"],
+        message: "Auto version selection cannot contain a requested version.",
+      });
+    }
+    if (value.selection === "fixed" && value.requestedVersion === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["requestedVersion"],
+        message: "Fixed version selection requires a requested version.",
+      });
+    }
+    if (value.supportLevel === "unsupported" && value.resolvedVersion !== null) {
+      context.addIssue({
+        code: "custom",
+        path: ["resolvedVersion"],
+        message: "An unsupported result cannot claim a resolved version.",
+      });
+    }
+    if (value.supportLevel !== "unsupported" && value.resolvedVersion === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["resolvedVersion"],
+        message: "A supported result requires a resolved version.",
+      });
+    }
+  });
 
 export const taskStatusSchema = z.enum([
   "queued",
@@ -76,6 +125,85 @@ const currentTaskSchema = z
   })
   .strict();
 
+export const l0SafetyRiskSchema = z.enum([
+  "CRITICAL_HEALTH",
+  "LOW_HEALTH",
+  "HUNGER",
+  "DROWNING",
+  "LAVA",
+  "FALLING",
+  "STUCK",
+  "INVENTORY_FULL",
+]);
+
+export const l0SafetyActionKindSchema = z.enum([
+  "PAUSE_NORMAL_TASKS",
+  "CONSUME_SAFE_FOOD",
+  "RETREAT_STEP",
+  "ASCEND",
+  "ESCAPE_LAVA",
+  "HALT_HORIZONTAL_MOVEMENT",
+  "UNSTICK",
+  "EMERGENCY_STOP",
+]);
+
+export const l0SafetyStatusSchema = z
+  .object({
+    mode: z.enum([
+      "monitoring",
+      "intervening",
+      "paused",
+      "emergency_stopping",
+    ]),
+    activeRisks: z.array(l0SafetyRiskSchema).max(8),
+    normalTasksPaused: z.boolean(),
+    lastDecisionId: identifierSchema.nullable(),
+    lastAction: z
+      .object({
+        kind: l0SafetyActionKindSchema,
+        outcome: z.enum(["executed", "skipped", "failed"]),
+        completedAt: timestampSchema,
+        errorCode: z
+          .string()
+          .min(1)
+          .max(128)
+          .regex(/^[A-Z][A-Z0-9_]*$/u)
+          .nullable(),
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict()
+  .superRefine((status, context) => {
+    if (new Set(status.activeRisks).size !== status.activeRisks.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["activeRisks"],
+        message: "Safety risks must be unique.",
+      });
+    }
+    if (
+      status.mode === "monitoring" &&
+      (status.activeRisks.length > 0 || status.normalTasksPaused)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["mode"],
+        message: "Monitoring mode cannot claim active risks or a task pause.",
+      });
+    }
+    if (
+      (status.mode === "paused" || status.mode === "emergency_stopping") &&
+      !status.normalTasksPaused
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["normalTasksPaused"],
+        message: "Paused safety modes must pause normal tasks.",
+      });
+    }
+  });
+
 const botMessageEnvelopeShape = {
   schemaVersion: z.literal("1.0"),
   messageId: z.string().uuid(),
@@ -107,6 +235,10 @@ export const botStatusV1Schema = z
         position: botPositionSchema,
         latencyMs: z.number().int().nonnegative().max(120_000).nullable(),
         currentTask: currentTaskSchema.nullable(),
+        safety: l0SafetyStatusSchema.optional(),
+        minecraftVersion: minecraftVersionCompatibilitySchema
+          .refine((value) => value.supportLevel !== "unsupported")
+          .optional(),
       })
       .strict(),
   })
@@ -129,7 +261,20 @@ export const botHeartbeatV1Schema = z
       })
       .strict(),
   })
-  .strict();
+  .strict()
+  .superRefine((message, context) => {
+    const lastStatusSequence = message.payload.lastStatusSequence;
+    if (
+      lastStatusSequence !== null &&
+      lastStatusSequence > message.payload.sequence
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "lastStatusSequence"],
+        message: "The last status sequence cannot exceed the message sequence.",
+      });
+    }
+  });
 
 export const botDisconnectedV1Schema = z
   .object({
@@ -153,6 +298,35 @@ export const botDisconnectedV1Schema = z
         expected: z.boolean(),
         lastStatusSequence: sequenceSchema.nullable(),
         detail: z.string().trim().min(1).max(500).optional(),
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((message, context) => {
+    const lastStatusSequence = message.payload.lastStatusSequence;
+    if (
+      lastStatusSequence !== null &&
+      lastStatusSequence > message.payload.sequence
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "lastStatusSequence"],
+        message: "The last status sequence cannot exceed the message sequence.",
+      });
+    }
+  });
+
+export const botVersionV1Schema = z
+  .object({
+    ...botMessageEnvelopeShape,
+    type: z.literal("bot.version.v1"),
+    payload: z
+      .object({
+        serverProfileId: identifierSchema,
+        runtimeInstanceId: identifierSchema,
+        sequence: sequenceSchema,
+        observedAt: timestampSchema,
+        compatibility: minecraftVersionCompatibilitySchema,
       })
       .strict(),
   })
@@ -236,24 +410,86 @@ export const stopBotCommandV1Schema = z
     }
   });
 
+export const botStopResultV1Schema = z
+  .object({
+    ...botMessageEnvelopeShape,
+    type: z.literal("bot.stop.result.v1"),
+    source: z
+      .object({
+        service: z.literal("bot-runtime"),
+        instanceId: identifierSchema,
+      })
+      .strict(),
+    payload: z
+      .object({
+        commandId: z.string().uuid(),
+        runtimeInstanceId: identifierSchema,
+        outcome: z.enum(["completed", "rejected", "failed"]),
+        completedAt: timestampSchema,
+        errorCode: z
+          .string()
+          .min(1)
+          .max(128)
+          .regex(/^[A-Z][A-Z0-9_]*$/u)
+          .optional(),
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((message, context) => {
+    if (message.source.instanceId !== message.payload.runtimeInstanceId) {
+      context.addIssue({
+        code: "custom",
+        path: ["source", "instanceId"],
+        message: "Stop result source must match the runtime instance.",
+      });
+    }
+    const hasError = message.payload.errorCode !== undefined;
+    if (message.payload.outcome === "completed" && hasError) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "errorCode"],
+        message: "A completed stop result cannot contain an error code.",
+      });
+    }
+    if (message.payload.outcome !== "completed" && !hasError) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "errorCode"],
+        message: "A rejected or failed stop result requires an error code.",
+      });
+    }
+  });
+
 export const botTelemetryMessageV1Schema = z.discriminatedUnion("type", [
   botStatusV1Schema,
   botHeartbeatV1Schema,
   botDisconnectedV1Schema,
+  botVersionV1Schema,
 ]);
 
 export const botProtocolMessageV1Schema = z.union([
   botStatusV1Schema,
   botHeartbeatV1Schema,
   botDisconnectedV1Schema,
+  botVersionV1Schema,
   stopBotCommandV1Schema,
+  botStopResultV1Schema,
 ]);
 
 export type ControlPermission = z.infer<typeof controlPermissionSchema>;
 export type BotStatusV1 = z.infer<typeof botStatusV1Schema>;
 export type BotHeartbeatV1 = z.infer<typeof botHeartbeatV1Schema>;
 export type BotDisconnectedV1 = z.infer<typeof botDisconnectedV1Schema>;
+export type BotVersionV1 = z.infer<typeof botVersionV1Schema>;
+export type L0SafetyRisk = z.infer<typeof l0SafetyRiskSchema>;
+export type L0SafetyActionKind = z.infer<typeof l0SafetyActionKindSchema>;
+export type L0SafetyStatus = z.infer<typeof l0SafetyStatusSchema>;
+export type MinecraftVersionCompatibility = z.infer<
+  typeof minecraftVersionCompatibilitySchema
+>;
 export type StopBotCommandV1 = z.infer<typeof stopBotCommandV1Schema>;
+export type BotStopResultV1 = z.infer<typeof botStopResultV1Schema>;
 export type BotTelemetryMessageV1 = z.infer<typeof botTelemetryMessageV1Schema>;
 export type BotProtocolMessageV1 = z.infer<typeof botProtocolMessageV1Schema>;
 
@@ -288,6 +524,10 @@ export class ProtocolAuthorizationError extends Error {
 
 export function parseBotTelemetryMessage(input: unknown): BotTelemetryMessageV1 {
   return botTelemetryMessageV1Schema.parse(input);
+}
+
+export function parseBotStopResult(input: unknown): BotStopResultV1 {
+  return botStopResultV1Schema.parse(input);
 }
 
 /**

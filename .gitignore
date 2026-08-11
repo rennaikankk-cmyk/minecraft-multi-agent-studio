@@ -1,7 +1,10 @@
 node_modules/
+node_modules.precheck-backup/
 .next/
 dist/
 coverage/
+test-results/
+playwright-report/
 .env
 .env.*
 !.env.example
@@ -13,3 +16,5 @@ runtime-data/
 portable-data/
 netcafe-session/
 configs/servers/*.local.json
+.pnpm-store/
+.claude/

@@ -1,7 +1,13 @@
 "use client";
 
-import type { EnvironmentSnapshot } from "@minecraft-studio/protocol";
-import { useCallback, useEffect, useState } from "react";
+import {
+  environmentMemorySampleSchema,
+  type EnvironmentMemorySample,
+  type EnvironmentSnapshot,
+} from "@minecraft-studio/protocol";
+import { useCallback, useEffect, useRef, useState } from "react";
+
+import { BotOverviewStrip } from "@/components/bot-overview-strip";
 
 type EnvironmentResponse = {
   requestId: string;
@@ -12,6 +18,16 @@ type ApiError = {
   requestId?: string;
   error?: { code?: string; message?: string };
 };
+
+type EnvironmentMemoryResponse = {
+  requestId?: string;
+  sample?: unknown;
+  error?: { code?: string; message?: string };
+};
+
+const MEMORY_POLL_INTERVAL_MS = 5_000;
+const MEMORY_REQUEST_TIMEOUT_MS = 4_000;
+const MEMORY_SAMPLE_STALE_AFTER_MS = 15_000;
 
 const modeNames: Record<EnvironmentSnapshot["mode"]["value"], string> = {
   standard: "标准模式",
@@ -44,6 +60,23 @@ export default function HomePage() {
   const [requestId, setRequestId] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [loading, setLoading] = useState(true);
+  const [memorySample, setMemorySample] =
+    useState<EnvironmentMemorySample | null>(null);
+  const [memoryError, setMemoryError] = useState<string>("");
+  const [memoryStaleByAge, setMemoryStaleByAge] = useState(false);
+  const memoryLastSuccessAtRef = useRef<number | null>(null);
+  const memoryLatestCapturedAtRef = useRef<number>(Number.NEGATIVE_INFINITY);
+
+  const applyMemorySample = useCallback((sample: EnvironmentMemorySample) => {
+    const capturedAt = Date.parse(sample.capturedAt);
+    if (capturedAt < memoryLatestCapturedAtRef.current) return false;
+    memoryLatestCapturedAtRef.current = capturedAt;
+    memoryLastSuccessAtRef.current = Date.now();
+    setMemorySample(sample);
+    setMemoryError("");
+    setMemoryStaleByAge(false);
+    return true;
+  }, []);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -63,18 +96,118 @@ export default function HomePage() {
         throw new Error("环境检测接口返回了无法识别的数据");
       }
 
+      const initialMemorySample = environmentMemorySampleSchema.parse({
+        schemaVersion: "1.0",
+        capturedAt: body.environment.capturedAt,
+        source: "node-os",
+        memory: body.environment.hardware.memory,
+      });
       setSnapshot(body.environment);
+      applyMemorySample(initialMemorySample);
     } catch (cause) {
       setSnapshot(null);
       setError(cause instanceof Error ? cause.message : "环境检测失败");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [applyMemorySample]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    let disposed = false;
+    let inFlight = false;
+    let activeController: AbortController | null = null;
+    let requestTimeout: number | null = null;
+
+    const captureMemory = async () => {
+      if (disposed || inFlight) return;
+      inFlight = true;
+      const controller = new AbortController();
+      activeController = controller;
+      requestTimeout = window.setTimeout(
+        () => controller.abort(),
+        MEMORY_REQUEST_TIMEOUT_MS,
+      );
+
+      try {
+        const response = await fetch("/api/environment/memory", {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        const body = (await response.json()) as EnvironmentMemoryResponse;
+        if (!response.ok) {
+          throw new Error(body.error?.message ?? "内存采集接口不可用");
+        }
+        const parsed = environmentMemorySampleSchema.safeParse(body.sample);
+        if (!parsed.success) {
+          throw new Error("内存采集接口返回了无法识别的数据");
+        }
+        if (!disposed) {
+          applyMemorySample(parsed.data);
+        }
+      } catch (cause) {
+        if (!disposed) {
+          setMemoryError(
+            cause instanceof DOMException && cause.name === "AbortError"
+              ? "采集超时，正在显示上次成功结果"
+              : cause instanceof Error
+                ? cause.message
+                : "内存采集失败，正在显示上次成功结果",
+          );
+        }
+      } finally {
+        if (requestTimeout !== null) window.clearTimeout(requestTimeout);
+        requestTimeout = null;
+        if (activeController === controller) activeController = null;
+        inFlight = false;
+      }
+    };
+
+    const interval = window.setInterval(
+      () => {
+        if (document.visibilityState === "visible") void captureMemory();
+      },
+      MEMORY_POLL_INTERVAL_MS,
+    );
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== "visible") return;
+      const lastSuccessAt = memoryLastSuccessAtRef.current;
+      if (
+        lastSuccessAt !== null &&
+        Date.now() - lastSuccessAt >= MEMORY_SAMPLE_STALE_AFTER_MS
+      ) {
+        setMemoryStaleByAge(true);
+      }
+      void captureMemory();
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      if (requestTimeout !== null) window.clearTimeout(requestTimeout);
+      activeController?.abort();
+    };
+  }, [applyMemorySample]);
+
+  useEffect(() => {
+    if (!memorySample || memoryLastSuccessAtRef.current === null) return;
+    const remaining = Math.max(
+      0,
+      MEMORY_SAMPLE_STALE_AFTER_MS -
+        (Date.now() - memoryLastSuccessAtRef.current),
+    );
+    const timeout = window.setTimeout(
+      () => setMemoryStaleByAge(true),
+      remaining,
+    );
+    return () => window.clearTimeout(timeout);
+  }, [memorySample]);
+
+  const memoryIsStale = Boolean(memoryError) || memoryStaleByAge;
 
   return (
     <main className="shell">
@@ -105,6 +238,8 @@ export default function HomePage() {
         </div>
       </section>
 
+      <BotOverviewStrip />
+
       {error ? (
         <section className="errorPanel" role="alert">
           <strong>环境状态不可用</strong>
@@ -131,10 +266,33 @@ export default function HomePage() {
               <strong>{snapshot.hardware.cpu.model}</strong>
               <small>{snapshot.hardware.cpu.logicalCores} 个逻辑核心</small>
             </article>
-            <article className="metricCard">
+            <article className="metricCard" data-testid="memory-card">
               <span>内存</span>
-              <strong>{formatBytes(snapshot.hardware.memory.totalBytes)}</strong>
-              <small>当前可用 {formatBytes(snapshot.hardware.memory.freeBytes)}</small>
+              <strong>
+                {formatBytes(
+                  memorySample?.memory.totalBytes ??
+                    snapshot.hardware.memory.totalBytes,
+                )}
+              </strong>
+              <small data-testid="memory-free">
+                当前可用{" "}
+                {formatBytes(
+                  memorySample?.memory.freeBytes ??
+                    snapshot.hardware.memory.freeBytes,
+                )}
+              </small>
+              <small
+                className={`memorySampleStatus ${memoryIsStale ? "stale" : "fresh"}`}
+                data-testid="memory-sample-status"
+              >
+                {memoryError
+                  ? `数据已过期：${memoryError}`
+                  : memoryStaleByAge
+                    ? "数据已过期：超过 15 秒未成功采集"
+                  : `每 5 秒采集 · ${new Date(
+                      memorySample?.capturedAt ?? snapshot.capturedAt,
+                    ).toLocaleTimeString("zh-CN")}`}
+              </small>
             </article>
             <article className="metricCard">
               <span>系统</span>
@@ -205,9 +363,9 @@ export default function HomePage() {
       </section>
       <section className="serviceGrid">
         <article><i className="ready" /><div><strong>环境检测</strong><small>本模块已接入</small></div></article>
-        <article><i /><div><strong>Bot Runtime</strong><small>待接入</small></div></article>
-        <article><i /><div><strong>Coordinator</strong><small>待接入</small></div></article>
-        <article><i /><div><strong>Minecraft 测试服</strong><small>未连接</small></div></article>
+        <article><i className="ready" /><div><strong>Control API</strong><small>状态以实时请求结果为准</small></div></article>
+        <article><i /><div><strong>Bot Runtime</strong><small>Runtime Link 已接入；无遥测不显示在线</small></div></article>
+        <article><i /><div><strong>Coordinator</strong><small>Control Link 已接入；断线明确标记不可用</small></div></article>
         <article><i /><div><strong>Local AI Hub</strong><small>待通过 AI Router 接入</small></div></article>
       </section>
 

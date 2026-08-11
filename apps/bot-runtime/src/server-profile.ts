@@ -4,6 +4,8 @@ import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 
+import { isMineflayerTestedVersion } from "./version-compatibility.js";
+
 const MAX_PROFILE_BYTES = 64 * 1024;
 
 function isLoopbackHost(host: string): boolean {
@@ -71,9 +73,16 @@ export const serverProfileSchema = z
     networkScope: z.enum(["loopback", "private-lan"]),
     host: z.string().trim().min(1).max(253),
     port: z.number().int().min(1).max(65_535),
-    minecraftVersion: z
-      .string()
-      .regex(/^1\.\d+(?:\.\d+)?$/u),
+    minecraftVersion: z.union([
+      z.literal("auto"),
+      z
+        .string()
+        .regex(/^1\.\d+(?:\.\d+)?$/u)
+        .refine(isMineflayerTestedVersion, {
+          message:
+            "Fixed minecraftVersion must be explicitly tested by the installed Mineflayer version.",
+        }),
+    ]),
     username: z
       .string()
       .min(3)

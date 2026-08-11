@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Minecraft 无规则服务器 多智能体作战体系设计 v2</title>
+<style>
+  @page { size: A4; margin: 16mm 15mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Microsoft YaHei","PingFang SC",sans-serif; color:#1a202c; line-height:1.7; font-size:10.5pt; margin:0; }
+  h1 { font-size:19pt; border-bottom:3px solid #742a2a; padding-bottom:8px; margin-bottom:4px; color:#742a2a; }
+  h2 { font-size:13.5pt; color:#9b2c2c; margin-top:26px; border-left:5px solid #9b2c2c; padding-left:10px; page-break-after:avoid; }
+  h3 { font-size:11pt; color:#2c5282; margin-top:16px; page-break-after:avoid; }
+  .meta { color:#718096; font-size:9pt; margin-bottom:20px; }
+  .box { border-radius:6px; padding:11px 15px; margin:14px 0; page-break-inside:avoid; }
+  .summary { background:#fff5f5; border:1px solid #fc8181; }
+  .key { background:#ebf8ff; border:1px solid #90cdf4; }
+  .warn { background:#fffaf0; border:1px solid #f6ad55; }
+  .good{color:#276749;font-weight:bold;} .bad{color:#c53030;font-weight:bold;}
+  table{border-collapse:collapse;width:100%;margin:10px 0;font-size:9.3pt;page-break-inside:avoid;}
+  th{background:#742a2a;color:#fff;padding:5px 9px;text-align:left;}
+  td{border:1px solid #cbd5e0;padding:5px 9px;vertical-align:top;}
+  tr:nth-child(even) td{background:#faf5f5;}
+  pre{background:#1a202c;color:#e2e8f0;padding:13px;border-radius:6px;font-family:"Consolas",monospace;font-size:8.3pt;line-height:1.45;white-space:pre;page-break-inside:avoid;}
+  code{background:#edf2f7;padding:1px 5px;border-radius:3px;font-family:"Consolas",monospace;font-size:9pt;}
+  ul,ol{padding-left:20px;} li{margin:3px 0;}
+  .pb{page-break-before:always;}
+  .role{border:1px solid #cbd5e0;border-left:5px solid #2c5282;border-radius:5px;padding:10px 14px;margin:12px 0;page-break-inside:avoid;}
+  .role h3{margin-top:0;}
+  .role .ai{color:#276749;} .role .det{color:#b7791f;}
+  .tag{display:inline-block;padding:1px 7px;border-radius:9px;font-size:8pt;font-weight:bold;margin-right:3px;}
+  .t-ts{background:#bee3f8;color:#2a4365;} .t-rust{background:#fed7aa;color:#7b341e;} .t-ai{background:#c6f6d5;color:#22543d;} .t-det{background:#feebc8;color:#7b341e;}
+  .footer{color:#718096;font-size:8.3pt;margin-top:26px;border-top:1px solid #e2e8f0;padding-top:9px;}
+</style>
+</head>
+<body>
+
+<h1>Minecraft 无规则服务器 · 多智能体作战体系设计（v2）</h1>
+<div class="meta">
+设计日期：2026-08-08 ｜ 项目：<code>minecraft-agents</code> ｜ 目标场景：无规则（anarchy）服务器 ｜
+本文取代 v1《架构评审》中"仅隔离测试服的安全执行底座"定位，将系统重定位为<b>多智能体作战集群</b>，但保留 v1 已验收的全部技术骨架。
+</div>
+
+<div class="box summary">
+<b>一页结论</b>：目标从"安全测试底座"转为"无规则服作战集群"后，现有架构骨架<b>仍然成立</b>——Mineflayer Runtime、确定性 L0 反射层、技能白名单、AI 旁路、协议先行都可直接复用。真正新增的是三样东西：<b>六类作战角色</b>（侦察/突袭/防御/战斗/建造与生产/后勤）、<b>三层 AI 调度</b>（战略/战术/反射），以及一整套<b>正式服现实约束</b>（正版账号认证、封号风险、存活即金钱、网络延迟）。<br>
+最关键的一条设计红线：<b>敌我识别是确定性白名单规则（白名单外一律视为敌人），AI 只决定"去哪、要不要发起战斗"，代码决定"打谁、怎么打"</b>。战斗机制（弹出图腾、水晶摆放/引爆时序、换甲）与敌我识别都必须在 tick 级由代码完成，AI 反应速度（100ms~数秒）根本不可能参与实时战斗，且 AI 判敌我会犹豫、会被话术欺骗。这条原则恰好是项目 v1 已有的"模型不碰 tick"边界，在作战场景下从"良好实践"升级为"生死线"。
+</div>
+
+<h2>一、定位转变：什么保留，什么新增</h2>
+<table>
+<tr><th>维度</th><th>v1（隔离测试底座）</th><th>v2（无规则服作战集群）</th><th>结论</th></tr>
+<tr><td>连接目标</td><td>仅回环/内网隔离服，offline 认证</td><td>公网正式服，online-mode 正版账号，多小号</td><td><span class="bad">根本性改变</span></td></tr>
+<tr><td>L0 安全层</td><td>防溺水/岩浆/坠落，边角能力</td><td>存活=保住全部装备，是核心资产，"死前断线"是刚需</td><td><span class="good">升级为核心</span></td></tr>
+<tr><td>技能框架</td><td>1 个 movement.goto</td><td>数十个作战/生产技能，分角色</td><td><span class="good">大幅扩展，框架复用</span></td></tr>
+<tr><td>AI Router</td><td>P2 远期旁路</td><td>提前到核心，负责角色分工与战略</td><td><span class="good">提前但边界不变</span></td></tr>
+<tr><td>多 Bot 协调</td><td>P1.4 远期</td><td>集群作战的前提，提前</td><td><span class="good">提前</span></td></tr>
+<tr><td>基地失陷撤离</td><td>P2.5 远期边角</td><td>被突袭是常态，撤离协议是必备</td><td><span class="good">升级为核心</span></td></tr>
+<tr><td>协议先行 / fail-closed / 确定性优先</td><td>已验收</td><td>不变，且更重要</td><td><span class="good">直接复用</span></td></tr>
+</table>
+<div class="box warn"><b>开发纪律不变</b>：即便终点是正式服，开发和验收仍<b>先在隔离测试服、再在私有测试 anarchy 服、最后才上目标服</b>。这是 v1 路线图既有的"先隔离、后仿真、最后正式"原则，作战场景下更不能跳过——一个未验证的战斗 bot 上正式服，等于送装备加送封号。</div>
+
+<h2>二、核心设计原则：三层职责划分</h2>
+<div class="box key">
+<b>敌我识别是确定性白名单，AI 只决定去哪和要不要打，代码决定打谁和怎么打。</b>把一切按"允许的反应延迟"分到三层，延迟越低越必须是纯代码。
+</div>
+<table>
+<tr><th>层</th><th>反应延迟</th><th>由谁做</th><th>负责什么</th></tr>
+<tr><td><span class="tag t-ai">战略层</span></td><td>分钟级</td><td>大模型（云或大内存本地）</td><td>总目标、角色分配、突袭/防御/扩张决策、去哪个区域、是否发起战斗（<b>不做敌我判断、不做威胁评估</b>）</td></tr>
+<tr><td><span class="tag t-ai">战术层</span></td><td>秒级</td><td>小模型（本地低延迟）</td><td>角色内的临场选择：先打哪个箱子、从哪个方向突入、要不要撤</td></tr>
+<tr><td><span class="tag t-det">反射层</span></td><td>tick 级 (&lt;50ms)</td><td>纯确定性代码，<b>零 AI</b></td><td><b>敌我识别（白名单外一律视为敌人）</b>、弹图腾、水晶摆放/引爆、换甲、自动进食、低血撤退、危险断线、寻路避障</td></tr>
+</table>
+<p><b>敌我识别规则（硬编码，不经 AI）</b>：维护白名单（本方 Bot、盟友、用户显式标记的中立玩家），<b>白名单之外的一切玩家一律视为敌人、可交战</b>；是否此刻真打由确定性存活逻辑决定（打得过就打、打不过先撤），不由 AI 判敌我。白名单只能由用户显式配置，AI 无权增删。这样既躲开 AI 判敌我的犹豫与被话术欺骗，也让"非友即敌"契合无规则服的现实。</p>
+<p>这层划分直接映射到现有代码：反射层就是已验收的 <code>packages/safety</code>（L0）+ <code>packages/skills</code> 执行器；战术/战略层是 P2 的 AI Router，输出只能是"经 Schema 校验的白名单技能调用 JSON"，永远不下发原始动作。<b>任何让 AI 直接控制战斗动作或敌我识别的设计都要在评审中否决</b>——不是出于安全洁癖，而是它必然打不过纯代码的对手。</p>
+
+<div class="pb"></div>
+<h2>三、六类作战角色</h2>
+<p>每个角色标注：<span class="ai">绿色=AI 决策部分</span>，<span class="det">橙色=确定性代码部分</span>，以及所需技能。角色是"能力集合"，一个 Bot 可按战略层分配临时担任某角色。</p>
+
+<div class="role">
+<h3>1. 侦察 / 探索 Scout</h3>
+<p><b>职责</b>：沿主干道（地狱顶层公路、坐标轴高速）远程旅行，记录基地/物资仓/玩家坐标，覆盖地图空白区，跟踪玩家找到其基地，鞘翅+烟花飞行，地狱门 8 倍距离穿梭。</p>
+<p><b>基岩顶巡逻 · 地狱门扫描（按服务器能力启停）</b>：入服后先<b>探测能否上到下界基岩顶</b>（Y=127 之上；部分服未修补此通道）。能上则优先在基岩顶巡逻——平坦、无怪物、鞘翅移动效率全游戏最高；且服务器同步的区块数据包含脚下整个区块柱的方块，bot 在顶上即可<b>直接扫描已加载区块中的已激活地狱门</b>，无需下到下界内部。已激活的门=有人使用过，下界坐标 ×8 即主世界基地嫌疑点。扫描 bot 只负责把门的坐标与状态<b>标记写入共享世界记忆</b>，由战略层按优先级指派其他侦察 bot 前往核实。探测失败（服务器已修补）则自动去除此项，退回地狱顶层公路巡逻，不做无谓尝试。探测结果记入 ServerProfile，换服重新探测。</p>
+<p><span class="ai">AI 决策</span>：探索方向与覆盖策略、某结构是否值得上报、是否跟踪某玩家、已标记地狱门的核实优先级。<br>
+<span class="det">确定性</span>：基岩顶可达性探测、区块地狱门扫描与坐标换算（×8）、公路循迹、避障、鞘翅飞行力学、自动进食、危险断线、坐标记录与标记写入。</p>
+<p><b>技能</b>：<code>travel.highway</code> · <code>fly.elytra</code> · <code>scan.chunks</code> · <code>scan.portal</code> · <code>probe.roof</code> · <code>track.player</code> · <code>log.coordinate</code></p>
+<p><b>产出</b>：写入共享世界记忆（基地/仓库坐标、玩家活动规律）——正是 P2.1 pgvector 长期记忆的输入源。侦察是整个集群的"眼睛"，突袭和防御都依赖它的数据。</p>
+</div>
+
+<div class="role">
+<h3>2. 突袭 / 破坏 Raider</h3>
+<p><b>职责</b>：攻破基地——黑曜石开采（附魔镐/水晶/TNT）、末影水晶爆破、凋灵拆墙、岩浆/水破坏、翻箱取物、拆除方块。</p>
+<p><b>穿墙 · 择时 · 脱离战术</b>：黑曜石抗爆极高，硬炸费料——首选<b>末影水晶贴墙连爆</b>（水晶对方块破坏效率远高于 TNT），附魔镐补挖，凋灵拆大面积墙。<b>接近路线</b>：不走正门，从远处斜向下挖或经下界对应点（×8）贴近，减少被防御 bot 的边界扫描发现。<b>择时</b>：优先在目标基地<b>无人在线/防御 bot 撤离</b>时突入（侦察角色提供玩家活动规律）。<b>翻箱优先级</b>：潜影盒 &gt; 末影箱线索 &gt; 附魔台/信标等高价值方块 &gt; 普通资源，背包满则打包潜影盒。<b>脱离</b>：预置<b>珍珠停滞</b>或挖竖井下潜逃生，达撤退阈值（生命、来敌数）立即断线保号——突袭 bot 死亡=损失一整套突入装备，撤离优先于贪财。</p>
+<p><span class="ai">AI 决策</span>：突入方式（挖进去 vs 炸开）、何时放弃撤退。<br>
+<span class="det">确定性</span>：敌我识别、目标优先级（先抢哪个箱子）、水晶摆放机制、TNT 引爆时序、挖掘模式、背包管理、撤退触发。</p>
+<p><b>技能</b>：<code>mine.obsidian</code> · <code>place.crystal</code> · <code>ignite.tnt</code> · <code>spawn.wither</code> · <code>loot.chest</code> · <code>breach.wall</code></p>
+<p><b>依赖</b>：侦察提供坐标、建造与生产角色提供 TNT/水晶/黑曜石、战斗角色护航。突袭是集群资源消耗最大的角色，必须有稳定的战争经济支撑。</p>
+</div>
+
+<div class="role">
+<h3>3. 防御 Defender</h3>
+<p><b>职责</b>：守卫己方基地，探测入侵者（范围内玩家实体），响应威胁，维护围墙/边界，向集群报警，记录威胁。</p>
+<p><b>反侦察 · 分层预警 · 迟滞战术</b>：敌人也会用我们侦察角色那套（基岩顶地狱门扫描、公路跟踪）——所以防御从"藏"开始：己方基地<b>不用主世界地狱门</b>或用完即拆/远置，避免暴露×8 坐标；核心仓与门厅分离。<b>分层预警</b>：外环（区块加载边缘检测新实体）→ 中环（边界巡逻发现玩家）→ 内环（触碰围墙/破坏方块）逐级升级报警。<b>迟滞而非死守</b>：防御 bot 单挑突袭队通常打不过，价值在<b>拖延+报警+疏散</b>——封门（黑曜石/岩浆幕）、水阻爬墙、拖到战斗 bot 从前线回援或核心物资撤离完成。<b>反跟踪</b>：发现被玩家尾随时不直接回基地，绕路/断线甩开，绝不把敌人带回家。达失陷阈值即触发 <code>COMPROMISED</code>，撤离优先于反击。</p>
+<p><span class="ai">AI 决策</span>：迎战 vs 躲藏 vs 撤离、是否触发"基地失陷协议"。<br>
+<span class="det">确定性</span>：敌我识别（白名单外即入侵者）、入侵探测、报警派发、边界巡逻路径、撤退。</p>
+<p><b>技能</b>：<code>patrol.perimeter</code> · <code>detect.intruder</code> · <code>alert.swarm</code> · <code>seal.entrance</code></p>
+<p><b>关键联动</b>：触发 <code>COMPROMISED</code> 状态后转入撤离协议（见第六节）——核心物资撤离、在≥10000 格外重建。这是 v1 路线图 P2.5 的设计，在作战场景中是必备而非边角。</p>
+</div>
+
+<div class="role">
+<h3>4. 战斗 / PvP Combatant</h3>
+<p><b>职责</b>：水晶 PvP、图腾管理、换甲、武器选择、锁定目标、拉近/脱离。护航突袭队，抵御攻击者。</p>
+<p><span class="ai">AI 决策</span>：<b>仅</b>是否交战/脱离、撤退阈值——战略级。<br>
+<span class="det">确定性（必须）</span>：敌我识别与目标选择（白名单外即目标）、图腾自动弹出（亚 tick 反应）、水晶摆放/引爆时序、护甲耐久换装、快捷栏管理、瞄准。</p>
+<div class="box warn"><b>本项目最重要的技术判断</b>：战斗机制必须 100% 确定性代码，且要跑在延迟最低的路径上。AI 的最快反应也在 100ms 以上，而水晶 PvP 的图腾弹出、连锁爆破需要 &lt;50ms 反应——让 AI 参与战斗动作等于必输。这也是下文 Rust/网络延迟讨论的核心动因。</div>
+<div class="box key"><b>打法来源：参考开源、自研反射层</b>。水晶 PvP、AutoTotem、AutoArmor、Surround 等算法以成熟开源实现（Meteor Client、Baritone、mineflayer-pvp）为<b>打法参考</b>，在本项目自研，三条硬线：① <b>只学机制与参数、重写为本项目 TS，禁止逐行翻译/复制 GPL 源码</b>（算法思路不受版权保护，逐行翻译属衍生作品受 GPL 约束）；② Meteor 等为 GPL-3.0，<b>仅在不分发时无约束，分发前必做许可评审</b>，默认按本地自用处理；③ <b>继续用 Mineflayer 无头 bot，不引入 MC 客户端模组栈</b>（Meteor 是 Java 客户端 Fabric 模组，架构不兼容且资源开销涨一到两个数量级）。Mineflayer 无头能否达到 &lt;50ms 时序是<b>未验证假设</b>，由 M3 单独实测硬化；扛不住才评估双栈或 Rust。</div>
+<p><b>技能</b>：<code>combat.crystal</code> · <code>combat.melee</code> · <code>manage.totem</code> · <code>manage.armor</code></p>
+</div>
+
+<div class="role">
+<h3>5. 建造与生产 Infrastructure（战争经济引擎）</h3>
+<p><b>为什么合并</b>：自动化农场是<b>建造的产物</b>——建好即自运转，不是需要持续操作的独立角色。而且<b>食物根本不是瓶颈</b>：金萝卜/金苹果自动农场一旦建成，产量绝对够全员吃，属 fire-and-forget。真正的战争经济瓶颈是<b>消耗性作战物资</b>：装备（甲/工具）、附魔、黑曜石、末影水晶、附魔瓶（经验瓶）——这些才是持续打仗不断烧掉、需要盯着产量的东西。所以本角色 = 建造隐蔽基地 + 搭建并运转这些战备物资的自动化生产线。</p>
+<p><b>职责</b>：从 0 选址建基地/围墙/隐蔽基地（地下/伪装）、黑曜石地堡；<b>按科技树自举</b>——搭建并运转自动化设施——刷石机/刷铁机/刷沙机、刷怪塔/火药（供 TNT）、烈焰人场、恶魂场、末影人场、黑曜石生成器、经验农场（供附魔瓶）、食物农场（金萝卜/金苹果，建好即忽略），直到<b>量产末影水晶</b>为一座完整基地；附魔与装备成套产出；含仓储/分拣系统。</p>
+<p><b>从 0 到量产水晶的自举顺序（科技树）</b>：水晶不能凭空造（末影水晶=7 玻璃+1 末影之眼+1 恶魂之泪），每样都有前置产线，一座"完整基地"= 走完这条依赖链，建造角色按<b>固定顺序逐层解锁</b>：①<b>生存底座（裸装冷启动）</b>——空手落在出生点,而无规则服出生点是<b>永久战区</b>(岩浆黑曜石陷阱、守尸党、griefer、夜怪),一落地就开建=送死。先跑一套确定性冷启动生存协议:<b>第一动作是脱离出生辐射区</b>(有下界高速优先远行到低流量区再落脚)→撸木撸石按固定链合成木/石镐剑(先有近战武器)→天黑遇敌<b>掘洞封块自保、禁止直下</b>→打动物摘浆果不饿死→遇白名单外玩家裸装期默认脱离藏匿(打不过不硬刚)→血量/食物/光照低于阈值即撤退掩蔽。<b>脱离战区+有石器武器+不饿死+找到低流量安全落脚点</b>才算底座就绪,再建临时庇护所+第一个基础食物农场(胡萝卜/土豆)→②材料层（<b>刷石机</b>+<b>刷铁机</b>+树场，出铁/漏斗/砧）→③玻璃层（<b>刷沙机</b> duper 或采沙→烧玻璃，水晶外壳大头）→④下界层（烈焰人场出烈焰粉、<b>恶魂场</b>出恶魂之泪—最卡产量）→⑤末影层（末影人场出珍珠，珍珠+烈焰粉=末影之眼）→⑥黑曜石层（生成器→底座/锚/抗爆壳）→⑦附魔层（经验场+书架+青金石→附魔台，灌<b>附魔瓶</b>，出成套装备）→⑧<b>量产水晶</b>（玻璃+末影之眼+恶魂之泪→流水线）。<span class="warn" style="font-weight:bold">难度分期</span>：③~⑤的 duper/恶魂/末影人场是复杂红石结构，无头 bot 按 schematic 逐块铺设慢且脆，属 M4 之后的后期能力；MVP 先做简单农场（胡萝卜/刷石/铁傀儡塔）+半自动搬运，<b>"全自动量产水晶"是终局不是近期可交付</b>。</p>
+<p><b>存储系统（不止堆箱子）</b>：集群吞吐大、损耗快，仓储须<b>自动分拣+自动打包+水位可读</b>，否则生产与后勤互堵。<b>漏斗分拣</b>：产出经漏斗滤器按类入区（甲/水晶/火药/建材各自成区），生产线直连对应仓；<b>潜影盒装载</b>：整组物资自动灌盒，后勤领走即走减少满箱往返（往返=暴露）；<b>溢出与水位</b>：每种物资仓接计数器→低/目标/上限三档，低水位报警顶格生产、到上限溢出转存，水位写入共享世界记忆供战略层调度；<b>分散不集中</b>：核心隐蔽仓+前线周转仓+应急暗仓（3-2-1），高价值（附魔装/水晶）进最深仓，任一仓被端不清零。</p>
+<p><b>隐蔽 · 抗爆 · 反坐标暴露战术</b>：无规则服的第一防御是<b>没人找得到</b>。选址硬规则（确定性可校验）：<b>远离坐标轴与主干道 N 格以上、远离主世界地狱门连线、避开整数/对称坐标</b>（人类爱建在整千坐标，避开反而隐蔽）；核心基地不设主世界门，往返靠临时门用完即拆。<b>结构</b>：外壳埋于地下/山体、入口伪装（假墙、无关方块群），核心库用<b>黑曜石壳+隔空</b>抗水晶连爆；关键箱藏在多层无关空间里，不集中堆放（一次被翻不至全损）。<b>分散</b>：生产、仓储、休整分点建，坐标各自独立，任一点暴露不牵连其他；高特征建筑（刷怪塔）远离核心基地。所有选址产出坐标写入共享世界记忆并标"己方隐蔽点"，防止己方侦察 bot 误标为嫌疑基地。</p>
+<p><b>产能优先级 · 库存水位战术</b>：战备物资<b>按战争节奏调产</b>——要发起突袭 → 火药/水晶原料/末影珍珠/TNT 拉满；进入防御期 → 图腾材料/黑曜石/附魔瓶优先。<b>库存水位线</b>：每种战略物资设低/目标/上限三档，低于低水位报警并顶格生产，到上限转产其他，避免单一囤积。<b>抗突袭</b>：生产点与核心仓<b>分离且不放全部产出</b>——成品定期由后勤转运隐蔽仓，现场只留在制品，即使某生产点被端，战争储备不清零。食物线不设水位，够用即忽略。</p>
+<p><span class="ai">AI 决策</span>：基地选址（隐蔽、远离公路）、布局、建什么、战备物资优先级与各物资水位阈值。<br>
+<span class="det">确定性</span>：选址硬规则校验（离轴/离门/避对称）、方块摆放/蓝图执行/脚手架、<b>自举顺序逐层推进</b>、农场运转循环、收割补种、<b>分拣路由/自动装箱</b>、库存水位计数与报警。</p>
+<p><b>技能</b>：<code>build.blueprint</code> · <code>place.blocks</code> · <code>build.wall</code> · <code>build.hidden-base</code> · <code>farm.crop</code> · <code>farm.mob</code> · <code>generate.obsidian</code> · <code>smelt</code> · <code>craft.item</code> · <code>enchant.gear</code> · <code>store.sort</code> · <code>pack.shulker</code></p>
+<p>没有稳定的战备物资生产，突袭和战斗就是无源之水。这个角色决定集群能持续作战多久。</p>
+</div>
+
+<div class="role">
+<h3>6. 后勤 / 仓储 Logistics</h3>
+<p><b>职责</b>：物资仓管理、潜影盒打包、物品分类、在农场/基地/前线间补给运输、给 bot 补货。</p>
+<p><b>补货套件 · 隐蔽转运 · 分散储备战术</b>：作战集群"死一个 bot 掉一套装"是常态,后勤把损失变成可快速补充。<b>预置补货套件</b>:按角色打包标准潜影盒(突袭套=镐/水晶/TNT/珍珠/图腾;战斗套=甲/水晶/图腾/金苹果;侦察套=鞘翅/烟花/食物),bot 死后重生领套即可再上线,无需临时凑装。<b>隐蔽转运</b>:运输是暴露风险最高的环节(满箱 bot 是活靶),路线避开公路热点、分批小额运、必要时经下界短途;贵重整合进潜影盒减少往返次数。<b>分散储备</b>:不设单一大仓——按 3-2-1 思路多点存放(核心隐蔽仓、前线周转仓、应急暗仓),任一仓被端不至全损;每仓库存与坐标写入共享世界记忆(仅集群可读)。<b>前线解耦</b>:前线 bot 只管打,补给由后勤推送到就近周转仓,前线不必回后方,降低暴露主基地的风险。</p>
+<p><span class="ai">AI 决策</span>：按战损与战事决定补货优先级、转运时机与路线取舍。<br>
+<span class="det">确定性为主</span>：<code>store.stash</code> · <code>pack.shulker</code> · <code>resupply</code> · <code>sort.items</code></p>
+<p>作战集群里"死一个 bot 掉一套装备"是常态，后勤负责让损失可快速补充，把前线和仓储解耦。</p>
+</div>
+
+<div class="pb"></div>
+<h2>四、AI 调度体系</h2>
+<pre>
+                    ┌────────────────────────────────────────┐
+                    │  战略 AI（分钟级，大模型 @ AI Hub）        │
+                    │  目标 / 角色分配 / 突袭·防御·扩张 / 去哪·是否开打 │
+                    └───────────────┬──────────────────────────┘
+                                    │ 下发：角色 + 目标（结构化 JSON）
+          ┌─────────────┬──────────┼──────────┬─────────────┐
+     ┌────▼───┐   ┌────▼───┐  ┌────▼───┐  ┌────────▼────────┐
+     │战术AI  │   │战术AI  │  │战术AI  │  │战术AI           │  (秒级，小模型/本地)
+     │侦察    │   │突袭    │  │防御    │  │建造与生产        │
+     └────┬───┘   └────┬───┘  └────┬───┘  └────────┬────────┘
+          │ 选择白名单技能调用（经 Schema + Policy + 参数边界校验）
+     ┌────▼──────────────────────────────────────────────────▼───┐
+     │  反射层 / 技能执行器 / L0 安全（纯确定性，零 AI，tick 级）      │
+     │  敌我识别(白名单外即敌) · 战斗机制 · 存活反应 · 寻路 · 断线      │
+     └──────────────────────────┬─────────────────────────────────┘
+                                │ Mineflayer
+                    ┌───────────▼───────────┐
+                    │   目标无规则服务器      │
+                    └───────────────────────┘
+   共享世界记忆（PostgreSQL + pgvector）：基地/仓库/玩家坐标、突袭战果、失败经验
+      ↑ 侦察写入          ↓ 战略/战术读取
+</pre>
+<h3>调度要点</h3>
+<ul>
+<li><b>角色分配是动态的</b>：战略 AI 根据战况把 Bot 在角色间调度——被突袭时把突袭队召回转防御，资源短缺时增派建造与生产角色。</li>
+<li><b>AI 宕机不致命</b>：AI Router 是旁路。战略 AI 掉线，Bot 退回"维持当前角色 + 反射层存活"，不会失控——这是 fail-closed 在作战场景的体现。</li>
+<li><b>模型输出永不直接执行</b>：战略/战术层输出的都是"技能 ID + 参数"，经协议校验和 Policy 白名单后才由执行器调用。模型说不出反射层没实现的动作。</li>
+<li><b>共享世界记忆是集群智能的关键</b>：单个 Bot 的视野有限，价值在于把侦察、突袭、失败经验汇聚成集群共享的知识库（对应 P2.1）。</li>
+</ul>
+
+<h2>五、Rust vs TypeScript 重新评估</h2>
+<p>作战场景让 v1 中"暂不需要 Rust"的结论出现了两个<b>更可能触发</b>的位置，但触发前提仍是"先测量、且 Mineflayer 锁定 Node"这个硬约束。</p>
+<table>
+<tr><th>模块</th><th>v1 判断</th><th>v2 判断（作战场景）</th><th>触发条件</th></tr>
+<tr><td>寻路 / 世界几何</td><td>远期可选</td><td><span class="bad">明显增强</span>：探索是 baritone 级远距离寻路，纯 CPU 密集</td><td>多 Bot 探索时寻路阻塞事件循环（延迟 &gt;50ms 可测）→ 独立 Rust 寻路服务，JSON/gRPC 接口</td></tr>
+<tr><td>战斗反射时序</td><td>未提及</td><td><span class="bad">新增关注</span>：Node 事件循环抖动可能让你输掉战斗/丢装备</td><td>先测量战斗路径的事件循环抖动；<b>但 Rust 战斗必须离开 Mineflayer（换 azalea），当前不成熟</b>，所以短期仍用进程内紧凑确定性 Node，仅在证明不足且 azalea 成熟后再议</td></tr>
+<tr><td>其余全部</td><td>TS</td><td>TS</td><td>协议、Coordinator、任务、Dashboard、建造与生产逻辑都是 I/O 或轻计算，无 Rust 收益</td></tr>
+</table>
+<div class="box key"><b>不变的铁律</b>：不在有性能测量数据前写任何 Rust。作战目标只是让"寻路服务"这一个位置从"远期可选"变成"较可能需要"，不改变"先测量、Rust 只放叶子位置、绝不进控制平面"的原则。</div>
+
+<div class="pb"></div>
+<h2>六、正式服现实约束（新增核心章节）</h2>
+<p>这是从测试底座转向正式服作战时<b>绕不开、且 v1 完全没有</b>的部分。诚实对待，不假装已解决。</p>
+
+<h3>6.1 账号与认证</h3>
+<ul>
+<li>正式服是 online-mode，需<b>正版微软账号</b>（OAuth token），取代 v1 的 offline-only。集群=多个小号（正版约 $30/个）。</li>
+<li><b>凭据纪律不变</b>：token 加密存储，绝不进仓库、日志、聊天；这是 v1 密钥纪律的延续。每个账号一套独立凭据。</li>
+<li>Runtime 需新增 online-mode 认证适配，且这条路径必须与"隔离测试 offline"路径并存、由 ServerProfile 显式区分，防止误把测试逻辑带上正式服。</li>
+</ul>
+
+<h3>6.2 封号风险（务必如实告知使用者）</h3>
+<ul>
+<li>多数服务器反作弊会封 bot，账号即金钱损失，集群化放大风险。2b2t 类明确允许 bot 的服是例外，但仍会因生存区 fly/reach 等作弊封号。</li>
+<li>缓解手段：<b>类人化移动与节奏</b>（避免瞬移/完美瞄准/不可能操作）、每账号限速、行为随机抖动、接受残余风险。</li>
+<li><span class="bad">红线</span>：不把"反封号"当成已解决问题写进文档；缓解=降低明显 bot 特征 + 遵守目标服规则，不等于免疫。是否接受封号风险是使用者的决定，系统只做到"减少明显破绽 + 死号可快速替换"。</li>
+</ul>
+
+<h3>6.3 存活即金钱 & 基地失陷协议</h3>
+<ul>
+<li>正式服死亡=掉光装备（巨大成本），L0"死前断线/存活优先"从边角升级为最高优先级反射。</li>
+<li>贵重装备平时存仓、作战按需领取；bot 感知危急时优先断线保号而非硬拼。</li>
+<li>基地被突袭是常态 → <code>COMPROMISED</code> 状态、证据记录、核心物资撤离、在≥10000 格外新址重建（P2.5 设计直接启用）。</li>
+</ul>
+
+<h3>6.4 网络延迟（作战特有，易被忽视）</h3>
+<div class="box warn">战斗 bot 对<b>到服务器的网络延迟</b>极其敏感——高 ping 会直接输掉水晶 PvP。因此<b>战斗/突袭 bot 不应跑在高延迟的家用网络上</b>，而要放在靠近目标服务器的 VPS/云主机。建造与生产、后勤这类非实时角色对延迟不敏感，可跑在家里的基础设施节点。这决定了集群是分布式部署，不是一台机器全包。</div>
+
+<h2>七、硬件角色映射</h2>
+<table>
+<tr><th>机器</th><th>角色</th><th>说明</th></tr>
+<tr><td>迷你主机 / NUC（家用）</td><td>基础设施节点</td><td>测试服 + PostgreSQL/Redis + Coordinator/服务进程 + 建造与生产/后勤 bot（延迟不敏感）</td></tr>
+<tr><td>大内存 NUC（356H+96G）/ DGX Spark</td><td>AI Hub</td><td>战略+战术模型推理；低频调用，正好匹配核显/统一内存的吞吐特性；DGX Spark 是 70B+ 私有化推理的正解</td></tr>
+<tr><td>靠近目标服的 VPS/云主机</td><td>前线节点</td><td>战斗/突袭/侦察 bot，吃低 ping；一账号一进程，轻量但要低延迟</td></tr>
+</table>
+<p>这正好落实 v1 硬件讨论的结论：NUC 管"今天需要的基础设施"，DGX Spark 管"v3 验证成功后的私有 AI"，而作战场景新增了"前线 VPS"这一维度。</p>
+
+<div class="pb"></div>
+<h2>八、MVP 重定义（面向作战，仍要小而可证）</h2>
+<div class="box summary"><b>MVP：单个 Bot 在测试服存活、旅行、独立完成一个非战斗角色任务（先做侦察或建造与生产），装备可暂存、危险可断线、全程可观测。</b>战斗作为独立的、单独硬化的里程碑，绝不与 MVP 混在一起。</div>
+<h3>分阶段路线</h3>
+<table>
+<tr><th>阶段</th><th>内容</th><th>验收</th></tr>
+<tr><td><b>M0 闭环底座</b></td><td>完成 v1 遗留的 P1.3.2 持久任务闭环 + Coordinator 任务调度接入 + 审计落库（这些无论作战与否都要）</td><td>杀进程任务不丢；Dashboard 建任务能驱动 Bot 动作</td></tr>
+<tr><td><b>M1 存活与旅行</b></td><td>online-mode 认证适配（与测试 offline 并存）；L0 存活升级（死前断线、装备暂存）；<code>travel.highway</code> + 鞘翅飞行</td><td>Bot 在私有测试 anarchy 服长时间存活、能远程旅行、危险自动断线保号</td></tr>
+<tr><td><b>M2 首个生产角色</b></td><td>侦察角色全链路（探索+坐标记录+写入共享世界记忆）<b>或</b>建造与生产角色（一个自动生产线稳定产出战备物资）——二选一先做</td><td>该角色在测试服连续运行数小时无人干预，产出真实可查</td></tr>
+<tr><td><b>M3 战斗反射（独立硬化）</b></td><td>确定性水晶 PvP / 图腾 / 换甲，在隔离 PvP 测试环境反复验证反应时序</td><td>在受控 PvP 测试中稳定弹图腾、连锁爆破；事件循环抖动实测达标</td></tr>
+<tr><td><b>M4 多角色协调</b></td><td>Coordinator 进程编排（拉起/回收多 Bot）+ 角色分配 + 共享世界记忆 + 分布式部署（家用+VPS）</td><td>侦察→突袭→撤退的多 Bot 协同在测试服跑通</td></tr>
+<tr><td><b>M5 收敛重构</b></td><td>v1 评审的 secure-link 抽取 + 千行文件拆分（趁规模可控）</td><td>重构前后测试行为一致</td></tr>
+<tr><td><b>M6 智能层 & 上正式服</b></td><td>AI Router 接战略/战术（先云 API 验证价值，再决定本地化）；灰度上目标服</td><td>先小规模灰度、接受并评估封号风险后再扩张</td></tr>
+</table>
+<div class="box warn"><b>顺序要点</b>：① 底座（M0）和存活（M1）是一切的前提，不能跳；② 战斗（M3）单独硬化、绝不与生产角色混做；③ 上正式服（M6）永远在最后，且先灰度；④ AI 智能层同样先用云 API 验证"分工调度到底提升多少"，再决定是否上本地大模型——不因手里有 DGX 就提前。</div>
+
+<h2>九、给 Codex 的要点</h2>
+<ol>
+<li>目标是无规则服多智能体作战集群，但<b>开发/验收严格遵循"隔离测试服 → 私有测试 anarchy → 灰度正式服"</b>三段式，不跳级。</li>
+<li>牢记三层职责：<b>敌我识别是确定性白名单（白名单外一律视为敌人），AI 只决定去哪/是否开打，代码决定打谁/怎么打</b>。任何让模型直接控制战斗、tick 动作或敌我识别的设计一律否决。</li>
+<li>战斗（M3）必须作为独立里程碑单独硬化，先在隔离 PvP 环境验证反应时序，达标前不上任何真实对抗。</li>
+<li>战斗打法参考开源实现（Meteor/Baritone/mineflayer-pvp）但<b>只学机制参数、重写为本项目 TS，禁止逐行翻译/复制 GPL 源码</b>；GPL 仅不分发时无约束，分发前必做许可评审；不引入 MC 客户端模组栈，继续用 Mineflayer 无头 bot。</li>
+<li>online-mode 认证与隔离测试 offline 认证<b>并存并由 ServerProfile 显式区分</b>，严禁把测试捷径带上正式服；账号凭据加密、不落仓库/日志。</li>
+<li>封号风险如实记录，不假装已解决；"类人化"是降低破绽不是免疫。</li>
+<li>其余 v1 铁律不变：协议先行、fail-closed、不重写已验收模块、不无测量写 Rust、<code>pnpm check</code> 全绿才算完成、不冒充验收。</li>
+</ol>
+
+<div class="footer">
+本文基于 2026-08-08 代码库状态与用户明确的"无规则服作战集群"目标编写，取代 v1《架构评审》的项目定位部分；v1 中关于协议、fail-closed、验收文化、Rust 触发原则的技术结论继续有效。所述作战角色为 Minecraft 游戏内玩法（anarchy 服允许的探索、突袭、PvP、建造、自动化），系统仅在游戏范围内运行。
+</div>
+
+</body>
+</html>

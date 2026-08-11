@@ -6,20 +6,26 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run --passWithNoTests"
+    "typecheck": "next typegen && tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@minecraft-studio/environment": "workspace:*",
+    "@minecraft-studio/observability": "workspace:*",
     "@minecraft-studio/protocol": "workspace:*",
-    "next": "16.2.10",
+    "next": "16.2.11",
     "react": "19.2.7",
-    "react-dom": "19.2.7"
+    "react-dom": "19.2.7",
+    "zustand": "5.0.14",
+    "ws": "8.21.1"
   },
   "devDependencies": {
+    "@playwright/test": "1.61.1",
     "@types/node": "26.1.1",
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "@types/ws": "8.18.1"
   }
 }

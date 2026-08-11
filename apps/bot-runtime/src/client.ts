@@ -1,5 +1,11 @@
 import type { BotConnectionState, BotPosition } from "./runtime-types.js";
 import type { ServerProfile } from "./server-profile.js";
+import type { MinecraftVersionCompatibility } from "@minecraft-studio/protocol";
+import type {
+  L0SafetyAction,
+  L0SafetyActionResult,
+} from "@minecraft-studio/safety";
+import type { SkillCapabilityRequest } from "@minecraft-studio/skills";
 
 export type BotClientSnapshot = {
   health: { current: number; maximum: number | null };
@@ -7,6 +13,16 @@ export type BotClientSnapshot = {
   armorPoints: number | null;
   position: BotPosition;
   latencyMs: number | null;
+  safety: {
+    oxygenLevel: number | null;
+    inWater: boolean;
+    inLava: boolean;
+    onGround: boolean;
+    velocityY: number | null;
+    inventory: { usedSlots: number; totalSlots: number };
+    hasSafeFood: boolean;
+    movementRequested: boolean;
+  };
 };
 
 export type BotDisconnectInfo = {
@@ -27,11 +43,15 @@ export type BotClientHandlers = {
   onStateChanged: () => void;
   onDisconnected: (info: BotDisconnectInfo) => void;
   onError: (error: Error) => void;
+  onVersionUnsupported: () => void;
 };
 
 export interface BotClient {
   setHandlers(handlers: BotClientHandlers): void;
   snapshot(): BotClientSnapshot;
+  executeSafetyAction(action: L0SafetyAction): Promise<L0SafetyActionResult>;
+  invokeSkillCapability?(request: SkillCapabilityRequest): Promise<unknown>;
+  versionCompatibility(): MinecraftVersionCompatibility;
   close(gracePeriodMs: number): Promise<void>;
 }
 
