@@ -1,0 +1,151 @@
+name: Minecraft 技能隔离验收
+
+on:
+  workflow_dispatch:
+    inputs:
+      eula_accepted:
+        description: 我确认已阅读并接受 Minecraft EULA，本次只启动 GitHub Runner 内的临时回环测试服
+        required: true
+        default: false
+        type: boolean
+  pull_request:
+    types:
+      - labeled
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minecraft-skill-acceptance-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  isolated-minecraft-skills:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+      github.event.action == 'labeled' &&
+      github.event.label.name == 'minecraft-acceptance' &&
+      github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - name: 校验触发来源与人工 EULA 确认
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_EULA_ACCEPTED: ${{ inputs.eula_accepted || false }}
+          REPOSITORY_EULA_ACCEPTED: ${{ vars.MINECRAFT_EULA_ACCEPTED }}
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+        run: |
+          if ($env:EVENT_NAME -eq "pull_request" -and $env:PR_HEAD_REPOSITORY -ne $env:GITHUB_REPOSITORY) {
+            throw "为避免运行来自 Fork 的未受信代码，标签验收只允许同仓库 PR。"
+          }
+          $accepted = if ($env:EVENT_NAME -eq "workflow_dispatch") {
+            $env:MANUAL_EULA_ACCEPTED
+          } else {
+            $env:REPOSITORY_EULA_ACCEPTED
+          }
+          if ($accepted -ne "true") {
+            throw "未检测到人工 EULA 确认。手动运行请勾选确认；标签运行请由仓库管理员将变量 MINECRAFT_EULA_ACCEPTED 设为 true。"
+          }
+
+      - name: 检出待验收代码
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: 配置 Node.js 24.18.0 LTS
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 24.18.0
+          package-manager-cache: false
+
+      - name: 启用固定版本 pnpm
+        shell: pwsh
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.9.0+sha512.bd682d5d03fe525ef7c9fd6780c6884d1e756ac4c9c9fe00c538782824310dcf90e3ddc4f53835f06dfaebd5085e41855e0bcbb3b60de2ac5bbab89e5036f03b --activate
+
+      - name: 安装锁定依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 准备固定版本回环测试服
+        shell: pwsh
+        run: |
+          $runtimeRoot = Join-Path $env:GITHUB_WORKSPACE "runtime-data\isolated-test"
+          $serverDirectory = Join-Path $runtimeRoot "server"
+          $profilePath = Join-Path $env:GITHUB_WORKSPACE "configs\servers\isolated-test.local.json"
+          New-Item -ItemType Directory -Path $serverDirectory -Force | Out-Null
+
+          $serverUrl = "https://piston-data.mojang.com/v1/objects/6bce4ef400e4efaa63a13d5e6f6b500be969ef81/server.jar"
+          $serverJar = Join-Path $serverDirectory "server.jar"
+          Invoke-WebRequest -Uri $serverUrl -OutFile $serverJar
+          $actualSha1 = (Get-FileHash -LiteralPath $serverJar -Algorithm SHA1).Hash.ToLowerInvariant()
+          if ($actualSha1 -ne "6bce4ef400e4efaa63a13d5e6f6b500be969ef81") {
+            throw "Minecraft 1.21.8 官方服务端 SHA-1 校验失败。"
+          }
+          $actualSha256 = (Get-FileHash -LiteralPath $serverJar -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualSha256 -ne "2349d9a8f0d4be2c40e7692890ef46a4b07015e7955b075460d02793be7fbbe7") {
+            throw "Minecraft 1.21.8 官方服务端 SHA-256 校验失败。"
+          }
+
+          # 只有前置步骤验证了人工确认后才生成临时 EULA 文件；脚本仍会再次检查。
+          [IO.File]::WriteAllText((Join-Path $serverDirectory "eula.txt"), "eula=true`n", [Text.UTF8Encoding]::new($false))
+          $properties = @(
+            "server-ip=127.0.0.1"
+            "server-port=25565"
+            "online-mode=false"
+            "enable-rcon=false"
+            "enable-query=false"
+            "enforce-secure-profile=false"
+            "spawn-protection=0"
+            "difficulty=peaceful"
+            "gamemode=survival"
+            "max-players=2"
+            "motd=GitHub isolated skill acceptance"
+          ) -join "`n"
+          [IO.File]::WriteAllText((Join-Path $serverDirectory "server.properties"), "$properties`n", [Text.UTF8Encoding]::new($false))
+          $profile = @{
+            schemaVersion = "1.0"
+            id = "github-isolated-test"
+            botId = "studio-bot-01"
+            purpose = "isolated-test"
+            networkScope = "loopback"
+            host = "127.0.0.1"
+            port = 25565
+            minecraftVersion = "1.21.8"
+            username = "StudioBot"
+            auth = "offline"
+            statusIntervalMs = 1000
+            heartbeatIntervalMs = 5000
+            stopGracePeriodMs = 5000
+            reconnect = @{
+              enabled = $true
+              maxAttempts = 5
+              baseDelayMs = 2000
+              maxDelayMs = 30000
+            }
+          } | ConvertTo-Json -Depth 4
+          [IO.File]::WriteAllText($profilePath, "$profile`n", [Text.UTF8Encoding]::new($false))
+
+          $javaExecutable = Join-Path $env:JAVA_HOME_21_X64 "bin\java.exe"
+          if (-not (Test-Path -LiteralPath $javaExecutable -PathType Leaf)) {
+            throw "windows-2025 Runner 未提供预期的 Java 21。"
+          }
+          "MC_TEST_JAVA_EXE=$javaExecutable" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "MC_TEST_SERVER_DIR=$serverDirectory" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BOT_SERVER_PROFILE_PATH=$profilePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "MC_TEST_PNPM_EXE=$((Get-Command pnpm.cmd -ErrorAction Stop).Source)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: 执行真实 Minecraft 技能隔离验收
+        run: pnpm test:minecraft-skills
+
+      - name: 保存脱敏后的隔离验收日志
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: minecraft-skill-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: runtime-data/isolated-test/acceptance/*.log
+          if-no-files-found: warn
+          retention-days: 7
