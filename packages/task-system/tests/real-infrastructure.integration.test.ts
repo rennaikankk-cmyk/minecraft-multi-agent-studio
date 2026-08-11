@@ -417,7 +417,7 @@ describeReal.sequential(
           failure_reason: string | null;
           finished_at: Date | null;
         }>(
-          `SELECT task_id::text, status, revision, failure_reason, finished_at
+        `SELECT task_id::text, status, revision::integer AS revision, failure_reason, finished_at
            FROM studio_tasks
            WHERE task_id IN ($1, $2, $3)`,
           [blocked.taskId, expired.taskId, numericRevision.taskId],
