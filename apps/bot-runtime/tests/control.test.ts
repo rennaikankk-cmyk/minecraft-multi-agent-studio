@@ -85,8 +85,20 @@ class ControlTestClient implements BotClient {
       selection: "fixed" as const,
       requestedVersion: "1.21.8",
       resolvedVersion: "1.21.8",
+      protocolVersion: 772,
+      majorVersion: "1.21",
       supportLevel: "tested" as const,
       supportedRange: { oldest: "1.8.8", latest: "1.21.11" },
+    };
+  }
+
+  skillCompatibilityEnvironment() {
+    return {
+      minecraftVersion: "1.21.8",
+      protocolVersion: 772,
+      supportsFeature: () => false,
+      hasResource: () => false,
+      serverCapability: () => undefined,
     };
   }
 

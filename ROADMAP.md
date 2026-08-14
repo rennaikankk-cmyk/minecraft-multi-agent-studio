@@ -1,8 +1,8 @@
 # Minecraft 多智能体机器人项目路线图
 
-更新时间：2026-08-11
+更新时间：2026-08-14
 当前阶段：阶段 1（安全执行底座）
-当前状态：Runtime/Control Link 验收保持通过；P1.3.2a 持久派发 outbox 与过期租约恢复已通过离线门禁和真实 PostgreSQL/Redis CI
+当前状态：Runtime/Control Link 验收保持通过；P1.2.2 多版本服务器事实与 Skill 兼容层已完成本机门禁，等待本分支 GitHub CI
 
 ## 当前进度总览
 
@@ -11,12 +11,12 @@
 ### 已完成并有本机或 CI 验证
 
 - 环境检测、运行模式识别、版本化 Bot/Control/Skill 协议。
-- 隔离测试服单 Bot Runtime、有限重连、优雅停止和 Minecraft 版本自适应。
+- 隔离测试服单 Bot Runtime、有限重连、优雅停止、Minecraft 版本/协议自动探测和 Skill 兼容变体解析。
 - Coordinator 进程内注册表、Control API/WebSocket 契约、Dashboard UI 与浏览器测试。
 - Runtime 与独立 Coordinator 之间的认证回环 WebSocket、遥测回执、停止确认、有限重连和失联安全停止。
 - Coordinator 与 Control API 之间的双向 HMAC Control Link、原子状态快照/有序增量、断线 503 和固定停止 RPC。
 - Dashboard 页面可见期间每 5 秒读取服务端主机或容器真实 Node OS 内存值；轻量采集不重跑软件/GPU 探测、不重叠、不持久化，失败或超过 15 秒没有成功样本时明确显示旧值已过期，页面从后台恢复后立即重采。
-- 确定性 L0 安全控制器、技能框架，以及离线验收的 `movement.goto@1.0.0`。
+- 确定性 L0 安全控制器、技能框架、六个已注册通用 Skill，以及把可用性与跨版本实机验证分开的兼容目录。
 - 任务 Schema、状态机、PostgreSQL 仓库、严格派发协议、事务 outbox、BullMQ Queue/Worker、自动对账器和隔离基础设施测试入口。
 - 2026-07-28 本机门禁：类型检查、158 项离线测试、生产构建、5 项 Dashboard E2E 和生产依赖审计通过；11 项外部环境测试按设计跳过。
 - 2026-07-28 GitHub Actions 运行 `30315095898`：完整离线质量门和真实 PostgreSQL/Redis 隔离集成门均通过。
@@ -25,6 +25,8 @@
 - 2026-08-08 本机隔离门禁：`pnpm check` 退出码 0，246 项离线测试通过、19 项外部环境测试按设计跳过，全部类型检查与生产构建通过；Runtime Link 双进程和四进程服务级验收均退出码 0、`minecraftConnected=false`。`test:task-infra` 因未提供专用 PostgreSQL/Redis/namespace 明确退出码 1，该文件的 17 项真实基础设施场景等待 CI，未冒充实机通过。
 - 2026-08-11 本机门禁：`pnpm check` 退出码 0，292 项测试通过、20 项外部环境测试按设计跳过，全部类型检查与生产构建通过；本次验证没有连接 Minecraft。
 - 2026-08-11 GitHub Actions 运行 `31480434428`：完整离线质量门和真实 PostgreSQL/Redis 隔离门均通过，18 项真实基础设施场景全部通过，包括 `0004` 前向升级、outbox 对账与自动过期租约恢复。
+- 2026-08-14 本机门禁：`pnpm check` 退出码 0，305 项测试通过、20 项真实 PostgreSQL/Redis 或真实隔离 Minecraft 场景按设计跳过，全部类型检查与生产构建通过；新增测试只在随机回环端口模拟 1.8.8、1.12.2、1.16.5 和 1.21.11 协议握手，没有连接外部 Minecraft。
+- 2026-08-14 Runtime Link 双进程与 Dashboard → Control API → Coordinator → 测试 Runtime 四进程回环验收均退出码 0，`minecraftConnected=false`、最终离线且客户端只关闭一次；GitHub CI 等本分支上传后确认。
 
 ### 已完成并有真实基础设施验证
 
@@ -37,6 +39,7 @@
 - Control Link 状态、停止幂等缓存和审计仍在内存中；用户登录、持久化审计、跨主机 TLS 和密钥轮换尚未接入。
 - 独立 Worker、自动过期租约恢复、持久取消消费、跨 Worker 取消、任务 API 和 Dashboard 任务看板。
 - 多 Bot 调度、生产技能、长期记忆、AI Router、本地规划和生产部署。
+- 跨版本语义资源别名、显式服务端能力探针，以及六个 Skill 的真实多版本玩法矩阵。
 
 ## 路线图原则
 
@@ -219,6 +222,18 @@
 - [x] 技能和 Runtime 离线测试覆盖权限、前置条件、安全配置和 L0 阻断。
 - [ ] 在隔离 Minecraft 测试服执行多版本真实寻路场景。
 
+### P1.2.2 多版本服务器事实与 Skill 兼容层
+
+状态：**已完成（本机协议级与离线验收；真实技能矩阵未完成）**
+
+- [x] 自动连接后上报真实 Minecraft 版本、协议号和主版本，不把协议 Schema 锁死为 `1.x` 命名。
+- [x] 每个 Skill 声明有序兼容变体；通用能力用 `portable` 变体跨版本保留，新版本特色能力按真实 feature/资源/服务端能力启用。
+- [x] 使用当前 Bot registry 和 `supportFeature()` 解析变体；服务端插件、数据包或规则能力只接受显式探针，不按版本号推断。
+- [x] Runtime 执行前 fail-closed 校验兼容性，并通过 `BotSkillCatalogV1` 发布可用性、验证状态、选中变体和稳定原因。
+- [x] Coordinator 绑定版本事实保存目录，新 Runtime 接管时清空旧目录，拒绝版本或协议冲突。
+- [x] 纯回环夹具验证 Mineflayer 自动探测 1.8.8、1.12.2、1.16.5 和 1.21.11；测试不连接外部 Minecraft。
+- [ ] 为规划器增加跨版本语义资源别名，并在真实隔离服逐版本执行六个 Skill 场景矩阵。
+
 ### P1.3 任务系统
 
 状态：**本机离线门禁与真实基础设施 CI 已通过；生产闭环未完成**
@@ -295,11 +310,12 @@
 2. **已完成：P0 Runtime Link**：Runtime ↔ Coordinator 的认证遥测与停止传输已通过真实双进程回环验收；测试没有连接 Minecraft。
 3. **已完成：P0 Control Bridge**：Control API ↔ 独立 Coordinator 的原子状态镜像和固定停止 RPC 已通过不连接 Minecraft 的真实四进程回环服务验收。
 4. **P1.3.2 持久任务闭环**：outbox/reconciler 与自动过期租约恢复的真实基础设施场景已通过；下一步增加持久取消消费、跨 Worker 取消和独立 Worker，最后接入任务 API 与 Dashboard。
-5. **P1.1/P1.2 实机矩阵**：验证 L0 危险场景和 Pathfinder 多版本真实寻路，不扩大正式服务器权限。
-6. **P1.4 多 Bot 协调**：实现任务分配、资源/箱子/区域锁、替补执行和故障转移。
-7. **P1.5/P1.6 生产能力与基础设施**：按场景逐项增加生产技能，再完善指标、日志、备份与可回滚部署。
-8. **P2 智能层**：基础设施稳定后再接长期记忆、AI Router 和本地规划；受监管自我改进、基地撤离和战斗保持最后阶段。
+5. **P1.2.3 跨版本语义资源解析**：把规划器的“原木/石材/新版本特色物品”等语义选择解析为当前 registry 的真实资源与兼容变体。
+6. **P1.1/P1.2 实机矩阵**：验证 L0 危险场景和六个 Skill 的多版本真实行为，不扩大正式服务器权限。
+7. **P1.4 多 Bot 协调**：实现任务分配、资源/箱子/区域锁、替补执行和故障转移。
+8. **P1.5/P1.6 生产能力与基础设施**：按场景逐项增加生产技能，再完善指标、日志、备份与可回滚部署。
+9. **P2 智能层**：基础设施稳定后再接长期记忆、AI Router 和本地规划；受监管自我改进、基地撤离和战斗保持最后阶段。
 
 ## 当前唯一下一步
 
-完成 P1.3.2 持久任务闭环：下一模块实现跨 Worker 持久取消和独立 Worker；随后接入任务 Control API 与 Dashboard。本步不扩大 Minecraft 连接权限。
+完成 P1.2.3 跨版本语义资源解析：把 Skill 输入中的语义资源选择映射到当前服务器 registry 的真实物品/方块 ID 和兼容变体，同时保持 ServerProfile 隔离与未知能力 fail-closed。本步不连接正式服务器。

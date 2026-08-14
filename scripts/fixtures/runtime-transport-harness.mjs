@@ -64,9 +64,24 @@ class DeterministicTestBotClient {
       selection: "fixed",
       requestedVersion: "1.21.8",
       resolvedVersion: "1.21.8",
+      protocolVersion: 772,
+      majorVersion: "1.21",
       supportLevel: "tested",
       supportedRange: { oldest: "1.8.8", latest: "1.21.11" },
     };
+  }
+
+  skillCompatibilityEnvironment() {
+    return Object.freeze({
+      minecraftVersion: "1.21.8",
+      protocolVersion: 772,
+      // This process is an explicit transport-only fixture. It carries enough
+      // negotiated metadata for portable Skill variants, but never fabricates
+      // Minecraft feature, registry, or server-plugin capability support.
+      supportsFeature: () => undefined,
+      hasResource: () => undefined,
+      serverCapability: () => undefined,
+    });
   }
 
   async executeSafetyAction() {

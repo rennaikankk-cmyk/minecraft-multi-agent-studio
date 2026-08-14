@@ -82,6 +82,11 @@ function movementSkill(
     inputSchema,
     outputSchema,
     stateSchema,
+    compatibility: {
+      variants: [
+        { id: "portable", requirements: [], verifiedMinecraftVersions: [] },
+      ],
+    },
     requiredCapabilities: ["bot.move"] as const,
     timeoutMs: 200,
     idempotent: false,
@@ -231,6 +236,43 @@ describe("SkillExecutor", () => {
       (await run.execute(invocation, authorization(), { online: false })).payload
         .errorCode,
     ).toBe("BOT_NOT_ONLINE");
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("rejects a skill whose negotiated version requirements are unavailable", async () => {
+    const registry = new SkillRegistry();
+    const handler = vi.fn(movementSkill().execute);
+    registry.register({
+      ...movementSkill(handler),
+      compatibility: {
+        variants: [
+          {
+            id: "elytra-native",
+            requirements: [{ kind: "feature", name: "hasElytraFlying" }],
+            verifiedMinecraftVersions: [],
+          },
+        ],
+      },
+    });
+    const result = await executor(registry).execute(
+      invocation,
+      authorization(),
+      { online: true },
+      undefined,
+      {
+        minecraftVersion: "1.8.8",
+        protocolVersion: 47,
+        supportsFeature: () => false,
+        hasResource: () => false,
+        serverCapability: () => undefined,
+      },
+    );
+
+    expect(result.payload).toMatchObject({
+      outcome: "rejected",
+      attempts: 0,
+      errorCode: "SKILL_VERSION_UNAVAILABLE",
+    });
     expect(handler).not.toHaveBeenCalled();
   });
 

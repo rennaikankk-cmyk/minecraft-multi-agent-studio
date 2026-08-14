@@ -2,7 +2,7 @@ import mineflayer from "mineflayer";
 
 import type { MinecraftVersionCompatibility } from "@minecraft-studio/protocol";
 
-const VERSION_PATTERN = /^1\.\d+(?:\.\d+)?$/u;
+const VERSION_PATTERN = /^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$/u;
 const {
   latestSupportedVersion,
   oldestSupportedVersion,
@@ -42,18 +42,23 @@ export function mineflayerVersionOption(
 export function resolvedVersionCompatibility(
   selection: MinecraftVersionSelection,
   resolvedVersion: string,
+  protocolVersion: number,
+  majorVersion: string,
 ): MinecraftVersionCompatibility {
   if (
     !VERSION_PATTERN.test(resolvedVersion) ||
-    compareVersions(resolvedVersion, oldestSupportedVersion) < 0 ||
-    compareVersions(resolvedVersion, latestSupportedVersion) > 0
+    !VERSION_PATTERN.test(majorVersion) ||
+    !Number.isSafeInteger(protocolVersion) ||
+    protocolVersion < 0
   ) {
-    throw new Error("Mineflayer resolved a version outside its supported range.");
+    throw new Error("Mineflayer resolved invalid version metadata.");
   }
   return {
     selection: selection === "auto" ? "auto" : "fixed",
     requestedVersion: selection === "auto" ? null : selection,
     resolvedVersion,
+    protocolVersion,
+    majorVersion,
     supportLevel: isMineflayerTestedVersion(resolvedVersion)
       ? "tested"
       : "compatible-untested",
@@ -71,6 +76,8 @@ export function unsupportedVersionCompatibility(
     selection: selection === "auto" ? "auto" : "fixed",
     requestedVersion: selection === "auto" ? null : selection,
     resolvedVersion: null,
+    protocolVersion: null,
+    majorVersion: null,
     supportLevel: "unsupported",
     supportedRange: {
       oldest: oldestSupportedVersion,
@@ -82,17 +89,7 @@ export function unsupportedVersionCompatibility(
 export function isMineflayerUnsupportedVersionError(error: Error): boolean {
   return (
     /Server version .* is not supported/iu.test(error.message) ||
-    /no data for version/iu.test(error.message)
+    /no data for version/iu.test(error.message) ||
+    /unsupported(?:\/unknown)? protocol version/iu.test(error.message)
   );
-}
-
-function compareVersions(left: string, right: string): number {
-  const leftParts = left.split(".").map(Number);
-  const rightParts = right.split(".").map(Number);
-  const length = Math.max(leftParts.length, rightParts.length);
-  for (let index = 0; index < length; index += 1) {
-    const difference = (leftParts[index] ?? 0) - (rightParts[index] ?? 0);
-    if (difference !== 0) return difference;
-  }
-  return 0;
 }

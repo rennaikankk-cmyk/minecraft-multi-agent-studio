@@ -78,6 +78,11 @@ export const movementGotoSkill = defineSkill({
   inputSchema: safeMovementGotoInputSchema,
   outputSchema: safeMovementGotoOutputSchema,
   stateSchema: safeMovementGotoStateSchema,
+  compatibility: {
+    variants: [
+      { id: "portable", requirements: [], verifiedMinecraftVersions: [] },
+    ],
+  },
   requiredCapabilities: ["bot.move"] as const,
   timeoutMs: SAFE_PATH_TIMEOUT_MS,
   idempotent: false,

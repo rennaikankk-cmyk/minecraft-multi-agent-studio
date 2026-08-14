@@ -2,6 +2,14 @@
 
 本目录只记录已经注册且存在真实 Runtime 适配器的技能。测试夹具和规划中的能力不列为可用技能。
 
+## 跨版本兼容契约
+
+- Skill ID 后的 SemVer 表示技能输入、输出和行为契约，不表示 Minecraft 服务器版本。
+- 每个 Skill 另有有序 `compatibility.variants`。Runtime 只使用连接后真实协商出的版本/协议，以及当前 registry 的 feature、物品、方块、实体和显式服务端能力探针解析变体；不以 `minVersion/maxVersion` 一刀切。
+- 当前目录中的六个 Skill 都声明无额外资源要求的 `portable` 变体，因此在当前 Mineflayer 适配器能够连接的版本上保持可用。它们的跨版本真实场景矩阵尚未执行，所以目录上报 `availability=available`、`verification=unverified`，不冒充实机已验证。
+- 新版本特色 Skill 必须声明它实际依赖的 feature/资源；如果还依赖服务器插件、数据包或规则，则必须等待显式探针。能力为 `unknown` 时 fail-closed，不从版本号猜测。
+- `collect.block`、`craft.item`、`world.place-block` 和 `container.transfer` 当前仍接收目标版本 registry 的原生资源名。兼容变体可以表达旧/新 ID 的替代顺序，但规划器使用的语义资源别名尚未接入。
+
 ## `movement.goto@1.0.0`
 
 - 权限：`bot.move`

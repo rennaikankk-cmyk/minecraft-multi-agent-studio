@@ -28,6 +28,8 @@ import {
   safeMovementGotoCapabilityInputSchema,
   safeMovementGotoCapabilityOutputSchema,
   type SkillCapabilityRequest,
+  type SkillCompatibilityEnvironment,
+  type SkillResourceKind,
 } from "@minecraft-studio/skills";
 
 import type {
@@ -1019,7 +1021,60 @@ export class MineflayerBotClient implements BotClient {
   }
 
   versionCompatibility() {
-    return resolvedVersionCompatibility(this.configuredVersion, this.bot.version);
+    const protocolVersion = Number(this.bot.protocolVersion);
+    return resolvedVersionCompatibility(
+      this.configuredVersion,
+      this.bot.version,
+      protocolVersion,
+      this.bot.majorVersion,
+    );
+  }
+
+  skillCompatibilityEnvironment(): SkillCompatibilityEnvironment {
+    const registry = this.bot.registry as unknown as {
+      supportFeature?: (name: string) => boolean;
+      itemsByName?: Record<string, unknown>;
+      blocksByName?: Record<string, unknown>;
+      entitiesByName?: Record<string, unknown>;
+    };
+    const resources: Readonly<
+      Record<SkillResourceKind, Record<string, unknown> | undefined>
+    > = {
+      item: registry.itemsByName,
+      block: registry.blocksByName,
+      entity: registry.entitiesByName,
+    };
+    const protocolVersion = Number(this.bot.protocolVersion);
+    if (
+      typeof this.bot.version !== "string" ||
+      !Number.isSafeInteger(protocolVersion)
+    ) {
+      throw new Error("Mineflayer compatibility facts are unavailable.");
+    }
+    return Object.freeze({
+      minecraftVersion: this.bot.version,
+      protocolVersion,
+      supportsFeature: (name: string): boolean | undefined => {
+        if (typeof registry.supportFeature !== "function") return undefined;
+        try {
+          const supported = registry.supportFeature(name);
+          return typeof supported === "boolean" ? supported : undefined;
+        } catch {
+          return undefined;
+        }
+      },
+      hasResource: (
+        kind: SkillResourceKind,
+        name: string,
+      ): boolean | undefined => {
+        const index = resources[kind];
+        return index ? index[name] !== undefined : undefined;
+      },
+      // Server-side plugins and rules can disable mechanics that exist in the
+      // negotiated protocol. Those facts stay unknown until an explicit,
+      // approved probe records them; version alone must not fabricate support.
+      serverCapability: (): undefined => undefined,
+    });
   }
 
   async close(gracePeriodMs: number): Promise<void> {

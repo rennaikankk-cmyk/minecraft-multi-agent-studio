@@ -75,8 +75,15 @@ export {
 } from "./builtin/container-transfer.js";
 export { SkillExecutor } from "./executor.js";
 export { SkillRegistry } from "./registry.js";
+export { resolveSkillCompatibility } from "./compatibility.js";
 export {
   defineSkill,
+  type SkillCompatibilityEnvironment,
+  type SkillCompatibilityManifest,
+  type SkillCompatibilityRequirement,
+  type SkillCompatibilityResolution,
+  type SkillCompatibilityUnmetRequirement,
+  type SkillCompatibilityVariant,
   type SkillCapabilityAdapter,
   type SkillCapabilityRequest,
   type SkillDefinition,
@@ -85,5 +92,7 @@ export {
   type SkillExecutorOptions,
   type SkillMetadata,
   type SkillPrecondition,
+  type SkillResourceKind,
   type SkillRetryPolicy,
+  type SkillVariantCompatibility,
 } from "./types.js";

@@ -4,9 +4,11 @@ import {
   ProtocolAuthorizationError,
   botDisconnectedV1Schema,
   botHeartbeatV1Schema,
+  botSkillCatalogV1Schema,
   botStopResultV1Schema,
   botStatusV1Schema,
   botVersionV1Schema,
+  minecraftVersionStringSchema,
   parseBotProtocolMessage,
   parseBotTelemetryMessage,
   stopBotCommandV1Schema,
@@ -238,6 +240,8 @@ describe("BotVersionV1", () => {
           selection: "auto" as const,
           requestedVersion: null,
           resolvedVersion: "1.21.8",
+          protocolVersion: 772,
+          majorVersion: "1.21",
           supportLevel: "tested" as const,
           supportedRange: { oldest: "1.8.8", latest: "1.21.11" },
         },
@@ -253,6 +257,79 @@ describe("BotVersionV1", () => {
             ...tested.payload.compatibility,
             supportLevel: "unsupported",
           },
+        },
+      }).success,
+    ).toBe(false);
+    expect(minecraftVersionStringSchema.parse("26.1.2")).toBe("26.1.2");
+  });
+});
+
+describe("BotSkillCatalogV1", () => {
+  const catalog = {
+    ...envelope,
+    type: "bot.skill-catalog.v1" as const,
+    payload: {
+      serverProfileId: "isolated-test",
+      runtimeInstanceId: "runtime-01",
+      sequence: 46,
+      observedAt: NOW,
+      minecraftVersion: "1.21.11",
+      protocolVersion: 774,
+      skills: [
+        {
+          skillId: "movement.goto",
+          skillVersion: "1.0.0",
+          availability: "available" as const,
+          verification: "unverified" as const,
+          selectedVariantId: "portable",
+          unavailableReasons: [],
+        },
+        {
+          skillId: "combat.mace",
+          skillVersion: "1.0.0",
+          availability: "unavailable" as const,
+          verification: "unverified" as const,
+          selectedVariantId: null,
+          unavailableReasons: [
+            {
+              variantId: "mace-native",
+              code: "SERVER_CAPABILITY_UNKNOWN" as const,
+              subject: "combat.mace-enabled",
+            },
+          ],
+        },
+      ],
+    },
+  };
+
+  it("reports portable and feature-gated skills without hiding either", () => {
+    expect(botSkillCatalogV1Schema.parse(catalog)).toEqual(catalog);
+    expect(parseBotTelemetryMessage(catalog).type).toBe(
+      "bot.skill-catalog.v1",
+    );
+  });
+
+  it("rejects contradictory availability and duplicate entries", () => {
+    expect(
+      botSkillCatalogV1Schema.safeParse({
+        ...catalog,
+        payload: {
+          ...catalog.payload,
+          skills: [
+            {
+              ...catalog.payload.skills[0],
+              selectedVariantId: null,
+            },
+          ],
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      botSkillCatalogV1Schema.safeParse({
+        ...catalog,
+        payload: {
+          ...catalog.payload,
+          skills: [catalog.payload.skills[0], catalog.payload.skills[0]],
         },
       }).success,
     ).toBe(false);

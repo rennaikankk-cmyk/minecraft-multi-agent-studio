@@ -74,6 +74,11 @@ export const collectBlockSkill = defineSkill({
   inputSchema: collectBlockInputSchema,
   outputSchema: collectBlockOutputSchema,
   stateSchema: collectBlockStateSchema,
+  compatibility: {
+    variants: [
+      { id: "portable", requirements: [], verifiedMinecraftVersions: [] },
+    ],
+  },
   requiredCapabilities: ["world.interact"] as const,
   timeoutMs: COLLECT_BLOCK_TIMEOUT_MS,
   idempotent: false,

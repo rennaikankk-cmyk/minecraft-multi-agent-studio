@@ -97,6 +97,11 @@ export const craftItemSkill = defineSkill({
   inputSchema: craftItemInputSchema,
   outputSchema: craftItemOutputSchema,
   stateSchema: craftItemStateSchema,
+  compatibility: {
+    variants: [
+      { id: "portable", requirements: [], verifiedMinecraftVersions: [] },
+    ],
+  },
   requiredCapabilities: ["craft.execute"] as const,
   timeoutMs: CRAFT_ITEM_TIMEOUT_MS,
   // 合成部分成功后重试会重复消耗材料，禁止自动重试。

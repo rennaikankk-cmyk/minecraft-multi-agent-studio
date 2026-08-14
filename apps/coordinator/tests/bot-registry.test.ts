@@ -201,6 +201,8 @@ describe("BotRegistry", () => {
             selection: "auto",
             requestedVersion: null,
             resolvedVersion: "1.21.8",
+            protocolVersion: 772,
+            majorVersion: "1.21",
             supportLevel: "tested",
             supportedRange: { oldest: "1.8.8", latest: "1.21.11" },
           },
@@ -216,6 +218,152 @@ describe("BotRegistry", () => {
         resolvedVersion: "1.21.8",
         supportLevel: "tested",
       },
+    });
+  });
+
+  it("stores a version-bound skill catalog without changing liveness", () => {
+    const registry = new BotRegistry({ staleAfterMs: 5_000 });
+    const now = new Date(BASE_TIME);
+    registry.ingest(heartbeat("runtime-a", 1, BASE_TIME, 1), now);
+    registry.ingest(
+      {
+        ...heartbeat("runtime-a", 2, BASE_TIME, 202),
+        type: "bot.version.v1",
+        payload: {
+          serverProfileId: "isolated-test",
+          runtimeInstanceId: "runtime-a",
+          sequence: 2,
+          observedAt: BASE_TIME,
+          compatibility: {
+            selection: "auto",
+            requestedVersion: null,
+            resolvedVersion: "1.21.11",
+            protocolVersion: 774,
+            majorVersion: "1.21",
+            supportLevel: "tested",
+            supportedRange: { oldest: "1.8.8", latest: "1.21.11" },
+          },
+        },
+      },
+      now,
+    );
+    const result = registry.ingest(
+      {
+        ...heartbeat("runtime-a", 3, BASE_TIME, 203),
+        type: "bot.skill-catalog.v1",
+        payload: {
+          serverProfileId: "isolated-test",
+          runtimeInstanceId: "runtime-a",
+          sequence: 3,
+          observedAt: BASE_TIME,
+          minecraftVersion: "1.21.11",
+          protocolVersion: 774,
+          skills: [
+            {
+              skillId: "movement.goto",
+              skillVersion: "1.0.0",
+              availability: "available",
+              verification: "unverified",
+              selectedVariantId: "portable",
+              unavailableReasons: [],
+            },
+          ],
+        },
+      },
+      now,
+    );
+
+    expect(result.record).toMatchObject({
+      connectionState: "online",
+      skillCatalog: {
+        minecraftVersion: "1.21.11",
+        protocolVersion: 774,
+        skills: [
+          expect.objectContaining({
+            skillId: "movement.goto",
+            availability: "available",
+          }),
+        ],
+      },
+    });
+  });
+
+  it("rejects conflicting version or catalog facts without advancing registry state", () => {
+    const registry = new BotRegistry({ staleAfterMs: 5_000 });
+    const now = new Date(BASE_TIME);
+    registry.ingest(heartbeat("runtime-a", 1, BASE_TIME, 1), now);
+    registry.ingest(
+      {
+        ...heartbeat("runtime-a", 2, BASE_TIME, 202),
+        type: "bot.version.v1",
+        payload: {
+          serverProfileId: "isolated-test",
+          runtimeInstanceId: "runtime-a",
+          sequence: 2,
+          observedAt: BASE_TIME,
+          compatibility: {
+            selection: "auto",
+            requestedVersion: null,
+            resolvedVersion: "1.21.11",
+            protocolVersion: 774,
+            majorVersion: "1.21",
+            supportLevel: "tested",
+            supportedRange: { oldest: "1.8.8", latest: "1.21.11" },
+          },
+        },
+      },
+      now,
+    );
+
+    expect(() =>
+      registry.ingest(
+        {
+          ...heartbeat("runtime-a", 3, BASE_TIME, 203),
+          type: "bot.skill-catalog.v1",
+          payload: {
+            serverProfileId: "isolated-test",
+            runtimeInstanceId: "runtime-a",
+            sequence: 3,
+            observedAt: BASE_TIME,
+            minecraftVersion: "1.20.6",
+            protocolVersion: 766,
+            skills: [],
+          },
+        },
+        now,
+      ),
+    ).toThrowError(expect.objectContaining({ code: "MESSAGE_INVALID" }));
+    expect(registry.get("worker-01", now)).toMatchObject({
+      lastSequence: 2,
+      skillCatalog: null,
+      minecraftVersion: { resolvedVersion: "1.21.11", protocolVersion: 774 },
+    });
+
+    const conflictingStatus = status("runtime-a", 3, BASE_TIME, 204);
+    expect(() =>
+      registry.ingest(
+        {
+          ...conflictingStatus,
+          payload: {
+            ...conflictingStatus.payload,
+            minecraftVersion: {
+              selection: "auto",
+              requestedVersion: null,
+              resolvedVersion: "1.20.6",
+              protocolVersion: 766,
+              majorVersion: "1.20",
+              supportLevel: "compatible-untested",
+              supportedRange: { oldest: "1.8.8", latest: "1.21.11" },
+            },
+          },
+        },
+        now,
+      ),
+    ).toThrowError(expect.objectContaining({ code: "MESSAGE_INVALID" }));
+    expect(registry.get("worker-01", now)).toMatchObject({
+      lastSequence: 2,
+      currentStatus: null,
+      minecraftVersion: { resolvedVersion: "1.21.11", protocolVersion: 774 },
     });
   });
 
