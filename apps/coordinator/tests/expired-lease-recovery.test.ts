@@ -147,7 +147,11 @@ describe("ExpiredLeaseRecoveryController", () => {
       "55555555-5555-4555-8555-555555555555",
     ];
     const controller = new ExpiredLeaseRecoveryController({
-      repository: { listExpiredLeases, recoverExpiredLease },
+      repository: {
+        listExpiredLeases,
+        resolveTaskCancellation: vi.fn(async () => null),
+        recoverExpiredLease,
+      },
       actorId: "coordinator-recovery",
       logger: logger(),
       batchSize: 2,
@@ -158,6 +162,7 @@ describe("ExpiredLeaseRecoveryController", () => {
       examined: 2,
       requeued: 1,
       failedTerminal: 1,
+      cancelled: 0,
       skippedConcurrent: 0,
       errors: 0,
     });
@@ -182,6 +187,116 @@ describe("ExpiredLeaseRecoveryController", () => {
     ]);
   });
 
+  it("resolves durable cancellation before recovering an expired lease", async () => {
+    const assigned = task(TASK_A);
+    const cancelled: TaskRecord = {
+      ...assigned,
+      status: "cancelled",
+      assignedBotId: null,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      updatedAt: NOW,
+      finishedAt: NOW,
+      revision: assigned.revision + 1,
+    };
+    const resolveTaskCancellation = vi.fn(async () => ({
+      request: {
+        requestId: "66666666-6666-4666-8666-666666666666",
+        operationId: "77777777-7777-4777-8777-777777777777",
+        taskId: TASK_A,
+        operationFingerprint: "b".repeat(64),
+        actorId: "operator-test",
+        reasonCode: "TASK_CANCELLED_BY_OPERATOR",
+        requestedAt: EXPIRED_AT,
+        acknowledgedAt: NOW,
+        acknowledgedBy: "coordinator-recovery",
+      },
+      task: cancelled,
+    }));
+    const recoverExpiredLease = vi.fn();
+    const controller = new ExpiredLeaseRecoveryController({
+      repository: {
+        listExpiredLeases: async () => [assigned],
+        resolveTaskCancellation,
+        recoverExpiredLease,
+      },
+      actorId: "coordinator-recovery",
+      logger: logger(),
+    });
+
+    await expect(controller.sweepOnce()).resolves.toEqual({
+      examined: 1,
+      requeued: 0,
+      failedTerminal: 0,
+      cancelled: 1,
+      skippedConcurrent: 0,
+      errors: 0,
+    });
+    expect(resolveTaskCancellation).toHaveBeenCalledWith({
+      taskId: TASK_A,
+      resolverId: "coordinator-recovery",
+      leaseOwner: null,
+    });
+    expect(recoverExpiredLease).not.toHaveBeenCalled();
+  });
+
+  it("rechecks cancellation when intent races the recovery mutation", async () => {
+    const assigned = task(TASK_A);
+    const cancelled: TaskRecord = {
+      ...assigned,
+      status: "cancelled",
+      assignedBotId: null,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      updatedAt: NOW,
+      finishedAt: NOW,
+      revision: assigned.revision + 1,
+    };
+    const resolveTaskCancellation = vi
+      .fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        request: {
+          requestId: "66666666-6666-4666-8666-666666555555",
+          operationId: "77777777-7777-4777-8777-777777555555",
+          taskId: TASK_A,
+          operationFingerprint: "c".repeat(64),
+          actorId: "operator-race",
+          reasonCode: "TASK_CANCELLED_DURING_RECOVERY",
+          requestedAt: EXPIRED_AT,
+          acknowledgedAt: NOW,
+          acknowledgedBy: "coordinator-recovery",
+        },
+        task: cancelled,
+      });
+    const recoverExpiredLease = vi.fn(async () => {
+      throw new TaskSystemError(
+        "TASK_CANCELLATION_PENDING",
+        "Cancellation won the task-row lock race.",
+      );
+    });
+    const controller = new ExpiredLeaseRecoveryController({
+      repository: {
+        listExpiredLeases: async () => [assigned],
+        resolveTaskCancellation,
+        recoverExpiredLease,
+      },
+      actorId: "coordinator-recovery",
+      logger: logger(),
+    });
+
+    await expect(controller.sweepOnce()).resolves.toEqual({
+      examined: 1,
+      requeued: 0,
+      failedTerminal: 0,
+      cancelled: 1,
+      skippedConcurrent: 0,
+      errors: 0,
+    });
+    expect(resolveTaskCancellation).toHaveBeenCalledTimes(2);
+    expect(recoverExpiredLease).toHaveBeenCalledTimes(1);
+  });
+
   it("coalesces overlapping sweeps so the database scan cannot overlap", async () => {
     let resolveScan: ((tasks: readonly TaskRecord[]) => void) | undefined;
     let scanNumber = 0;
@@ -196,6 +311,7 @@ describe("ExpiredLeaseRecoveryController", () => {
     );
     const repository: ExpiredLeaseRecoveryRepository = {
       listExpiredLeases,
+      resolveTaskCancellation: vi.fn(async () => null),
       recoverExpiredLease: vi.fn(),
     };
     const controller = new ExpiredLeaseRecoveryController({
@@ -228,6 +344,7 @@ describe("ExpiredLeaseRecoveryController", () => {
     const controller = new ExpiredLeaseRecoveryController({
       repository: {
         listExpiredLeases: async () => [assigned, running],
+        resolveTaskCancellation: vi.fn(async () => null),
         recoverExpiredLease,
       },
       actorId: "coordinator-recovery",
@@ -238,6 +355,7 @@ describe("ExpiredLeaseRecoveryController", () => {
       examined: 2,
       requeued: 0,
       failedTerminal: 0,
+      cancelled: 0,
       skippedConcurrent: 1,
       errors: 1,
     });
@@ -262,6 +380,7 @@ describe("ExpiredLeaseRecoveryController", () => {
     const controller = new ExpiredLeaseRecoveryController({
       repository: {
         listExpiredLeases,
+        resolveTaskCancellation: vi.fn(async () => null),
         recoverExpiredLease: vi.fn(),
       },
       actorId: "coordinator-recovery",
@@ -286,6 +405,7 @@ describe("ExpiredLeaseRecoveryController", () => {
         listExpiredLeases: async () => {
           throw new Error("connection string must not be logged");
         },
+        resolveTaskCancellation: vi.fn(async () => null),
         recoverExpiredLease: vi.fn(),
       },
       actorId: "coordinator-recovery",
@@ -296,6 +416,7 @@ describe("ExpiredLeaseRecoveryController", () => {
       examined: 0,
       requeued: 0,
       failedTerminal: 0,
+      cancelled: 0,
       skippedConcurrent: 0,
       errors: 1,
     });

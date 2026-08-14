@@ -52,6 +52,8 @@ export {
   type SubmitTaskResult,
   type RetryTaskDispatchResult,
   type RecoverExpiredLeaseResult,
+  type ResolveTaskCancellationInput,
+  type ResolveTaskCancellationResult,
   type TaskCancellationAcknowledgeInput,
   type TaskCancellationRequestInput,
   type TaskOutboxAckOptions,

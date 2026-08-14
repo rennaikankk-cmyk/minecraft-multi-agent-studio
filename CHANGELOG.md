@@ -6,6 +6,9 @@
 
 ### 新增
 
+- 新增 PostgreSQL 权威的持久取消消费：首个取消操作不可覆盖，执行租约所有者有界轮询并确认请求，跨 Worker 发起方可等待同一 cancelled 终态；租约失效后由无租约解析者完成取消。
+- 新增独立 `@minecraft-studio/task-worker` Node 进程入口与 `isolated.acceptance.wait@1.0.0` 验收处理器。入口强制使用回环 PostgreSQL/Redis、专用 Schema、`isolated-test` purpose 和固定 handler profile，不注册生产或 Minecraft 处理器。
+- 真实基础设施套件新增队列取消原子性、不同 Worker 发起/消费取消，以及独立 Worker 子进程消费持久取消的场景；本分支等待 GitHub Actions 临时 PostgreSQL/Redis 验证。
 - 新增 `inventory.equip-armor@1.0.0`——首个"参考 GPL 机制、代码全自研"技能（每槽选最优护甲、平手不换）；决策为可离线单测的纯函数，Runtime 只提供 `armor.snapshot`/`armor.equip` 原子能力，client 硬护栏拒绝非该槽护甲与背包没有的护甲。
 - 新增生存链四技能：`collect.block@1.0.0`（MIT `mineflayer-collectblock` 1.6.0 + `mineflayer-tool` 1.2.0 供应链锁定接入，禁自动倒箱、与寻路互斥）、`craft.item@1.0.0`（自研，原生 recipesFor+craft，2x2/3x3）、`world.place-block@1.0.0`（自研，一次一块、放置后读回校验）、`container.transfer@1.0.0`（自研，openContainer+deposit/withdraw，容器白名单仅箱子/木桶/潜影盒）。裸装冷启动第一循环（走→撸木→合成→放置→撸石→穿甲→入库）技能层闭环。
 - 技能结果日志 `bot_runtime_skill_result` 新增 `durationMs` 与白名单标量遥测摘要（`craftedCount`/`movedCount`/`itemsCollected` 等 10 键），单行日志即可判定技能在隔离服上可不可用；新增 `docs/skill-verification-runbook.md`（grep 起手式 + 失败签名表）。
@@ -13,6 +16,8 @@
 
 ### 安全
 
+- 已持久化取消通过任务行锁优先于新租约、完成、失败、截止时间和租约恢复；Coordinator 在取消与过期恢复竞争时重新读取并优先解析取消，避免把取消任务重派或改写为失败。
+- 独立 Worker 配置不记录连接 URL，缺失显式隔离用途、验收 profile、专用 namespace 或回环服务时 fail-closed。它只隔离控制平面与 Worker 进程，不宣称对进程内不合作处理器提供硬终止。
 - 供应链新增 `mineflayer-collectblock` 1.6.0 与 `mineflayer-tool` 1.2.0（均 MIT，官方 npm Registry，精确版本+完整性哈希记入 SECURITY.md）；插件不直接暴露给 AI 或任务层，仅经技能接口包装。
 
 ### 新增（较早）
@@ -76,8 +81,8 @@
 - Runtime ↔ Coordinator 已通过真实双进程回环验收，Dashboard → Control API → Coordinator → 测试专用 Runtime 已通过四进程服务级回环验收；后者没有连接 Minecraft，也不等同于浏览器 E2E 或正式服务器验收。
 - Control Link 当前只支持同机回环，状态、停止幂等缓存和审计仍在内存中；跨主机 TLS、密钥轮换、用户登录和持久化停止审计尚未完成。
 - 本机未检测到 PostgreSQL、Redis 或 Docker；2026-07-28 的 GitHub Actions 运行 `30315095898` 已通过真实临时 PostgreSQL/Redis 集成门，该结果不代表生产服务在线。
-- 当前提供可嵌入 Worker 库和 Coordinator 过期租约恢复控制器，尚未提供独立生产 Worker 应用、Coordinator 任务基础设施启动配置、任务 Control API 或 Dashboard 任务看板。
-- 当前已实现事务 outbox、PostgreSQL→BullMQ 对账、显式失败重派和自动过期租约恢复，但本机没有 PostgreSQL/Redis；新增升级、回滚、并发对账、异常封存和恢复场景已在 2026-08-11 GitHub Actions 运行 `31480434428` 的真实 PostgreSQL/Redis 门禁中 18/18 通过。持久取消消费和跨 Worker 取消仍未完成。
+- 当前提供可嵌入 Worker 库、Coordinator 过期租约恢复控制器和仅供隔离验收的独立 Worker 应用；尚未提供生产 Worker 配置/处理器、Coordinator 任务基础设施启动配置、任务 Control API 或 Dashboard 任务看板。
+- 当前已实现事务 outbox、PostgreSQL→BullMQ 对账、显式失败重派、自动过期租约恢复和跨 Worker 持久取消，但本机没有 PostgreSQL/Redis；截至 2026-08-11 的升级、回滚、并发对账、异常封存和恢复场景已在 GitHub Actions 运行 `31480434428` 的真实门禁中 18/18 通过，本分支新增取消场景尚待 CI。
 - 任务处理器是受信任的进程内代码，并非强隔离沙盒；不合作响应 `AbortSignal` 的代码在失去租约后仍可能继续运行自身副作用，硬终止需后续独立进程隔离。
 - 没有注册生产任务处理器，本模块不会执行模型输出，也不会连接 Minecraft。
 
