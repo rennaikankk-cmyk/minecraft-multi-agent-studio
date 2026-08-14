@@ -227,7 +227,7 @@
 - 处理器是预先审核的受信任进程内代码，并非沙盒；严格队列消息阻止消息携带代码，但不能约束开发者主动注册的 Node.js 处理器。Worker 不会因不合作处理器而无限持有租约，但忽略 `AbortSignal` 的代码可能在失去租约后继续运行自身副作用，硬终止需要后续独立进程隔离。
 - 隔离基础设施配置只接受回环地址、专用数据库 Schema 和严格 Redis 前缀；测试清理不使用 `FLUSHALL`，也不会连接 Minecraft。独立 `task-worker` 还要求显式 `isolated-test` purpose 与固定验收处理器 profile；缺失任一边界即拒绝启动，日志不写连接 URL。
 - 事务 outbox 和对账器提供至少一次重建，不构成 PostgreSQL 与 Redis 的跨系统原子提交，也不得声称 exactly-once。跨 Worker 持久取消只保证任务事实与协作式 `AbortSignal`；独立 Worker 内的处理器仍非强隔离沙盒。
-- 当前代码和 CI 流程已经接入 BullMQ/Redis/PostgreSQL 测试边界，本机没有运行这些服务；本分支新增的跨 Worker 和独立进程取消场景等待真实临时服务 CI。该结果不得扩张解释为生产基础设施在线或生产 Worker 已可用。
+- 当前代码和 CI 流程已经接入 BullMQ/Redis/PostgreSQL 测试边界，本机没有运行这些服务；2026-08-14 GitHub Actions 运行 `31793333384` 的 20 项真实场景全部通过，包括跨 Worker 和独立进程取消。该结果不得扩张解释为生产基础设施在线或生产 Worker 已可用。
 
 ## 15. 漏洞报告
 

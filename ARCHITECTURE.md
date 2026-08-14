@@ -336,6 +336,6 @@ PostgreSQL ← parameterized transaction + revision + append-only history
 
 取消方先写 PostgreSQL 请求，不需要与租约所有者处于同一 Worker。租约所有者以有界间隔轮询、确认、传播 `AbortSignal` 并原子写入 cancelled；已持久化取消会阻止新租约以及 completed/failed/expired/requeue 等竞争变更。租约过期时，Coordinator 恢复循环先解析取消，再决定是否重派或失败。独立 Worker 进程不等于处理器沙盒：处理器仍是 Worker 进程内的受信任代码，忽略信号的代码可能在失去租约后继续运行自身副作用。
 
-真实基础设施测试只接受本机回环 PostgreSQL/Redis、专用 PostgreSQL Schema 和独立 Redis 前缀；清理范围不超过这些测试命名空间，也不连接 Minecraft。GitHub Actions 使用固定镜像摘要的临时服务执行迁移、并发重放/领取、outbox 对账、租约恢复、队列去重、续租、取消、超时和显式重投场景。跨 Worker 与独立进程取消场景在本分支等待 CI；该结果无论通过与否都只证明隔离集成边界，不代表生产基础设施在线。
+真实基础设施测试只接受本机回环 PostgreSQL/Redis、专用 PostgreSQL Schema 和独立 Redis 前缀；清理范围不超过这些测试命名空间，也不连接 Minecraft。GitHub Actions 使用固定镜像摘要的临时服务执行迁移、并发重放/领取、outbox 对账、租约恢复、队列去重、续租、取消、超时和显式重投场景。2026-08-14 运行 `31793333384` 的 20 项真实场景全部通过，包括跨 Worker 与独立进程取消；该结果只证明隔离集成边界，不代表生产基础设施在线。
 
 当前缺少 Coordinator 任务基础设施启动编排、生产处理器注册、任务 API、Dashboard 任务看板和生产部署。事务 outbox 与 BullMQ 之间仍是至少一次投递，不得声称 exactly-once；跨 Worker 持久取消也不构成对不合作处理器的硬终止保证。
