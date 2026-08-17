@@ -2,7 +2,7 @@
 
 面向 Minecraft Java 版多智能体机器人的硬件无关控制平台。
 
-当前已完成项目基线、真实环境检测、版本化 Bot 状态协议、单 Bot 隔离联机验收、Minecraft 版本自适应、Runtime ↔ Coordinator 认证链路、Control API/Dashboard 四进程服务链路、确定性 L0 安全层、受限 Pathfinder 技能，以及 P1.3 任务持久化基础：
+当前已完成项目基线、真实环境检测、版本化 Bot 状态协议、单 Bot 隔离联机验收、Minecraft 版本自适应、多版本 Skill 可用性解析、Runtime ↔ Coordinator 认证链路、Control API/Dashboard 四进程服务链路、确定性 L0 安全层、受限 Pathfinder 技能，以及 P1.3 任务持久化基础：
 
 - 自动检测当前 CPU、内存、操作系统和 GPU 探测状态。
 - 检测 Node.js、Java、Docker 和 Git 是否可用。
@@ -17,11 +17,13 @@
 - 安全停止要求可信授权、幂等命令 ID、审计、超时和 Runtime 确认结果。
 - Control API 已提供认证列表、详情、WebSocket 状态流和受权优雅停止入口；生产入口通过双向 HMAC 的本机 Control Link 获取 Coordinator 原子状态快照并转发停止请求，链路未就绪或断开时返回 `503 CONTROL_UNAVAILABLE`。
 - 安全停止要求弹窗二次确认、本地确认码、`bot.stop` 权限和 Runtime 真实确认结果。
-- Bot 可对批准的隔离服务器自动探测 Minecraft 版本，并上报真实兼容状态。
+- Bot 可对批准的隔离服务器自动探测 Minecraft 版本，并上报真实版本、协议号、主版本和兼容状态。
+- Runtime 按当前连接实际暴露的 feature、物品、方块、实体和经批准的服务端能力探针解析 Skill 变体；通用 Skill 不会因为服务器版本不同被一刀切禁用，新版本特色 Skill 只在依赖能力真实存在时可用。
 - Runtime Link 双进程链路和 Dashboard → Control API → Coordinator → Bot Runtime 四进程服务链路均可用同一追踪编号核对结构化日志；四进程验收使用测试专用 Runtime fixture，不连接 Minecraft，也不替代浏览器 E2E。
 - L0 安全层从真实 Mineflayer 状态识别饥饿、低/危急生命值、溺水、岩浆、坠落、卡死和背包满，并执行固定白名单动作。
 - `movement.goto@1.0.0` 通过受限 Pathfinder 适配器移动，不允许挖掘、搭塔、垫方块或跑酷。
-- 任务系统提供 PostgreSQL 迁移、严格状态机、幂等键、乐观修订号、租约边界、版本化处理器契约、严格派发协议和 BullMQ Worker。
+- 任务系统提供 PostgreSQL 迁移、严格状态机、幂等键、乐观修订号、租约边界、事务 outbox、自动对账/过期租约恢复、持久取消、严格派发协议和 BullMQ Worker。
+- `apps/task-worker` 提供独立 Node 进程验收入口；当前只接受显式隔离测试配置并注册 `isolated.acceptance.wait@1.0.0`，不包含生产处理器，也不连接 Minecraft。
 - 隔离 PostgreSQL/Redis 集成测试已于 2026-07-28 在 GitHub Actions 真实临时服务中通过；本机没有运行这些服务时不会冒充本机服务在线。
 
 当前项目是单 Bot 安全执行与任务基础设施，不是已经完成的多智能体产品。Runtime ↔ Coordinator 已通过双进程验收，Dashboard → Control API → Coordinator → Runtime 已通过不连接 Minecraft 的四进程服务级验收。Control Link 不可用时不会沿用旧快照：Control API 返回 503，Dashboard 清空 Bot 列表并明确显示错误。
@@ -114,6 +116,14 @@ pnpm bot:start
 - 当前锁定的 Mineflayer 4.37.1 声明测试范围为 1.8.8 至 1.21.11，共 27 个测试版本。
 - 自动协商成功但未列入测试清单时标记 `compatible-untested`，不会冒充“已测试”。
 - 超出支持范围时标记 `unsupported` 并停止自动重连。
+
+多版本 Skill 策略：
+
+- Skill 的 SemVer 是执行契约版本，不等于 Minecraft 版本。每个定义另带有序兼容变体；Runtime 使用连接后真实协商出的 `minecraftVersion`、`protocolVersion`、`majorVersion` 和 registry/feature 能力选择第一个满足条件的变体。
+- 当前六个已注册 Skill 声明为 `portable` 通用变体，因此不会仅因版本号不同被禁用；“可用性”和“实机验证状态”分开上报，它们在跨版本真实场景矩阵完成前仍标记为 `unverified`。
+- 新版本特色 Skill 应声明所需 feature、物品/方块/实体及必要的服务端能力。缺少资源时标记 `unavailable`；服务端能力尚未经过显式探针时标记 `unknown` 并拒绝执行，不按版本号猜测。
+- 当前通用输入仍使用目标版本 registry 的原生名称，例如旧版本和新版本的原木 ID 可能不同。兼容层已经支持有序资源变体，但面向规划器的跨版本语义资源别名仍是下一模块。
+- 回环协议夹具已验证 `minecraftVersion: "auto"` 能分别协商 1.8.8、1.12.2、1.16.5 和 1.21.11，并得到对应协议号；该测试不连接外部服务器，也不等于六个 Skill 已在四个版本真实执行。
 
 ## 真实联机验收
 
@@ -289,7 +299,7 @@ Dashboard 的 Bot 卡片显示真实 L0 状态。旧 Runtime 未上报该字段�
 
 ## Pathfinder 确定性技能
 
-当前仅注册 [`movement.goto@1.0.0`](SKILLS.md)。目标必须与 Bot 当前 ServerProfile 和维度一致，距离最多 64 格，半径 1～4 格，超时 20 秒。L0 暂停、Runtime 停止、断线或取消会停止寻路。
+当前已注册的六个确定性 Skill 见 [`SKILLS.md`](SKILLS.md)。其中 `movement.goto@1.0.0` 的目标必须与 Bot 当前 ServerProfile 和维度一致，距离最多 64 格，半径 1～4 格，超时 20 秒。L0 暂停、Runtime 停止、断线或取消会停止寻路。
 
 该技能已通过离线测试，但尚未在真实隔离服运行路径场景和跨版本矩阵，因此不能视为实机寻路验收完成。
 
@@ -299,7 +309,9 @@ Dashboard 的 Bot 卡片显示真实 L0 状态。旧 Runtime 未上报该字段�
 
 Worker 只接受 `TaskDispatchV1` 严格消息和预先注册的精确版本任务处理器；任务、派发和注册表中的处理器版本与幂等策略必须完全一致。消息中的文本、代码、Shell、URL 或未知字段不会执行。PostgreSQL 是任务事实源，Redis 只保存队列和临时 Worker 状态。BullMQ 自身不代替领域重试预算。
 
-活动取消、超时和截止时间先传播 `AbortSignal`；即使受信任处理器不合作，Worker 也会停止等待、停止续租并按数据库权威时间释放持久租约。任务处理器当前仍与 Worker 运行在同一 Node.js 进程，并非强隔离沙盒，因此已失去租约的处理器代码仍可能继续执行自身副作用，后续必须通过独立进程隔离获得硬终止能力。旧 job 的恢复仅在显式 BullMQ 重投、原租约已过期、Bot 归属匹配、持久化处理器版本/幂等策略与当前注册表一致且 PostgreSQL 重试预算仍有余额时允许。当前还没有 outbox、自动 PostgreSQL→BullMQ 对账重投或跨 Worker 取消 API。
+取消请求先以不可覆盖的操作身份写入 PostgreSQL；持有租约的 Worker 轮询、确认并传播 `AbortSignal`，任务完成、失败、截止时间和租约恢复在同一任务行锁之后必须让已持久化的取消优先。发起取消的 Worker 不需要拥有执行租约；原 Worker 失联且租约过期后，调用方或 Coordinator 恢复循环可完成取消。超时和截止时间同样按数据库权威时间持久化终态。
+
+事务 outbox、PostgreSQL→BullMQ 有界对账、自动过期租约恢复和跨 Worker 持久取消已经实现。`apps/task-worker` 将 Worker 与控制平面分成独立进程，但处理器仍是该 Worker 进程内的受信任代码，并非每任务强隔离沙盒；忽略 `AbortSignal` 的处理器在 Worker 放弃等待后仍可能继续执行自身副作用。旧 job 的恢复仅在显式 BullMQ 重投、原租约已过期、Bot 归属匹配、持久化处理器版本/幂等策略与当前注册表一致且 PostgreSQL 重试预算仍有余额时允许。
 
 本机没有配置 PostgreSQL/Redis 时，普通 `pnpm check` 只运行离线测试。真实基础设施测试使用专用数据库 Schema 和 Redis 前缀，拒绝非回环地址，也不会执行 `FLUSHALL` 或连接 Minecraft。该命令不会下载或启动 PostgreSQL/Redis；准备好已运行的隔离服务后执行：
 
@@ -310,7 +322,7 @@ $env:TASK_INFRA_TEST_NAMESPACE='studio_test_local_unique01'
 pnpm test:task-infra
 ```
 
-三个变量缺少任意一个时命令会失败，不会静默跳过。GitHub Actions 使用固定摘要的临时 PostgreSQL/Redis 服务完成同一组测试，2026-07-28 的运行 `30315095898` 已通过。该结果证明隔离集成边界，不代表生产基础设施在线；Coordinator 调度入口、outbox/自动对账重投、跨 Worker 取消、任务 Control API、Dashboard 任务看板和生产基础设施仍待后续模块接入。
+三个变量缺少任意一个时命令会失败，不会静默跳过。测试会构建并启动独立 `task-worker` 子进程，但强制注入 `TASK_WORKER_PURPOSE=isolated-test` 与 `TASK_WORKER_HANDLER_PROFILE=isolated-acceptance`，不会连接 Minecraft。GitHub Actions 使用固定摘要的临时 PostgreSQL/Redis 服务完成同一组测试；2026-08-14 运行 `31793333384` 的 20 项真实基础设施场景全部通过，包括跨 Worker 与独立进程取消。该边界不代表生产基础设施在线；Coordinator 任务启动编排、生产任务处理器、任务 Control API 和 Dashboard 任务看板仍待后续模块接入。
 
 ## 安全说明
 

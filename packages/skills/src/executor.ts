@@ -17,6 +17,7 @@ import {
 import { SkillAbortError, SkillFault, SkillFrameworkError } from "./errors.js";
 import { SkillRegistry } from "./registry.js";
 import type {
+  SkillCompatibilityEnvironment,
   SkillExecutionAuthorization,
   SkillExecutionContext,
   SkillExecutorOptions,
@@ -82,6 +83,7 @@ export class SkillExecutor {
     authorization: SkillExecutionAuthorization,
     state: unknown,
     externalSignal?: AbortSignal,
+    compatibilityEnvironment: SkillCompatibilityEnvironment | null = null,
   ): Promise<SkillExecutionResultV1> {
     const parsed = skillInvocationV1Schema.safeParse(input);
     if (!parsed.success) {
@@ -106,6 +108,21 @@ export class SkillExecutor {
     );
     if (authorizationError) {
       return this.result(invocation, "rejected", 0, undefined, authorizationError);
+    }
+
+    const compatibility = this.registry.resolveCompatibility(
+      definition.id,
+      definition.version,
+      compatibilityEnvironment,
+    );
+    if (!compatibility || compatibility.availability === "unavailable") {
+      return this.result(
+        invocation,
+        "rejected",
+        0,
+        undefined,
+        "SKILL_VERSION_UNAVAILABLE",
+      );
     }
 
     const parsedInput = definition.inputSchema.safeParse(invocation.payload.input);
@@ -183,6 +200,12 @@ export class SkillExecutor {
         botId: invocation.botId,
         signal: controller.signal,
         deadlineMs,
+        compatibility: Object.freeze({
+          minecraftVersion: compatibility.minecraftVersion,
+          protocolVersion: compatibility.protocolVersion,
+          variantId: compatibility.selectedVariantId!,
+          verification: compatibility.verification,
+        }),
         callCapability: async <TOutput extends SkillJsonValue = SkillJsonValue>(
           capability: SkillCapability,
           operation: string,

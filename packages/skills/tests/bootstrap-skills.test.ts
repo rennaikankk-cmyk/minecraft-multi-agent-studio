@@ -5,6 +5,7 @@ import {
   containerTransferSkill,
   craftItemSkill,
   placeBlockSkill,
+  smeltItemSkill,
   SkillExecutor,
   SkillRegistry,
   type SkillExecutionAuthorization,
@@ -95,6 +96,7 @@ function makeExecutor(invoke = vi.fn()) {
   registry.register(craftItemSkill);
   registry.register(placeBlockSkill);
   registry.register(containerTransferSkill);
+  registry.register(smeltItemSkill);
   return {
     invoke,
     executor: new SkillExecutor(registry, {
@@ -392,3 +394,57 @@ describe("container.transfer@1.0.0", () => {
     expect(run.invoke).not.toHaveBeenCalled();
   });
 });
+
+describe("smelt.item@1.0.0", () => {
+  const input = {
+    inputItemName: "raw_iron",
+    fuelItemName: "coal",
+    fuelCount: 1,
+    count: 5,
+    furnace: { x: 2, y: 64, z: 0 },
+    dimension: DIMENSION,
+    serverProfileId: SERVER,
+  };
+
+  it("smelts through the bounded craft capability and reports read-back output", async () => {
+    const adapter = vi.fn(async () => ({
+      inputItemName: "raw_iron",
+      fuelItemName: "coal",
+      outputItemName: "iron_ingot",
+      requestedCount: 5,
+      insertedFuelCount: 1,
+      smeltedCount: 5,
+    }));
+    const run = makeExecutor(adapter);
+    const invocation = makeInvocation("smelt.item", input);
+    const result = await run.executor.execute(
+      invocation,
+      makeAuthorization(invocation, ["craft.execute"]),
+      state,
+    );
+    expect(result.payload).toMatchObject({
+      outcome: "completed",
+      output: { outputItemName: "iron_ingot", smeltedCount: 5 },
+    });
+    expect(adapter).toHaveBeenCalledWith(expect.objectContaining({
+      capability: "craft.execute",
+      operation: "smelt.item-safe",
+    }));
+  });
+
+  it("rejects an out-of-reach furnace before capability execution", async () => {
+    const run = makeExecutor();
+    const invocation = makeInvocation("smelt.item", {
+      ...input,
+      furnace: { x: 50, y: 64, z: 50 },
+    });
+    const result = await run.executor.execute(
+      invocation,
+      makeAuthorization(invocation, ["craft.execute"]),
+      state,
+    );
+    expect(result.payload.errorCode).toBe("FURNACE_OUT_OF_REACH");
+    expect(run.invoke).not.toHaveBeenCalled();
+  });
+});
+

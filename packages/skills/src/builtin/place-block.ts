@@ -106,6 +106,11 @@ export const placeBlockSkill = defineSkill({
   inputSchema: placeBlockInputSchema,
   outputSchema: placeBlockOutputSchema,
   stateSchema: placeBlockStateSchema,
+  compatibility: {
+    variants: [
+      { id: "portable", requirements: [], verifiedMinecraftVersions: [] },
+    ],
+  },
   requiredCapabilities: ["world.interact"] as const,
   timeoutMs: PLACE_BLOCK_TIMEOUT_MS,
   // 重复放置同一目标位要么已被占用失败、要么消耗第二个方块，禁止自动重试。

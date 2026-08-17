@@ -1,4 +1,5 @@
 import {
+  minecraftVersionStringSchema,
   skillCapabilitySchema,
   skillErrorCodeSchema,
   skillIdentifierSchema,
@@ -7,7 +8,13 @@ import {
 import { z } from "zod";
 
 import { SkillFrameworkError } from "./errors.js";
-import type { SkillDefinition, SkillMetadata } from "./types.js";
+import { resolveSkillCompatibility } from "./compatibility.js";
+import type {
+  SkillCompatibilityEnvironment,
+  SkillCompatibilityResolution,
+  SkillDefinition,
+  SkillMetadata,
+} from "./types.js";
 
 type StoredSkillDefinition = SkillDefinition<unknown, unknown, unknown>;
 
@@ -37,10 +44,76 @@ const preconditionMetadataSchema = z
   })
   .strict();
 
+const compatibilityNameSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u);
+
+const compatibilityRequirementSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("feature"),
+      name: compatibilityNameSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("resource"),
+      resource: z.enum(["item", "block", "entity"]),
+      names: z
+        .array(
+          z
+            .string()
+            .min(1)
+            .max(128)
+            .regex(/^[a-z0-9_]+$/u),
+        )
+        .min(1)
+        .max(32)
+        .refine((values) => new Set(values).size === values.length),
+      match: z.enum(["any", "all"]),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("server-capability"),
+      name: compatibilityNameSchema,
+    })
+    .strict(),
+]);
+
+const compatibilityManifestSchema = z
+  .object({
+    variants: z
+      .array(
+        z
+          .object({
+            id: skillIdentifierSchema,
+            requirements: z
+              .array(compatibilityRequirementSchema)
+              .max(16),
+            verifiedMinecraftVersions: z
+              .array(minecraftVersionStringSchema)
+              .max(64)
+              .refine((values) => new Set(values).size === values.length),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(8)
+      .refine(
+        (variants) =>
+          new Set(variants.map(({ id }) => id)).size === variants.length,
+      ),
+  })
+  .strict();
+
 const definitionMetadataSchema = z
   .object({
     id: skillIdentifierSchema,
     version: skillVersionSchema,
+    compatibility: compatibilityManifestSchema,
     requiredCapabilities: z
       .array(skillCapabilitySchema)
       .max(16)
@@ -88,6 +161,7 @@ export class SkillRegistry {
     const metadata = definitionMetadataSchema.safeParse({
       id: definition.id,
       version: definition.version,
+      compatibility: definition.compatibility,
       requiredCapabilities: definition.requiredCapabilities,
       timeoutMs: definition.timeoutMs,
       idempotent: definition.idempotent,
@@ -116,6 +190,30 @@ export class SkillRegistry {
 
     const stored = Object.freeze({
       ...definition,
+      compatibility: Object.freeze({
+        variants: Object.freeze(
+          metadata.data.compatibility.variants.map((variant) =>
+            Object.freeze({
+              ...variant,
+              requirements: Object.freeze(
+                variant.requirements.map((requirement) =>
+                  Object.freeze(
+                    requirement.kind === "resource"
+                      ? {
+                          ...requirement,
+                          names: Object.freeze([...requirement.names]),
+                        }
+                      : { ...requirement },
+                  ),
+                ),
+              ),
+              verifiedMinecraftVersions: Object.freeze([
+                ...variant.verifiedMinecraftVersions,
+              ]),
+            }),
+          ),
+        ),
+      }),
       requiredCapabilities: Object.freeze([
         ...metadata.data.requiredCapabilities,
       ]),
@@ -141,12 +239,40 @@ export class SkillRegistry {
     return this.definitions.get(key(parsedId.data, parsedVersion.data)) ?? null;
   }
 
+  resolveCompatibility(
+    id: string,
+    version: string,
+    environment: SkillCompatibilityEnvironment | null,
+  ): SkillCompatibilityResolution | null {
+    const definition = this.resolve(id, version);
+    return definition
+      ? resolveSkillCompatibility(definition, environment)
+      : null;
+  }
+
+  listCompatibility(
+    environment: SkillCompatibilityEnvironment | null,
+  ): readonly SkillCompatibilityResolution[] {
+    return Object.freeze(
+      [...this.definitions.values()]
+        .map((definition) =>
+          resolveSkillCompatibility(definition, environment),
+        )
+        .sort((left, right) =>
+          `${left.skillId}@${left.skillVersion}`.localeCompare(
+            `${right.skillId}@${right.skillVersion}`,
+          ),
+        ),
+    );
+  }
+
   list(): readonly SkillMetadata[] {
     return [...this.definitions.values()]
       .map((definition) =>
         Object.freeze({
           id: definition.id,
           version: definition.version,
+          compatibility: definition.compatibility,
           requiredCapabilities: Object.freeze([
             ...definition.requiredCapabilities,
           ]),

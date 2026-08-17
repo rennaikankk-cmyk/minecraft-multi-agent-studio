@@ -23,11 +23,15 @@ import {
   craftItemCapabilityOutputSchema,
   placeBlockCapabilityInputSchema,
   placeBlockCapabilityOutputSchema,
+  smeltItemCapabilityInputSchema,
+  smeltItemCapabilityOutputSchema,
   SAFE_PATH_MAX_DISTANCE,
   SkillFault,
   safeMovementGotoCapabilityInputSchema,
   safeMovementGotoCapabilityOutputSchema,
   type SkillCapabilityRequest,
+  type SkillCompatibilityEnvironment,
+  type SkillResourceKind,
 } from "@minecraft-studio/skills";
 
 import type {
@@ -458,6 +462,12 @@ export class MineflayerBotClient implements BotClient {
       return this.invokeCraftItem(request);
     }
     if (
+      request.capability === "craft.execute" &&
+      request.operation === "smelt.item-safe"
+    ) {
+      return this.invokeSmeltItem(request);
+    }
+    if (
       request.capability === "world.interact" &&
       request.operation === "block.place-safe"
     ) {
@@ -871,6 +881,88 @@ export class MineflayerBotClient implements BotClient {
     });
   }
 
+  /** 熔炼：只使用空熔炉，显式装入原料和燃料，逐次取出并读回真实产物。 */
+  private async invokeSmeltItem(
+    request: SkillCapabilityRequest,
+  ): Promise<unknown> {
+    const input = smeltItemCapabilityInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    this.assertDimensionMatch(input.data.dimension);
+
+    const registry = this.bot.registry as unknown as {
+      itemsByName?: Record<string, { id: number } | undefined>;
+    };
+    const inputType = registry.itemsByName?.[input.data.inputItemName];
+    const fuelType = registry.itemsByName?.[input.data.fuelItemName];
+    if (!inputType || !fuelType) throw new SkillFault("ITEM_NAME_UNKNOWN");
+    if (this.countInventoryItem(input.data.inputItemName) < input.data.count) {
+      throw new SkillFault("SMELT_INPUT_INSUFFICIENT");
+    }
+    if (this.countInventoryItem(input.data.fuelItemName) < input.data.fuelCount) {
+      throw new SkillFault("SMELT_FUEL_INSUFFICIENT");
+    }
+
+    const { x, y, z } = input.data.furnace;
+    const block = this.bot.blockAt(new Vec3(x, y, z));
+    if (!block || !["furnace", "blast_furnace", "smoker"].includes(block.name)) {
+      throw new SkillFault("FURNACE_NOT_FOUND");
+    }
+
+    let furnace: Awaited<ReturnType<Bot["openFurnace"]>> | null = null;
+    let outputItemName: string | null = null;
+    let smeltedCount = 0;
+    try {
+      furnace = await this.bot.openFurnace(block);
+      if (furnace.inputItem() || furnace.fuelItem() || furnace.outputItem()) {
+        throw new SkillFault("FURNACE_NOT_EMPTY");
+      }
+      if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      await furnace.putInput(inputType.id, null, input.data.count);
+      await furnace.putFuel(fuelType.id, null, input.data.fuelCount);
+
+      while (smeltedCount < input.data.count) {
+        if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+        const output = furnace.outputItem();
+        if (output) {
+          outputItemName ??= output.name;
+          if (output.name !== outputItemName) throw new SkillFault("FURNACE_OUTPUT_MISMATCH");
+          const taken = await furnace.takeOutput();
+          smeltedCount += taken.count;
+          continue;
+        }
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(finish, 250);
+          const onAbort = () => finish(new SkillFault("SKILL_CANCELLED"));
+          const onUpdate = () => finish();
+          function finish(error?: Error) {
+            clearTimeout(timer);
+            furnace?.removeListener("update", onUpdate);
+            request.signal.removeEventListener("abort", onAbort);
+            error ? reject(error) : resolve();
+          }
+          furnace?.once("update", onUpdate);
+          request.signal.addEventListener("abort", onAbort, { once: true });
+        });
+      }
+    } catch (error) {
+      if (error instanceof SkillFault) throw error;
+      if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      throw new SkillFault("SMELT_FAILED");
+    } finally {
+      try { furnace?.close(); } catch { /* closing never fabricates success */ }
+    }
+    if (!outputItemName || smeltedCount < 1) throw new SkillFault("SMELT_OUTPUT_NOT_CONFIRMED");
+    return smeltItemCapabilityOutputSchema.parse({
+      inputItemName: input.data.inputItemName,
+      fuelItemName: input.data.fuelItemName,
+      outputItemName,
+      requestedCount: input.data.count,
+      insertedFuelCount: input.data.fuelCount,
+      smeltedCount,
+    });
+  }
+
   /** 放置方块：原生 placeBlock，放置后读回目标位校验，不伪造成功。 */
   private async invokePlaceBlock(
     request: SkillCapabilityRequest,
@@ -1019,7 +1111,60 @@ export class MineflayerBotClient implements BotClient {
   }
 
   versionCompatibility() {
-    return resolvedVersionCompatibility(this.configuredVersion, this.bot.version);
+    const protocolVersion = Number(this.bot.protocolVersion);
+    return resolvedVersionCompatibility(
+      this.configuredVersion,
+      this.bot.version,
+      protocolVersion,
+      this.bot.majorVersion,
+    );
+  }
+
+  skillCompatibilityEnvironment(): SkillCompatibilityEnvironment {
+    const registry = this.bot.registry as unknown as {
+      supportFeature?: (name: string) => boolean;
+      itemsByName?: Record<string, unknown>;
+      blocksByName?: Record<string, unknown>;
+      entitiesByName?: Record<string, unknown>;
+    };
+    const resources: Readonly<
+      Record<SkillResourceKind, Record<string, unknown> | undefined>
+    > = {
+      item: registry.itemsByName,
+      block: registry.blocksByName,
+      entity: registry.entitiesByName,
+    };
+    const protocolVersion = Number(this.bot.protocolVersion);
+    if (
+      typeof this.bot.version !== "string" ||
+      !Number.isSafeInteger(protocolVersion)
+    ) {
+      throw new Error("Mineflayer compatibility facts are unavailable.");
+    }
+    return Object.freeze({
+      minecraftVersion: this.bot.version,
+      protocolVersion,
+      supportsFeature: (name: string): boolean | undefined => {
+        if (typeof registry.supportFeature !== "function") return undefined;
+        try {
+          const supported = registry.supportFeature(name);
+          return typeof supported === "boolean" ? supported : undefined;
+        } catch {
+          return undefined;
+        }
+      },
+      hasResource: (
+        kind: SkillResourceKind,
+        name: string,
+      ): boolean | undefined => {
+        const index = resources[kind];
+        return index ? index[name] !== undefined : undefined;
+      },
+      // Server-side plugins and rules can disable mechanics that exist in the
+      // negotiated protocol. Those facts stay unknown until an explicit,
+      // approved probe records them; version alone must not fabricate support.
+      serverCapability: (): undefined => undefined,
+    });
   }
 
   async close(gracePeriodMs: number): Promise<void> {
@@ -1128,3 +1273,4 @@ export function createMineflayerOptions(profile: ServerProfile) {
     logErrors: false,
   };
 }
+

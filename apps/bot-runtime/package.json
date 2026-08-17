@@ -25,6 +25,7 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@types/ws": "8.18.1"
+    "@types/ws": "8.18.1",
+    "minecraft-protocol": "1.66.2"
   }
 }

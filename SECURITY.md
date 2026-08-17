@@ -48,6 +48,7 @@
 - 浏览器验收使用官方 npm Registry 的 Playwright Test 1.61.1（Apache-2.0），完整性为 `sha512-8nKv6+0RJSL9FE4jYOEGXnPeM/Hg12qZpmqzZjRh3qM0Y7c3z1mrOTfFLids72RDQYVh9WpLEfR5WdpNX4fkig==`；本机验收复用已安装 Edge，未自动下载浏览器。
 - 安全寻路使用 PrismarineJS 官方 `mineflayer-pathfinder` 2.4.5（MIT），来源为官方 npm Registry，完整性为 `sha512-Jh3JnUgRLwhMh2Dugo4SPza68C41y+NPP5sdsgxRu35ydndo70i1JJGxauVWbXrpNwIxYNztUw78aFyb7icw8g==`。
 - 方块采集使用 PrismarineJS 官方 `mineflayer-collectblock` 1.6.0（MIT），来源为官方 npm Registry，完整性为 `sha512-8UUmLTSIanolxEsLPSex2VG3l/QJQq9QK/JUhn00jtKqTMHyfASI6DzRj2omJ6XC0lbOli9w9+0plmuxG9sSOw==`；工具自动选择使用其依赖 `mineflayer-tool` 1.2.0（MIT），完整性为 `sha512-TRd7JOX4obJnzqzVi+4MLKmbeeCDjp9taerLKM8+AGpWfgtdbAguGmsr3BHu+TdXxOIT05veYecCv77S3KX6PA==`。两者均通过技能接口包装（`collect.block@1.0.0`），插件不直接暴露给 AI 或任务层。
+- 多版本握手夹具直接使用 PrismarineJS 官方 `minecraft-protocol` 1.66.2（BSD-3-Clause），来源为官方 npm Registry，完整性为 `sha512-keY1IY1E2AeurcekCfcXrg0TDbykGVFiMe1E4wR8QkNtQRieNwfr2xaF3g3vT9ChkwzvENqp3jxgmtFCKSUKPg==`；它只作为 Bot Runtime 开发依赖启动随机回环端口测试服务器，不进入生产 Runtime 依赖或连接外部目标。
 - Dashboard 使用 Next.js 16.2.11（MIT），完整性为 `sha512-B339zaqbyK8cmxhoAvLrcwoabwCP1wz21zSzfqxqXAemTu2BXnH7tQnfcglKv1vnMUIDBc+Hth7XODQriTZiRQ==`。
 - Next.js 间接依赖 PostCSS 覆盖为 8.5.23（MIT），完整性为 `sha512-g50586zr4bZmwFiTlflMu8E0bDTb5I5gertgwAKmsdUlTQIhZtunzUlD1WSzwcVWPoAVpsrA6vlfCD7oXvRwgg==`；Sharp 覆盖为 0.35.0（核心包 Apache-2.0，Windows x64 平台包声明 Apache-2.0 AND LGPL-3.0-or-later），完整性为 `sha512-BqvG5XbwPZ4NV0DK90d86leEECMsoa8bO0nqnKWlBDYxri4GJ7c4EDInaF6q20lTh/mATmnDIKWJFfXnoVfH5g==`。
 - 任务队列使用官方 npm Registry 的 BullMQ 5.81.2（MIT），完整性为 `sha512-Hi9GaVCC6HE9bQP65j/FNv1aL1fcEukTF99ezS5pl1Ud+joCFpNWiPCV45mWdkEmpuacS0XJdMMFGKPIHCwoPg==`。
@@ -161,7 +162,7 @@
 - `purpose` 只能是 `isolated-test`，`auth` 当前只能是 `offline`。
 - `minecraftVersion=auto` 只对 ServerProfile 已批准的单一目标执行协议探测，不发现、扫描或尝试其他服务器。
 - 固定版本必须存在于当前安装 Mineflayer 的真实 `testedVersions` 清单中，不接受手写的未知固定版本。
-- 自动探测成功后上报真实解析版本和兼容等级；不能解析时明确上报 `unsupported`，不填造版本。
+- 自动探测成功后上报真实解析版本、协议号、主版本和兼容等级；不能解析时明确上报 `unsupported`，不填造版本。
 - 不支持版本是确定性错误，不自动重连；升级依赖后必须重新运行版本和真实隔离回归测试。
 - 目标只允许 loopback、RFC1918、链路本地/唯一本地 IPv6 或 `host.docker.internal`。
 - 公网 IP、任意域名、生产用途和配置内密码全部拒绝。
@@ -172,6 +173,7 @@
 - 真实联机验收脚本不会自动接受 Minecraft EULA，也不会自动下载依赖；缺少可信资产时立即停止。
 - 验收前必须校验 Minecraft 1.21.8 官方服务端 SHA-1，并强制 `server-ip=127.0.0.1`、关闭 RCON/Query 和在线认证。
 - 端口已被其他进程占用时拒绝复用或终止该进程，测试退出时只清理本次启动的子进程。
+- 多版本握手自动测试只在操作系统分配的回环端口创建临时协议服务器，当前覆盖 1.8.8、1.12.2、1.16.5 和 1.21.11；它不扫描网络、不读取 ServerProfile 密钥，也不声称验证真实玩法或反作弊行为。
 
 ## 11. 日志与指标边界
 
@@ -199,11 +201,13 @@
 - 技能 ID 和版本必须精确匹配注册表；禁止 `latest`、模糊匹配或静默降级。
 - 消息内授权只是引用，执行器必须与可信上下文中的来源、操作者、任务、Bot、调用、技能、版本和有效期逐项匹配。
 - 每个技能必须声明输入、输出、状态 Schema、确定性前置条件、能力清单、超时、幂等性和有界重试策略。
+- 每个技能必须声明有序兼容变体；解析只能读取已连接 Bot 的真实 feature/registry 和显式服务端能力探针。变体声明依赖的事实若未知则默认不可执行；无额外要求的 `portable` 变体不因版本标签不同被禁用，不能用版本字符串猜测能力。
+- Skill 可用性与版本实机验证状态必须分开；`available + unverified` 不得在 API、日志或前端改写成“该版本已验证”。
 - 非幂等技能最多执行一次；只有明确声明的稳定错误码可触发有限指数退避和抖动重试。
 - 技能只能调用同时存在于技能声明和可信授权集合中的能力；不存在 Shell、文件系统、任意网络、Docker、数据库管理员或模型执行能力。
 - 能力请求和响应必须为有界结构化 JSON；技能输出还要通过技能输出 Schema 与通用 JSON Schema 双重验证。
 - 超时或取消后执行器禁止新的能力调用，能力适配器必须遵守 `AbortSignal`。当前进程内 JavaScript 处理器不是强隔离沙盒，不能将忽略取消的代码标记为已强制终止。
-- 当前只注册 `movement.goto@1.0.0` 真实技能。目标必须匹配当前 ServerProfile 和维度，距离最多 64 格，半径 1～4 格，总超时 20 秒。
+- 当前注册六个真实技能；全部通过 `portable` 变体保持跨适配器支持版本可解析，但尚未完成跨版本实机技能矩阵。`movement.goto@1.0.0` 的目标必须匹配当前 ServerProfile 和维度，距离最多 64 格，半径 1～4 格，总超时 20 秒。
 - Pathfinder 适配器固定关闭挖掘、搭塔、垫方块、开门、跑酷、冲刺和超过 2 格的下落；不能由技能输入重新启用。
 - 同一 Bot 同时只允许一个 Pathfinder 调用。L0 暂停、Runtime 停止、断线和外部取消都会调用 `pathfinder.stop()`。
 - 当前只完成离线单元和 Runtime 集成测试，尚未在真实隔离服验证跨版本路径行为，前端不得显示“实机寻路已验收”。
@@ -218,15 +222,16 @@
 - R3/R4 任务在可信审批上下文尚未接入前一律禁止领取，不能依靠命令内字段自证批准。
 - `studio_tasks` 禁止直接删除，`studio_task_history` 禁止更新或删除。取消、失败和过期通过状态与历史表达。
 - 所有 SQL 使用固定语句和参数绑定，不拼接任务输入。唯一的动态 SQL 片段是源码固定的 `FOR UPDATE` 选择。
-- 两个迁移文件在真实测试运行前分别校验 SHA-256：`0001_task_system.sql` 为 `8a66af4a41c4a3d8d938e997ac5c96a3d3c644c3eec0b7d947f9b584a2bbfb3a`，`0002_task_lease_invariants.sql` 为 `5c1514a76f11b201e5eb95613441f77aaab49ce4e05da3182c21b173bb237a6c`。
+- 四个迁移文件在真实测试运行前分别校验 SHA-256：`0001_task_system.sql` 为 `8a66af4a41c4a3d8d938e997ac5c96a3d3c644c3eec0b7d947f9b584a2bbfb3a`，`0002_task_lease_invariants.sql` 为 `5c1514a76f11b201e5eb95613441f77aaab49ce4e05da3182c21b173bb237a6c`，`0003_task_delivery.sql` 为 `0c12859e03273ea6f3940cded8828989d7f82b6ed8208dfd40d31be1a29482b0`，`0004_task_delivery_hardening.sql` 为 `f4f5de71e67fbbd7037678127724ba5be6dbc939a6262f476dc35edd92f395f2`。
 - 队列只接受严格 `TaskDispatchV1`，job 名称和 ID 均由代码固定。消息不包含可执行代码、Shell、模型文本或 URL；Worker 只调用任务、派发和注册表三方处理器版本/幂等策略完全一致的确定性处理器。
 - Redis 只用于消息投递和 BullMQ 临时锁，不能覆盖 PostgreSQL 事实。BullMQ 固定 `attempts=1`，领域重试必须经过任务状态机、幂等处理器声明和持久化重试预算。
-- 活动取消、超时与截止时间先传播 `AbortSignal`；Worker 有界停止等待和续租，并使用 PostgreSQL 权威时钟写入 cancelled/failed/expired 终态。续租在最终状态提交前停止并等待，避免续租与完成并发修改同一修订号。
+- 取消意图先以唯一操作 ID 和指纹持久化；不同取消不得覆盖首个请求。租约所有者轮询并确认请求后传播 `AbortSignal`，再原子写入 cancelled。任务行锁保证已持久取消优先于新租约、完成、失败、截止时间和租约恢复；租约失效后只允许无租约解析者完成取消。
+- 超时与截止时间先传播 `AbortSignal`；Worker 有界停止等待和续租，并使用 PostgreSQL 权威时钟写入 failed/expired 终态。续租在最终状态提交前停止并等待，避免续租与完成并发修改同一修订号。
 - 旧 job 恢复只允许显式 BullMQ 重投，且原任务必须为租约已过期的 assigned/running 状态、Bot 归属匹配；running 任务还要求持久化的精确处理器版本与幂等策略匹配当前注册表，且重试预算未用尽。
 - 处理器是预先审核的受信任进程内代码，并非沙盒；严格队列消息阻止消息携带代码，但不能约束开发者主动注册的 Node.js 处理器。Worker 不会因不合作处理器而无限持有租约，但忽略 `AbortSignal` 的代码可能在失去租约后继续运行自身副作用，硬终止需要后续独立进程隔离。
-- 隔离基础设施配置只接受回环地址、专用数据库 Schema 和严格 Redis 前缀；测试清理不使用 `FLUSHALL`，也不会连接 Minecraft。
-- 当前没有事务 outbox、Redis 丢失后的自动队列重建、PostgreSQL→BullMQ reconciler 或跨 Worker 取消 API。数据库提交与入队不具备原子性，不得声称 exactly-once 或自动故障恢复。
-- 当前代码和 CI 流程已经接入 BullMQ/Redis/PostgreSQL 测试边界，本机没有运行这些服务；2026-07-28 的 GitHub Actions 运行 `30315095898` 已通过真实临时服务集成作业。该结果不得扩张解释为生产基础设施在线或已具备自动故障恢复。
+- 隔离基础设施配置只接受回环地址、专用数据库 Schema 和严格 Redis 前缀；测试清理不使用 `FLUSHALL`，也不会连接 Minecraft。独立 `task-worker` 还要求显式 `isolated-test` purpose 与固定验收处理器 profile；缺失任一边界即拒绝启动，日志不写连接 URL。
+- 事务 outbox 和对账器提供至少一次重建，不构成 PostgreSQL 与 Redis 的跨系统原子提交，也不得声称 exactly-once。跨 Worker 持久取消只保证任务事实与协作式 `AbortSignal`；独立 Worker 内的处理器仍非强隔离沙盒。
+- 当前代码和 CI 流程已经接入 BullMQ/Redis/PostgreSQL 测试边界，本机没有运行这些服务；2026-08-14 GitHub Actions 运行 `31793333384` 的 20 项真实场景全部通过，包括跨 Worker 和独立进程取消。该结果不得扩张解释为生产基础设施在线或生产 Worker 已可用。
 
 ## 15. 漏洞报告
 

@@ -112,8 +112,20 @@ class FakeBotClient implements BotClient {
       selection: "fixed" as const,
       requestedVersion: "1.21.8",
       resolvedVersion: "1.21.8",
+      protocolVersion: 772,
+      majorVersion: "1.21",
       supportLevel: "tested" as const,
       supportedRange: { oldest: "1.8.8", latest: "1.21.11" },
+    };
+  }
+
+  skillCompatibilityEnvironment() {
+    return {
+      minecraftVersion: "1.21.8",
+      protocolVersion: 772,
+      supportsFeature: () => false,
+      hasResource: () => false,
+      serverCapability: () => undefined,
     };
   }
 
@@ -251,6 +263,23 @@ describe("SingleBotRuntime", () => {
       },
     });
     expect(runtime.getState()).toBe("online");
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "bot.skill-catalog.v1",
+        payload: expect.objectContaining({
+          minecraftVersion: "1.21.8",
+          protocolVersion: 772,
+          skills: expect.arrayContaining([
+            expect.objectContaining({
+              skillId: "movement.goto",
+              availability: "available",
+              verification: "unverified",
+              selectedVariantId: "portable",
+            }),
+          ]),
+        }),
+      }),
+    );
     expect(runtime.getMetricsSnapshot()).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -266,6 +295,7 @@ describe("SingleBotRuntime", () => {
     runtime.publishCurrentState();
     expect(messages.slice(beforeRefresh).map(({ type }) => type)).toEqual([
       "bot.version.v1",
+      "bot.skill-catalog.v1",
       "bot.status.v1",
       "bot.heartbeat.v1",
     ]);
