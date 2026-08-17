@@ -51,6 +51,11 @@ function withinReach(target: { x: number; y: number; z: number }, position: { x:
 export const smeltItemSkill = defineSkill({
   id: "smelt.item", version: "1.0.0", inputSchema: smeltItemInputSchema,
   outputSchema: smeltItemOutputSchema, stateSchema: smeltItemStateSchema,
+  compatibility: {
+    variants: [
+      { id: "portable", requirements: [], verifiedMinecraftVersions: [] },
+    ],
+  },
   requiredCapabilities: ["craft.execute"] as const,
   timeoutMs: SMELT_ITEM_TIMEOUT_MS, idempotent: false,
   retryPolicy: { maxAttempts: 1, baseDelayMs: 50, maxDelayMs: 250, retryableErrorCodes: [] },
