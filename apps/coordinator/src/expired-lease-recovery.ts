@@ -5,6 +5,8 @@ import {
   MAX_EXPIRED_LEASE_BATCH_SIZE,
   TaskSystemError,
   type RecoverExpiredLeaseResult,
+  type ResolveTaskCancellationInput,
+  type ResolveTaskCancellationResult,
   type TaskLeaseExpireCommand,
   type TaskRecord,
 } from "@minecraft-studio/task-system";
@@ -22,6 +24,9 @@ const CONCURRENT_RECOVERY_CODES = new Set([
 
 export type ExpiredLeaseRecoveryRepository = Readonly<{
   listExpiredLeases(limit: number): Promise<readonly TaskRecord[]>;
+  resolveTaskCancellation(
+    input: ResolveTaskCancellationInput,
+  ): Promise<ResolveTaskCancellationResult | null>;
   recoverExpiredLease(
     command: TaskLeaseExpireCommand,
   ): Promise<RecoverExpiredLeaseResult>;
@@ -31,6 +36,7 @@ export type ExpiredLeaseRecoveryResult = Readonly<{
   examined: number;
   requeued: number;
   failedTerminal: number;
+  cancelled: number;
   skippedConcurrent: number;
   errors: number;
 }>;
@@ -112,6 +118,7 @@ export class ExpiredLeaseRecoveryController {
 
     let requeued = 0;
     let failedTerminal = 0;
+    let cancelled = 0;
     let skippedConcurrent = 0;
     let errors = 0;
 
@@ -125,6 +132,10 @@ export class ExpiredLeaseRecoveryController {
         reasonCode: "TASK_LEASE_EXPIRED",
       };
       try {
+        if (await this.resolveCancellation(task.taskId)) {
+          cancelled += 1;
+          continue;
+        }
         const recovered =
           await this.options.repository.recoverExpiredLease(command);
         if (
@@ -159,12 +170,23 @@ export class ExpiredLeaseRecoveryController {
           );
         }
       } catch (error) {
-        if (isConcurrentRecovery(error)) {
+        let failure = error;
+        if (isPendingCancellation(failure)) {
+          try {
+            if (await this.resolveCancellation(task.taskId)) {
+              cancelled += 1;
+              continue;
+            }
+          } catch (resolutionError) {
+            failure = resolutionError;
+          }
+        }
+        if (isConcurrentRecovery(failure)) {
           skippedConcurrent += 1;
           this.options.logger.warn(
             "coordinator_task_lease_recovery_skipped",
             {
-              code: error.code,
+              code: failure.code,
               taskId: task.taskId,
               expectedRevision: task.revision,
             },
@@ -173,7 +195,7 @@ export class ExpiredLeaseRecoveryController {
         }
         errors += 1;
         this.options.logger.error("coordinator_task_lease_recovery_failed", {
-          code: stableErrorCode(error),
+          code: stableErrorCode(failure),
           taskId: task.taskId,
           expectedRevision: task.revision,
         });
@@ -184,6 +206,7 @@ export class ExpiredLeaseRecoveryController {
       examined: expired.length,
       requeued,
       failedTerminal,
+      cancelled,
       skippedConcurrent,
       errors,
     };
@@ -192,6 +215,27 @@ export class ExpiredLeaseRecoveryController {
     }
     return result;
   }
+
+  private async resolveCancellation(taskId: string): Promise<boolean> {
+    const cancellation =
+      await this.options.repository.resolveTaskCancellation({
+        taskId,
+        resolverId: this.options.actorId,
+        leaseOwner: null,
+      });
+    if (cancellation === null) return false;
+    if (
+      cancellation.task.status !== "cancelled" ||
+      cancellation.task.taskId !== taskId ||
+      cancellation.request.taskId !== taskId
+    ) {
+      throw new TaskSystemError(
+        "TASK_PERSISTENCE_FAILED",
+        "Cancellation recovery returned an invalid task.",
+      );
+    }
+    return true;
+  }
 }
 
 function emptyResult(errors: number): ExpiredLeaseRecoveryResult {
@@ -199,6 +243,7 @@ function emptyResult(errors: number): ExpiredLeaseRecoveryResult {
     examined: 0,
     requeued: 0,
     failedTerminal: 0,
+    cancelled: 0,
     skippedConcurrent: 0,
     errors,
   };
@@ -208,6 +253,13 @@ function isConcurrentRecovery(error: unknown): error is TaskSystemError {
   return (
     error instanceof TaskSystemError &&
     CONCURRENT_RECOVERY_CODES.has(error.code)
+  );
+}
+
+function isPendingCancellation(error: unknown): error is TaskSystemError {
+  return (
+    error instanceof TaskSystemError &&
+    error.code === "TASK_CANCELLATION_PENDING"
   );
 }
 

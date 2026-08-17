@@ -1,8 +1,8 @@
 # Minecraft 多智能体机器人项目路线图
 
-更新时间：2026-08-11
+更新时间：2026-08-14
 当前阶段：阶段 1（安全执行底座）
-当前状态：Runtime/Control Link 验收保持通过；P1.3.2a 持久派发 outbox 与过期租约恢复已通过离线门禁和真实 PostgreSQL/Redis CI
+当前状态：Runtime/Control Link 验收保持通过；P1.3.2b 跨 Worker 持久取消与独立隔离 Worker 已通过离线门禁和真实 PostgreSQL/Redis CI
 
 ## 当前进度总览
 
@@ -25,6 +25,7 @@
 - 2026-08-08 本机隔离门禁：`pnpm check` 退出码 0，246 项离线测试通过、19 项外部环境测试按设计跳过，全部类型检查与生产构建通过；Runtime Link 双进程和四进程服务级验收均退出码 0、`minecraftConnected=false`。`test:task-infra` 因未提供专用 PostgreSQL/Redis/namespace 明确退出码 1，该文件的 17 项真实基础设施场景等待 CI，未冒充实机通过。
 - 2026-08-11 本机门禁：`pnpm check` 退出码 0，292 项测试通过、20 项外部环境测试按设计跳过，全部类型检查与生产构建通过；本次验证没有连接 Minecraft。
 - 2026-08-11 GitHub Actions 运行 `31480434428`：完整离线质量门和真实 PostgreSQL/Redis 隔离门均通过，18 项真实基础设施场景全部通过，包括 `0004` 前向升级、outbox 对账与自动过期租约恢复。
+- 2026-08-14 GitHub Actions 运行 `31793333384`：完整离线质量门、Runtime Link/四进程验收和真实 PostgreSQL/Redis 隔离门均通过；20 项真实基础设施场景全部通过，新增覆盖队列取消原子性、跨 Worker 取消和独立 Task Worker 子进程消费持久取消，且没有连接 Minecraft。
 
 ### 已完成并有真实基础设施验证
 
@@ -35,7 +36,7 @@
 ### 尚未形成生产闭环
 
 - Control Link 状态、停止幂等缓存和审计仍在内存中；用户登录、持久化审计、跨主机 TLS 和密钥轮换尚未接入。
-- 独立 Worker、自动过期租约恢复、持久取消消费、跨 Worker 取消、任务 API 和 Dashboard 任务看板。
+- 生产 Worker 配置与处理器、Coordinator 任务基础设施启动编排、任务 API 和 Dashboard 任务看板。
 - 多 Bot 调度、生产技能、长期记忆、AI Router、本地规划和生产部署。
 
 ## 路线图原则
@@ -237,7 +238,7 @@
 - [x] 在真实 Redis/BullMQ 上验证队列去重、续租、取消、超时和显式重投。
 - [x] 完成事务 outbox 与 PostgreSQL→BullMQ 自动对账重投；同事务创建、连续失败预算、异常记录封存和显式重派均已通过离线与真实基础设施门禁。
 - [x] 增加 Coordinator 所有的有界过期租约恢复；`assigned` 任务恢复与新修订 outbox 同事务提交，`running` 任务按稳定原因进入失败终态，并发扫描不重叠，真实 PostgreSQL 场景已通过。
-- [ ] 增加持久取消消费和跨 Worker 取消。
+- [x] 增加持久取消消费、跨 Worker 取消和独立隔离 Worker；GitHub Actions 真实 PostgreSQL/Redis 场景已通过。
 - [ ] 接入 Coordinator、Control API 和 Dashboard 任务看板。
 
 ### P1.4 多机器人协调
@@ -298,7 +299,7 @@
 1. **已完成：P1.3.1 真实基础设施门禁**：GitHub Actions 中的 PostgreSQL/Redis 隔离测试已通过；测试没有连接 Minecraft。
 2. **已完成：P0 Runtime Link**：Runtime ↔ Coordinator 的认证遥测与停止传输已通过真实双进程回环验收；测试没有连接 Minecraft。
 3. **已完成：P0 Control Bridge**：Control API ↔ 独立 Coordinator 的原子状态镜像和固定停止 RPC 已通过不连接 Minecraft 的真实四进程回环服务验收。
-4. **P1.3.2 持久任务闭环**：outbox/reconciler 与自动过期租约恢复的真实基础设施场景已通过；下一步增加持久取消消费、跨 Worker 取消和独立 Worker，最后接入任务 API 与 Dashboard。
+4. **已完成：P1.3.2 持久任务闭环**：outbox/reconciler、自动过期租约恢复、持久取消、跨 Worker 取消和独立隔离 Worker 已通过真实基础设施 CI；生产处理器仍未接入。
 5. **P1.1/P1.2 实机矩阵**：验证 L0 危险场景和 Pathfinder 多版本真实寻路，不扩大正式服务器权限。
 6. **P1.4 多 Bot 协调**：实现任务分配、资源/箱子/区域锁、替补执行和故障转移。
 7. **P1.5/P1.6 生产能力与基础设施**：按场景逐项增加生产技能，再完善指标、日志、备份与可回滚部署。
@@ -306,4 +307,4 @@
 
 ## 当前唯一下一步
 
-完成 P1.3.2 持久任务闭环：下一模块实现跨 Worker 持久取消和独立 Worker；随后接入任务 Control API 与 Dashboard。本步不扩大 Minecraft 连接权限。
+接入任务 Control API 与 Dashboard 看板；本模块只提供任务查询/取消控制面，不注册生产处理器，也不扩大 Minecraft 连接权限。

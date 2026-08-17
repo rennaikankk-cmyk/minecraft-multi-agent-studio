@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { spawn, type ChildProcess } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
@@ -39,6 +40,9 @@ const runRealInfrastructure =
   process.env.RUN_REAL_TASK_INFRA_TEST === "1";
 const describeReal = runRealInfrastructure ? describe : describe.skip;
 const REAL_TEST_TIMEOUT_MS = 30_000;
+const taskWorkerEntry = fileURLToPath(
+  new URL("../../../apps/task-worker/dist/main.js", import.meta.url),
+);
 
 const migrationFiles = [
   {
@@ -193,6 +197,95 @@ async function boundedCleanup(
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(
           () => reject(new Error(`${label} cleanup timed out.`)),
+          timeoutMs,
+        );
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function waitForTaskWorkerReady(
+  child: ChildProcess,
+  timeoutMs = 10_000,
+): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  let output = "";
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      child.removeListener("exit", onExit);
+      child.stdout?.removeListener("data", onData);
+      child.stderr?.removeListener("data", onData);
+    };
+    const onData = (chunk: Buffer | string) => {
+      output = `${output}${chunk.toString()}`.slice(-8_192);
+      if (output.includes('"event":"task_worker_started"')) {
+        cleanup();
+        resolve();
+      }
+    };
+    const onExit = () => {
+      cleanup();
+      reject(new Error("Independent Task Worker exited before readiness."));
+    };
+    child.stdout?.on("data", onData);
+    child.stderr?.on("data", onData);
+    child.once("exit", onExit);
+    timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("Independent Task Worker readiness timed out."));
+    }, timeoutMs);
+    timer.unref();
+  });
+}
+
+async function stopTaskWorkerProcess(
+  child: ChildProcess,
+  timeoutMs = 5_000,
+): Promise<number | null> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return child.exitCode;
+  }
+  const exited = new Promise<number | null>((resolve) => {
+    child.once("exit", (code) => resolve(code));
+  });
+  child.kill("SIGTERM");
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      exited,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("Independent Task Worker shutdown timed out.")),
+          timeoutMs,
+        );
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function forceStopTaskWorkerProcess(
+  child: ChildProcess,
+  timeoutMs = 2_000,
+): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  let timer: NodeJS.Timeout | undefined;
+  const exited = new Promise<void>((resolve) => {
+    child.once("exit", () => resolve());
+  });
+  child.kill("SIGKILL");
+  try {
+    await Promise.race([
+      exited,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("Independent Task Worker force-stop timed out.")),
           timeoutMs,
         );
         timer.unref();
@@ -1211,6 +1304,66 @@ describeReal.sequential(
       expect(taskCount.rows[0]?.count).toBe(1);
     }, REAL_TEST_TIMEOUT_MS);
 
+    it("blocks new leases and resolves queued cancellation atomically", async () => {
+      const task = (
+        await repository.createTask(
+          taskCreateCommand("test.queued-durable-cancellation"),
+        )
+      ).task;
+      const operationId = randomUUID();
+      const request = await repository.requestTaskCancellation({
+        operationId,
+        taskId: task.taskId,
+        actorId: "integration-canceller",
+        reasonCode: "TASK_CANCELLED_BEFORE_LEASE",
+      });
+      await expect(
+        repository.acquireLease({
+          schemaVersion: "1.0",
+          operationId: randomUUID(),
+          taskId: task.taskId,
+          expectedRevision: task.revision,
+          actorId: "worker-after-cancellation",
+          botId: "isolated-test-bot",
+          leaseOwner: "worker-after-cancellation",
+          leaseDurationMs: 3_000,
+        }),
+      ).rejects.toMatchObject({ code: "TASK_CANCELLATION_PENDING" });
+
+      const resolved = await repository.resolveTaskCancellation({
+        taskId: task.taskId,
+        resolverId: "integration-cancellation-resolver",
+        leaseOwner: null,
+      });
+      expect(resolved).toMatchObject({
+        request: {
+          requestId: request.requestId,
+          operationId,
+          acknowledgedBy: "integration-cancellation-resolver",
+        },
+        task: {
+          taskId: task.taskId,
+          status: "cancelled",
+          revision: task.revision + 1,
+        },
+      });
+      expect(resolved?.request.acknowledgedAt).not.toBeNull();
+      await expect(
+        repository.resolveTaskCancellation({
+          taskId: task.taskId,
+          resolverId: "integration-cancellation-replay",
+          leaseOwner: null,
+        }),
+      ).resolves.toEqual(resolved);
+      const history = await assertionPool.query<{ count: number }>(
+        `SELECT COUNT(*)::integer AS count
+         FROM studio_task_history
+         WHERE operation_id = $1 AND event_type = 'task.cancelled'`,
+        [operationId],
+      );
+      expect(history.rows[0]?.count).toBe(1);
+    }, REAL_TEST_TIMEOUT_MS);
+
     it("atomically recovers an expired assigned lease with one new-revision outbox", async () => {
       const created = await repository.createTask(
         taskCreateCommand("test.coordinator-expired-lease-recovery"),
@@ -1375,16 +1528,15 @@ describeReal.sequential(
       await worker.close();
     }, REAL_TEST_TIMEOUT_MS);
 
-    it("acknowledges handler cancellation before persisting the terminal state", async () => {
+    it("persists cancellation from one worker and aborts the remote lease owner", async () => {
       const queue = createQueue();
-      const registry = new TaskHandlerRegistry();
       let observedAbort = false;
-      registry.register({
+      const definition = {
         taskType: "test.worker-cancel",
         handlerVersion: "1.0.0",
         idempotent: true,
-        execute: async ({ signal }) =>
-          await new Promise((_resolve, reject) => {
+        execute: async ({ signal }: { signal: AbortSignal }) =>
+          await new Promise<never>((_resolve, reject) => {
             signal.addEventListener(
               "abort",
               () => {
@@ -1394,9 +1546,14 @@ describeReal.sequential(
               { once: true },
             );
           }),
-      });
-      const worker = createWorker(registry, "integration-worker-cancel");
-      await worker.start();
+      } as const;
+      const ownerRegistry = new TaskHandlerRegistry();
+      ownerRegistry.register(definition);
+      const ownerWorker = createWorker(
+        ownerRegistry,
+        "integration-worker-cancel-owner",
+      );
+      await ownerWorker.start();
 
       const task = (
         await repository.createTask(
@@ -1409,7 +1566,14 @@ describeReal.sequential(
         task.taskId,
         (candidate) => candidate.status === "running",
       );
-      const cancelled = await worker.cancelTask({
+      const requesterRegistry = new TaskHandlerRegistry();
+      requesterRegistry.register(definition);
+      const requesterWorker = createWorker(
+        requesterRegistry,
+        "integration-worker-cancel-requester",
+      );
+      await requesterWorker.start();
+      const cancelled = await requesterWorker.cancelTask({
         schemaVersion: "1.0",
         operationId: randomUUID(),
         taskId: running.taskId,
@@ -1425,7 +1589,76 @@ describeReal.sequential(
       await expect
         .poll(() => observedAbort, { timeout: 3_000 })
         .toBe(true);
-      await worker.close();
+      const request = await repository.getTaskCancellationRequest(task.taskId);
+      expect(request).toMatchObject({
+        acknowledgedBy: running.leaseOwner,
+        reasonCode: "TASK_CANCELLED_BY_TEST",
+      });
+      expect(request?.acknowledgedAt).not.toBeNull();
+      await requesterWorker.close();
+      await ownerWorker.close();
+    }, REAL_TEST_TIMEOUT_MS);
+
+    it("runs cancellation through the isolated independent Task Worker process", async () => {
+      const queue = createQueue();
+      const child = spawn(process.execPath, [taskWorkerEntry], {
+        cwd: fileURLToPath(new URL("../../..", import.meta.url)),
+        env: {
+          ...process.env,
+          TASK_WORKER_PURPOSE: "isolated-test",
+          TASK_WORKER_HANDLER_PROFILE: "isolated-acceptance",
+          TASK_POSTGRES_URL: config.postgresUrl,
+          TASK_REDIS_URL: config.redisUrl,
+          TASK_INFRA_TEST_NAMESPACE: schemaName,
+          TASK_WORKER_CANCELLATION_POLL_INTERVAL_MS: "50",
+        },
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      try {
+        await waitForTaskWorkerReady(child);
+        const task = (
+          await repository.createTask(
+            taskCreateCommand("isolated.acceptance.wait", 8_000),
+          )
+        ).task;
+        await queue.enqueue(dispatchFor(task));
+        const running = await waitForTask(
+          repository,
+          task.taskId,
+          (candidate) => candidate.status === "running",
+        );
+        const request = await repository.requestTaskCancellation({
+          operationId: randomUUID(),
+          taskId: task.taskId,
+          actorId: "integration-process-canceller",
+          reasonCode: "TASK_CANCELLED_BY_PROCESS_TEST",
+        });
+        expect(request.acknowledgedAt).toBeNull();
+
+        const cancelled = await waitForTask(
+          repository,
+          task.taskId,
+          (candidate) => candidate.status === "cancelled",
+        );
+        expect(cancelled.leaseOwner).toBeNull();
+        const acknowledged = await repository.getTaskCancellationRequest(
+          task.taskId,
+        );
+        expect(acknowledged).toMatchObject({
+          operationId: request.operationId,
+          acknowledgedBy: running.leaseOwner,
+        });
+        expect(acknowledged?.acknowledgedAt).not.toBeNull();
+
+        await expect(stopTaskWorkerProcess(child)).resolves.toBe(0);
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) {
+          await stopTaskWorkerProcess(child).catch(async () => {
+            await forceStopTaskWorkerProcess(child);
+          });
+        }
+      }
     }, REAL_TEST_TIMEOUT_MS);
 
     it("waits for timeout acknowledgement and records a stable failed task", async () => {

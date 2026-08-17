@@ -129,7 +129,19 @@ export type TaskCancellationRequestInput = Readonly<{
 
 export type TaskCancellationAcknowledgeInput = Readonly<{
   taskId: string;
+  acknowledgedBy: string;
   leaseOwner: string;
+}>;
+
+export type ResolveTaskCancellationInput = Readonly<{
+  taskId: string;
+  resolverId: string;
+  leaseOwner: string | null;
+}>;
+
+export type ResolveTaskCancellationResult = Readonly<{
+  request: TaskCancellationRequest;
+  task: TaskRecord;
 }>;
 
 export const MAX_EXPIRED_LEASE_BATCH_SIZE = 100;
@@ -1183,6 +1195,12 @@ export class PostgresTaskRepository {
           "Only a blocked task can retry durable dispatch.",
         );
       }
+      if (await this.hasTaskCancellationRequest(client, current.taskId)) {
+        throw new TaskSystemError(
+          "TASK_CANCELLATION_PENDING",
+          "Task cancellation must resolve before dispatch retry.",
+        );
+      }
       const now = await this.databaseNow(client);
       if (
         current.deadline !== null &&
@@ -1310,6 +1328,20 @@ export class PostgresTaskRepository {
         await client.query("COMMIT");
         return existing;
       }
+      const task = await this.loadTask(client, taskId, true);
+      if (!task) {
+        throw new TaskSystemError("TASK_NOT_FOUND", "Task does not exist.");
+      }
+      if (
+        task.status === "completed" ||
+        task.status === "expired" ||
+        task.status === "cancelled"
+      ) {
+        throw new TaskSystemError(
+          "TASK_TERMINAL",
+          "Terminal task cannot accept a new cancellation request.",
+        );
+      }
       const requestedAt = (await this.databaseNow(client)).toISOString();
       const requestId = randomUUID();
       await client.query(
@@ -1366,6 +1398,7 @@ export class PostgresTaskRepository {
     input: TaskCancellationAcknowledgeInput,
   ): Promise<boolean> {
     const taskId = taskCancelCommandSchema.shape.taskId.parse(input.taskId);
+    const acknowledgedBy = identifierSchema.parse(input.acknowledgedBy);
     const leaseOwner = identifierSchema.parse(input.leaseOwner);
     const client = await this.pool.connect();
     try {
@@ -1377,8 +1410,8 @@ export class PostgresTaskRepository {
            AND request.acknowledged_at IS NULL
            AND task.task_id = request.task_id
            AND task.status IN ('assigned', 'running')
-           AND task.lease_owner = $2`,
-        [taskId, leaseOwner],
+           AND task.lease_owner = $3`,
+        [taskId, acknowledgedBy, leaseOwner],
       );
       return result.rowCount === 1;
     } catch (error) {
@@ -1409,13 +1442,184 @@ export class PostgresTaskRepository {
     }
   }
 
+  async resolveTaskCancellation(
+    input: ResolveTaskCancellationInput,
+  ): Promise<ResolveTaskCancellationResult | null> {
+    const taskId = taskCancelCommandSchema.shape.taskId.parse(input.taskId);
+    const resolverId = identifierSchema.parse(input.resolverId);
+    const leaseOwner = identifierSchema.nullable().parse(input.leaseOwner);
+    const client = await this.pool.connect();
+    try {
+      await this.beginTransaction(client);
+      const visibleRequest = await client.query(
+        `SELECT *
+         FROM studio_task_cancellation_requests
+         WHERE task_id = $1`,
+        [taskId],
+      );
+      const visibleRow = visibleRequest.rows[0];
+      if (!visibleRow) {
+        await client.query("COMMIT");
+        return null;
+      }
+      const visible = mapCancellationRequestRow(visibleRow);
+      await this.lockOperation(client, visible.operationId);
+      const task = await this.loadTask(client, taskId, true);
+      if (!task) {
+        throw new TaskSystemError("TASK_NOT_FOUND", "Task does not exist.");
+      }
+      const lockedRequest = await client.query(
+        `SELECT *
+         FROM studio_task_cancellation_requests
+         WHERE task_id = $1
+         FOR UPDATE`,
+        [taskId],
+      );
+      const lockedRow = lockedRequest.rows[0];
+      if (!lockedRow) {
+        throw new TaskSystemError(
+          "TASK_PERSISTENCE_FAILED",
+          "Cancellation request disappeared while being resolved.",
+        );
+      }
+      const request = mapCancellationRequestRow(lockedRow);
+      if (request.operationId !== visible.operationId) {
+        throw new TaskSystemError(
+          "TASK_OPERATION_CONFLICT",
+          "Cancellation request identity changed while being resolved.",
+        );
+      }
+      const now = await this.databaseNow(client);
+      if (task.status === "completed" || task.status === "expired") {
+        throw new TaskSystemError(
+          "TASK_TERMINAL",
+          "Task reached a non-cancellation terminal state.",
+        );
+      }
+
+      let resolvedTask = task;
+      if (task.status !== "cancelled") {
+        const active = task.status === "assigned" || task.status === "running";
+        if (active) {
+          if (task.leaseOwner === null || task.leaseExpiresAt === null) {
+            throw new TaskSystemError(
+              "TASK_LEASE_REQUIRED",
+              "Active task cancellation requires a durable lease.",
+            );
+          }
+          if (leaseOwner === null) {
+            if (Date.parse(task.leaseExpiresAt) > now.getTime()) {
+              throw new TaskSystemError(
+                "TASK_LEASE_OWNER_MISMATCH",
+                "Live task cancellation must be resolved by its lease owner.",
+              );
+            }
+          } else if (task.leaseOwner !== leaseOwner) {
+            throw new TaskSystemError(
+              "TASK_LEASE_OWNER_MISMATCH",
+              "Task cancellation resolver does not own the durable lease.",
+            );
+          }
+        } else if (leaseOwner !== null) {
+          throw new TaskSystemError(
+            "TASK_LEASE_OWNER_MISMATCH",
+            "Inactive task cancellation cannot claim a lease owner.",
+          );
+        }
+
+        const timestamp = now.toISOString();
+        resolvedTask = taskRecordSchema.parse({
+          ...task,
+          status: "cancelled",
+          assignedBotId: null,
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          revision: task.revision + 1,
+          updatedAt: timestamp,
+          finishedAt: timestamp,
+        });
+        const updated = await client.query(
+          `UPDATE studio_tasks SET
+            status = 'cancelled',
+            assigned_bot_id = NULL,
+            lease_owner = NULL,
+            lease_expires_at = NULL,
+            revision = $2,
+            updated_at = $3,
+            finished_at = $3
+          WHERE task_id = $1 AND revision = $4`,
+          [task.taskId, resolvedTask.revision, timestamp, task.revision],
+        );
+        if (updated.rowCount !== 1) {
+          throw new TaskSystemError(
+            "TASK_REVISION_CONFLICT",
+            "Task changed while resolving cancellation.",
+          );
+        }
+        const command = taskCancelCommandSchema.parse({
+          schemaVersion: "1.0",
+          operationId: request.operationId,
+          taskId: request.taskId,
+          actorId: request.actorId,
+          leaseOwner: null,
+          reasonCode: request.reasonCode,
+        });
+        await this.appendHistory(client, {
+          command,
+          operationFingerprint: request.operationFingerprint,
+          eventType: "task.cancelled",
+          fromStatus: task.status,
+          toStatus: resolvedTask.status,
+          reasonCode: request.reasonCode,
+          task: resolvedTask,
+          timestamp,
+        });
+      }
+
+      const acknowledged = await client.query(
+        `UPDATE studio_task_cancellation_requests
+         SET acknowledged_at = COALESCE(acknowledged_at, $3),
+             acknowledged_by = COALESCE(acknowledged_by, $2)
+         WHERE task_id = $1
+         RETURNING *`,
+        [taskId, resolverId, now.toISOString()],
+      );
+      const acknowledgedRow = acknowledged.rows[0];
+      if (!acknowledgedRow) {
+        throw new TaskSystemError(
+          "TASK_PERSISTENCE_FAILED",
+          "Resolved cancellation could not be acknowledged.",
+        );
+      }
+      const resolvedRequest = mapCancellationRequestRow(acknowledgedRow);
+      await client.query("COMMIT");
+      return { request: resolvedRequest, task: resolvedTask };
+    } catch (error) {
+      await this.rollback(client);
+      throw this.persistenceError(error);
+    } finally {
+      client.release();
+    }
+  }
+
   transition(input: unknown): Promise<TaskRecord> {
     const command = taskTransitionCommandSchema.parse(input);
     return this.mutate(
       command,
       "task.transitioned",
       command.reasonCode,
-      (task, now) => transitionTask(task, command, now),
+      async (task, now, client) => {
+        if (
+          command.to !== "cancelled" &&
+          (await this.hasTaskCancellationRequest(client, task.taskId))
+        ) {
+          throw new TaskSystemError(
+            "TASK_CANCELLATION_PENDING",
+            "Task has a durable cancellation request pending.",
+          );
+        }
+        return transitionTask(task, command, now);
+      },
     );
   }
 
@@ -1452,14 +1656,21 @@ export class PostgresTaskRepository {
       command,
       "task.lease-acquired",
       "TASK_LEASE_ACQUIRED",
-      async (task, now, client) =>
-        acquireTaskLease(task, command, {
+      async (task, now, client) => {
+        if (await this.hasTaskCancellationRequest(client, task.taskId)) {
+          throw new TaskSystemError(
+            "TASK_CANCELLATION_PENDING",
+            "Task cancellation must resolve before lease acquisition.",
+          );
+        }
+        return acquireTaskLease(task, command, {
           now,
           dependenciesReady: await this.dependenciesReady(
             client,
             command.taskId,
           ),
-        }),
+        });
+      },
     );
   }
 
@@ -1489,7 +1700,15 @@ export class PostgresTaskRepository {
       command,
       "task.lease-expired",
       command.reasonCode,
-      (task, now) => expireTaskLease(task, command, now),
+      async (task, now, client) => {
+        if (await this.hasTaskCancellationRequest(client, task.taskId)) {
+          throw new TaskSystemError(
+            "TASK_CANCELLATION_PENDING",
+            "Task cancellation must resolve before lease expiry.",
+          );
+        }
+        return expireTaskLease(task, command, now);
+      },
     );
   }
 
@@ -1506,7 +1725,15 @@ export class PostgresTaskRepository {
       command,
       "task.lease-expired",
       command.reasonCode,
-      (task, now) => expireTaskLease(task, command, now),
+      async (task, now, client) => {
+        if (await this.hasTaskCancellationRequest(client, task.taskId)) {
+          throw new TaskSystemError(
+            "TASK_CANCELLATION_PENDING",
+            "Task cancellation must resolve before lease recovery.",
+          );
+        }
+        return expireTaskLease(task, command, now);
+      },
       async (task, client) => {
         if (task.status !== "queued") {
           return { task, dispatch: null, outbox: null };
@@ -1543,6 +1770,12 @@ export class PostgresTaskRepository {
       current.revision !== input.expectedRevision
     ) {
       return;
+    }
+    if (await this.hasTaskCancellationRequest(client, current.taskId)) {
+      throw new TaskSystemError(
+        "TASK_CANCELLATION_PENDING",
+        "Task cancellation must resolve before outbox failure handling.",
+      );
     }
     const now = await this.databaseNow(client);
     const targetStatus =
@@ -1752,6 +1985,20 @@ export class PostgresTaskRepository {
     const row = taskResult.rows[0];
     if (!row) return null;
     return mapTaskRow(row, await this.loadDependencyIds(client, taskId));
+  }
+
+  private async hasTaskCancellationRequest(
+    client: PostgresClientLike,
+    taskId: string,
+  ): Promise<boolean> {
+    const result = await client.query(
+      `SELECT 1
+       FROM studio_task_cancellation_requests
+       WHERE task_id = $1
+       LIMIT 1`,
+      [taskId],
+    );
+    return result.rows.length > 0;
   }
 
   private async loadDependencyIds(
