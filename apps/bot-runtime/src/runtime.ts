@@ -37,6 +37,7 @@ import {
   equipArmorSkill,
   movementGotoSkill,
   placeBlockSkill,
+  smeltItemSkill,
   SkillExecutor,
   SkillFault,
   SkillRegistry,
@@ -117,6 +118,7 @@ function skillResultTelemetryDigest(
     "requestedCount",
     "craftedCount",
     "movedCount",
+    "smeltedCount",
   ] as const;
   const digest: Record<string, number> = {};
   for (const key of summaryKeys) {
@@ -184,6 +186,7 @@ export class SingleBotRuntime {
       skillRegistry.register(craftItemSkill);
       skillRegistry.register(placeBlockSkill);
       skillRegistry.register(containerTransferSkill);
+      skillRegistry.register(smeltItemSkill);
     }
     this.skillExecutor = new SkillExecutor(skillRegistry, {
       runtimeInstanceId: this.runtimeInstanceId,
@@ -1026,3 +1029,4 @@ export class SingleBotRuntime {
     }
   }
 }
+

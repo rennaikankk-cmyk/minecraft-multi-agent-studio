@@ -22,6 +22,8 @@
     "test:task-infra": "pnpm build:packages && node scripts/run-task-infrastructure-tests.mjs",
     "test:runtime-link": "pnpm build:control-plane && pnpm --filter @minecraft-studio/bot-runtime build && node scripts/run-runtime-link-acceptance.mjs",
     "test:four-process": "pnpm build && node scripts/run-four-process-acceptance.mjs",
+    "test:minecraft-skills": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-isolated-minecraft-test.ps1",
+    "check:minecraft-workflow": "node scripts/validate-minecraft-acceptance-workflow.mjs",
     "test:e2e": "pnpm --filter @minecraft-studio/dashboard test:e2e",
     "check": "pnpm typecheck && pnpm test && pnpm build"
   },
