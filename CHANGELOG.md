@@ -9,6 +9,10 @@
 - 新增 PostgreSQL 权威的持久取消消费：首个取消操作不可覆盖，执行租约所有者有界轮询并确认请求，跨 Worker 发起方可等待同一 cancelled 终态；租约失效后由无租约解析者完成取消。
 - 新增独立 `@minecraft-studio/task-worker` Node 进程入口与 `isolated.acceptance.wait@1.0.0` 验收处理器。入口强制使用回环 PostgreSQL/Redis、专用 Schema、`isolated-test` purpose 和固定 handler profile，不注册生产或 Minecraft 处理器。
 - 真实基础设施套件新增队列取消原子性、不同 Worker 发起/消费取消，以及独立 Worker 子进程消费持久取消的场景；2026-08-14 GitHub Actions 运行 `31793333384` 已在临时 PostgreSQL/Redis 上 20/20 通过。
+- 新增“Minecraft 技能隔离验收”GitHub Actions 门禁：仅支持人工勾选 EULA 后手动运行，或由仓库变量确认 EULA 后通过 `minecraft-acceptance` 标签触发；拒绝 Fork、无 Secret、只读权限、固定 Mojang 官方 JAR 与 SHA-1、仅本机回环临时服。
+- 新增严格版本化的 Minecraft 技能验收场景清单，为 7 个内置技能统一定义成功、材料不足、权限/位置拒绝、L0 抢占、取消、断线和部分成功读回矩阵。
+- 新增 `pnpm test:minecraft-skills` 一键回环隔离验收入口；复用既有官方服务端哈希、人工 EULA、安全属性和未知端口进程拒绝检查，并加入真实 `smelt.item@1.0.0` 场景握手与中文通过标记。
+- 新增 `smelt.item@1.0.0`：使用 Mineflayer 原生 `openFurnace`，显式指定原料、燃料及数量，只接管空熔炉，异步等待并逐次取回真实产物；单次最多 5 件以保持既有 60 秒技能硬超时，取消/L0 抢占时 fail-closed，不自动重试非幂等熔炼。
 - 新增 `inventory.equip-armor@1.0.0`——首个"参考 GPL 机制、代码全自研"技能（每槽选最优护甲、平手不换）；决策为可离线单测的纯函数，Runtime 只提供 `armor.snapshot`/`armor.equip` 原子能力，client 硬护栏拒绝非该槽护甲与背包没有的护甲。
 - 新增生存链四技能：`collect.block@1.0.0`（MIT `mineflayer-collectblock` 1.6.0 + `mineflayer-tool` 1.2.0 供应链锁定接入，禁自动倒箱、与寻路互斥）、`craft.item@1.0.0`（自研，原生 recipesFor+craft，2x2/3x3）、`world.place-block@1.0.0`（自研，一次一块、放置后读回校验）、`container.transfer@1.0.0`（自研，openContainer+deposit/withdraw，容器白名单仅箱子/木桶/潜影盒）。裸装冷启动第一循环（走→撸木→合成→放置→撸石→穿甲→入库）技能层闭环。
 - 技能结果日志 `bot_runtime_skill_result` 新增 `durationMs` 与白名单标量遥测摘要（`craftedCount`/`movedCount`/`itemsCollected` 等 10 键），单行日志即可判定技能在隔离服上可不可用；新增 `docs/skill-verification-runbook.md`（grep 起手式 + 失败签名表）。

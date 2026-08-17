@@ -73,8 +73,27 @@ export {
   containerTransferStateSchema,
   TRANSFER_MAX_COUNT,
 } from "./builtin/container-transfer.js";
+export {
+  FURNACE_MAX_DISTANCE,
+  SMELT_ITEM_TIMEOUT_MS,
+  SMELT_MAX_COUNT,
+  smeltItemCapabilityInputSchema,
+  smeltItemCapabilityOutputSchema,
+  smeltItemInputSchema,
+  smeltItemOutputSchema,
+  smeltItemSkill,
+  smeltItemStateSchema,
+} from "./builtin/smelt-item.js";
 export { SkillExecutor } from "./executor.js";
 export { SkillRegistry } from "./registry.js";
+export {
+  builtinSkillVerificationManifestsV1,
+  skillScenarioCategories,
+  skillScenarioCategorySchema,
+  skillVerificationManifestV1Schema,
+  skillVerificationScenarioV1Schema,
+  type SkillVerificationManifestV1,
+} from "./verification-scenarios.js";
 export {
   defineSkill,
   type SkillCapabilityAdapter,
