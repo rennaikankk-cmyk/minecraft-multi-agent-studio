@@ -36,7 +36,8 @@ apps/
 ├─ bot-runtime/            # 单 Bot Mineflayer 运行时
 ├─ coordinator/            # Bot 注册表与安全停止控制平面
 ├─ control-api/            # 认证 HTTP/WebSocket 状态 API 与受权停止入口
-└─ dashboard/              # Next.js 前端、服务端代理与真实状态 Store
+├─ dashboard/              # Next.js 前端、服务端代理与真实状态 Store
+└─ task-worker/            # 仅隔离验收的独立 BullMQ Worker 进程
 packages/
 ├─ protocol/               # 版本化 Zod Schema
 ├─ environment/            # 真实硬件、软件和模式检测
@@ -46,7 +47,7 @@ packages/
 └─ task-system/            # PostgreSQL 事实源、BullMQ 队列与确定性 Worker
 ```
 
-尚未创建 AI Router、生产数据库部署和独立任务 Worker 应用。Bot Runtime 已完成 Minecraft 1.21.8 隔离联机验收，并已通过认证 Runtime Link 接入独立 Coordinator 的进程内 Bot 注册表和安全停止控制边界；Control API 通过认证 Control Link 镜像 Coordinator 状态并转发固定停止 RPC。Dashboard 通过服务端代理读取 Control API，浏览器不会收到长期令牌。四进程服务链路已用生产 Coordinator、Control API、Dashboard 和测试专用 Runtime fixture 完成真实回环验收；该结果没有连接 Minecraft，也不是浏览器 E2E。确定性技能库已注册 `movement.goto@1.0.0`，Bot Runtime 通过受限 Pathfinder 适配器执行；任务包已建立 PostgreSQL 适配器、严格 BullMQ 队列和可嵌入 Worker，当前只允许通过显式隔离测试配置连接真实 PostgreSQL/Redis。
+尚未创建 AI Router 或生产数据库部署。Bot Runtime 已完成 Minecraft 1.21.8 隔离联机验收，并已通过认证 Runtime Link 接入独立 Coordinator 的进程内 Bot 注册表和安全停止控制边界；Control API 通过认证 Control Link 镜像 Coordinator 状态并转发固定停止 RPC。Dashboard 通过服务端代理读取 Control API，浏览器不会收到长期令牌。四进程服务链路已用生产 Coordinator、Control API、Dashboard 和测试专用 Runtime fixture 完成真实回环验收；该结果没有连接 Minecraft，也不是浏览器 E2E。确定性技能库已注册 `movement.goto@1.0.0`，Bot Runtime 通过受限 Pathfinder 适配器执行；任务包已建立 PostgreSQL 适配器、严格 BullMQ 队列、持久取消和可嵌入 Worker。独立 `task-worker` 应用当前只允许通过显式隔离测试配置连接真实 PostgreSQL/Redis，并且只注册验收处理器，不是生产 Worker 配置。
 
 ## 4. 环境检测数据流
 
@@ -346,8 +347,10 @@ PostgreSQL ← parameterized transaction + revision + append-only history
 
 `@minecraft-studio/task-system` 定义了 queued、assigned、running、blocked、waiting、paused、completed、failed、cancelled 和 expired 状态。状态转换使用乐观修订号；运行和完成必须持有未过期且所有者匹配的租约，原租约所有者可在截止时间到达后写入 expired 终态。任务创建持久化精确处理器版本与幂等策略，使用作用域化幂等键和规范化 SHA-256 请求指纹；相同操作 ID 由事务级 advisory lock 串行化，只能返回完全相同的持久化快照。截止时间统一规范化为 UTC，时间、租约过期判断和状态历史以 PostgreSQL 时钟为准。可信高风险审批尚未接入，因此 R3/R4 任务当前可以记录但不能领取执行。
 
-迁移创建 `studio_tasks`、`studio_task_dependencies` 和只追加的 `studio_task_history`，并约束 assigned/running 状态必须存在完整租约和 Bot 归属。任务禁止直接删除，历史禁止更新或删除。BullMQ job 固定一次尝试，领域重试只在 PostgreSQL 中显式记账；旧 job 只有在显式重投、租约真实过期、Bot 归属匹配、持久化处理器版本/幂等策略与注册表一致且重试预算仍有余额时才可恢复。活动取消、超时和截止时间传播 `AbortSignal` 后，Worker 会有界停止等待和续租并写入权威终态；进程内处理器本身仍不是强隔离沙盒，忽略信号的代码可能在失去租约后继续运行自身副作用。
+迁移创建 `studio_tasks`、`studio_task_dependencies`、只追加的 `studio_task_history`、事务派发 outbox 和取消请求表，并约束 assigned/running 状态必须存在完整租约和 Bot 归属。任务禁止直接删除，历史禁止更新或删除。BullMQ job 固定一次尝试，领域重试只在 PostgreSQL 中显式记账；旧 job 只有在显式重投、租约真实过期、Bot 归属匹配、持久化处理器版本/幂等策略与注册表一致且重试预算仍有余额时才可恢复。
 
-真实基础设施测试只接受本机回环 PostgreSQL/Redis、专用 PostgreSQL Schema 和独立 Redis 前缀；清理范围不超过这些测试命名空间，也不连接 Minecraft。GitHub Actions 使用固定镜像摘要的临时服务执行迁移、并发重放/领取、队列去重、续租、取消、超时和显式重投场景，2026-07-28 的运行 `30315095898` 已通过。该结果证明隔离集成边界，不代表生产基础设施在线。
+取消方先写 PostgreSQL 请求，不需要与租约所有者处于同一 Worker。租约所有者以有界间隔轮询、确认、传播 `AbortSignal` 并原子写入 cancelled；已持久化取消会阻止新租约以及 completed/failed/expired/requeue 等竞争变更。租约过期时，Coordinator 恢复循环先解析取消，再决定是否重派或失败。独立 Worker 进程不等于处理器沙盒：处理器仍是 Worker 进程内的受信任代码，忽略信号的代码可能在失去租约后继续运行自身副作用。
 
-当前没有事务 outbox 或 PostgreSQL→BullMQ 自动 reconciler：数据库提交与入队不是原子事务，Redis 数据丢失后也不会自动从 PostgreSQL 重建。取消只覆盖当前 Worker 进程内的活动处理器；跨 Worker 取消、自动故障重投、Coordinator 任务调度、任务 API、Dashboard 任务看板和生产服务编排仍待后续模块接入。
+真实基础设施测试只接受本机回环 PostgreSQL/Redis、专用 PostgreSQL Schema 和独立 Redis 前缀；清理范围不超过这些测试命名空间，也不连接 Minecraft。GitHub Actions 使用固定镜像摘要的临时服务执行迁移、并发重放/领取、outbox 对账、租约恢复、队列去重、续租、取消、超时和显式重投场景。2026-08-14 运行 `31793333384` 的 20 项真实场景全部通过，包括跨 Worker 与独立进程取消；该结果只证明隔离集成边界，不代表生产基础设施在线。
+
+当前缺少 Coordinator 任务基础设施启动编排、生产处理器注册、任务 API、Dashboard 任务看板和生产部署。事务 outbox 与 BullMQ 之间仍是至少一次投递，不得声称 exactly-once；跨 Worker 持久取消也不构成对不合作处理器的硬终止保证。

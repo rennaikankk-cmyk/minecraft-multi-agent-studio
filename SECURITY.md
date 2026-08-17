@@ -222,15 +222,16 @@
 - R3/R4 任务在可信审批上下文尚未接入前一律禁止领取，不能依靠命令内字段自证批准。
 - `studio_tasks` 禁止直接删除，`studio_task_history` 禁止更新或删除。取消、失败和过期通过状态与历史表达。
 - 所有 SQL 使用固定语句和参数绑定，不拼接任务输入。唯一的动态 SQL 片段是源码固定的 `FOR UPDATE` 选择。
-- 两个迁移文件在真实测试运行前分别校验 SHA-256：`0001_task_system.sql` 为 `8a66af4a41c4a3d8d938e997ac5c96a3d3c644c3eec0b7d947f9b584a2bbfb3a`，`0002_task_lease_invariants.sql` 为 `5c1514a76f11b201e5eb95613441f77aaab49ce4e05da3182c21b173bb237a6c`。
+- 四个迁移文件在真实测试运行前分别校验 SHA-256：`0001_task_system.sql` 为 `8a66af4a41c4a3d8d938e997ac5c96a3d3c644c3eec0b7d947f9b584a2bbfb3a`，`0002_task_lease_invariants.sql` 为 `5c1514a76f11b201e5eb95613441f77aaab49ce4e05da3182c21b173bb237a6c`，`0003_task_delivery.sql` 为 `0c12859e03273ea6f3940cded8828989d7f82b6ed8208dfd40d31be1a29482b0`，`0004_task_delivery_hardening.sql` 为 `f4f5de71e67fbbd7037678127724ba5be6dbc939a6262f476dc35edd92f395f2`。
 - 队列只接受严格 `TaskDispatchV1`，job 名称和 ID 均由代码固定。消息不包含可执行代码、Shell、模型文本或 URL；Worker 只调用任务、派发和注册表三方处理器版本/幂等策略完全一致的确定性处理器。
 - Redis 只用于消息投递和 BullMQ 临时锁，不能覆盖 PostgreSQL 事实。BullMQ 固定 `attempts=1`，领域重试必须经过任务状态机、幂等处理器声明和持久化重试预算。
-- 活动取消、超时与截止时间先传播 `AbortSignal`；Worker 有界停止等待和续租，并使用 PostgreSQL 权威时钟写入 cancelled/failed/expired 终态。续租在最终状态提交前停止并等待，避免续租与完成并发修改同一修订号。
+- 取消意图先以唯一操作 ID 和指纹持久化；不同取消不得覆盖首个请求。租约所有者轮询并确认请求后传播 `AbortSignal`，再原子写入 cancelled。任务行锁保证已持久取消优先于新租约、完成、失败、截止时间和租约恢复；租约失效后只允许无租约解析者完成取消。
+- 超时与截止时间先传播 `AbortSignal`；Worker 有界停止等待和续租，并使用 PostgreSQL 权威时钟写入 failed/expired 终态。续租在最终状态提交前停止并等待，避免续租与完成并发修改同一修订号。
 - 旧 job 恢复只允许显式 BullMQ 重投，且原任务必须为租约已过期的 assigned/running 状态、Bot 归属匹配；running 任务还要求持久化的精确处理器版本与幂等策略匹配当前注册表，且重试预算未用尽。
 - 处理器是预先审核的受信任进程内代码，并非沙盒；严格队列消息阻止消息携带代码，但不能约束开发者主动注册的 Node.js 处理器。Worker 不会因不合作处理器而无限持有租约，但忽略 `AbortSignal` 的代码可能在失去租约后继续运行自身副作用，硬终止需要后续独立进程隔离。
-- 隔离基础设施配置只接受回环地址、专用数据库 Schema 和严格 Redis 前缀；测试清理不使用 `FLUSHALL`，也不会连接 Minecraft。
-- 当前没有事务 outbox、Redis 丢失后的自动队列重建、PostgreSQL→BullMQ reconciler 或跨 Worker 取消 API。数据库提交与入队不具备原子性，不得声称 exactly-once 或自动故障恢复。
-- 当前代码和 CI 流程已经接入 BullMQ/Redis/PostgreSQL 测试边界，本机没有运行这些服务；2026-07-28 的 GitHub Actions 运行 `30315095898` 已通过真实临时服务集成作业。该结果不得扩张解释为生产基础设施在线或已具备自动故障恢复。
+- 隔离基础设施配置只接受回环地址、专用数据库 Schema 和严格 Redis 前缀；测试清理不使用 `FLUSHALL`，也不会连接 Minecraft。独立 `task-worker` 还要求显式 `isolated-test` purpose 与固定验收处理器 profile；缺失任一边界即拒绝启动，日志不写连接 URL。
+- 事务 outbox 和对账器提供至少一次重建，不构成 PostgreSQL 与 Redis 的跨系统原子提交，也不得声称 exactly-once。跨 Worker 持久取消只保证任务事实与协作式 `AbortSignal`；独立 Worker 内的处理器仍非强隔离沙盒。
+- 当前代码和 CI 流程已经接入 BullMQ/Redis/PostgreSQL 测试边界，本机没有运行这些服务；2026-08-14 GitHub Actions 运行 `31793333384` 的 20 项真实场景全部通过，包括跨 Worker 和独立进程取消。该结果不得扩张解释为生产基础设施在线或生产 Worker 已可用。
 
 ## 15. 漏洞报告
 

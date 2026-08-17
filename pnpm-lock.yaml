@@ -150,6 +150,15 @@ importers:
         specifier: 6.0.3
         version: 6.0.3
 
+  apps/task-worker:
+    dependencies:
+      '@minecraft-studio/observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
+      '@minecraft-studio/task-system':
+        specifier: workspace:*
+        version: link:../../packages/task-system
+
   packages/environment:
     dependencies:
       '@minecraft-studio/protocol':

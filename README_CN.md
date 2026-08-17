@@ -22,7 +22,8 @@
 - Runtime Link 双进程链路和 Dashboard → Control API → Coordinator → Bot Runtime 四进程服务链路均可用同一追踪编号核对结构化日志；四进程验收使用测试专用 Runtime fixture，不连接 Minecraft，也不替代浏览器 E2E。
 - L0 安全层从真实 Mineflayer 状态识别饥饿、低/危急生命值、溺水、岩浆、坠落、卡死和背包满，并执行固定白名单动作。
 - `movement.goto@1.0.0` 通过受限 Pathfinder 适配器移动，不允许挖掘、搭塔、垫方块或跑酷。
-- 任务系统提供 PostgreSQL 迁移、严格状态机、幂等键、乐观修订号、租约边界、版本化处理器契约、严格派发协议和 BullMQ Worker。
+- 任务系统提供 PostgreSQL 迁移、严格状态机、幂等键、乐观修订号、租约边界、事务 outbox、自动对账/过期租约恢复、持久取消、严格派发协议和 BullMQ Worker。
+- `apps/task-worker` 提供独立 Node 进程验收入口；当前只接受显式隔离测试配置并注册 `isolated.acceptance.wait@1.0.0`，不包含生产处理器，也不连接 Minecraft。
 - 隔离 PostgreSQL/Redis 集成测试已于 2026-07-28 在 GitHub Actions 真实临时服务中通过；本机没有运行这些服务时不会冒充本机服务在线。
 
 当前项目是单 Bot 安全执行与任务基础设施，不是已经完成的多智能体产品。Runtime ↔ Coordinator 已通过双进程验收，Dashboard → Control API → Coordinator → Runtime 已通过不连接 Minecraft 的四进程服务级验收。Control Link 不可用时不会沿用旧快照：Control API 返回 503，Dashboard 清空 Bot 列表并明确显示错误。
@@ -308,7 +309,9 @@ Dashboard 的 Bot 卡片显示真实 L0 状态。旧 Runtime 未上报该字段�
 
 Worker 只接受 `TaskDispatchV1` 严格消息和预先注册的精确版本任务处理器；任务、派发和注册表中的处理器版本与幂等策略必须完全一致。消息中的文本、代码、Shell、URL 或未知字段不会执行。PostgreSQL 是任务事实源，Redis 只保存队列和临时 Worker 状态。BullMQ 自身不代替领域重试预算。
 
-活动取消、超时和截止时间先传播 `AbortSignal`；即使受信任处理器不合作，Worker 也会停止等待、停止续租并按数据库权威时间释放持久租约。任务处理器当前仍与 Worker 运行在同一 Node.js 进程，并非强隔离沙盒，因此已失去租约的处理器代码仍可能继续执行自身副作用，后续必须通过独立进程隔离获得硬终止能力。旧 job 的恢复仅在显式 BullMQ 重投、原租约已过期、Bot 归属匹配、持久化处理器版本/幂等策略与当前注册表一致且 PostgreSQL 重试预算仍有余额时允许。当前还没有 outbox、自动 PostgreSQL→BullMQ 对账重投或跨 Worker 取消 API。
+取消请求先以不可覆盖的操作身份写入 PostgreSQL；持有租约的 Worker 轮询、确认并传播 `AbortSignal`，任务完成、失败、截止时间和租约恢复在同一任务行锁之后必须让已持久化的取消优先。发起取消的 Worker 不需要拥有执行租约；原 Worker 失联且租约过期后，调用方或 Coordinator 恢复循环可完成取消。超时和截止时间同样按数据库权威时间持久化终态。
+
+事务 outbox、PostgreSQL→BullMQ 有界对账、自动过期租约恢复和跨 Worker 持久取消已经实现。`apps/task-worker` 将 Worker 与控制平面分成独立进程，但处理器仍是该 Worker 进程内的受信任代码，并非每任务强隔离沙盒；忽略 `AbortSignal` 的处理器在 Worker 放弃等待后仍可能继续执行自身副作用。旧 job 的恢复仅在显式 BullMQ 重投、原租约已过期、Bot 归属匹配、持久化处理器版本/幂等策略与当前注册表一致且 PostgreSQL 重试预算仍有余额时允许。
 
 本机没有配置 PostgreSQL/Redis 时，普通 `pnpm check` 只运行离线测试。真实基础设施测试使用专用数据库 Schema 和 Redis 前缀，拒绝非回环地址，也不会执行 `FLUSHALL` 或连接 Minecraft。该命令不会下载或启动 PostgreSQL/Redis；准备好已运行的隔离服务后执行：
 
@@ -319,7 +322,7 @@ $env:TASK_INFRA_TEST_NAMESPACE='studio_test_local_unique01'
 pnpm test:task-infra
 ```
 
-三个变量缺少任意一个时命令会失败，不会静默跳过。GitHub Actions 使用固定摘要的临时 PostgreSQL/Redis 服务完成同一组测试，2026-07-28 的运行 `30315095898` 已通过。该结果证明隔离集成边界，不代表生产基础设施在线；Coordinator 调度入口、outbox/自动对账重投、跨 Worker 取消、任务 Control API、Dashboard 任务看板和生产基础设施仍待后续模块接入。
+三个变量缺少任意一个时命令会失败，不会静默跳过。测试会构建并启动独立 `task-worker` 子进程，但强制注入 `TASK_WORKER_PURPOSE=isolated-test` 与 `TASK_WORKER_HANDLER_PROFILE=isolated-acceptance`，不会连接 Minecraft。GitHub Actions 使用固定摘要的临时 PostgreSQL/Redis 服务完成同一组测试；2026-08-14 运行 `31793333384` 的 20 项真实基础设施场景全部通过，包括跨 Worker 与独立进程取消。该边界不代表生产基础设施在线；Coordinator 任务启动编排、生产任务处理器、任务 Control API 和 Dashboard 任务看板仍待后续模块接入。
 
 ## 安全说明
 

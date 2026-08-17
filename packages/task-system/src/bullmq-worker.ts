@@ -20,6 +20,7 @@ import {
 import { TaskSystemError } from "./errors.js";
 import {
   taskEvidenceSchema,
+  type TaskCancellationRequest,
   type TaskRecord,
 } from "./model.js";
 import { PostgresTaskRepository } from "./postgres-repository.js";
@@ -56,6 +57,12 @@ const workerOptionsSchema = z
       .min(1_000)
       .max(60_000)
       .default(10_000),
+    cancellationPollIntervalMs: z
+      .number()
+      .int()
+      .min(50)
+      .max(10_000)
+      .default(250),
   })
   .strict()
   .superRefine((value, context) => {
@@ -72,6 +79,14 @@ const workerOptionsSchema = z
         path: ["lockDurationMs"],
         message:
           "BullMQ lock duration must exceed the PostgreSQL lease duration.",
+      });
+    }
+    if (value.cancellationPollIntervalMs > value.cancellationWaitMs) {
+      context.addIssue({
+        code: "custom",
+        path: ["cancellationPollIntervalMs"],
+        message:
+          "Cancellation polling must occur within the caller wait window.",
       });
     }
   });
@@ -96,6 +111,7 @@ type ActiveTaskExecution = {
   readonly jobId: string;
   readonly leaseOwner: string;
   cancellation: CancelTaskCommand | null;
+  abortExecution: ((reason: TaskWorkerError) => void) | null;
 };
 
 export type TaskHandlerResult = Readonly<{
@@ -132,7 +148,6 @@ export class TaskWorkerError extends Error {
       | "TASK_LEASE_LOST"
       | "TASK_EXECUTION_CANCELLED"
       | "TASK_CANCELLATION_CONFLICT"
-      | "TASK_CANCELLATION_NOT_LOCAL"
       | "TASK_CANCELLATION_UNACKNOWLEDGED"
       | "TASK_WORKER_UNAVAILABLE"
       | "TASK_WORKER_SHUTDOWN",
@@ -225,6 +240,49 @@ function abortError(signal: AbortSignal): TaskWorkerError {
   );
 }
 
+function cancellationCommand(
+  request: TaskCancellationRequest,
+): CancelTaskCommand {
+  return cancelTaskCommandSchema.parse({
+    schemaVersion: "1.0",
+    operationId: request.operationId,
+    taskId: request.taskId,
+    actorId: request.actorId,
+    reasonCode: request.reasonCode,
+  });
+}
+
+function sameCancellation(
+  left: CancelTaskCommand,
+  right: CancelTaskCommand,
+): boolean {
+  return (
+    left.operationId === right.operationId &&
+    left.taskId === right.taskId &&
+    left.actorId === right.actorId &&
+    left.reasonCode === right.reasonCode
+  );
+}
+
+async function waitUntilPolled(
+  delayMs: number,
+  signal: AbortSignal,
+): Promise<void> {
+  if (signal.aborted) return;
+  await new Promise<void>((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    timer.unref();
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 async function executeHandlerUntilAbort(
   handler: TaskHandlerDefinition,
   context: TaskHandlerContext,
@@ -266,6 +324,14 @@ function terminalResult(task: TaskRecord): TaskWorkerQueueResult | null {
       revision: task.revision,
     };
   }
+  if (task.status === "failed") {
+    return {
+      schemaVersion: "1.0",
+      taskId: task.taskId,
+      status: "failed",
+      revision: task.revision,
+    };
+  }
   if (task.status === "expired") {
     return {
       schemaVersion: "1.0",
@@ -275,6 +341,15 @@ function terminalResult(task: TaskRecord): TaskWorkerQueueResult | null {
     };
   }
   return null;
+}
+
+function requiredTerminalResult(task: TaskRecord): TaskWorkerQueueResult {
+  const result = terminalResult(task);
+  if (result) return result;
+  throw new TaskWorkerError(
+    "TASK_WORKER_UNAVAILABLE",
+    "Task mutation did not produce a durable terminal state.",
+  );
 }
 
 export class BullMqTaskWorker {
@@ -339,6 +414,7 @@ export class BullMqTaskWorker {
     try {
       await waitForWorkerReady(this.worker.waitUntilReady(), 10_000);
     } catch {
+      this.closing = true;
       await this.worker.close(true).catch(() => undefined);
       throw new TaskWorkerError(
         "TASK_WORKER_UNAVAILABLE",
@@ -359,24 +435,25 @@ export class BullMqTaskWorker {
   }
 
   async cancelTask(input: unknown): Promise<TaskRecord> {
-    const command = cancelTaskCommandSchema.parse(input);
+    const requested = cancelTaskCommandSchema.parse(input);
+    const request = await this.repository.requestTaskCancellation({
+      operationId: requested.operationId,
+      taskId: requested.taskId,
+      actorId: requested.actorId,
+      reasonCode: requested.reasonCode,
+    });
+    const command = cancellationCommand(request);
     const active = this.activeExecutionByTask.get(command.taskId);
     if (active) {
-      if (active.cancellation) {
-        if (
-          active.cancellation.operationId !== command.operationId ||
-          active.cancellation.actorId !== command.actorId ||
-          active.cancellation.reasonCode !== command.reasonCode
-        ) {
-          throw new TaskWorkerError(
-            "TASK_CANCELLATION_CONFLICT",
-            "Task already has a different cancellation request in progress.",
-          );
-        }
-        return await this.waitForCancellation(command.taskId);
+      this.attachCancellation(active, command);
+      if (request.acknowledgedAt === null) {
+        await this.repository.acknowledgeTaskCancellation({
+          taskId: command.taskId,
+          acknowledgedBy: active.leaseOwner,
+          leaseOwner: active.leaseOwner,
+        });
       }
-      active.cancellation = command;
-      this.worker.cancelJob(active.jobId, command.reasonCode);
+      this.abortActiveExecution(active);
       return await this.waitForCancellation(command.taskId);
     }
 
@@ -388,20 +465,29 @@ export class BullMqTaskWorker {
       );
     }
     if (current.status === "cancelled") return current;
-    if (current.status === "assigned" || current.status === "running") {
+    if (
+      current.status === "completed" ||
+      current.status === "expired"
+    ) {
       throw new TaskWorkerError(
-        "TASK_CANCELLATION_NOT_LOCAL",
-        "Active task belongs to another worker and cannot be cancelled locally.",
+        "TASK_CANCELLATION_UNACKNOWLEDGED",
+        "Task reached another terminal state before cancellation.",
       );
     }
-    return await this.repository.cancelTask({
-      schemaVersion: "1.0",
-      operationId: command.operationId,
-      taskId: command.taskId,
-      actorId: command.actorId,
-      leaseOwner: null,
-      reasonCode: command.reasonCode,
-    });
+    if (current.status === "assigned" || current.status === "running") {
+      return await this.waitForCancellation(command.taskId);
+    }
+    try {
+      const resolved = await this.repository.resolveTaskCancellation({
+        taskId: command.taskId,
+        resolverId: this.options.instanceId,
+        leaseOwner: null,
+      });
+      if (resolved) return resolved.task;
+    } catch (error) {
+      if (!isCancellationOwnershipRace(error)) throw error;
+    }
+    return await this.waitForCancellation(command.taskId);
   }
 
   async close(): Promise<void> {
@@ -460,6 +546,7 @@ export class BullMqTaskWorker {
         jobId,
       ),
       cancellation: null,
+      abortExecution: null,
     };
     this.activeExecutionByTask.set(dispatch.taskId, active);
     try {
@@ -521,12 +608,30 @@ export class BullMqTaskWorker {
         );
       }
 
-      const recovery = await this.recoverStalledTask(
+      const cancelledBeforeRecovery = await this.cancelIfRequested(
         task,
-        dispatch,
-        handler,
-        job.attemptsStarted,
+        active,
+        workerSignal,
       );
+      if (cancelledBeforeRecovery) return cancelledBeforeRecovery;
+
+      let recovery: Awaited<ReturnType<BullMqTaskWorker["recoverStalledTask"]>>;
+      try {
+        recovery = await this.recoverStalledTask(
+          task,
+          dispatch,
+          handler,
+          job.attemptsStarted,
+        );
+      } catch (error) {
+        const cancelled = await this.resolvePendingCancellation(
+          error,
+          task.taskId,
+          active,
+        );
+        if (cancelled) return requiredTerminalResult(cancelled);
+        throw error;
+      }
       task = recovery.task;
       if (
         task.revision !== dispatch.payload.expectedRevision &&
@@ -551,20 +656,30 @@ export class BullMqTaskWorker {
       );
       if (cancelledBeforeLease) return cancelledBeforeLease;
 
-      task = await this.repository.acquireLease({
-        schemaVersion: "1.0",
-        operationId: deterministicOperationId(
-          dispatch.messageId,
-          "lease-acquire",
-          task.revision,
-        ),
-        taskId: task.taskId,
-        expectedRevision: task.revision,
-        actorId: this.options.instanceId,
-        botId: dispatch.botId,
-        leaseOwner: active.leaseOwner,
-        leaseDurationMs: this.options.leaseDurationMs,
-      });
+      try {
+        task = await this.repository.acquireLease({
+          schemaVersion: "1.0",
+          operationId: deterministicOperationId(
+            dispatch.messageId,
+            "lease-acquire",
+            task.revision,
+          ),
+          taskId: task.taskId,
+          expectedRevision: task.revision,
+          actorId: this.options.instanceId,
+          botId: dispatch.botId,
+          leaseOwner: active.leaseOwner,
+          leaseDurationMs: this.options.leaseDurationMs,
+        });
+      } catch (error) {
+        const cancelled = await this.resolvePendingCancellation(
+          error,
+          task.taskId,
+          active,
+        );
+        if (cancelled) return requiredTerminalResult(cancelled);
+        throw error;
+      }
       const cancelledAfterLease = await this.cancelIfRequested(
         task,
         active,
@@ -572,23 +687,33 @@ export class BullMqTaskWorker {
       );
       if (cancelledAfterLease) return cancelledAfterLease;
 
-      task = await this.repository.transition({
-        schemaVersion: "1.0",
-        operationId: deterministicOperationId(
-          dispatch.messageId,
-          "task-start",
-          task.revision,
-        ),
-        taskId: task.taskId,
-        expectedRevision: task.revision,
-        actorId: this.options.instanceId,
-        to: "running",
-        reasonCode: "TASK_WORKER_STARTED",
-        leaseOwner: active.leaseOwner,
-        failureReason: null,
-        result: null,
-        evidence: [],
-      });
+      try {
+        task = await this.repository.transition({
+          schemaVersion: "1.0",
+          operationId: deterministicOperationId(
+            dispatch.messageId,
+            "task-start",
+            task.revision,
+          ),
+          taskId: task.taskId,
+          expectedRevision: task.revision,
+          actorId: this.options.instanceId,
+          to: "running",
+          reasonCode: "TASK_WORKER_STARTED",
+          leaseOwner: active.leaseOwner,
+          failureReason: null,
+          result: null,
+          evidence: [],
+        });
+      } catch (error) {
+        const cancelled = await this.resolvePendingCancellation(
+          error,
+          task.taskId,
+          active,
+        );
+        if (cancelled) return requiredTerminalResult(cancelled);
+        throw error;
+      }
       const cancelledBeforeHandler = await this.cancelIfRequested(
         task,
         active,
@@ -701,10 +826,23 @@ export class BullMqTaskWorker {
   ): Promise<TaskWorkerQueueResult> {
     let currentTask = initialTask;
     let renewalError: unknown = null;
+    let cancellationMonitorError: unknown = null;
     let stopRenewal = false;
     let timedOut = false;
+    const databaseNow = await this.repository.getDatabaseTime();
+    const startedAtMs =
+      currentTask.startedAt === null
+        ? databaseNow.getTime()
+        : Date.parse(currentTask.startedAt);
+    const timeoutRemainingMs = Math.max(
+      0,
+      currentTask.timeoutMs -
+        Math.max(0, databaseNow.getTime() - startedAtMs),
+    );
     const executionController = new AbortController();
     const renewalController = new AbortController();
+    const cancellationController = new AbortController();
+    active.abortExecution = (reason) => executionController.abort(reason);
     const onWorkerAbort = () => {
       executionController.abort(
         this.closing
@@ -722,16 +860,19 @@ export class BullMqTaskWorker {
       if (workerSignal.aborted) onWorkerAbort();
       else workerSignal.addEventListener("abort", onWorkerAbort, { once: true });
     }
-    const databaseNow = await this.repository.getDatabaseTime();
-    const startedAtMs =
-      currentTask.startedAt === null
-        ? databaseNow.getTime()
-        : Date.parse(currentTask.startedAt);
-    const timeoutRemainingMs = Math.max(
-      0,
-      currentTask.timeoutMs -
-        Math.max(0, databaseNow.getTime() - startedAtMs),
-    );
+    const cancellationPromise = this.monitorTaskCancellation(
+      initialTask.taskId,
+      active,
+      cancellationController.signal,
+    ).catch((error: unknown) => {
+      cancellationMonitorError = error;
+      executionController.abort(
+        new TaskWorkerError(
+          "TASK_WORKER_UNAVAILABLE",
+          "Task cancellation monitor became unavailable.",
+        ),
+      );
+    });
     const timeout = setTimeout(() => {
       timedOut = true;
       executionController.abort(
@@ -822,7 +963,10 @@ export class BullMqTaskWorker {
       clearTimeout(timeout);
       stopRenewal = true;
       renewalController.abort();
+      cancellationController.abort();
       await renewalPromise;
+      await cancellationPromise;
+      active.abortExecution = null;
       if (workerSignal) {
         workerSignal.removeEventListener("abort", onWorkerAbort);
       }
@@ -839,37 +983,17 @@ export class BullMqTaskWorker {
     if (terminal) return terminal;
     currentTask = persisted;
 
+    await this.syncPersistedCancellation(currentTask, active);
     if (active.cancellation) {
-      const cancelled = await this.repository.cancelTask({
-        schemaVersion: "1.0",
-        operationId: active.cancellation.operationId,
-        taskId: currentTask.taskId,
-        actorId: active.cancellation.actorId,
-        leaseOwner: active.leaseOwner,
-        reasonCode: active.cancellation.reasonCode,
-      });
-      return {
-        schemaVersion: "1.0",
-        taskId: cancelled.taskId,
-        status: "cancelled",
-        revision: cancelled.revision,
-      };
+      return await this.resolveCancellation(currentTask, active);
     }
     const expiredAfterExecution = await this.finalizeExpiredBudget(
       currentTask,
       dispatch,
-      active.leaseOwner,
+      active,
     );
     if (expiredAfterExecution) {
-      return {
-        schemaVersion: "1.0",
-        taskId: expiredAfterExecution.taskId,
-        status:
-          expiredAfterExecution.status === "failed"
-            ? "failed"
-            : "already-terminal",
-        revision: expiredAfterExecution.revision,
-      };
+      return requiredTerminalResult(expiredAfterExecution);
     }
     if (this.closing) {
       throw new TaskWorkerError(
@@ -883,50 +1007,38 @@ export class BullMqTaskWorker {
         "Task lease was lost before a durable result was recorded.",
       );
     }
+    if (cancellationMonitorError !== null) {
+      throw new TaskWorkerError(
+        "TASK_WORKER_UNAVAILABLE",
+        "Task cancellation state could not be verified before persistence.",
+      );
+    }
     if (timedOut) {
       const failed = await this.failTask(
         currentTask,
         dispatch,
-        active.leaseOwner,
+        active,
         "TASK_TIMEOUT_EXPIRED",
       );
-      return {
-        schemaVersion: "1.0",
-        taskId: failed.taskId,
-        status: "failed",
-        revision: failed.revision,
-      };
+      return requiredTerminalResult(failed);
     }
     if (handlerError !== null || handlerResult === null) {
       const failed = await this.failTask(
         currentTask,
         dispatch,
-        active.leaseOwner,
+        active,
         "TASK_HANDLER_FAILED",
       );
-      return {
-        schemaVersion: "1.0",
-        taskId: failed.taskId,
-        status: "failed",
-        revision: failed.revision,
-      };
+      return requiredTerminalResult(failed);
     }
 
     const expiredBeforeCompletion = await this.finalizeExpiredBudget(
       currentTask,
       dispatch,
-      active.leaseOwner,
+      active,
     );
     if (expiredBeforeCompletion) {
-      return {
-        schemaVersion: "1.0",
-        taskId: expiredBeforeCompletion.taskId,
-        status:
-          expiredBeforeCompletion.status === "failed"
-            ? "failed"
-            : "already-terminal",
-        revision: expiredBeforeCompletion.revision,
-      };
+      return requiredTerminalResult(expiredBeforeCompletion);
     }
 
     let completed: TaskRecord;
@@ -949,6 +1061,12 @@ export class BullMqTaskWorker {
         evidence: handlerResult.evidence,
       });
     } catch (error) {
+      const cancelled = await this.resolvePendingCancellation(
+        error,
+        currentTask.taskId,
+        active,
+      );
+      if (cancelled) return requiredTerminalResult(cancelled);
       if (
         !(error instanceof TaskSystemError) ||
         ![
@@ -971,18 +1089,10 @@ export class BullMqTaskWorker {
       const budgetTerminal = await this.finalizeExpiredBudget(
         latest,
         dispatch,
-        active.leaseOwner,
+        active,
       );
       if (budgetTerminal) {
-        return {
-          schemaVersion: "1.0",
-          taskId: budgetTerminal.taskId,
-          status:
-            budgetTerminal.status === "failed"
-              ? "failed"
-              : "already-terminal",
-          revision: budgetTerminal.revision,
-        };
+        return requiredTerminalResult(budgetTerminal);
       }
       throw new TaskWorkerError(
         "TASK_LEASE_LOST",
@@ -1000,30 +1110,41 @@ export class BullMqTaskWorker {
   private async finalizeExpiredBudget(
     task: TaskRecord,
     dispatch: TaskDispatchV1,
-    leaseOwner: string,
+    active: ActiveTaskExecution,
   ): Promise<TaskRecord | null> {
+    const leaseOwner = active.leaseOwner;
     if (task.status !== "running" || task.leaseOwner !== leaseOwner) {
       return null;
     }
     const now = await this.repository.getDatabaseTime();
     if (task.deadline !== null && Date.parse(task.deadline) <= now.getTime()) {
-      return await this.repository.transition({
-        schemaVersion: "1.0",
-        operationId: deterministicOperationId(
-          dispatch.messageId,
-          "TASK_DEADLINE_EXPIRED",
-          task.revision,
-        ),
-        taskId: task.taskId,
-        expectedRevision: task.revision,
-        actorId: this.options.instanceId,
-        to: "expired",
-        reasonCode: "TASK_DEADLINE_EXPIRED",
-        leaseOwner,
-        failureReason: null,
-        result: null,
-        evidence: [],
-      });
+      try {
+        return await this.repository.transition({
+          schemaVersion: "1.0",
+          operationId: deterministicOperationId(
+            dispatch.messageId,
+            "TASK_DEADLINE_EXPIRED",
+            task.revision,
+          ),
+          taskId: task.taskId,
+          expectedRevision: task.revision,
+          actorId: this.options.instanceId,
+          to: "expired",
+          reasonCode: "TASK_DEADLINE_EXPIRED",
+          leaseOwner,
+          failureReason: null,
+          result: null,
+          evidence: [],
+        });
+      } catch (error) {
+        const cancelled = await this.resolvePendingCancellation(
+          error,
+          task.taskId,
+          active,
+        );
+        if (cancelled) return cancelled;
+        throw error;
+      }
     }
     if (
       task.startedAt !== null &&
@@ -1032,7 +1153,7 @@ export class BullMqTaskWorker {
       return await this.failTask(
         task,
         dispatch,
-        leaseOwner,
+        active,
         "TASK_TIMEOUT_EXPIRED",
       );
     }
@@ -1042,26 +1163,180 @@ export class BullMqTaskWorker {
   private async failTask(
     task: TaskRecord,
     dispatch: TaskDispatchV1,
-    leaseOwner: string,
+    active: ActiveTaskExecution,
     failureReason: "TASK_TIMEOUT_EXPIRED" | "TASK_HANDLER_FAILED",
   ): Promise<TaskRecord> {
-    return await this.repository.transition({
-      schemaVersion: "1.0",
-      operationId: deterministicOperationId(
-        dispatch.messageId,
+    try {
+      return await this.repository.transition({
+        schemaVersion: "1.0",
+        operationId: deterministicOperationId(
+          dispatch.messageId,
+          failureReason,
+          task.revision,
+        ),
+        taskId: task.taskId,
+        expectedRevision: task.revision,
+        actorId: this.options.instanceId,
+        to: "failed",
+        reasonCode: failureReason,
+        leaseOwner: active.leaseOwner,
         failureReason,
-        task.revision,
-      ),
+        result: null,
+        evidence: [],
+      });
+    } catch (error) {
+      const cancelled = await this.resolvePendingCancellation(
+        error,
+        task.taskId,
+        active,
+      );
+      if (cancelled) return cancelled;
+      throw error;
+    }
+  }
+
+  private attachCancellation(
+    active: ActiveTaskExecution,
+    command: CancelTaskCommand,
+  ): void {
+    if (active.cancellation && !sameCancellation(active.cancellation, command)) {
+      throw new TaskWorkerError(
+        "TASK_CANCELLATION_CONFLICT",
+        "Task already has a different cancellation request in progress.",
+      );
+    }
+    active.cancellation = command;
+  }
+
+  private abortActiveExecution(active: ActiveTaskExecution): void {
+    const cancellation = active.cancellation;
+    if (!cancellation) return;
+    const reason = new TaskWorkerError(
+      "TASK_EXECUTION_CANCELLED",
+      "Task execution has a durable cancellation request.",
+    );
+    if (active.abortExecution) {
+      active.abortExecution(reason);
+      return;
+    }
+    this.worker.cancelJob(active.jobId, cancellation.reasonCode);
+  }
+
+  private async syncPersistedCancellation(
+    task: TaskRecord,
+    active: ActiveTaskExecution,
+  ): Promise<void> {
+    const request = await this.repository.getTaskCancellationRequest(task.taskId);
+    if (!request) return;
+    this.attachCancellation(active, cancellationCommand(request));
+    if (
+      request.acknowledgedAt === null &&
+      (task.status === "assigned" || task.status === "running") &&
+      task.leaseOwner === active.leaseOwner
+    ) {
+      const acknowledged = await this.repository.acknowledgeTaskCancellation({
+        taskId: task.taskId,
+        acknowledgedBy: active.leaseOwner,
+        leaseOwner: active.leaseOwner,
+      });
+      if (!acknowledged) {
+        const latest = await this.repository.getTaskCancellationRequest(
+          task.taskId,
+        );
+        if (!latest?.acknowledgedAt) {
+          throw new TaskWorkerError(
+            "TASK_LEASE_LOST",
+            "Task cancellation could not be acknowledged by the lease owner.",
+          );
+        }
+      }
+    }
+  }
+
+  private async monitorTaskCancellation(
+    taskId: string,
+    active: ActiveTaskExecution,
+    signal: AbortSignal,
+  ): Promise<void> {
+    while (!signal.aborted) {
+      const task = await this.repository.getTask(taskId);
+      if (!task || terminalResult(task)) return;
+      await this.syncPersistedCancellation(task, active);
+      if (active.cancellation) {
+        this.abortActiveExecution(active);
+        return;
+      }
+      await waitUntilPolled(
+        this.options.cancellationPollIntervalMs,
+        signal,
+      );
+    }
+  }
+
+  private async resolveCancellation(
+    task: TaskRecord,
+    active: ActiveTaskExecution,
+  ): Promise<TaskWorkerQueueResult> {
+    return requiredTerminalResult(
+      await this.resolveCancellationTask(task, active),
+    );
+  }
+
+  private async resolveCancellationTask(
+    task: TaskRecord,
+    active: ActiveTaskExecution,
+  ): Promise<TaskRecord> {
+    if (!active.cancellation) {
+      throw new TaskWorkerError(
+        "TASK_CANCELLATION_UNACKNOWLEDGED",
+        "Task cancellation resolution was requested without durable intent.",
+      );
+    }
+    const activeLeaseOwner =
+      (task.status === "assigned" || task.status === "running") &&
+      task.leaseOwner === active.leaseOwner
+        ? active.leaseOwner
+        : null;
+    const resolved = await this.repository.resolveTaskCancellation({
       taskId: task.taskId,
-      expectedRevision: task.revision,
-      actorId: this.options.instanceId,
-      to: "failed",
-      reasonCode: failureReason,
-      leaseOwner,
-      failureReason,
-      result: null,
-      evidence: [],
+      resolverId: this.options.instanceId,
+      leaseOwner: activeLeaseOwner,
     });
+    if (!resolved) {
+      throw new TaskWorkerError(
+        "TASK_CANCELLATION_UNACKNOWLEDGED",
+        "Durable cancellation request disappeared before resolution.",
+      );
+    }
+    return resolved.task;
+  }
+
+  private async resolvePendingCancellation(
+    error: unknown,
+    taskId: string,
+    active: ActiveTaskExecution,
+  ): Promise<TaskRecord | null> {
+    if (
+      !(error instanceof TaskSystemError) ||
+      error.code !== "TASK_CANCELLATION_PENDING"
+    ) {
+      return null;
+    }
+    const latest = await this.repository.getTask(taskId);
+    if (!latest) {
+      throw new TaskWorkerError(
+        "TASK_LEASE_LOST",
+        "Task disappeared while durable cancellation was pending.",
+      );
+    }
+    await this.syncPersistedCancellation(latest, active);
+    if (!active.cancellation) {
+      throw new TaskWorkerError(
+        "TASK_WORKER_UNAVAILABLE",
+        "Task reported pending cancellation without durable request state.",
+      );
+    }
+    return await this.resolveCancellationTask(latest, active);
   }
 
   private async cancelIfRequested(
@@ -1069,27 +1344,12 @@ export class BullMqTaskWorker {
     active: ActiveTaskExecution,
     workerSignal?: AbortSignal,
   ): Promise<TaskWorkerQueueResult | null> {
+    await this.syncPersistedCancellation(task, active);
     if (!active.cancellation) {
       if (workerSignal?.aborted) throw abortError(workerSignal);
       return null;
     }
-    const cancelled = await this.repository.cancelTask({
-      schemaVersion: "1.0",
-      operationId: active.cancellation.operationId,
-      taskId: task.taskId,
-      actorId: active.cancellation.actorId,
-      leaseOwner:
-        task.status === "assigned" || task.status === "running"
-          ? active.leaseOwner
-          : null,
-      reasonCode: active.cancellation.reasonCode,
-    });
-    return {
-      schemaVersion: "1.0",
-      taskId: cancelled.taskId,
-      status: "cancelled",
-      revision: cancelled.revision,
-    };
+    return await this.resolveCancellation(task, active);
   }
 
   private async waitForCancellation(taskId: string): Promise<TaskRecord> {
@@ -1105,13 +1365,30 @@ export class BullMqTaskWorker {
       if (task.status === "cancelled") return task;
       if (
         task.status === "completed" ||
-        task.status === "expired" ||
-        task.status === "failed"
+        task.status === "expired"
       ) {
         throw new TaskWorkerError(
           "TASK_CANCELLATION_UNACKNOWLEDGED",
           "Task reached another terminal state before cancellation.",
         );
+      }
+      const inactive =
+        task.status !== "assigned" && task.status !== "running";
+      const leasePossiblyExpired =
+        !inactive &&
+        task.leaseExpiresAt !== null &&
+        Date.parse(task.leaseExpiresAt) <= Date.now();
+      if (inactive || leasePossiblyExpired) {
+        try {
+          const resolved = await this.repository.resolveTaskCancellation({
+            taskId,
+            resolverId: this.options.instanceId,
+            leaseOwner: null,
+          });
+          if (resolved) return resolved.task;
+        } catch (error) {
+          if (!isCancellationOwnershipRace(error)) throw error;
+        }
       }
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
@@ -1120,6 +1397,20 @@ export class BullMqTaskWorker {
       "Task handler did not acknowledge cancellation within the allowed time.",
     );
   }
+}
+
+function isCancellationOwnershipRace(error: unknown): boolean {
+  return (
+    error instanceof TaskSystemError &&
+    [
+      "TASK_LEASE_REQUIRED",
+      "TASK_LEASE_OWNER_MISMATCH",
+      "TASK_REVISION_CONFLICT",
+      "TASK_TRANSITION_INVALID",
+      "TASK_CANCELLATION_PENDING",
+      "TASK_TERMINAL",
+    ].includes(error.code)
+  );
 }
 
 function deterministicLeaseOwner(

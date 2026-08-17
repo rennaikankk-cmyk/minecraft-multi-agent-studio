@@ -9,6 +9,13 @@
 - 新增多版本 Skill 兼容清单与有序变体解析器：通用 Skill 可声明无额外要求的 `portable` 变体，新版本特色 Skill 可按真实 feature、物品、方块、实体和显式服务端能力探针启用；不再把“不同版本”直接等同于“不可用”。
 - `BotVersionV1` 补充真实 `protocolVersion` / `majorVersion`，新增 `BotSkillCatalogV1` 遥测；Runtime 在连接及链路重连时发布每个 Skill 的选中变体、可用性、验证状态和稳定原因，Coordinator 拒绝与当前 Runtime/版本事实矛盾的目录。
 - 新增纯回环多版本握手测试，使用 Mineflayer 自动探测分别验证 1.8.8、1.12.2、1.16.5 和 1.21.11 及其协议号；协议版本字符串不再硬编码 `1.x` 命名。
+- 新增 PostgreSQL 权威的持久取消消费：首个取消操作不可覆盖，执行租约所有者有界轮询并确认请求，跨 Worker 发起方可等待同一 cancelled 终态；租约失效后由无租约解析者完成取消。
+- 新增独立 `@minecraft-studio/task-worker` Node 进程入口与 `isolated.acceptance.wait@1.0.0` 验收处理器。入口强制使用回环 PostgreSQL/Redis、专用 Schema、`isolated-test` purpose 和固定 handler profile，不注册生产或 Minecraft 处理器。
+- 真实基础设施套件新增队列取消原子性、不同 Worker 发起/消费取消，以及独立 Worker 子进程消费持久取消的场景；2026-08-14 GitHub Actions 运行 `31793333384` 已在临时 PostgreSQL/Redis 上 20/20 通过。
+- 新增“Minecraft 技能隔离验收”GitHub Actions 门禁：仅支持人工勾选 EULA 后手动运行，或由仓库变量确认 EULA 后通过 `minecraft-acceptance` 标签触发；拒绝 Fork、无 Secret、只读权限、固定 Mojang 官方 JAR 与 SHA-1、仅本机回环临时服。
+- 新增严格版本化的 Minecraft 技能验收场景清单，为 7 个内置技能统一定义成功、材料不足、权限/位置拒绝、L0 抢占、取消、断线和部分成功读回矩阵。
+- 新增 `pnpm test:minecraft-skills` 一键回环隔离验收入口；复用既有官方服务端哈希、人工 EULA、安全属性和未知端口进程拒绝检查，并加入真实 `smelt.item@1.0.0` 场景握手与中文通过标记。
+- 新增 `smelt.item@1.0.0`：使用 Mineflayer 原生 `openFurnace`，显式指定原料、燃料及数量，只接管空熔炉，异步等待并逐次取回真实产物；单次最多 5 件以保持既有 60 秒技能硬超时，取消/L0 抢占时 fail-closed，不自动重试非幂等熔炼。
 - 新增 `inventory.equip-armor@1.0.0`——首个"参考 GPL 机制、代码全自研"技能（每槽选最优护甲、平手不换）；决策为可离线单测的纯函数，Runtime 只提供 `armor.snapshot`/`armor.equip` 原子能力，client 硬护栏拒绝非该槽护甲与背包没有的护甲。
 - 新增生存链四技能：`collect.block@1.0.0`（MIT `mineflayer-collectblock` 1.6.0 + `mineflayer-tool` 1.2.0 供应链锁定接入，禁自动倒箱、与寻路互斥）、`craft.item@1.0.0`（自研，原生 recipesFor+craft，2x2/3x3）、`world.place-block@1.0.0`（自研，一次一块、放置后读回校验）、`container.transfer@1.0.0`（自研，openContainer+deposit/withdraw，容器白名单仅箱子/木桶/潜影盒）。裸装冷启动第一循环（走→撸木→合成→放置→撸石→穿甲→入库）技能层闭环。
 - 技能结果日志 `bot_runtime_skill_result` 新增 `durationMs` 与白名单标量遥测摘要（`craftedCount`/`movedCount`/`itemsCollected` 等 10 键），单行日志即可判定技能在隔离服上可不可用；新增 `docs/skill-verification-runbook.md`（grep 起手式 + 失败签名表）。
@@ -18,6 +25,8 @@
 
 - Skill 执行前重新按当前连接的真实兼容环境解析；资源缺失或服务端能力未知时返回稳定 `SKILL_VERSION_UNAVAILABLE`，不会按版本号猜测、静默降级或调用处理器。
 - 多版本测试服务器只绑定随机回环端口，不连接外部 Minecraft；“可用性”和“跨版本实机验证状态”分开记录，当前六个通用 Skill 仍诚实标记为 `unverified`。
+- 已持久化取消通过任务行锁优先于新租约、完成、失败、截止时间和租约恢复；Coordinator 在取消与过期恢复竞争时重新读取并优先解析取消，避免把取消任务重派或改写为失败。
+- 独立 Worker 配置不记录连接 URL，缺失显式隔离用途、验收 profile、专用 namespace 或回环服务时 fail-closed。它只隔离控制平面与 Worker 进程，不宣称对进程内不合作处理器提供硬终止。
 - 供应链新增 `mineflayer-collectblock` 1.6.0 与 `mineflayer-tool` 1.2.0（均 MIT，官方 npm Registry，精确版本+完整性哈希记入 SECURITY.md）；插件不直接暴露给 AI 或任务层，仅经技能接口包装。
 
 ### 新增（较早）
@@ -83,8 +92,8 @@
 - Runtime ↔ Coordinator 已通过真实双进程回环验收，Dashboard → Control API → Coordinator → 测试专用 Runtime 已通过四进程服务级回环验收；后者没有连接 Minecraft，也不等同于浏览器 E2E 或正式服务器验收。
 - Control Link 当前只支持同机回环，状态、停止幂等缓存和审计仍在内存中；跨主机 TLS、密钥轮换、用户登录和持久化停止审计尚未完成。
 - 本机未检测到 PostgreSQL、Redis 或 Docker；2026-07-28 的 GitHub Actions 运行 `30315095898` 已通过真实临时 PostgreSQL/Redis 集成门，该结果不代表生产服务在线。
-- 当前提供可嵌入 Worker 库和 Coordinator 过期租约恢复控制器，尚未提供独立生产 Worker 应用、Coordinator 任务基础设施启动配置、任务 Control API 或 Dashboard 任务看板。
-- 当前已实现事务 outbox、PostgreSQL→BullMQ 对账、显式失败重派和自动过期租约恢复，但本机没有 PostgreSQL/Redis；新增升级、回滚、并发对账、异常封存和恢复场景已在 2026-08-11 GitHub Actions 运行 `31480434428` 的真实 PostgreSQL/Redis 门禁中 18/18 通过。持久取消消费和跨 Worker 取消仍未完成。
+- 当前提供可嵌入 Worker 库、Coordinator 过期租约恢复控制器和仅供隔离验收的独立 Worker 应用；尚未提供生产 Worker 配置/处理器、Coordinator 任务基础设施启动配置、任务 Control API 或 Dashboard 任务看板。
+- 当前已实现事务 outbox、PostgreSQL→BullMQ 对账、显式失败重派、自动过期租约恢复和跨 Worker 持久取消，但本机没有 PostgreSQL/Redis；2026-08-14 GitHub Actions 运行 `31793333384` 的真实门禁已 20/20 通过。该结果不代表生产基础设施在线。
 - 任务处理器是受信任的进程内代码，并非强隔离沙盒；不合作响应 `AbortSignal` 的代码在失去租约后仍可能继续运行自身副作用，硬终止需后续独立进程隔离。
 - 没有注册生产任务处理器，本模块不会执行模型输出，也不会连接 Minecraft。
 
