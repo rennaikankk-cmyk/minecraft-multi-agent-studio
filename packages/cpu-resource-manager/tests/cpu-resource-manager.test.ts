@@ -181,6 +181,39 @@ describe("CPU topology", () => {
       reliability: "none",
     });
   });
+
+  it("ARM64 异构容量信息不被猜测为 Intel P/E 核", async () => {
+    const base = hybridFixture();
+    const topology = await detectCpuTopology({
+      ...base,
+      architecture: "arm64",
+      readTextFile: async (path) => {
+        if (path === "/proc/cpuinfo") {
+          return "model name : ARM64 双簇测试 CPU\n";
+        }
+        const capacity = path.match(/cpu([0-9]+)\/cpu_capacity$/u);
+        if (capacity?.[1]) {
+          return Number(capacity[1]) < 2 ? "1024\n" : "768\n";
+        }
+        return base.readTextFile!(path);
+      },
+      readCpuid: async () => {
+        throw new Error("ARM64 不提供 Intel CPUID 叶");
+      },
+    });
+    const pools = createCpuPools(topology);
+
+    expect(topology.architecture).toBe("arm64");
+    expect(topology.heterogeneousCapacityDetected).toBe(true);
+    expect(topology.hybridCpuDetected).toBe(false);
+    expect(topology.classification).toMatchObject({
+      source: "generic",
+      reliability: "none",
+      reason: "non_intel_without_exact_core_types",
+    });
+    expect(pools.performancePool.cpuIds).toEqual([0, 1, 2, 3]);
+    expect(pools.backgroundPool.cpuIds).toEqual([0, 1, 2, 3]);
+  });
 });
 
 describe("configuration and scheduling", () => {

@@ -6,6 +6,13 @@
 
 ### 新增
 
+- 增加通用第二阶段目标主机门禁与 ARM64 普通核心回退测试，允许使用 DGX Spark 完成前期 Supervisor、IPC、崩溃恢复和合成性能验证，同时明确不把 ARM64 双簇猜测为 Intel P/E Core。
+- 新增 Bot Process Supervisor：按部署等级隔离正式、灰度、测试和批处理故障域，支持一至三个 Bot 共用一个 `child_process.fork` 子进程，并保留旧单 Bot 启动入口。
+- 新增严格 Supervisor IPC v1：固定子入口、双向 HMAC challenge、Profile SHA-256 复验、最多三个 Bot 的启动清单、有界消息/队列、单调生命周期序列和认证停止命令。
+- 新增子进程优雅停止、滑动窗口重启预算、带抖动指数退避、稳定驻留重置和预算耗尽停止自旋；初次启动失败会清理已启动的其他进程组。
+- 已认证子进程 PID 接入 CPU Resource Manager 活跃授权表，退出时释放 workload；硬件建议可选择 1～3 的分组大小，无法可靠识别 P/E Core 时继续 generic fallback。
+- 新增真实 Node 子进程验收，覆盖两 Bot 分组、认证启动、优雅停止、CPU workload 注册/释放和首次崩溃后恢复；新增 1/5/10/20 Bot 空 Host 生命周期合成 Benchmark。
+- 新增 `configs/bot-supervisor.example.json`、`pnpm bot:supervisor`、`pnpm test:bot-supervisor` 与 `pnpm benchmark:bot-supervisor`。
 - 新增多版本 Skill 兼容清单与有序变体解析器：通用 Skill 可声明无额外要求的 `portable` 变体，新版本特色 Skill 可按真实 feature、物品、方块、实体和显式服务端能力探针启用；不再把“不同版本”直接等同于“不可用”。
 - `BotVersionV1` 补充真实 `protocolVersion` / `majorVersion`，新增 `BotSkillCatalogV1` 遥测；Runtime 在连接及链路重连时发布每个 Skill 的选中变体、可用性、验证状态和稳定原因，Coordinator 拒绝与当前 Runtime/版本事实矛盾的目录。
 - 新增纯回环多版本握手测试，使用 Mineflayer 自动探测分别验证 1.8.8、1.12.2、1.16.5 和 1.21.11 及其协议号；协议版本字符串不再硬编码 `1.x` 命名。
@@ -23,6 +30,9 @@
 
 ### 安全
 
+- Supervisor 配置文件只保存密钥环境变量名；ServerProfile 必须位于显式根目录，符号链接逃逸、身份错配、重复 keyId、未知字段和父子交接期间文件变化均在连接 Minecraft 前拒绝。
+- 子进程不继承父进程的 Bot 密钥、`NODE_OPTIONS` 或调试参数；父 IPC 丢失、认证失败、重放、序列错误或背压溢出时整组 fail-closed。
+- CPU 识别、资源注册或 affinity 失败只记录 warning，不导致 Bot 退出；affinity 和动态 scheduler 继续默认关闭。
 - Skill 执行前重新按当前连接的真实兼容环境解析；资源缺失或服务端能力未知时返回稳定 `SKILL_VERSION_UNAVAILABLE`，不会按版本号猜测、静默降级或调用处理器。
 - 多版本测试服务器只绑定随机回环端口，不连接外部 Minecraft；“可用性”和“跨版本实机验证状态”分开记录，当前六个通用 Skill 仍诚实标记为 `unverified`。
 - 已持久化取消通过任务行锁优先于新租约、完成、失败、截止时间和租约恢复；Coordinator 在取消与过期恢复竞争时重新读取并优先解析取消，避免把取消任务重派或改写为失败。
@@ -88,6 +98,9 @@
 
 ### 当前限制
 
+- Supervisor 的合成 Benchmark 使用不连接 Minecraft 的空 Host；尚未完成真实 1/5/10/20 Bot、P/E Core、Pathfinder/PvP 或低端实体机性能门禁。
+- Pathfinder、方块扫描、蓝图和战斗位置搜索仍在所属 Bot 事件循环；Bot 状态驱动 CPU 提升、Dashboard CPU 页面和 systemd 配置尚未接入。
+- `BOT_RUNTIME_AUTO_SIZE=true` 当前只选择分组大小并告警超预算，不会静默丢弃 Bot，也尚未实现 Coordinator 期望状态驱动的待机队列或热迁移。
 - 当前四版本自动探测验证是协议级回环握手，不是六个 Skill 的真实玩法矩阵；资源输入仍使用各版本 registry 原生名称，规划器语义别名和显式服务端能力探针尚未接入。
 - Runtime ↔ Coordinator 已通过真实双进程回环验收，Dashboard → Control API → Coordinator → 测试专用 Runtime 已通过四进程服务级回环验收；后者没有连接 Minecraft，也不等同于浏览器 E2E 或正式服务器验收。
 - Control Link 当前只支持同机回环，状态、停止幂等缓存和审计仍在内存中；跨主机 TLS、密钥轮换、用户登录和持久化停止审计尚未完成。

@@ -1,82 +1,41 @@
-import type { BotTelemetryMessageV1 } from "@minecraft-studio/protocol";
 import { createStructuredLogger } from "@minecraft-studio/observability";
 
-import { createMineflayerClient } from "./mineflayer-client.js";
 import {
-  RuntimeLinkClient,
   RuntimeLinkClientError,
 } from "./runtime-link-client.js";
 import {
   loadRuntimeLinkConfig,
   RuntimeLinkConfigError,
 } from "./runtime-link-config.js";
-import { SingleBotRuntime } from "./runtime.js";
+import { BotRuntimeHost } from "./runtime-host.js";
 import { loadServerProfile, ServerProfileError } from "./server-profile.js";
 const logger = createStructuredLogger({
   service: "bot-runtime",
   instanceId: `bot-runtime-${process.pid}`,
 });
 
-function reportTelemetry(message: BotTelemetryMessageV1): void {
-  const payload = message.payload;
-  logger.info("bot_telemetry", {
-    traceId: message.traceId,
-    taskId:
-      "currentTaskId" in payload
-        ? payload.currentTaskId ?? null
-        : "currentTask" in payload
-          ? payload.currentTask?.taskId ?? null
-          : null,
-    messageType: message.type,
-    botId: message.botId,
-    skillId: null,
-    modelName: null,
-    sequence: "sequence" in payload ? payload.sequence : undefined,
-    connectionState:
-      "connectionState" in payload ? payload.connectionState : undefined,
-  });
-}
-
 async function main(): Promise<void> {
   const profile = await loadServerProfile();
   const runtimeLinkConfig = loadRuntimeLinkConfig();
-  let runtimeLink: RuntimeLinkClient | null = null;
-  const runtime = new SingleBotRuntime(profile, {
-    createClient: createMineflayerClient,
-    messageSink: (message) => {
-      reportTelemetry(message);
-      runtimeLink?.publishTelemetry(message);
-    },
+  const host = new BotRuntimeHost({
+    profile,
+    runtimeLinkConfig,
     logger,
+    onFatal: () => {
+      process.exitCode = 1;
+    },
   });
 
   let shutdownStarted = false;
   const shutdown = async (signal: string) => {
     if (shutdownStarted) return;
     shutdownStarted = true;
-    await runtime.stop(signal);
-    await runtimeLink?.close();
+    await host.stop(signal);
   };
-
-  runtimeLink = new RuntimeLinkClient({
-    config: runtimeLinkConfig,
-    botId: profile.botId,
-    runtimeInstanceId: runtime.getRuntimeInstanceId(),
-    logger,
-    handleStopCommand: (command, authorizationContext) =>
-      runtime.handleStopCommand(command, authorizationContext),
-    publishCurrentState: () => runtime.publishCurrentState(),
-    failClosed: async (error) => {
-      logger.error("bot_runtime_control_link_lost", { code: error.code });
-      process.exitCode = 1;
-      await runtime.stop("runtime_link_fail_closed");
-    },
-  });
 
   process.once("SIGINT", () => void shutdown("SIGINT"));
   process.once("SIGTERM", () => void shutdown("SIGTERM"));
-  await runtimeLink.start();
-  runtime.start();
+  await host.start();
 }
 
 void main().catch((error: unknown) => {
@@ -96,6 +55,10 @@ export {
   createMineflayerClient,
   createMineflayerOptions,
 } from "./mineflayer-client.js";
+export {
+  BotRuntimeHost,
+  type BotRuntimeHostOptions,
+} from "./runtime-host.js";
 export {
   RuntimeControlError,
   SingleBotRuntime,
@@ -122,6 +85,29 @@ export {
   type ServerProfile,
   type ServerProfileErrorCode,
 } from "./server-profile.js";
+export {
+  BotSupervisorConfigError,
+  loadBotSupervisorConfig,
+  type BotSupervisorConfig,
+  type BotSupervisorConfigErrorCode,
+  type BotSupervisorIpcConfig,
+  type BotSupervisorRestartConfig,
+  type ResolvedSupervisorBot,
+} from "./supervisor-config.js";
+export {
+  BotProcessSupervisor,
+  type BotProcessGroupSnapshot,
+  type BotProcessSupervisorOptions,
+  type BotProcessSupervisorSnapshot,
+  type SupervisorFork,
+} from "./supervisor.js";
+export {
+  createBotSupervisorPlan,
+  RestartBudget,
+  type BotProcessGroupPlan,
+  type BotSupervisorPlan,
+  type RestartDecision,
+} from "./supervisor-plan.js";
 export type {
   BotClient,
   BotClientFactory,

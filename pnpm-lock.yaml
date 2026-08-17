@@ -25,6 +25,9 @@ importers:
 
   apps/bot-runtime:
     dependencies:
+      '@minecraft-studio/cpu-resource-manager':
+        specifier: workspace:*
+        version: link:../../packages/cpu-resource-manager
       '@minecraft-studio/observability':
         specifier: workspace:*
         version: link:../../packages/observability

@@ -1,6 +1,5 @@
 import { createBot, type Bot } from "mineflayer";
-import {
-  goals,
+import pathfinderModule, {
   Movements,
   pathfinder,
 } from "mineflayer-pathfinder";
@@ -46,6 +45,8 @@ import {
   mineflayerVersionOption,
   resolvedVersionCompatibility,
 } from "./version-compatibility.js";
+
+const { goals } = pathfinderModule;
 
 const ARMOR_POINTS: Readonly<Record<string, number>> = {
   leather_helmet: 1,
@@ -1273,4 +1274,3 @@ export function createMineflayerOptions(profile: ServerProfile) {
     logErrors: false,
   };
 }
-

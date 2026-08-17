@@ -1,8 +1,8 @@
 # Minecraft 多智能体机器人项目路线图
 
-更新时间：2026-08-14
+更新时间：2026-08-17
 当前阶段：阶段 1（安全执行底座）
-当前状态：Runtime/Control Link 验收保持通过；P1.3.2b 跨 Worker 持久取消与独立隔离 Worker 已通过离线门禁和真实 PostgreSQL/Redis CI；P1.2.2 多版本服务器事实与 Skill 兼容层已完成本机门禁，等待本堆叠分支 GitHub CI
+当前状态：Runtime/Control Link 验收保持通过；CPU Resource Manager 第一阶段和 Bot Process Supervisor 第二阶段已完成本机门禁；真实 Minecraft 多 Bot 与 Intel 混合架构实体机门禁尚未执行
 
 ## 当前进度总览
 
@@ -12,6 +12,8 @@
 
 - 环境检测、运行模式识别、版本化 Bot/Control/Skill 协议。
 - 隔离测试服单 Bot Runtime、有限重连、优雅停止、Minecraft 版本/协议自动探测和 Skill 兼容变体解析。
+- 可选 Bot Process Supervisor：一至三个 Bot 分组、部署等级故障域隔离、认证 IPC、优雅停止、有限崩溃恢复和 CPU workload PID 注册。
+- CPU Resource Manager：可靠 CPU 拓扑探测、P/E Core 禁止猜测、generic fallback、CPU Pool、硬件建议和默认关闭的 affinity/scheduler。
 - Coordinator 进程内注册表、Control API/WebSocket 契约、Dashboard UI 与浏览器测试。
 - Runtime 与独立 Coordinator 之间的认证回环 WebSocket、遥测回执、停止确认、有限重连和失联安全停止。
 - Coordinator 与 Control API 之间的双向 HMAC Control Link、原子状态快照/有序增量、断线 503 和固定停止 RPC。
@@ -28,6 +30,7 @@
 - 2026-08-14 本机门禁：`pnpm check` 退出码 0，305 项测试通过、20 项真实 PostgreSQL/Redis 或真实隔离 Minecraft 场景按设计跳过，全部类型检查与生产构建通过；新增测试只在随机回环端口模拟 1.8.8、1.12.2、1.16.5 和 1.21.11 协议握手，没有连接外部 Minecraft。
 - 2026-08-14 Runtime Link 双进程与 Dashboard → Control API → Coordinator → 测试 Runtime 四进程回环验收均退出码 0，`minecraftConnected=false`、最终离线且客户端只关闭一次；GitHub CI 等本分支上传后确认。
 - 2026-08-14 GitHub Actions 运行 `31793333384`：完整离线质量门、Runtime Link/四进程验收和真实 PostgreSQL/Redis 隔离门均通过；20 项真实基础设施场景全部通过，新增覆盖队列取消原子性、跨 Worker 取消和独立 Task Worker 子进程消费持久取消，且没有连接 Minecraft。
+- 2026-08-17 Bot Process Supervisor 本机门禁：严格配置与 IPC 测试、真实子进程两 Bot 分组/优雅停止、首次崩溃退避恢复和 1/5/10/20 Bot 空 Host 合成 Benchmark 通过；没有连接 Minecraft，不能代替 P/E Core 实体机性能结论。
 
 ### 已完成并有真实基础设施验证
 
@@ -260,6 +263,19 @@
 
 - 角色评分、任务分配、资源锁、箱子锁、区域锁、替补执行和故障恢复。
 
+### P1.4.1 异构 CPU 资源调度
+
+状态：**第一、二阶段完成；第三阶段实体机 affinity 接入待开始**
+
+- [x] 第一阶段：可靠 CPU/NUMA/cpuset/P/E 分类探测、generic fallback、CPU Pool、硬件建议与合成策略门禁。
+- [x] 第二阶段：Bot Process Supervisor、1～3 Bot 分组、部署等级隔离、认证 IPC、背压、优雅停止、有限崩溃恢复和活跃 PID 授权。
+- [ ] 第三阶段：在 Intel 混合架构、AMD、旧 Intel、虚拟机、Docker 和权限受限主机验证进程 CPU affinity；生成可选 systemd 配置。
+- [ ] 第四至七阶段：Pool 配额、Bot 状态优先级、监控页面和带冷却/滞后的动态调度。
+- [ ] 第八至九阶段：自动硬件参数闭环与 Skill CPU 成本评分。
+
+第二阶段不会迁移 Pathfinder；复杂寻路 Worker 需先定义 World Snapshot、Block Cache 和
+Entity Snapshot 协议。旧 `pnpm bot:start` 保持回滚可用，affinity 和 scheduler 默认关闭。
+
 ### P1.5 生产技能
 
 - 采集、合成、冶炼、箱子、物流、农业、建造和巡逻，逐项通过场景测试。
@@ -315,12 +331,14 @@
 2. **已完成：P0 Runtime Link**：Runtime ↔ Coordinator 的认证遥测与停止传输已通过真实双进程回环验收；测试没有连接 Minecraft。
 3. **已完成：P0 Control Bridge**：Control API ↔ 独立 Coordinator 的原子状态镜像和固定停止 RPC 已通过不连接 Minecraft 的真实四进程回环服务验收。
 4. **已完成：P1.3.2 持久任务闭环**：outbox/reconciler、自动过期租约恢复、持久取消、跨 Worker 取消和独立隔离 Worker 已通过真实基础设施 CI；生产处理器仍未接入。
-5. **P1.2.3 跨版本语义资源解析**：把规划器的“原木/石材/新版本特色物品”等语义选择解析为当前 registry 的真实资源与兼容变体。
-6. **P1.1/P1.2 实机矩阵**：验证 L0 危险场景和六个 Skill 的多版本真实行为，不扩大正式服务器权限。
-7. **P1.4 多 Bot 协调**：实现任务分配、资源/箱子/区域锁、替补执行和故障转移。
-8. **P1.5/P1.6 生产能力与基础设施**：按场景逐项增加生产技能，再完善指标、日志、备份与可回滚部署。
-9. **P2 智能层**：基础设施稳定后再接长期记忆、AI Router 和本地规划；受监管自我改进、基地撤离和战斗保持最后阶段。
+5. **已完成：CPU 调度第一、二阶段**：可靠硬件探测与 Bot Process Supervisor 已通过离线和真实子进程门禁；未连接 Minecraft。
+6. **CPU 调度第三阶段**：用已认证子进程 PID 表执行可选 affinity，并在 Intel 混合架构与 generic fallback 主机完成实体机门禁。
+7. **P1.2.3 跨版本语义资源解析**：把规划器的“原木/石材/新版本特色物品”等语义选择解析为当前 registry 的真实资源与兼容变体。
+8. **P1.1/P1.2 实机矩阵**：验证 L0 危险场景和六个 Skill 的多版本真实行为，不扩大正式服务器权限。
+9. **P1.4 多 Bot 协调**：实现任务分配、资源/箱子/区域锁、替补执行和故障转移。
+10. **P1.5/P1.6 生产能力与基础设施**：按场景逐项增加生产技能，再完善指标、日志、备份与可回滚部署。
+11. **P2 智能层**：基础设施稳定后再接长期记忆、AI Router 和本地规划；受监管自我改进、基地撤离和战斗保持最后阶段。
 
 ## 当前唯一下一步
 
-完成 P1.2.3 跨版本语义资源解析：把 Skill 输入中的语义资源选择映射到当前服务器 registry 的真实物品/方块 ID 和兼容变体，同时保持 ServerProfile 隔离与未知能力 fail-closed。本步不连接正式服务器。
+完成 CPU 调度第三阶段实体机 affinity 接入：使用 Supervisor 已认证的活跃子进程 PID 表应用 CPU Pool，在 Intel 混合架构与 generic fallback 主机验证权限失败不退出、池内多核心分配和可选 systemd 配置；默认仍保持关闭，不连接正式服务器。

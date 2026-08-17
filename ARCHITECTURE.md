@@ -15,7 +15,9 @@ Browser → Dashboard server
              ⇅ Control Link v1 / mutual HMAC / loopback WebSocket
          Coordinator / Policy Engine
              ⇅ Runtime Link v1 / mutual HMAC / loopback WebSocket
-         Bot Runtime / Deterministic Skills / L0 Safety
+         Bot Process Supervisor / CPU Resource Manager
+             ↓ authenticated Node IPC / fixed child entry
+         Bot Runtime groups / Deterministic Skills / L0 Safety
              ↓ explicit isolated-test profile only
          Isolated Minecraft Test Server
 
@@ -33,12 +35,13 @@ AI Router
 
 ```text
 apps/
-├─ bot-runtime/            # 单 Bot Mineflayer 运行时
+├─ bot-runtime/            # 单 Bot Host 与可选多进程 Supervisor
 ├─ coordinator/            # Bot 注册表与安全停止控制平面
 ├─ control-api/            # 认证 HTTP/WebSocket 状态 API 与受权停止入口
 ├─ dashboard/              # Next.js 前端、服务端代理与真实状态 Store
 └─ task-worker/            # 仅隔离验收的独立 BullMQ Worker 进程
 packages/
+├─ cpu-resource-manager/   # CPU 探测、Pool、affinity 抽象与轻量调度
 ├─ protocol/               # 版本化 Zod Schema
 ├─ environment/            # 真实硬件、软件和模式检测
 ├─ observability/          # 结构化日志和进程内指标
@@ -47,7 +50,7 @@ packages/
 └─ task-system/            # PostgreSQL 事实源、BullMQ 队列与确定性 Worker
 ```
 
-尚未创建 AI Router 或生产数据库部署。Bot Runtime 已完成 Minecraft 1.21.8 隔离联机验收，并已通过认证 Runtime Link 接入独立 Coordinator 的进程内 Bot 注册表和安全停止控制边界；Control API 通过认证 Control Link 镜像 Coordinator 状态并转发固定停止 RPC。Dashboard 通过服务端代理读取 Control API，浏览器不会收到长期令牌。四进程服务链路已用生产 Coordinator、Control API、Dashboard 和测试专用 Runtime fixture 完成真实回环验收；该结果没有连接 Minecraft，也不是浏览器 E2E。确定性技能库已注册 `movement.goto@1.0.0`，Bot Runtime 通过受限 Pathfinder 适配器执行；任务包已建立 PostgreSQL 适配器、严格 BullMQ 队列、持久取消和可嵌入 Worker。独立 `task-worker` 应用当前只允许通过显式隔离测试配置连接真实 PostgreSQL/Redis，并且只注册验收处理器，不是生产 Worker 配置。
+尚未创建 AI Router 或生产数据库部署。Bot Runtime 已完成 Minecraft 1.21.8 隔离联机验收，并已通过认证 Runtime Link 接入独立 Coordinator 的进程内 Bot 注册表和安全停止控制边界。可选 Bot Process Supervisor 能用固定子入口托管一至三个 Bot 的进程组，通过双向 HMAC IPC、有限重启预算和活跃 PID 授权接入 CPU Resource Manager；旧单 Bot 入口仍可独立运行。Control API 通过认证 Control Link 镜像 Coordinator 状态并转发固定停止 RPC。Dashboard 通过服务端代理读取 Control API，浏览器不会收到长期令牌。四进程服务链路已用生产 Coordinator、Control API、Dashboard 和测试专用 Runtime fixture 完成真实回环验收；该结果没有连接 Minecraft，也不是浏览器 E2E。确定性技能库已注册 `movement.goto@1.0.0`，Bot Runtime 通过受限 Pathfinder 适配器执行；任务包已建立 PostgreSQL 适配器、严格 BullMQ 队列、持久取消和可嵌入 Worker。独立 `task-worker` 应用当前只允许通过显式隔离测试配置连接真实 PostgreSQL/Redis，并且只注册验收处理器，不是生产 Worker 配置。
 
 ## 4. 环境检测数据流
 
@@ -183,6 +186,22 @@ ServerProfile 只接受：
 当前六个注册 Skill 都使用 `portable` 变体，但跨版本实机验证仍为 `unverified`。面向具体物品或方块的输入仍按当前 registry 的原生名称解释；兼容清单已经能表达例如旧/新资源 ID 的有序变体，面向规划器的语义资源别名尚未实现。
 
 真实联机验收由 `scripts/run-isolated-minecraft-test.ps1` 编排。脚本只接受预先准备的可信 Java、Minecraft 1.21.8 官方服务端和本地 ServerProfile，启动前校验服务端哈希、用户 EULA 状态、安全属性与端口占用，测试完成后优雅关闭本地服务。运行时世界、日志和本地配置保存在忽略提交的 `runtime-data` 中。
+
+### 机器人多进程托管
+
+`BotRuntimeHost` 将原有单 Bot Runtime 与其 Runtime Link 客户端封装为可复用生命周期对象；
+`pnpm bot:start` 继续直接启动一个 Host。`pnpm bot:supervisor` 则先读取严格清单，按部署等级和
+一至三个 Bot 的分组边界 fork 固定子入口。正式、灰度、测试、批处理不混合故障域。
+
+父子进程使用一次性随机密钥完成方向绑定 HMAC，认证前不下发 ServerProfile 或 Runtime Link
+密钥。启动清单、生命周期和停止消息均由共享协议包严格校验，并受消息、队列和时间上限约束。
+Profile 必须位于显式配置根目录，父进程计算 SHA-256，子进程启动前复验。父 IPC 丢失、证明
+失败或 Profile 变化时整组 fail-closed。
+
+Supervisor 只把已经认证且 PID 与 fork 结果一致的子进程交给 CPU Resource Manager。无法可靠
+识别 P/E Core 时所有 Pool 使用相同 generic cpuset；affinity 失败只告警。Pathfinder 当前仍在
+所属 Bot 事件循环，CPU 状态提升、Pathfinder Worker、Dashboard CPU 页面和外部服务 PID 管理
+不属于第二阶段。
 
 ## 8. Coordinator Bot 注册表
 

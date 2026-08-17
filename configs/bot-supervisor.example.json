@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "1.0",
+  "bots": [
+    {
+      "botId": "studio-bot-01",
+      "profilePath": "servers/isolated-test.example.json",
+      "deploymentTier": "production",
+      "runtimeLink": {
+        "url": "ws://127.0.0.1:3220/v1/runtime-link",
+        "keyId": "runtime-key-01",
+        "secretEnvironmentVariable": "BOT_RUNTIME_LINK_SECRET_STUDIO_BOT_01"
+      }
+    }
+  ],
+  "restart": {
+    "maxAttempts": 5,
+    "windowMs": 300000,
+    "baseDelayMs": 1000,
+    "maxDelayMs": 30000,
+    "stableAfterMs": 60000
+  },
+  "ipc": {
+    "handshakeTimeoutMs": 5000,
+    "sendTimeoutMs": 5000,
+    "gracefulShutdownMs": 30000,
+    "maxQueuedMessages": 32,
+    "maxQueuedBytes": 524288
+  }
+}

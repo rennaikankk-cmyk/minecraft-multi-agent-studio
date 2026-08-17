@@ -2,7 +2,7 @@
 
 面向 Minecraft Java 版多智能体机器人的硬件无关控制平台。
 
-当前已完成项目基线、真实环境检测、版本化 Bot 状态协议、单 Bot 隔离联机验收、Minecraft 版本自适应、多版本 Skill 可用性解析、Runtime ↔ Coordinator 认证链路、Control API/Dashboard 四进程服务链路、确定性 L0 安全层、受限 Pathfinder 技能，以及 P1.3 任务持久化基础：
+当前已完成项目基线、真实环境检测、版本化 Bot 状态协议、单 Bot 隔离联机验收、Bot Process Supervisor、Minecraft 版本自适应、多版本 Skill 可用性解析、Runtime ↔ Coordinator 认证链路、Control API/Dashboard 四进程服务链路、确定性 L0 安全层、受限 Pathfinder 技能，以及 P1.3 任务持久化基础：
 
 - 自动检测当前 CPU、内存、操作系统和 GPU 探测状态。
 - 检测 Node.js、Java、Docker 和 Git 是否可用。
@@ -11,6 +11,9 @@
 - Dashboard 服务端代理与 Control API 契约已完成，可显示经过校验的在线、离线、失联和后端不可用状态。
 - 定义并测试 Bot 状态、心跳、断线和安全停止协议 v1。
 - 实现只允许隔离测试服的单 Bot Mineflayer Runtime。
+- 新增增量 Bot Process Supervisor，可配置一至三个 Bot 共用一个子进程；正式、灰度、测试和批处理按部署等级隔离故障域，旧单 Bot 启动入口继续可用。
+- Supervisor 使用双向 HMAC 的版本化 Node IPC、固定子入口、有界队列、Profile SHA-256 复验、优雅停止和有限崩溃退避；认证后的子进程 PID 可注册到 CPU Resource Manager。
+- CPU Resource Manager 能可靠探测时建立 P/E Pool，无法可靠识别时使用普通核心回退；affinity 和动态 scheduler 仍默认关闭。
 - 已在仅绑定本机回环地址的 Minecraft 1.21.8 服务端验证连接、停止、断线和有限重连。
 - Coordinator 使用真实遥测维护在线、失联和离线状态，并拒绝重复、乱序及旧进程心跳。
 - Bot Runtime 与独立 Coordinator 通过双向 HMAC 认证的本机 WebSocket 传输遥测、回执、停止命令和真实停止结果。
@@ -26,7 +29,7 @@
 - `apps/task-worker` 提供独立 Node 进程验收入口；当前只接受显式隔离测试配置并注册 `isolated.acceptance.wait@1.0.0`，不包含生产处理器，也不连接 Minecraft。
 - 隔离 PostgreSQL/Redis 集成测试已于 2026-07-28 在 GitHub Actions 真实临时服务中通过；本机没有运行这些服务时不会冒充本机服务在线。
 
-当前项目是单 Bot 安全执行与任务基础设施，不是已经完成的多智能体产品。Runtime ↔ Coordinator 已通过双进程验收，Dashboard → Control API → Coordinator → Runtime 已通过不连接 Minecraft 的四进程服务级验收。Control Link 不可用时不会沿用旧快照：Control API 返回 503，Dashboard 清空 Bot 列表并明确显示错误。
+当前项目具备单 Bot 安全执行、可选多 Bot 进程托管和任务基础设施，但不是已经完成的多智能体产品。Supervisor 已通过不连接 Minecraft 的真实子进程认证、分组、优雅停止和崩溃恢复验收；真实 1/5/10/20 Bot 联机与 P/E Core 实体机性能门禁仍未完成。Runtime ↔ Coordinator 已通过双进程验收，Dashboard → Control API → Coordinator → Runtime 已通过不连接 Minecraft 的四进程服务级验收。Control Link 不可用时不会沿用旧快照：Control API 返回 503，Dashboard 清空 Bot 列表并明确显示错误。
 
 当前不会自动连接 Minecraft，不会调用模型，也不会显示模拟 Bot。
 
@@ -116,6 +119,47 @@ pnpm bot:start
 - 当前锁定的 Mineflayer 4.37.1 声明测试范围为 1.8.8 至 1.21.11，共 27 个测试版本。
 - 自动协商成功但未列入测试清单时标记 `compatible-untested`，不会冒充“已测试”。
 - 超出支持范围时标记 `unsupported` 并停止自动重连。
+
+## 启动机器人进程监管器
+
+旧 `pnpm bot:start` 始终保留为一 Bot 一进程的回滚入口。需要托管多个 Bot 时，复制并修改
+`configs/bot-supervisor.example.json`，为每个 Bot 准备独立 ServerProfile、Runtime Link keyId
+和只存在于环境变量中的明文共享密钥：
+
+```powershell
+Copy-Item .\configs\bot-supervisor.example.json .\configs\bot-supervisor.local.json
+$env:BOT_SUPERVISOR_CONFIG_PATH="$PWD\configs\bot-supervisor.local.json"
+$env:BOT_SUPERVISOR_PROFILE_ROOT="$PWD\configs"
+$env:BOT_RUNTIME_PROCESS_MODE="process"
+$env:BOT_RUNTIME_BOTS_PER_PROCESS="2"
+$env:BOT_RUNTIME_AUTO_SIZE="false"
+$env:BOT_RUNTIME_LINK_SECRET_STUDIO_BOT_01="<至少 32 字符的本机明文密钥>"
+pnpm bot:supervisor
+```
+
+Supervisor 配置只记录密钥环境变量名，不记录明文。ServerProfile 必须使用相对于显式根目录的
+路径，符号链接逃逸、身份不一致、文件变化、重复 Bot/keyId 和未知字段都会在连接 Minecraft 前
+拒绝。`botsPerProcess` 只能为 1～3；`BOT_RUNTIME_AUTO_SIZE=true` 时按检测到的硬件建议选择
+分组大小，但不会静默丢弃超过建议预算的 Bot。
+
+不连接 Minecraft 的真实子进程验收与合成生命周期门禁：
+
+```powershell
+pnpm test:bot-supervisor
+pnpm benchmark:bot-supervisor
+```
+
+在 DGX Spark 或其他计划长期使用的目标主机上，首次部署前运行完整第二阶段主机门禁：
+
+```bash
+pnpm validate:phase2-host
+```
+
+该命令生成当前主机的 `hardware-profile.json`，并执行完整检查、真实子进程验收及两个合成
+Benchmark。DGX Spark 的 ARM64 双簇不会被猜测为 Intel P/E Core，而会走普通核心安全回退。
+
+实现边界、配置说明、回滚方法和未完成项见
+`docs/bot-process-supervisor-phase2-2026-08-17.md`。
 
 多版本 Skill 策略：
 

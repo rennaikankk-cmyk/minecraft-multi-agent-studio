@@ -110,6 +110,19 @@
 - 控制链路重连耗尽、关键队列溢出或身份异常时 Runtime fail-closed；未收到匹配停止结果时 Coordinator 不报告成功。
 - 当前仅完成同一主机回环部署；Docker 跨容器、跨主机 TLS 和密钥轮换尚未接入，不能通过放宽监听地址绕过。
 
+### 机器人进程监管器边界
+
+- Supervisor 只 fork 项目编译生成的固定子入口；配置、IPC 或 Bot 消息均不能指定脚本、可执行文件、Shell 参数或 `execArgv`。
+- 子进程使用最小环境，不继承父进程中的其他 Bot 密钥、`NODE_OPTIONS` 或调试参数。每次 fork 使用新的 256 位会话密钥，并在子进程读取后立即从环境对象删除。
+- 父子双方以独立 nonce、方向绑定 HMAC 和时序安全比较相互认证；证明绑定 Supervisor、子进程、进程组、challenge、PID 和完整启动清单。
+- 启动清单最多三个 Bot，只包含固定 ServerProfile 引用、摘要、部署等级和该组 Runtime Link 凭据；严格 Schema 拒绝未知版本、字段、重复 Bot 和越界值。
+- 配置文件只保存 Runtime Link 密钥环境变量名。Profile 路径必须相对于显式根目录，解析 `realpath` 后仍在目录内；符号链接逃逸、非普通文件、超限、身份不一致和重复 keyId 均拒绝。
+- 父进程计算 Profile SHA-256，子进程启动前重新读取并比对；交接期间内容变化时不连接 Minecraft。
+- IPC 消息最大 128 KiB，发送消息数、字节数、发送时间、握手时间和序列均有边界；父链路断开、认证失败、重放、乱序或背压溢出时子进程停止整组 Bot。
+- 意外退出使用有窗口和最大次数的指数退避；预算耗尽后停止自旋。正常停止优先走认证 IPC，超时后只发送 `SIGTERM` 并记录 warning。
+- 只有认证消息中的 PID 与 fork 返回 PID 一致时才可注册 CPU workload；进程退出后释放。CPU 探测或 affinity 失败只告警，不改变 Bot 安全生命周期。
+- `pnpm bot:start` 继续作为不经过 Supervisor 的显式单 Bot 回滚入口；Supervisor 不会因存在配置文件而自动启动。
+
 ### Control Link 传输边界
 
 - Coordinator 服务端和 Control API 客户端只接受 `ws://127.0.0.1` 或 `ws://[::1]`、固定 `/v1/control-link` 路径和 `minecraft-studio.control-link.v1` 子协议；拒绝域名、其他私网/公网地址、凭据 URL、查询、片段、重定向和带浏览器 `Origin` 的升级请求。
