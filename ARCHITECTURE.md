@@ -97,7 +97,8 @@ GET /api/environment/memory (no-store)
 - `BotStatusV1`：完整状态快照，包含真实血量、饥饿、护甲、位置和当前任务。
 - `BotHeartbeatV1`：轻量心跳、运行实例、序列号和最近状态序列号。
 - `BotDisconnectedV1`：结构化断线原因、是否预期和最后状态序列号。
-- `BotVersionV1`：版本选择、真实解析版本、兼容等级和适配器支持范围。
+- `BotVersionV1`：版本选择、真实解析版本、协议号、主版本、兼容等级和适配器支持范围。
+- `BotSkillCatalogV1`：同一 Runtime 实例解析出的 Skill 变体、可用性、验证状态和稳定原因码。
 - `StopBotCommandV1`：有期限、幂等命令 ID 和授权决策引用的安全停止命令。
 - `BotStopResultV1`：由目标 Runtime 返回的完成、拒绝或失败确认。
 
@@ -105,7 +106,9 @@ GET /api/environment/memory (no-store)
 Bot Runtime
   ├─ BotStatusV1
   ├─ BotHeartbeatV1
-  └─ BotDisconnectedV1
+  ├─ BotDisconnectedV1
+  ├─ BotVersionV1
+  └─ BotSkillCatalogV1
           ↓ strict Zod validation
       Coordinator BotRegistry
 
@@ -127,6 +130,8 @@ API Gateway / Coordinator
 - `SkillExecutionResultV1`：由 Bot Runtime 返回的结构化完成、拒绝、失败、取消或超时结果。
 - 调用消息不携带可自证的能力授权；执行器必须把消息与独立可信上下文逐项匹配。
 - 完成结果必须包含经技能 Schema 和 JSON Schema 双重验证的输出；其他结果只能包含稳定错误码。
+- Skill SemVer 与 Minecraft 版本正交；每个 Skill 定义还必须声明一个或多个有序兼容变体。
+- 兼容变体按连接后真实 feature、资源 registry 和显式服务端能力探针解析，不使用脆弱的 `minVersion/maxVersion` 区间替代能力事实。
 
 ### Task Dispatch Protocol v1
 
@@ -167,7 +172,15 @@ ServerProfile 只接受：
 
 状态来自 Mineflayer 实例。无法可靠读取最大生命值、护甲或延迟时使用 `null`，不使用假定值替代。
 
-版本能力直接读取锁定的 Mineflayer 4.37.1 公开导出，而不是在业务代码复制版本表。当前包声明的测试范围是 1.8.8 至 1.21.11，共 27 个测试版本。自动模式省略 Mineflayer `version` 选项，由其先探测目标服务器协议；成功后读取 Bot 的真实解析版本并标记为 `tested` 或 `compatible-untested`。超出适配器能力时上报 `unsupported`，并禁止对同一确定性错误继续重连。
+版本能力直接读取锁定的 Mineflayer 4.37.1 公开导出，而不是在业务代码复制版本表。当前包声明的测试范围是 1.8.8 至 1.21.11，共 27 个测试版本。自动模式省略 Mineflayer `version` 选项，由其先探测目标服务器协议；成功后读取 Bot 的真实解析版本、协议号与主版本，并标记为 `tested` 或 `compatible-untested`。超出适配器能力时上报 `unsupported`，并禁止对同一确定性错误继续重连。协议中的版本字符串不硬编码 `1.x` 命名，但实际可连接范围仍以当前适配器导出为准。
+
+### 多版本 Skill 兼容解析
+
+连接成功后，`MineflayerBotClient` 从当前 Bot 的 `registry.itemsByName`、`blocksByName`、`entitiesByName` 和 `supportFeature()` 构造只读兼容环境。服务端插件或规则能力不会由 Minecraft 版本推断，只有后续显式、受批准的探针才能把对应能力从 `unknown` 变为 `available` 或 `unavailable`。
+
+每个 Skill 的兼容清单包含有序变体。解析器选择第一个满足全部 feature、资源和服务端能力要求的变体；没有要求的 `portable` 变体可跨适配器支持版本继续使用。解析结果把 `availability` 与 `verification` 分离：可执行并不等于已经在该 Minecraft 版本实机验收。Runtime 在接受技能调用前重新解析并对 `unavailable` 返回稳定的 `SKILL_VERSION_UNAVAILABLE`，同时在连接后和 Runtime Link 重连时发布 `BotSkillCatalogV1`。
+
+当前六个注册 Skill 都使用 `portable` 变体，但跨版本实机验证仍为 `unverified`。面向具体物品或方块的输入仍按当前 registry 的原生名称解释；兼容清单已经能表达例如旧/新资源 ID 的有序变体，面向规划器的语义资源别名尚未实现。
 
 真实联机验收由 `scripts/run-isolated-minecraft-test.ps1` 编排。脚本只接受预先准备的可信 Java、Minecraft 1.21.8 官方服务端和本地 ServerProfile，启动前校验服务端哈希、用户 EULA 状态、安全属性与端口占用，测试完成后优雅关闭本地服务。运行时世界、日志和本地配置保存在忽略提交的 `runtime-data` 中。
 
@@ -184,7 +197,7 @@ BotRegistry (in-memory, real process state)
   └─ offline after disconnect or confirmed stop
 ```
 
-注册表按 Bot 保留当前运行实例和有限数量的已退役运行实例。新运行实例接管后，旧实例的延迟心跳不能恢复在线状态；同一实例的重复或乱序序列也不会覆盖较新状态。状态读取返回副本，不能从调用方直接修改注册表内部数据。
+注册表按 Bot 保留当前运行实例和有限数量的已退役运行实例。新运行实例接管后，旧实例的延迟心跳不能恢复在线状态；同一实例的重复或乱序序列也不会覆盖较新状态。`BotSkillCatalogV1` 与版本遥测必须属于同一 Runtime、同一真实 Minecraft 版本和协议号，否则拒绝；新 Runtime 接管时旧目录立即清空。状态读取返回副本，不能从调用方直接修改注册表内部数据。
 
 安全停止由 `StopController` 生成并再次校验 `StopBotCommandV1`，可信授权上下文必须匹配决策、操作者、Bot、命令、权限和有效期。`RuntimeLinkServer` 只把命令路由到注册表当前运行实例对应的认证会话，Runtime 从已认证 Coordinator 会话重建可信上下文并返回 `BotStopResultV1`；Coordinator 只在确认身份完全匹配后更新离线状态。
 
@@ -288,6 +301,8 @@ L0 当前提供基础生存反应，不声称具备路径规划：低血量撤�
 ```text
 SkillInvocationV1 + trusted authorization context
         ↓ exact skill ID/version lookup
+current version/features/resources → ordered compatibility variant
+        ↓ available (verification tracked separately)
 strict input/state Schema + deterministic preconditions
         ↓ capability declaration/grant intersection
 SkillExecutor
@@ -297,7 +312,7 @@ SkillExecutor
         ↓ strict JSON SkillExecutionResultV1
 ```
 
-技能注册表允许同一技能的多个明确版本，但不提供 `latest` 或静默版本回退。每个定义必须声明输入、输出、状态、前置条件、能力、超时、幂等性和重试策略；非幂等技能不能自动重试。
+技能注册表允许同一技能的多个明确版本，但不提供 `latest` 或静默版本回退。每个定义必须声明输入、输出、状态、前置条件、能力、超时、幂等性、重试策略和有序 Minecraft 兼容变体；非幂等技能不能自动重试。选中的变体 ID、版本/协议事实和验证状态进入执行上下文，但不会赋予额外能力。
 
 执行器不会把 Mineflayer、Shell、文件系统、网络或模型对象直接交给技能。技能只能通过已声明且可信上下文已授权的能力适配器发起结构化 JSON 调用，适配器返回值和最终结果也必须可验证、可序列化。当前框架仍在 Bot Runtime 进程内运行；若处理器忽略 `AbortSignal` 并执行纯 CPU 或绕过适配器的自有副作用，JavaScript 无法强制终止它，因此不将本模块标记为隔离沙盒。
 

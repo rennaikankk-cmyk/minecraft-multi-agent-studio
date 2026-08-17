@@ -6,6 +6,9 @@
 
 ### 新增
 
+- 新增多版本 Skill 兼容清单与有序变体解析器：通用 Skill 可声明无额外要求的 `portable` 变体，新版本特色 Skill 可按真实 feature、物品、方块、实体和显式服务端能力探针启用；不再把“不同版本”直接等同于“不可用”。
+- `BotVersionV1` 补充真实 `protocolVersion` / `majorVersion`，新增 `BotSkillCatalogV1` 遥测；Runtime 在连接及链路重连时发布每个 Skill 的选中变体、可用性、验证状态和稳定原因，Coordinator 拒绝与当前 Runtime/版本事实矛盾的目录。
+- 新增纯回环多版本握手测试，使用 Mineflayer 自动探测分别验证 1.8.8、1.12.2、1.16.5 和 1.21.11 及其协议号；协议版本字符串不再硬编码 `1.x` 命名。
 - 新增 PostgreSQL 权威的持久取消消费：首个取消操作不可覆盖，执行租约所有者有界轮询并确认请求，跨 Worker 发起方可等待同一 cancelled 终态；租约失效后由无租约解析者完成取消。
 - 新增独立 `@minecraft-studio/task-worker` Node 进程入口与 `isolated.acceptance.wait@1.0.0` 验收处理器。入口强制使用回环 PostgreSQL/Redis、专用 Schema、`isolated-test` purpose 和固定 handler profile，不注册生产或 Minecraft 处理器。
 - 真实基础设施套件新增队列取消原子性、不同 Worker 发起/消费取消，以及独立 Worker 子进程消费持久取消的场景；2026-08-14 GitHub Actions 运行 `31793333384` 已在临时 PostgreSQL/Redis 上 20/20 通过。
@@ -20,6 +23,8 @@
 
 ### 安全
 
+- Skill 执行前重新按当前连接的真实兼容环境解析；资源缺失或服务端能力未知时返回稳定 `SKILL_VERSION_UNAVAILABLE`，不会按版本号猜测、静默降级或调用处理器。
+- 多版本测试服务器只绑定随机回环端口，不连接外部 Minecraft；“可用性”和“跨版本实机验证状态”分开记录，当前六个通用 Skill 仍诚实标记为 `unverified`。
 - 已持久化取消通过任务行锁优先于新租约、完成、失败、截止时间和租约恢复；Coordinator 在取消与过期恢复竞争时重新读取并优先解析取消，避免把取消任务重派或改写为失败。
 - 独立 Worker 配置不记录连接 URL，缺失显式隔离用途、验收 profile、专用 namespace 或回环服务时 fail-closed。它只隔离控制平面与 Worker 进程，不宣称对进程内不合作处理器提供硬终止。
 - 供应链新增 `mineflayer-collectblock` 1.6.0 与 `mineflayer-tool` 1.2.0（均 MIT，官方 npm Registry，精确版本+完整性哈希记入 SECURITY.md）；插件不直接暴露给 AI 或任务层，仅经技能接口包装。
@@ -71,6 +76,7 @@
 
 ### 依赖
 
+- Bot Runtime 新增开发依赖 `minecraft-protocol` 1.66.2（BSD-3-Clause，官方 npm Registry，精确版本和完整性哈希已记录），仅用于回环多版本握手夹具。
 - 新增 BullMQ 5.81.2、`pg` 8.22.0 和 `@types/pg` 8.20.0，均来自官方 npm Registry，使用精确版本并由锁文件记录完整性；Coordinator 与 Bot Runtime 复用仓库已锁定的 `ws` 8.21.1 和 `@types/ws` 8.18.1。
 - 明确禁止 BullMQ 间接可选原生依赖 `msgpackr-extract` 的安装构建脚本。
 
@@ -82,6 +88,7 @@
 
 ### 当前限制
 
+- 当前四版本自动探测验证是协议级回环握手，不是六个 Skill 的真实玩法矩阵；资源输入仍使用各版本 registry 原生名称，规划器语义别名和显式服务端能力探针尚未接入。
 - Runtime ↔ Coordinator 已通过真实双进程回环验收，Dashboard → Control API → Coordinator → 测试专用 Runtime 已通过四进程服务级回环验收；后者没有连接 Minecraft，也不等同于浏览器 E2E 或正式服务器验收。
 - Control Link 当前只支持同机回环，状态、停止幂等缓存和审计仍在内存中；跨主机 TLS、密钥轮换、用户登录和持久化停止审计尚未完成。
 - 本机未检测到 PostgreSQL、Redis 或 Docker；2026-07-28 的 GitHub Actions 运行 `30315095898` 已通过真实临时 PostgreSQL/Redis 集成门，该结果不代表生产服务在线。

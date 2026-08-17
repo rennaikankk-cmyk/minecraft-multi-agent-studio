@@ -53,18 +53,33 @@ describe("Mineflayer version compatibility", () => {
   });
 
   it("distinguishes tested, compatible-untested, and unsupported results", () => {
-    expect(resolvedVersionCompatibility("auto", "1.21.8")).toMatchObject({
+    expect(
+      resolvedVersionCompatibility("auto", "1.21.8", 772, "1.21"),
+    ).toMatchObject({
       selection: "auto",
       resolvedVersion: "1.21.8",
+      protocolVersion: 772,
+      majorVersion: "1.21",
       supportLevel: "tested",
     });
-    expect(resolvedVersionCompatibility("auto", "1.21.10")).toMatchObject({
-      supportLevel: "compatible-untested",
-    });
+    expect(
+      resolvedVersionCompatibility("auto", "1.21.10", 773, "1.21"),
+    ).toMatchObject({ supportLevel: "compatible-untested" });
     expect(unsupportedVersionCompatibility("auto")).toMatchObject({
       resolvedVersion: null,
+      protocolVersion: null,
+      majorVersion: null,
       supportLevel: "unsupported",
     });
-    expect(() => resolvedVersionCompatibility("auto", "1.99.0")).toThrow();
+    expect(
+      resolvedVersionCompatibility("auto", "26.1.2", 800, "26.1"),
+    ).toMatchObject({
+      resolvedVersion: "26.1.2",
+      protocolVersion: 800,
+      supportLevel: "compatible-untested",
+    });
+    expect(() =>
+      resolvedVersionCompatibility("auto", "bad version", 800, "26.1"),
+    ).toThrow();
   });
 });

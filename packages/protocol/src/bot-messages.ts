@@ -27,13 +27,26 @@ export const botConnectionStateSchema = z.enum([
 
 export const minecraftVersionStringSchema = z
   .string()
-  .regex(/^1\.\d+(?:\.\d+)?$/u);
+  .min(1)
+  .max(64)
+  // Minecraft changed its public versioning scheme after the 1.x era. Keep
+  // the wire contract scheme-agnostic; the installed adapter remains the
+  // authority for whether a concrete version is actually supported.
+  .regex(/^[0-9A-Za-z][0-9A-Za-z._+-]*$/u);
 
 export const minecraftVersionCompatibilitySchema = z
   .object({
     selection: z.enum(["auto", "fixed"]),
     requestedVersion: minecraftVersionStringSchema.nullable(),
     resolvedVersion: minecraftVersionStringSchema.nullable(),
+    protocolVersion: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(Number.MAX_SAFE_INTEGER)
+      .nullable()
+      .optional(),
+    majorVersion: minecraftVersionStringSchema.nullable().optional(),
     supportLevel: z.enum(["tested", "compatible-untested", "unsupported"]),
     supportedRange: z
       .object({
@@ -70,6 +83,87 @@ export const minecraftVersionCompatibilitySchema = z
         code: "custom",
         path: ["resolvedVersion"],
         message: "A supported result requires a resolved version.",
+      });
+    }
+    if (
+      value.supportLevel === "unsupported" &&
+      (value.protocolVersion != null || value.majorVersion != null)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["protocolVersion"],
+        message: "An unsupported result cannot claim resolved protocol metadata.",
+      });
+    }
+  });
+
+export const skillCompatibilityAvailabilitySchema = z.enum([
+  "available",
+  "unavailable",
+]);
+
+export const skillCompatibilityVerificationSchema = z.enum([
+  "verified",
+  "unverified",
+]);
+
+const skillCatalogIdentifierSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[a-z0-9][a-z0-9._-]*[a-z0-9]$/u);
+
+const skillCatalogVersionSchema = z
+  .string()
+  .min(5)
+  .max(64)
+  .regex(
+    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u,
+  );
+
+export const skillCompatibilityReasonSchema = z
+  .object({
+    variantId: skillCatalogIdentifierSchema,
+    code: z.enum([
+      "FEATURE_MISSING",
+      "RESOURCE_MISSING",
+      "SERVER_CAPABILITY_MISSING",
+      "SERVER_CAPABILITY_UNKNOWN",
+      "COMPATIBILITY_ENVIRONMENT_UNAVAILABLE",
+    ]),
+    subject: z.string().min(1).max(512),
+  })
+  .strict();
+
+export const botSkillCatalogEntryV1Schema = z
+  .object({
+    skillId: skillCatalogIdentifierSchema,
+    skillVersion: skillCatalogVersionSchema,
+    availability: skillCompatibilityAvailabilitySchema,
+    verification: skillCompatibilityVerificationSchema,
+    selectedVariantId: skillCatalogIdentifierSchema.nullable(),
+    unavailableReasons: z.array(skillCompatibilityReasonSchema).max(128),
+  })
+  .strict()
+  .superRefine((entry, context) => {
+    if (
+      entry.availability === "available" &&
+      (entry.selectedVariantId === null || entry.unavailableReasons.length > 0)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["availability"],
+        message: "An available skill requires one selected variant and no reasons.",
+      });
+    }
+    if (
+      entry.availability === "unavailable" &&
+      (entry.selectedVariantId !== null || entry.unavailableReasons.length === 0)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["availability"],
+        message: "An unavailable skill requires bounded incompatibility reasons.",
       });
     }
   });
@@ -332,6 +426,39 @@ export const botVersionV1Schema = z
   })
   .strict();
 
+export const botSkillCatalogV1Schema = z
+  .object({
+    ...botMessageEnvelopeShape,
+    type: z.literal("bot.skill-catalog.v1"),
+    payload: z
+      .object({
+        serverProfileId: identifierSchema,
+        runtimeInstanceId: identifierSchema,
+        sequence: sequenceSchema,
+        observedAt: timestampSchema,
+        minecraftVersion: minecraftVersionStringSchema,
+        protocolVersion: z
+          .number()
+          .int()
+          .nonnegative()
+          .max(Number.MAX_SAFE_INTEGER),
+        skills: z
+          .array(botSkillCatalogEntryV1Schema)
+          .max(256)
+          .refine(
+            (skills) =>
+              new Set(
+                skills.map(({ skillId, skillVersion }) =>
+                  `${skillId}@${skillVersion}`,
+                ),
+              ).size === skills.length,
+            { message: "Skill catalog entries must be unique by ID and version." },
+          ),
+      })
+      .strict(),
+  })
+  .strict();
+
 export const controlPermissionSchema = z.enum([
   "bot.stop",
   "bot.emergency-stop",
@@ -466,6 +593,7 @@ export const botTelemetryMessageV1Schema = z.discriminatedUnion("type", [
   botHeartbeatV1Schema,
   botDisconnectedV1Schema,
   botVersionV1Schema,
+  botSkillCatalogV1Schema,
 ]);
 
 export const botProtocolMessageV1Schema = z.union([
@@ -473,6 +601,7 @@ export const botProtocolMessageV1Schema = z.union([
   botHeartbeatV1Schema,
   botDisconnectedV1Schema,
   botVersionV1Schema,
+  botSkillCatalogV1Schema,
   stopBotCommandV1Schema,
   botStopResultV1Schema,
 ]);
@@ -482,6 +611,19 @@ export type BotStatusV1 = z.infer<typeof botStatusV1Schema>;
 export type BotHeartbeatV1 = z.infer<typeof botHeartbeatV1Schema>;
 export type BotDisconnectedV1 = z.infer<typeof botDisconnectedV1Schema>;
 export type BotVersionV1 = z.infer<typeof botVersionV1Schema>;
+export type BotSkillCatalogEntryV1 = z.infer<
+  typeof botSkillCatalogEntryV1Schema
+>;
+export type BotSkillCatalogV1 = z.infer<typeof botSkillCatalogV1Schema>;
+export type SkillCompatibilityAvailability = z.infer<
+  typeof skillCompatibilityAvailabilitySchema
+>;
+export type SkillCompatibilityVerification = z.infer<
+  typeof skillCompatibilityVerificationSchema
+>;
+export type SkillCompatibilityReason = z.infer<
+  typeof skillCompatibilityReasonSchema
+>;
 export type L0SafetyRisk = z.infer<typeof l0SafetyRiskSchema>;
 export type L0SafetyActionKind = z.infer<typeof l0SafetyActionKindSchema>;
 export type L0SafetyStatus = z.infer<typeof l0SafetyStatusSchema>;

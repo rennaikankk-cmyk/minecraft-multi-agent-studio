@@ -86,6 +86,7 @@ export {
 } from "./builtin/smelt-item.js";
 export { SkillExecutor } from "./executor.js";
 export { SkillRegistry } from "./registry.js";
+export { resolveSkillCompatibility } from "./compatibility.js";
 export {
   builtinSkillVerificationManifestsV1,
   skillScenarioCategories,
@@ -96,6 +97,12 @@ export {
 } from "./verification-scenarios.js";
 export {
   defineSkill,
+  type SkillCompatibilityEnvironment,
+  type SkillCompatibilityManifest,
+  type SkillCompatibilityRequirement,
+  type SkillCompatibilityResolution,
+  type SkillCompatibilityUnmetRequirement,
+  type SkillCompatibilityVariant,
   type SkillCapabilityAdapter,
   type SkillCapabilityRequest,
   type SkillDefinition,
@@ -104,5 +111,7 @@ export {
   type SkillExecutorOptions,
   type SkillMetadata,
   type SkillPrecondition,
+  type SkillResourceKind,
   type SkillRetryPolicy,
+  type SkillVariantCompatibility,
 } from "./types.js";

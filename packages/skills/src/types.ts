@@ -17,6 +17,78 @@ export type SkillPrecondition<TInput, TState> = Readonly<{
   check(input: TInput, state: TState): boolean;
 }>;
 
+export type SkillResourceKind = "item" | "block" | "entity";
+
+export type SkillCompatibilityRequirement =
+  | Readonly<{
+      kind: "feature";
+      name: string;
+    }>
+  | Readonly<{
+      kind: "resource";
+      resource: SkillResourceKind;
+      names: readonly string[];
+      match: "any" | "all";
+    }>
+  | Readonly<{
+      kind: "server-capability";
+      name: string;
+    }>;
+
+/**
+ * One skill implementation may expose ordered compatibility variants. The
+ * first variant whose requirements are satisfied is selected. This lets a
+ * portable skill keep one semantic ID while using a legacy or modern adapter
+ * branch, without treating every non-primary Minecraft version as unusable.
+ */
+export type SkillCompatibilityVariant = Readonly<{
+  id: string;
+  requirements: readonly SkillCompatibilityRequirement[];
+  verifiedMinecraftVersions: readonly string[];
+}>;
+
+export type SkillCompatibilityManifest = Readonly<{
+  variants: readonly SkillCompatibilityVariant[];
+}>;
+
+export interface SkillCompatibilityEnvironment {
+  readonly minecraftVersion: string;
+  readonly protocolVersion: number;
+  supportsFeature(name: string): boolean | undefined;
+  hasResource(kind: SkillResourceKind, name: string): boolean | undefined;
+  serverCapability(name: string): boolean | undefined;
+}
+
+export type SkillCompatibilityUnmetRequirement = Readonly<{
+  requirement: SkillCompatibilityRequirement;
+  status: "missing" | "unknown";
+}>;
+
+export type SkillVariantCompatibility = Readonly<{
+  variantId: string;
+  available: boolean;
+  verification: "verified" | "unverified";
+  unmetRequirements: readonly SkillCompatibilityUnmetRequirement[];
+}>;
+
+export type SkillCompatibilityResolution = Readonly<{
+  skillId: string;
+  skillVersion: string;
+  minecraftVersion: string | null;
+  protocolVersion: number | null;
+  availability: "available" | "unavailable";
+  verification: "verified" | "unverified";
+  selectedVariantId: string | null;
+  variants: readonly SkillVariantCompatibility[];
+}>;
+
+export type SkillExecutionCompatibility = Readonly<{
+  minecraftVersion: string | null;
+  protocolVersion: number | null;
+  variantId: string;
+  verification: "verified" | "unverified";
+}>;
+
 export type SkillCapabilityRequest = Readonly<{
   invocationId: string;
   traceId: string;
@@ -41,6 +113,7 @@ export type SkillExecutionContext = Readonly<{
   botId: string;
   signal: AbortSignal;
   deadlineMs: number;
+  compatibility: SkillExecutionCompatibility;
   callCapability<TOutput extends SkillJsonValue = SkillJsonValue>(
     capability: SkillCapability,
     operation: string,
@@ -54,6 +127,7 @@ export type SkillDefinition<TInput, TOutput, TState> = Readonly<{
   inputSchema: z.ZodType<TInput>;
   outputSchema: z.ZodType<TOutput>;
   stateSchema: z.ZodType<TState>;
+  compatibility: SkillCompatibilityManifest;
   requiredCapabilities: readonly SkillCapability[];
   timeoutMs: number;
   idempotent: boolean;
@@ -69,6 +143,7 @@ export type SkillDefinition<TInput, TOutput, TState> = Readonly<{
 export type SkillMetadata = Readonly<{
   id: string;
   version: string;
+  compatibility: SkillCompatibilityManifest;
   requiredCapabilities: readonly SkillCapability[];
   timeoutMs: number;
   idempotent: boolean;

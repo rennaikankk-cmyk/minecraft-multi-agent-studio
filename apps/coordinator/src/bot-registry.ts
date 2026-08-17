@@ -2,6 +2,7 @@ import {
   parseBotStopResult,
   parseBotTelemetryMessage,
   type BotDisconnectedV1,
+  type BotSkillCatalogV1,
   type BotStatusV1,
   type BotStopResultV1,
   type BotTelemetryMessageV1,
@@ -23,6 +24,7 @@ export type BotRegistryRecord = Readonly<{
   lastStatusAt: string | null;
   currentStatus: BotStatusV1["payload"] | null;
   minecraftVersion: MinecraftVersionCompatibility | null;
+  skillCatalog: BotSkillCatalogV1["payload"] | null;
   offlineReason: BotDisconnectedV1["payload"]["reason"] | null;
 }>;
 
@@ -59,6 +61,32 @@ export class CoordinatorTelemetryError extends Error {
   }
 }
 
+function versionFactsConflict(
+  left: MinecraftVersionCompatibility,
+  right: MinecraftVersionCompatibility,
+): boolean {
+  return (
+    left.resolvedVersion !== right.resolvedVersion ||
+    (left.protocolVersion != null &&
+      right.protocolVersion != null &&
+      left.protocolVersion !== right.protocolVersion) ||
+    (left.majorVersion != null &&
+      right.majorVersion != null &&
+      left.majorVersion !== right.majorVersion)
+  );
+}
+
+function versionCatalogConflict(
+  version: MinecraftVersionCompatibility,
+  catalog: BotSkillCatalogV1["payload"],
+): boolean {
+  return (
+    version.resolvedVersion !== catalog.minecraftVersion ||
+    (version.protocolVersion != null &&
+      version.protocolVersion !== catalog.protocolVersion)
+  );
+}
+
 type InternalRecord = {
   botId: string;
   serverProfileId: string;
@@ -73,6 +101,7 @@ type InternalRecord = {
   lastStatusAt: string | null;
   currentStatus: BotStatusV1["payload"] | null;
   minecraftVersion: MinecraftVersionCompatibility | null;
+  skillCatalog: BotSkillCatalogV1["payload"] | null;
   offlineReason: BotDisconnectedV1["payload"]["reason"] | null;
   retiredRuntimeIds: Set<string>;
   retiredRuntimeOrder: string[];
@@ -161,6 +190,13 @@ export class BotRegistry {
       }
       return this.ignored(existing, "duplicate_message", receivedMs);
     }
+    if (
+      existing &&
+      existing.runtimeInstanceId === message.payload.runtimeInstanceId &&
+      message.payload.sequence > existing.lastSequence
+    ) {
+      this.assertVersionConsistency(existing, message);
+    }
     this.rememberMessageId(message.messageId);
 
     const record = existing ?? this.createRecord(message, receivedMs, observedMs);
@@ -181,6 +217,7 @@ export class BotRegistry {
       record.lastStatusAt = null;
       record.currentStatus = null;
       record.minecraftVersion = null;
+      record.skillCatalog = null;
       record.offlineReason = null;
     } else if (record.serverProfileId !== message.payload.serverProfileId) {
       throw new CoordinatorTelemetryError(
@@ -220,6 +257,8 @@ export class BotRegistry {
       }
     } else if (message.type === "bot.version.v1") {
       record.minecraftVersion = structuredClone(message.payload.compatibility);
+    } else if (message.type === "bot.skill-catalog.v1") {
+      record.skillCatalog = structuredClone(message.payload);
     } else {
       record.connectionState = "offline";
       record.offlineReason = message.payload.reason;
@@ -232,6 +271,45 @@ export class BotRegistry {
       reason: "accepted",
       record: snapshot(record),
     };
+  }
+
+  private assertVersionConsistency(
+    record: InternalRecord,
+    message: BotTelemetryMessageV1,
+  ): void {
+    const incomingVersion = message.type === "bot.version.v1"
+      ? message.payload.compatibility
+      : message.type === "bot.status.v1"
+        ? (message.payload.minecraftVersion ?? null)
+        : null;
+    if (
+      incomingVersion &&
+      ((record.minecraftVersion &&
+        versionFactsConflict(record.minecraftVersion, incomingVersion)) ||
+        (record.skillCatalog &&
+          versionCatalogConflict(incomingVersion, record.skillCatalog)))
+    ) {
+      throw new CoordinatorTelemetryError(
+        "MESSAGE_INVALID",
+        "Version telemetry conflicts with the current runtime facts.",
+      );
+    }
+
+    if (
+      message.type === "bot.skill-catalog.v1" &&
+      ((record.minecraftVersion &&
+        versionCatalogConflict(record.minecraftVersion, message.payload)) ||
+        (record.skillCatalog &&
+          (record.skillCatalog.minecraftVersion !==
+            message.payload.minecraftVersion ||
+            record.skillCatalog.protocolVersion !==
+              message.payload.protocolVersion)))
+    ) {
+      throw new CoordinatorTelemetryError(
+        "MESSAGE_INVALID",
+        "Skill catalog conflicts with the current runtime facts.",
+      );
+    }
   }
 
   confirmStop(input: unknown, receivedAt = this.now()): boolean {
@@ -312,6 +390,7 @@ export class BotRegistry {
       lastStatusAt: null,
       currentStatus: null,
       minecraftVersion: null,
+      skillCatalog: null,
       offlineReason: null,
       retiredRuntimeIds: new Set<string>(),
       retiredRuntimeOrder: [],
@@ -385,6 +464,9 @@ function snapshot(record: InternalRecord): BotRegistryRecord {
       : null,
     minecraftVersion: record.minecraftVersion
       ? structuredClone(record.minecraftVersion)
+      : null,
+    skillCatalog: record.skillCatalog
+      ? structuredClone(record.skillCatalog)
       : null,
     offlineReason: record.offlineReason,
   };

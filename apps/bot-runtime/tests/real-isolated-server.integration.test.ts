@@ -104,6 +104,8 @@ integrationDescribe("real isolated Minecraft 1.21.8 server", () => {
           requestedVersion:
             profile.minecraftVersion === "auto" ? null : profile.minecraftVersion,
           resolvedVersion: "1.21.8",
+          protocolVersion: 772,
+          majorVersion: "1.21",
           supportLevel: "tested",
         });
         expect(status.payload.minecraftVersion).toEqual(

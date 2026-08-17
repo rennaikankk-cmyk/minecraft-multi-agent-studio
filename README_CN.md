@@ -2,7 +2,7 @@
 
 面向 Minecraft Java 版多智能体机器人的硬件无关控制平台。
 
-当前已完成项目基线、真实环境检测、版本化 Bot 状态协议、单 Bot 隔离联机验收、Minecraft 版本自适应、Runtime ↔ Coordinator 认证链路、Control API/Dashboard 四进程服务链路、确定性 L0 安全层、受限 Pathfinder 技能，以及 P1.3 任务持久化基础：
+当前已完成项目基线、真实环境检测、版本化 Bot 状态协议、单 Bot 隔离联机验收、Minecraft 版本自适应、多版本 Skill 可用性解析、Runtime ↔ Coordinator 认证链路、Control API/Dashboard 四进程服务链路、确定性 L0 安全层、受限 Pathfinder 技能，以及 P1.3 任务持久化基础：
 
 - 自动检测当前 CPU、内存、操作系统和 GPU 探测状态。
 - 检测 Node.js、Java、Docker 和 Git 是否可用。
@@ -17,7 +17,8 @@
 - 安全停止要求可信授权、幂等命令 ID、审计、超时和 Runtime 确认结果。
 - Control API 已提供认证列表、详情、WebSocket 状态流和受权优雅停止入口；生产入口通过双向 HMAC 的本机 Control Link 获取 Coordinator 原子状态快照并转发停止请求，链路未就绪或断开时返回 `503 CONTROL_UNAVAILABLE`。
 - 安全停止要求弹窗二次确认、本地确认码、`bot.stop` 权限和 Runtime 真实确认结果。
-- Bot 可对批准的隔离服务器自动探测 Minecraft 版本，并上报真实兼容状态。
+- Bot 可对批准的隔离服务器自动探测 Minecraft 版本，并上报真实版本、协议号、主版本和兼容状态。
+- Runtime 按当前连接实际暴露的 feature、物品、方块、实体和经批准的服务端能力探针解析 Skill 变体；通用 Skill 不会因为服务器版本不同被一刀切禁用，新版本特色 Skill 只在依赖能力真实存在时可用。
 - Runtime Link 双进程链路和 Dashboard → Control API → Coordinator → Bot Runtime 四进程服务链路均可用同一追踪编号核对结构化日志；四进程验收使用测试专用 Runtime fixture，不连接 Minecraft，也不替代浏览器 E2E。
 - L0 安全层从真实 Mineflayer 状态识别饥饿、低/危急生命值、溺水、岩浆、坠落、卡死和背包满，并执行固定白名单动作。
 - `movement.goto@1.0.0` 通过受限 Pathfinder 适配器移动，不允许挖掘、搭塔、垫方块或跑酷。
@@ -115,6 +116,14 @@ pnpm bot:start
 - 当前锁定的 Mineflayer 4.37.1 声明测试范围为 1.8.8 至 1.21.11，共 27 个测试版本。
 - 自动协商成功但未列入测试清单时标记 `compatible-untested`，不会冒充“已测试”。
 - 超出支持范围时标记 `unsupported` 并停止自动重连。
+
+多版本 Skill 策略：
+
+- Skill 的 SemVer 是执行契约版本，不等于 Minecraft 版本。每个定义另带有序兼容变体；Runtime 使用连接后真实协商出的 `minecraftVersion`、`protocolVersion`、`majorVersion` 和 registry/feature 能力选择第一个满足条件的变体。
+- 当前六个已注册 Skill 声明为 `portable` 通用变体，因此不会仅因版本号不同被禁用；“可用性”和“实机验证状态”分开上报，它们在跨版本真实场景矩阵完成前仍标记为 `unverified`。
+- 新版本特色 Skill 应声明所需 feature、物品/方块/实体及必要的服务端能力。缺少资源时标记 `unavailable`；服务端能力尚未经过显式探针时标记 `unknown` 并拒绝执行，不按版本号猜测。
+- 当前通用输入仍使用目标版本 registry 的原生名称，例如旧版本和新版本的原木 ID 可能不同。兼容层已经支持有序资源变体，但面向规划器的跨版本语义资源别名仍是下一模块。
+- 回环协议夹具已验证 `minecraftVersion: "auto"` 能分别协商 1.8.8、1.12.2、1.16.5 和 1.21.11，并得到对应协议号；该测试不连接外部服务器，也不等于六个 Skill 已在四个版本真实执行。
 
 ## 真实联机验收
 
@@ -290,7 +299,7 @@ Dashboard 的 Bot 卡片显示真实 L0 状态。旧 Runtime 未上报该字段�
 
 ## Pathfinder 确定性技能
 
-当前仅注册 [`movement.goto@1.0.0`](SKILLS.md)。目标必须与 Bot 当前 ServerProfile 和维度一致，距离最多 64 格，半径 1～4 格，超时 20 秒。L0 暂停、Runtime 停止、断线或取消会停止寻路。
+当前已注册的六个确定性 Skill 见 [`SKILLS.md`](SKILLS.md)。其中 `movement.goto@1.0.0` 的目标必须与 Bot 当前 ServerProfile 和维度一致，距离最多 64 格，半径 1～4 格，超时 20 秒。L0 暂停、Runtime 停止、断线或取消会停止寻路。
 
 该技能已通过离线测试，但尚未在真实隔离服运行路径场景和跨版本矩阵，因此不能视为实机寻路验收完成。
 

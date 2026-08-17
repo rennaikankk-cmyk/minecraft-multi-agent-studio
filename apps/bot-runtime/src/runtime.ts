@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  botSkillCatalogV1Schema,
   botVersionV1Schema,
   botStopResultV1Schema,
   botDisconnectedV1Schema,
@@ -10,6 +11,8 @@ import {
   parseBotTelemetryMessage,
   type BotDisconnectedV1,
   type BotHeartbeatV1,
+  type BotSkillCatalogEntryV1,
+  type BotSkillCatalogV1,
   type SkillExecutionResultV1,
   type BotStopResultV1,
   type BotStatusV1,
@@ -42,6 +45,8 @@ import {
   SkillFault,
   SkillRegistry,
   type SkillCapabilityRequest,
+  type SkillCompatibilityEnvironment,
+  type SkillCompatibilityResolution,
   type SkillExecutionAuthorization,
 } from "@minecraft-studio/skills";
 
@@ -130,6 +135,49 @@ function skillResultTelemetryDigest(
   return Object.keys(digest).length > 0 ? digest : null;
 }
 
+function skillCatalogEntry(
+  resolution: SkillCompatibilityResolution,
+): BotSkillCatalogEntryV1 {
+  const unavailableReasons = resolution.availability === "available"
+    ? []
+    : resolution.variants.flatMap((variant) =>
+        variant.unmetRequirements.map((unmet) => {
+          const requirement = unmet.requirement;
+          let code: BotSkillCatalogEntryV1["unavailableReasons"][number]["code"];
+          let subject: string;
+          if (requirement.kind === "feature") {
+            code = unmet.status === "unknown"
+              ? "COMPATIBILITY_ENVIRONMENT_UNAVAILABLE"
+              : "FEATURE_MISSING";
+            subject = requirement.name;
+          } else if (requirement.kind === "resource") {
+            code = unmet.status === "unknown"
+              ? "COMPATIBILITY_ENVIRONMENT_UNAVAILABLE"
+              : "RESOURCE_MISSING";
+            subject = `${requirement.resource}:${requirement.match}:${requirement.names.join(",")}`;
+          } else {
+            code = unmet.status === "unknown"
+              ? "SERVER_CAPABILITY_UNKNOWN"
+              : "SERVER_CAPABILITY_MISSING";
+            subject = requirement.name;
+          }
+          return {
+            variantId: variant.variantId,
+            code,
+            subject: subject.slice(0, 512),
+          };
+        }),
+      );
+  return {
+    skillId: resolution.skillId,
+    skillVersion: resolution.skillVersion,
+    availability: resolution.availability,
+    verification: resolution.verification,
+    selectedVariantId: resolution.selectedVariantId,
+    unavailableReasons,
+  };
+}
+
 
 export class SingleBotRuntime {
   private readonly runtimeInstanceId: string;
@@ -137,6 +185,7 @@ export class SingleBotRuntime {
   private readonly now: () => Date;
   private readonly randomId: () => string;
   private readonly safetyController: L0SafetyController;
+  private readonly skillRegistry: SkillRegistry;
   private readonly skillExecutor: SkillExecutor;
   private state: BotConnectionState = "offline";
   private client: BotClient | null = null;
@@ -153,6 +202,10 @@ export class SingleBotRuntime {
   private lastStatusAt = 0;
   private minecraftVersionCompatibility: MinecraftVersionCompatibility | null =
     null;
+  private skillCompatibilityEnvironment: SkillCompatibilityEnvironment | null =
+    null;
+  private skillCompatibilityCatalog: readonly SkillCompatibilityResolution[] =
+    [];
   private versionUnsupported = false;
   private stopPromise: Promise<RuntimeStopOutcome> | null = null;
   private safetyActionQueue: Promise<void> = Promise.resolve();
@@ -188,6 +241,7 @@ export class SingleBotRuntime {
       skillRegistry.register(containerTransferSkill);
       skillRegistry.register(smeltItemSkill);
     }
+    this.skillRegistry = skillRegistry;
     this.skillExecutor = new SkillExecutor(skillRegistry, {
       runtimeInstanceId: this.runtimeInstanceId,
       capabilityAdapter: {
@@ -226,6 +280,9 @@ export class SingleBotRuntime {
   publishCurrentState(): void {
     if (this.minecraftVersionCompatibility) {
       this.emitVersion();
+    }
+    if (this.skillCompatibilityEnvironment) {
+      this.emitSkillCatalog();
     }
     if (this.state === "online" && this.client) {
       this.emitStatus(this.generation);
@@ -311,6 +368,7 @@ export class SingleBotRuntime {
         authorization,
         this.skillState(),
         controller.signal,
+        this.skillCompatibilityEnvironment,
       );
       const durationMs = Math.max(0, this.now().getTime() - startedAtMs);
       this.metrics.increment("bot_skill_results_total", {
@@ -491,6 +549,8 @@ export class SingleBotRuntime {
     };
     this.traceId = `connection-${this.randomId()}`;
     this.minecraftVersionCompatibility = null;
+    this.skillCompatibilityEnvironment = null;
+    this.skillCompatibilityCatalog = [];
     this.versionUnsupported = false;
     this.state = "connecting";
     this.metrics.increment("bot_connection_attempts_total", {
@@ -532,8 +592,21 @@ export class SingleBotRuntime {
   private handleSpawn(generation: number): void {
     if (generation !== this.generation || this.stopping || !this.client) return;
     try {
-      this.minecraftVersionCompatibility =
-        this.client.versionCompatibility();
+      const versionCompatibility = this.client.versionCompatibility();
+      const compatibilityEnvironment =
+        this.client.skillCompatibilityEnvironment();
+      if (
+        versionCompatibility.resolvedVersion !==
+          compatibilityEnvironment.minecraftVersion ||
+        versionCompatibility.protocolVersion !==
+          compatibilityEnvironment.protocolVersion
+      ) {
+        throw new Error("Version and skill compatibility facts disagree.");
+      }
+      this.minecraftVersionCompatibility = versionCompatibility;
+      this.skillCompatibilityEnvironment = compatibilityEnvironment;
+      this.skillCompatibilityCatalog =
+        this.skillRegistry.listCompatibility(compatibilityEnvironment);
     } catch {
       this.handleVersionUnsupported(generation);
       this.dependencies.logger.error(
@@ -554,6 +627,7 @@ export class SingleBotRuntime {
     this.state = "online";
     this.reconnectAttempts = 0;
     this.emitVersion();
+    this.emitSkillCatalog();
     this.startStatusTimer(generation);
     this.emitStatus(generation);
     this.emitHeartbeat();
@@ -570,6 +644,8 @@ export class SingleBotRuntime {
     this.minecraftVersionCompatibility = unsupportedVersionCompatibility(
       this.profile.minecraftVersion,
     );
+    this.skillCompatibilityEnvironment = null;
+    this.skillCompatibilityCatalog = [];
     this.versionUnsupported = true;
     this.emitVersion();
     this.dependencies.logger.warn("bot_runtime_version_unsupported", this.logFields({
@@ -877,6 +953,24 @@ export class SingleBotRuntime {
         sequence: this.nextSequence(),
         observedAt: this.now().toISOString(),
         compatibility: this.minecraftVersionCompatibility,
+      },
+    });
+    this.emit(message);
+  }
+
+  private emitSkillCatalog(): void {
+    const environment = this.skillCompatibilityEnvironment;
+    if (!environment) return;
+    const message: BotSkillCatalogV1 = botSkillCatalogV1Schema.parse({
+      ...this.envelope("bot.skill-catalog.v1"),
+      payload: {
+        serverProfileId: this.profile.id,
+        runtimeInstanceId: this.runtimeInstanceId,
+        sequence: this.nextSequence(),
+        observedAt: this.now().toISOString(),
+        minecraftVersion: environment.minecraftVersion,
+        protocolVersion: environment.protocolVersion,
+        skills: this.skillCompatibilityCatalog.map(skillCatalogEntry),
       },
     });
     this.emit(message);

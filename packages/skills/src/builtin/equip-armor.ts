@@ -182,6 +182,11 @@ export const equipArmorSkill = defineSkill({
   inputSchema: equipArmorInputSchema,
   outputSchema: equipArmorOutputSchema,
   stateSchema: equipArmorStateSchema,
+  compatibility: {
+    variants: [
+      { id: "portable", requirements: [], verifiedMinecraftVersions: [] },
+    ],
+  },
   requiredCapabilities: ["inventory.read", "inventory.write"] as const,
   timeoutMs: EQUIP_ARMOR_TIMEOUT_MS,
   idempotent: true,

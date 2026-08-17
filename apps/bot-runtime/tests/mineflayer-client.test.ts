@@ -66,6 +66,35 @@ describe("MineflayerBotClient lifecycle", () => {
     expect(movements.exclusionAreasBreak[0]?.({} as never)).toBe(100);
     expect(movements.exclusionAreasPlace[0]?.({} as never)).toBe(100);
   });
+
+  it("exposes negotiated protocol, feature, and registry facts to skills", () => {
+    const emitter = new EventEmitter();
+    const bot = emitter as unknown as Bot;
+    Object.assign(bot, {
+      version: "1.21.11",
+      protocolVersion: 774,
+      majorVersion: "1.21",
+      registry: {
+        supportFeature: (name: string) => name === "hasElytraFlying",
+        itemsByName: { mace: { id: 1 } },
+        blocksByName: { oak_log: { id: 2 } },
+        entitiesByName: { breeze: { id: 3 } },
+      },
+    });
+    const facts = new MineflayerBotClient(
+      bot,
+      "auto",
+    ).skillCompatibilityEnvironment();
+
+    expect(facts).toMatchObject({
+      minecraftVersion: "1.21.11",
+      protocolVersion: 774,
+    });
+    expect(facts.supportsFeature("hasElytraFlying")).toBe(true);
+    expect(facts.hasResource("item", "mace")).toBe(true);
+    expect(facts.hasResource("block", "log")).toBe(false);
+    expect(facts.serverCapability("combat.mace-enabled")).toBeUndefined();
+  });
 });
 
 function handlers(

@@ -77,7 +77,8 @@ export const serverProfileSchema = z
       z.literal("auto"),
       z
         .string()
-        .regex(/^1\.\d+(?:\.\d+)?$/u)
+        .min(1)
+        .max(64)
         .refine(isMineflayerTestedVersion, {
           message:
             "Fixed minecraftVersion must be explicitly tested by the installed Mineflayer version.",

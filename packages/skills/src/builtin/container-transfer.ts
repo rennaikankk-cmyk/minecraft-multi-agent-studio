@@ -100,6 +100,11 @@ export const containerTransferSkill = defineSkill({
   inputSchema: containerTransferInputSchema,
   outputSchema: containerTransferOutputSchema,
   stateSchema: containerTransferStateSchema,
+  compatibility: {
+    variants: [
+      { id: "portable", requirements: [], verifiedMinecraftVersions: [] },
+    ],
+  },
   // 读写都要：开箱清点是读，存取是写。
   requiredCapabilities: ["container.read", "container.write"] as const,
   timeoutMs: CONTAINER_TRANSFER_TIMEOUT_MS,
