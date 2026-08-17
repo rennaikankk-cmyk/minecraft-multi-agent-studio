@@ -159,6 +159,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/task-system
 
+  packages/cpu-resource-manager: {}
+
   packages/environment:
     dependencies:
       '@minecraft-studio/protocol':

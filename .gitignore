@@ -13,6 +13,7 @@ playwright-report/
 .DS_Store
 Thumbs.db
 runtime-data/
+hardware-profile.json
 portable-data/
 netcafe-session/
 configs/servers/*.local.json
