@@ -10,12 +10,14 @@ import {
 import type { RuntimeLinkClientConfig } from "./runtime-link-config.js";
 import { SingleBotRuntime, type RuntimeStopOutcome } from "./runtime.js";
 import type { ServerProfile } from "./server-profile.js";
+import type { AILoopConfig } from "./ai-runtime-loop.js";
 
 export type BotRuntimeHostOptions = Readonly<{
   profile: ServerProfile;
   runtimeLinkConfig: RuntimeLinkClientConfig;
   logger: AppLogger;
   createClient?: BotClientFactory;
+  aiLoopConfig?: AILoopConfig;
   onFatal?: (error: RuntimeLinkClientError) => Promise<void> | void;
 }>;
 
@@ -35,6 +37,7 @@ export class BotRuntimeHost {
         runtimeLink?.publishTelemetry(message);
       },
       logger: options.logger,
+      ...(options.aiLoopConfig ? { aiLoopConfig: options.aiLoopConfig } : {}),
     });
     this.runtimeLink = runtimeLink = new RuntimeLinkClient({
       config: options.runtimeLinkConfig,

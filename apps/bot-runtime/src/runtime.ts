@@ -63,6 +63,7 @@ import type {
   RuntimeLogger,
 } from "./runtime-types.js";
 import { unsupportedVersionCompatibility } from "./version-compatibility.js";
+import { AIRuntimeLoop, type AILoopConfig } from "./ai-runtime-loop.js";
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
@@ -75,6 +76,7 @@ export type RuntimeDependencies = {
   skillRegistry?: SkillRegistry;
   now?: () => Date;
   randomId?: () => string;
+  aiLoopConfig?: AILoopConfig;
 };
 
 export type RuntimeStopOutcome =
@@ -221,6 +223,7 @@ export class SingleBotRuntime {
     { fingerprint: string; result: Promise<BotStopResultV1> }
   >();
   private readonly activeSkillControllers = new Set<AbortController>();
+  private aiLoop: AIRuntimeLoop | null = null;
 
   constructor(
     private readonly profile: ServerProfile,
@@ -250,6 +253,15 @@ export class SingleBotRuntime {
       now: this.now,
       messageId: this.randomId,
     });
+
+    // 初始化 AI 决策循环
+    if (dependencies.aiLoopConfig?.enabled) {
+      this.aiLoop = new AIRuntimeLoop(
+        dependencies.aiLoopConfig,
+        this.skillExecutor,
+        () => this.client
+      );
+    }
   }
 
   getState(): BotConnectionState {
@@ -298,6 +310,11 @@ export class SingleBotRuntime {
     this.stopping = false;
     this.reconnectAttempts = 0;
     this.connect();
+
+    // 启动 AI 决策循环
+    if (this.aiLoop) {
+      this.aiLoop.start();
+    }
   }
 
   stop(
@@ -413,6 +430,12 @@ export class SingleBotRuntime {
     operationTraceId: string,
   ): Promise<RuntimeStopOutcome> {
     this.stopping = true;
+
+    // 停止 AI 决策循环
+    if (this.aiLoop) {
+      this.aiLoop.stop();
+    }
+
     this.cancelActiveSkills();
     this.metrics.increment("bot_stop_requests_total", {
       bot_id: this.profile.botId,
@@ -631,6 +654,12 @@ export class SingleBotRuntime {
     this.startStatusTimer(generation);
     this.emitStatus(generation);
     this.emitHeartbeat();
+
+    // 启动 AI 决策循环
+    if (this.aiLoop) {
+      this.aiLoop.start();
+    }
+
     this.dependencies.logger.info("bot_runtime_online", this.logFields({
       serverProfileId: this.profile.id,
     }));

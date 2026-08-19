@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "1.0",
+  "id": "local-test-ai",
+  "botId": "ai-bot-001",
+  "purpose": "isolated-test",
+  "networkScope": "loopback",
+  "host": "localhost",
+  "port": 25565,
+  "minecraftVersion": "auto",
+  "username": "AIBot",
+  "auth": "offline",
+  "statusIntervalMs": 2000,
+  "heartbeatIntervalMs": 5000,
+  "stopGracePeriodMs": 3000,
+  "reconnect": {
+    "enabled": true,
+    "maxAttempts": 5,
+    "baseDelayMs": 2000,
+    "maxDelayMs": 30000
+  }
+}

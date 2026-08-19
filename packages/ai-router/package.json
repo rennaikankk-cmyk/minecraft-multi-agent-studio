@@ -1,0 +1,26 @@
+{
+  "name": "@minecraft-studio/ai-router",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:vllm": "tsx src/test-vllm.ts"
+  },
+  "dependencies": {
+    "@minecraft-studio/observability": "workspace:*",
+    "@minecraft-studio/protocol": "workspace:*",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.1",
+    "tsx": "^4.23.12",
+    "typescript": "6.0.3",
+    "vitest": "4.1.10"
+  }
+}

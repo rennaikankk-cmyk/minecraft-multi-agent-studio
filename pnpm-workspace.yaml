@@ -3,6 +3,7 @@ packages:
   - packages/*
 
 allowBuilds:
+  esbuild: true
   msgpackr-extract: false
   sharp: true
 

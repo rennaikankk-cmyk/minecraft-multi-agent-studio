@@ -15,6 +15,7 @@
     "test:integration": "vitest run tests/real-isolated-server.integration.test.ts"
   },
   "dependencies": {
+    "@minecraft-studio/ai-router": "workspace:*",
     "@minecraft-studio/cpu-resource-manager": "workspace:*",
     "@minecraft-studio/observability": "workspace:*",
     "@minecraft-studio/protocol": "workspace:*",
