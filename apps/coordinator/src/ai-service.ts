@@ -7,7 +7,10 @@ import {
   type AISchedulerSnapshot,
 } from "@minecraft-studio/ai-router";
 import type { AppLogger } from "@minecraft-studio/observability";
-import type { SkillExecutionResultV1 } from "@minecraft-studio/protocol";
+import type {
+  BotAiPerformanceV1,
+  SkillExecutionResultV1,
+} from "@minecraft-studio/protocol";
 
 import {
   CoordinatorAIPlanner,
@@ -33,6 +36,7 @@ export type CoordinatorAIExecutionOptions = Readonly<{
   auditSink: SkillInvocationAuditSink;
   logger: AppLogger;
   teamStateProvider?: (botId: string) => readonly string[];
+  onPlanningObservation?: (observation: BotAiPerformanceV1) => void;
 }>;
 
 export type CoordinatorAIServiceOptions = Readonly<{
@@ -68,6 +72,9 @@ export class CoordinatorAIService {
       maxTokens: options.config.maxTokens,
       temperature: options.config.temperature,
       timeoutMs: options.config.timeoutMs,
+      ...(options.execution?.onPlanningObservation === undefined
+        ? {}
+        : { onObservation: options.execution.onPlanningObservation }),
     });
     this.invocationController = options.execution
       ? new SkillInvocationController({

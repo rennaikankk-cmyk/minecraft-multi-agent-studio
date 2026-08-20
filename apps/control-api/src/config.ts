@@ -7,7 +7,18 @@ const PERMISSIONS = new Set<ControlApiPermission>([
   "bot.position.read",
   "bot.stop",
   "task.execute",
+  "ai.metrics.read",
 ]);
+
+export type SparkMetricsRuntimeConfig = Readonly<{
+  baseUrl: string;
+  nodeName: string;
+  backend: "vllm" | "openai-compatible";
+  quantization?: string;
+  apiKey?: string;
+  timeoutMs: number;
+  maxConcurrency?: number;
+}>;
 
 export type ControlApiRuntimeConfig = Readonly<{
   host: "127.0.0.1" | "::1";
@@ -16,6 +27,7 @@ export type ControlApiRuntimeConfig = Readonly<{
   requestLimitPerMinute: number;
   handshakeLimitPerMinute: number;
   maxConnectionsPerSubject: number;
+  sparkMetrics: SparkMetricsRuntimeConfig | null;
 }>;
 
 export class ControlApiConfigError extends Error {
@@ -58,6 +70,7 @@ export function loadControlApiConfig(
   }
 
   const principals = parsed.map((value) => parsePrincipal(value));
+  const sparkMetrics = parseSparkMetricsConfig(environment);
   return {
     host,
     port: integerEnvironment(environment.CONTROL_API_PORT, 3210, 1, 65_535),
@@ -80,6 +93,58 @@ export function loadControlApiConfig(
       1,
       100,
     ),
+    sparkMetrics,
+  };
+}
+
+function parseSparkMetricsConfig(
+  environment: NodeJS.ProcessEnv,
+): SparkMetricsRuntimeConfig | null {
+  const rawUrl = environment.SPARK_AI_BASE_URL;
+  if (rawUrl === undefined || rawUrl === "") return null;
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new ControlApiConfigError("SPARK_AI_BASE_URL is invalid.");
+  }
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.search !== "" ||
+    url.hash !== "" ||
+    (url.pathname !== "/" && url.pathname !== "/v1" && url.pathname !== "/v1/")
+  ) {
+    throw new ControlApiConfigError("SPARK_AI_BASE_URL must be an HTTP(S) origin or its /v1 root.");
+  }
+  const backend = environment.SPARK_AI_BACKEND ?? "vllm";
+  if (backend !== "vllm" && backend !== "openai-compatible") {
+    throw new ControlApiConfigError("SPARK_AI_BACKEND is invalid.");
+  }
+  const apiKey = environment.SPARK_AI_API_KEY?.trim() || undefined;
+  if (apiKey !== undefined && (apiKey.length < 16 || apiKey.length > 4_096)) {
+    throw new ControlApiConfigError("SPARK_AI_API_KEY length is invalid.");
+  }
+  if (!isLoopbackHost(url.hostname) && apiKey === undefined) {
+    throw new ControlApiConfigError(
+      "SPARK_AI_API_KEY is required for a non-loopback metrics endpoint.",
+    );
+  }
+  const maxConcurrencyValue = environment.AI_MAX_CONCURRENCY;
+  return {
+    baseUrl: rawUrl,
+    nodeName: boundedText(environment.SPARK_AI_NODE_NAME ?? "MSI DGX Spark", 1, 128),
+    backend,
+    ...(environment.SPARK_AI_QUANTIZATION === undefined ||
+      environment.SPARK_AI_QUANTIZATION === ""
+      ? {}
+      : { quantization: boundedText(environment.SPARK_AI_QUANTIZATION, 1, 128) }),
+    ...(apiKey === undefined ? {} : { apiKey }),
+    timeoutMs: integerEnvironment(environment.SPARK_METRICS_TIMEOUT_MS, 5_000, 100, 60_000),
+    ...(maxConcurrencyValue === undefined || maxConcurrencyValue === ""
+      ? {}
+      : { maxConcurrency: integerEnvironment(maxConcurrencyValue, 10, 1, 1_000) }),
   };
 }
 
@@ -126,4 +191,17 @@ function integerEnvironment(
     throw new ControlApiConfigError("Control API numeric setting is out of range.");
   }
   return parsed;
+}
+
+function boundedText(value: string, minimum: number, maximum: number): string {
+  const normalized = value.trim();
+  if (normalized.length < minimum || normalized.length > maximum) {
+    throw new ControlApiConfigError("Control API text setting is invalid.");
+  }
+  return normalized;
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1" ||
+    hostname === "[::1]" || hostname === "::1";
 }

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { createStructuredLogger } from "@minecraft-studio/observability";
+import { SparkMetricsCollector } from "@minecraft-studio/ai-router";
 
 import { loadControlApiConfig } from "./config.js";
 import { CoordinatorLinkClient } from "./coordinator-link-client.js";
@@ -18,6 +19,9 @@ const logger = createStructuredLogger({
 
 async function main(): Promise<void> {
   const config = loadControlApiConfig();
+  const aiMetricsCollector = config.sparkMetrics
+    ? new SparkMetricsCollector(config.sparkMetrics)
+    : undefined;
   const coordinatorLink = new CoordinatorLinkClient({
     config: loadCoordinatorLinkConfig(),
     instanceId,
@@ -31,6 +35,7 @@ async function main(): Promise<void> {
     stopController: coordinatorLink,
     taskController: coordinatorLink,
     teamTaskController: coordinatorLink,
+    ...(aiMetricsCollector ? { aiMetricsCollector } : {}),
     principals: config.principals,
     requestLimitPerMinute: config.requestLimitPerMinute,
     handshakeLimitPerMinute: config.handshakeLimitPerMinute,

@@ -80,6 +80,11 @@ export {
 } from "./expired-lease-recovery.js";
 
 export {
+  BotAiPerformanceTracker,
+  type BotAiPerformanceListener,
+} from "./bot-ai-performance-tracker.js";
+
+export {
   CoordinatorAIPlanner,
   CoordinatorAIPlanningError,
   type CoordinatorAIPlannerOptions,

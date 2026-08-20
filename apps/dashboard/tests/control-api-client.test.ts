@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   DashboardControlError,
+  fetchDashboardAiMetrics,
   fetchDashboardBots,
   loadDashboardControlConfig,
   requestDashboardBotStop,
@@ -108,6 +109,21 @@ describe("Dashboard Control API client", () => {
     expect(result.data.traceId).toBe(UUID);
     expect(timeoutSpy).toHaveBeenCalledWith(20_000);
   });
+
+  it("reads strict AI metrics without exposing the Spark endpoint", async () => {
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      expect(String(input)).toBe("http://127.0.0.1:3210/v1/ai/metrics");
+      return jsonResponse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: aiMetrics(),
+      });
+    });
+    await expect(fetchDashboardAiMetrics(config(), fetcher)).resolves.toEqual(aiMetrics());
+    expect(fetcher.mock.calls[0]?.[1]?.headers).toMatchObject({
+      Authorization: `Bearer ${TOKEN}`,
+    });
+  });
 });
 
 function config() {
@@ -154,4 +170,33 @@ function jsonResponse(value: unknown, status = 200): Response {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+function aiMetrics() {
+  return {
+    schemaVersion: "1.0" as const,
+    nodeName: "MSI DGX Spark",
+    status: "online" as const,
+    sampledAt: NOW,
+    backend: "vllm" as const,
+    backendVersion: "0.15.0",
+    quantization: "modelopt_fp4",
+    models: ["qwen3.8-27b-nvfp4"],
+    networkRttMs: 2,
+    runningRequests: 2,
+    waitingRequests: 1,
+    maxConcurrency: 10,
+    kvCacheUsagePercent: 42,
+    promptTokensPerSecond: 120,
+    generationTokensPerSecond: 40,
+    promptTokensTotal: 1_000,
+    generationTokensTotal: 400,
+    successfulRequestsTotal: 20,
+    ttft: { p50Ms: 100, p95Ms: 500, p99Ms: 800 },
+    tpot: { p50Ms: 20, p95Ms: 50, p99Ms: 80 },
+    queueLatency: { p50Ms: 0, p95Ms: 20, p99Ms: 50 },
+    endToEndLatency: { p50Ms: 500, p95Ms: 1_000, p99Ms: 2_000 },
+    errorRate: null,
+    errorCodes: [],
+  };
 }

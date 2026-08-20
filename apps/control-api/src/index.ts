@@ -29,6 +29,7 @@ export {
   ControlApiConfigError,
   loadControlApiConfig,
   type ControlApiRuntimeConfig,
+  type SparkMetricsRuntimeConfig,
 } from "./config.js";
 export {
   CoordinatorLinkClient,

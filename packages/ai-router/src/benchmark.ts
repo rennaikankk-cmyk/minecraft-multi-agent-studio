@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { AIRouter } from "./router.js";
 import { AIRequestScheduler } from "./scheduler.js";
+import type { SparkMetricsSnapshot } from "./spark-metrics.js";
 import type { AIProvider } from "./types/provider.js";
 
 export type AIConcurrencyBenchmarkLevel = Readonly<{
@@ -13,9 +14,28 @@ export type AIConcurrencyBenchmarkLevel = Readonly<{
   wallTimeMs: number;
   latencyP50Ms: number | null;
   latencyP95Ms: number | null;
+  latencyP99Ms: number | null;
+  queueTimeP50Ms: number | null;
+  queueTimeP95Ms: number | null;
+  queueTimeP99Ms: number | null;
+  providerQueueTimeP50Ms: number | null;
+  providerQueueTimeP95Ms: number | null;
+  providerQueueTimeP99Ms: number | null;
+  timeToFirstTokenP50Ms: number | null;
+  timeToFirstTokenP95Ms: number | null;
+  timeToFirstTokenP99Ms: number | null;
+  timePerOutputTokenP50Ms: number | null;
+  timePerOutputTokenP95Ms: number | null;
+  timePerOutputTokenP99Ms: number | null;
   requestsPerSecond: number;
+  promptTokens: number;
+  promptTokensPerSecond: number;
   outputTokens: number;
   outputTokensPerSecond: number;
+  perRequestGenerationTokensPerSecondP50: number | null;
+  perRequestGenerationTokensPerSecondP95: number | null;
+  inferenceNodeBefore: SparkMetricsSnapshot | null;
+  inferenceNodeAfter: SparkMetricsSnapshot | null;
   errors: Readonly<Record<string, number>>;
 }>;
 
@@ -27,6 +47,11 @@ export type AIConcurrencyBenchmarkResult = Readonly<{
   provider: string;
   concurrencyLevels: readonly AIConcurrencyBenchmarkLevel[];
   recommendedMaxConcurrency: number | null;
+  recommendation: Readonly<{
+    recommendedConcurrency: number | null;
+    tested: readonly number[];
+    reason: string;
+  }>;
   recommendationRule: string;
 }>;
 
@@ -41,6 +66,7 @@ export type AIConcurrencyBenchmarkOptions = Readonly<{
   maximumErrorRate?: number;
   now?: () => Date;
   randomId?: () => string;
+  metricsCollector?: Readonly<{ collect(signal?: AbortSignal): Promise<SparkMetricsSnapshot> }>;
 }>;
 
 export async function runAIConcurrencyBenchmark(
@@ -60,6 +86,7 @@ export async function runAIConcurrencyBenchmark(
   const results: AIConcurrencyBenchmarkLevel[] = [];
 
   for (const concurrency of levels) {
+    const inferenceNodeBefore = await safeCollect(options.metricsCollector);
     const requests = requestCount(options.requestsPerLevel, concurrency);
     const router = new AIRouter();
     router.register(options.provider);
@@ -99,6 +126,21 @@ export async function runAIConcurrencyBenchmark(
       .map((result) => result.value);
     const failures = settled.filter((result) => result.status === "rejected");
     const latencies = successes.map(({ totalLatencyMs }) => totalLatencyMs);
+    const queueTimes = successes.map(({ queueTimeMs }) => queueTimeMs);
+    const providerQueueTimes = compact(successes.map(({ metrics }) => metrics?.queueTimeMs));
+    const timeToFirstTokens = compact(
+      successes.map(({ metrics }) => metrics?.timeToFirstTokenMs),
+    );
+    const timePerOutputTokens = compact(
+      successes.map(({ metrics }) => metrics?.meanInterTokenLatencyMs),
+    );
+    const perRequestGenerationRates = compact(
+      successes.map(({ metrics }) => metrics?.tokensPerSecond),
+    );
+    const promptTokens = successes.reduce(
+      (total, result) => total + result.usage.promptTokens,
+      0,
+    );
     const outputTokens = successes.reduce(
       (total, result) => total + result.usage.completionTokens,
       0,
@@ -113,6 +155,7 @@ export async function runAIConcurrencyBenchmark(
           : "UNKNOWN";
       errors[code] = (errors[code] ?? 0) + 1;
     }
+    const inferenceNodeAfter = await safeCollect(options.metricsCollector);
     results.push(Object.freeze({
       concurrency,
       requests,
@@ -122,13 +165,39 @@ export async function runAIConcurrencyBenchmark(
       wallTimeMs,
       latencyP50Ms: percentile(latencies, 0.5),
       latencyP95Ms: percentile(latencies, 0.95),
+      latencyP99Ms: percentile(latencies, 0.99),
+      queueTimeP50Ms: percentile(queueTimes, 0.5),
+      queueTimeP95Ms: percentile(queueTimes, 0.95),
+      queueTimeP99Ms: percentile(queueTimes, 0.99),
+      providerQueueTimeP50Ms: percentile(providerQueueTimes, 0.5),
+      providerQueueTimeP95Ms: percentile(providerQueueTimes, 0.95),
+      providerQueueTimeP99Ms: percentile(providerQueueTimes, 0.99),
+      timeToFirstTokenP50Ms: percentile(timeToFirstTokens, 0.5),
+      timeToFirstTokenP95Ms: percentile(timeToFirstTokens, 0.95),
+      timeToFirstTokenP99Ms: percentile(timeToFirstTokens, 0.99),
+      timePerOutputTokenP50Ms: percentile(timePerOutputTokens, 0.5),
+      timePerOutputTokenP95Ms: percentile(timePerOutputTokens, 0.95),
+      timePerOutputTokenP99Ms: percentile(timePerOutputTokens, 0.99),
       requestsPerSecond: round((successes.length * 1_000) / wallTimeMs),
+      promptTokens,
+      promptTokensPerSecond: round((promptTokens * 1_000) / wallTimeMs),
       outputTokens,
       outputTokensPerSecond: round((outputTokens * 1_000) / wallTimeMs),
+      perRequestGenerationTokensPerSecondP50: percentile(
+        perRequestGenerationRates,
+        0.5,
+      ),
+      perRequestGenerationTokensPerSecondP95: percentile(
+        perRequestGenerationRates,
+        0.95,
+      ),
+      inferenceNodeBefore,
+      inferenceNodeAfter,
       errors: Object.freeze(errors),
     }));
   }
 
+  const recommendation = recommend(results, maximumErrorRate);
   return Object.freeze({
     schemaVersion: "1.0",
     benchmarkType: "ai-openai-compatible-concurrency",
@@ -137,9 +206,13 @@ export async function runAIConcurrencyBenchmark(
     measuredAt: now().toISOString(),
     provider: options.provider.name,
     concurrencyLevels: Object.freeze(results),
-    recommendedMaxConcurrency: recommend(results, maximumErrorRate),
+    recommendedMaxConcurrency: recommendation.recommendedConcurrency,
+    recommendation: Object.freeze({
+      ...recommendation,
+      tested: Object.freeze(levels),
+    }),
     recommendationRule:
-      "Lowest healthy level within 95% of maximum measured throughput; healthy means error rate at or below the configured threshold.",
+      "Lowest balanced level near peak throughput after rejecting excessive errors, P95 latency growth, provider queueing, waiting requests, or KV cache pressure.",
   });
 }
 
@@ -166,16 +239,59 @@ function percentile(values: readonly number[], fraction: number): number | null 
 function recommend(
   results: readonly AIConcurrencyBenchmarkLevel[],
   maximumErrorRate: number,
-): number | null {
+): Readonly<{ recommendedConcurrency: number | null; reason: string }> {
   const healthy = results.filter(({ errorRate, succeeded }) =>
     succeeded > 0 && errorRate <= maximumErrorRate,
   );
-  if (healthy.length === 0) return null;
+  if (healthy.length === 0) {
+    return {
+      recommendedConcurrency: null,
+      reason: "No tested level completed within the configured error-rate limit.",
+    };
+  }
   const useTokenThroughput = healthy.some(({ outputTokens }) => outputTokens > 0);
   const throughput = (result: AIConcurrencyBenchmarkLevel) =>
     useTokenThroughput ? result.outputTokensPerSecond : result.requestsPerSecond;
   const maximum = Math.max(...healthy.map(throughput));
-  return healthy.find((result) => throughput(result) >= maximum * 0.95)!.concurrency;
+  const bestP95 = Math.min(
+    ...healthy.map(({ latencyP95Ms }) => latencyP95Ms ?? Number.POSITIVE_INFINITY),
+  );
+  const balanced = healthy.filter((result) => {
+    const kvUsage = result.inferenceNodeAfter?.kvCacheUsagePercent;
+    const waiting = result.inferenceNodeAfter?.waitingRequests;
+    const latencyAcceptable = !Number.isFinite(bestP95) || result.latencyP95Ms === null ||
+      result.latencyP95Ms <= bestP95 * 2.5;
+    const queueAcceptable = result.providerQueueTimeP95Ms === null ||
+      result.providerQueueTimeP95Ms <= Math.max(1_000, bestP95);
+    return throughput(result) >= maximum * 0.9 &&
+      latencyAcceptable &&
+      queueAcceptable &&
+      (kvUsage === null || kvUsage === undefined || kvUsage <= 90) &&
+      (waiting === null || waiting === undefined || waiting <= result.concurrency);
+  });
+  const selected = (balanced.length > 0 ? balanced : healthy)
+    .sort((left, right) => left.concurrency - right.concurrency)[0]!;
+  return {
+    recommendedConcurrency: selected.concurrency,
+    reason:
+      `Concurrency ${selected.concurrency} is the lowest tested level near peak healthy throughput ` +
+      "without observed excessive P95 latency, provider queueing, waiting requests, or KV pressure.",
+  };
+}
+
+async function safeCollect(
+  collector: AIConcurrencyBenchmarkOptions["metricsCollector"],
+): Promise<SparkMetricsSnapshot | null> {
+  if (collector === undefined) return null;
+  try {
+    return await collector.collect();
+  } catch {
+    return null;
+  }
+}
+
+function compact(values: readonly (number | null | undefined)[]): number[] {
+  return values.filter((value): value is number => value !== null && value !== undefined);
 }
 
 function round(value: number): number {

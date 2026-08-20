@@ -35,6 +35,7 @@ import {
   type ControlLinkTaskRequestV1,
   type ControlLinkTeamTaskErrorCode,
   type ControlLinkTeamTaskRequestV1,
+  type BotAiPerformanceV1,
   type PublicBotDetailV1,
 } from "@minecraft-studio/protocol";
 import { WebSocket, WebSocketServer } from "ws";
@@ -91,6 +92,10 @@ export type ControlLinkServerOptions = Readonly<{
     ): CoordinatorAIExecutionHandle;
   }>;
   teamCoordinator?: Pick<TeamCoordinator, "createObjective" | "assignTask" | "releaseTask">;
+  aiPerformanceSource?: Readonly<{
+    get(botId: string): BotAiPerformanceV1 | null;
+    subscribe(listener: (observation: BotAiPerformanceV1) => void): () => void;
+  }>;
   logger: AppLogger;
   now?: () => Date;
   randomId?: () => string;
@@ -161,6 +166,7 @@ export class ControlLinkServer {
   private readonly httpServer: HttpServer;
   private readonly webSocketServer: WebSocketServer;
   private readonly unsubscribeRegistry: () => void;
+  private readonly unsubscribeAiPerformance: () => void;
   private readonly maxSessions: number;
   private readonly maxPendingStops: number;
   private readonly maxPendingTasks: number;
@@ -291,6 +297,10 @@ export class ControlLinkServer {
     this.unsubscribeRegistry = options.registry.subscribe((record) => {
       this.publishRecord(record);
     });
+    this.unsubscribeAiPerformance = options.aiPerformanceSource?.subscribe((observation) => {
+      const record = options.registry.get(observation.botId, validNow(this.now()));
+      if (record !== null) this.publishRecord(record);
+    }) ?? (() => undefined);
   }
 
   async start(): Promise<ControlLinkAddress> {
@@ -321,6 +331,7 @@ export class ControlLinkServer {
     if (this.stopped) return;
     this.stopped = true;
     this.unsubscribeRegistry();
+    this.unsubscribeAiPerformance();
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.pingTimer = null;
     for (const pending of this.pendingStops.values()) {
@@ -585,7 +596,7 @@ export class ControlLinkServer {
     try {
       bots = this.options.registry
         .list(validNow(this.now()))
-        .map(projectBotState);
+        .map((record) => this.projectBotState(record));
     } catch {
       this.closeSession(session, 1011, "snapshot_failed");
       return;
@@ -706,7 +717,7 @@ export class ControlLinkServer {
         payload: {
           coordinatorInstanceId: this.options.instanceId,
           streamSequence: this.streamSequence,
-          bot: projectBotState(record),
+          bot: this.projectBotState(record),
         },
       });
     } catch {
@@ -1472,9 +1483,19 @@ export class ControlLinkServer {
       session.socket.ping();
     }
   }
+
+  private projectBotState(record: BotRegistryRecord): PublicBotDetailV1 {
+    return projectBotState(
+      record,
+      this.options.aiPerformanceSource?.get(record.botId) ?? null,
+    );
+  }
 }
 
-function projectBotState(record: BotRegistryRecord): PublicBotDetailV1 {
+function projectBotState(
+  record: BotRegistryRecord,
+  aiPerformance: BotAiPerformanceV1 | null = null,
+): PublicBotDetailV1 {
   const status = record.currentStatus;
   return {
     botId: record.botId,
@@ -1491,6 +1512,7 @@ function projectBotState(record: BotRegistryRecord): PublicBotDetailV1 {
     positionRedacted: false,
     minecraftVersion: record.minecraftVersion,
     safety: status?.safety ?? null,
+    aiPerformance,
   };
 }
 

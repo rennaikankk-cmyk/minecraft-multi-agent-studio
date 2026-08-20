@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   botDetailResponseV1Schema,
+  aiNodeMetricsHttpResponseV1Schema,
   botListResponseV1Schema,
   botStreamEventV1Schema,
   botStreamSnapshotV1Schema,
@@ -34,6 +35,26 @@ const detail = {
   position: null,
   positionRedacted: true,
   minecraftVersion: null,
+  aiPerformance: {
+    state: "completed" as const,
+    observedAt: NOW,
+    botId: "worker-01",
+    requestId: UUID,
+    taskId: null,
+    taskType: "planner",
+    provider: "spark-vllm",
+    model: "qwen3.8-27b-nvfp4",
+    queueTimeMs: 3,
+    providerQueueTimeMs: 1,
+    totalLatencyMs: 100,
+    timeToFirstTokenMs: 40,
+    generationTimeMs: 50,
+    meanInterTokenLatencyMs: 5,
+    generationTokensPerSecond: 20,
+    promptTokens: 100,
+    outputTokens: 10,
+    errorCode: null,
+  },
 };
 
 describe("Control API v1 protocol", () => {
@@ -231,5 +252,45 @@ describe("Control API v1 protocol", () => {
       },
     });
     expect(response.data.assignment.botId).toBe("worker-01");
+  });
+
+  it("validates nullable evidence-backed AI node metrics", () => {
+    const response = aiNodeMetricsHttpResponseV1Schema.parse({
+      schemaVersion: "1.0",
+      requestId: UUID,
+      data: {
+        schemaVersion: "1.0",
+        nodeName: "MSI DGX Spark",
+        status: "online",
+        sampledAt: NOW,
+        backend: "vllm",
+        backendVersion: "0.15.0",
+        quantization: "modelopt_fp4",
+        models: ["qwen3.8-27b-nvfp4"],
+        networkRttMs: 2,
+        runningRequests: 2,
+        waitingRequests: 1,
+        maxConcurrency: 10,
+        kvCacheUsagePercent: 42,
+        promptTokensPerSecond: null,
+        generationTokensPerSecond: null,
+        promptTokensTotal: 100,
+        generationTokensTotal: 40,
+        successfulRequestsTotal: 4,
+        ttft: { p50Ms: 100, p95Ms: 500, p99Ms: 500 },
+        tpot: { p50Ms: 20, p95Ms: 50, p99Ms: 50 },
+        queueLatency: { p50Ms: null, p95Ms: null, p99Ms: null },
+        endToEndLatency: { p50Ms: null, p95Ms: null, p99Ms: null },
+        errorRate: null,
+        errorCodes: [],
+      },
+    });
+    expect(response.data.promptTokensPerSecond).toBeNull();
+    expect(
+      aiNodeMetricsHttpResponseV1Schema.safeParse({
+        ...response,
+        data: { ...response.data, kvCacheUsagePercent: 101 },
+      }).success,
+    ).toBe(false);
   });
 });

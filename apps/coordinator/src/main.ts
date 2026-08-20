@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { createStructuredLogger } from "@minecraft-studio/observability";
 
 import { BotRegistry } from "./bot-registry.js";
+import { BotAiPerformanceTracker } from "./bot-ai-performance-tracker.js";
 import { createCoordinatorAIServiceFromEnv } from "./ai-service.js";
 import { CoordinatorAIConfigError } from "./ai-service-config.js";
 import {
@@ -37,12 +38,14 @@ async function main(): Promise<void> {
     logger,
   });
   const teamCoordinator = new TeamCoordinator({ registry });
+  const aiPerformance = new BotAiPerformanceTracker();
   const aiService = createCoordinatorAIServiceFromEnv(registry, {
     instanceId,
     transport: runtimeServer,
     auditSink: new InMemorySkillInvocationAuditSink(),
     logger,
     teamStateProvider: (botId) => teamCoordinator.teamStateForBot(botId),
+    onPlanningObservation: (observation) => aiPerformance.record(observation),
   });
   const stopController = new StopController({
     instanceId,
@@ -59,6 +62,7 @@ async function main(): Promise<void> {
     registry,
     stopController,
     teamCoordinator,
+    aiPerformanceSource: aiPerformance,
     ...(aiService ? { taskExecutor: aiService } : {}),
     logger,
   });

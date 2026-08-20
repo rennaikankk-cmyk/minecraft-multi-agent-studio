@@ -74,6 +74,7 @@ export class AIRouter {
           ...(response.finishReason === undefined
             ? {}
             : { finishReason: response.finishReason }),
+          ...(response.metrics === undefined ? {} : { metrics: response.metrics }),
           ...(validated === undefined ? {} : { validated }),
         } as AIRouterResponse<T>;
       } catch (error) {

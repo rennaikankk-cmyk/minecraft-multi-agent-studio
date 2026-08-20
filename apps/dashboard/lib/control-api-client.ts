@@ -3,9 +3,11 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import {
   botDetailResponseV1Schema,
   botListResponseV1Schema,
+  aiNodeMetricsHttpResponseV1Schema,
   controlApiErrorV1Schema,
   stopBotHttpResponseV1Schema,
   type PublicBotDetailV1,
+  type AiNodeMetricsSnapshotV1,
   type StopBotHttpResponseV1,
 } from "@minecraft-studio/protocol";
 
@@ -163,6 +165,26 @@ export async function requestDashboardBotStop(
     );
   }
   return parsed.data;
+}
+
+export async function fetchDashboardAiMetrics(
+  config: DashboardControlConfig,
+  fetchImplementation: typeof fetch = fetch,
+): Promise<AiNodeMetricsSnapshotV1> {
+  const value = await requestJson(
+    config,
+    "/v1/ai/metrics",
+    { method: "GET" },
+    fetchImplementation,
+  );
+  const parsed = aiNodeMetricsHttpResponseV1Schema.safeParse(value);
+  if (!parsed.success) {
+    throw new DashboardControlError(
+      "INVALID_CONTROL_RESPONSE",
+      "Control API 返回了无法识别的 AI 节点指标。",
+    );
+  }
+  return parsed.data.data;
 }
 
 export function verifyStopConfirmation(

@@ -11,6 +11,7 @@ import {
   controlLinkTaskRequestV1Schema,
   parseControlLinkServerMessage,
   type BotHeartbeatV1,
+  type BotAiPerformanceV1,
   type BotStatusV1,
   type ControlLinkChallengeV1,
   type ControlLinkProofContext,
@@ -77,6 +78,54 @@ describe("Coordinator Control Link server", () => {
     await expect(reader.next()).resolves.toMatchObject({
       type: "control.link.state-upsert.v1",
       payload: { streamSequence: 2, bot: { botId: BOT_ID } },
+    });
+  });
+
+  it("adds the latest per-Bot AI performance to snapshots and live upserts", async () => {
+    let latest: BotAiPerformanceV1 | null = aiPerformance("queued");
+    let listener: ((observation: BotAiPerformanceV1) => void) | undefined;
+    const aiPerformanceSource = {
+      get: vi.fn(() => latest),
+      subscribe: vi.fn((next: (observation: BotAiPerformanceV1) => void) => {
+        listener = next;
+        return () => { listener = undefined; };
+      }),
+    };
+    const { registry, url } = await startServer({ aiPerformanceSource });
+    registry.ingest(statusMessage(1), NOW);
+    const { reader } = await authenticate(url);
+
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.snapshot-begin.v1",
+    });
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.snapshot-item.v1",
+      payload: {
+        bot: {
+          botId: BOT_ID,
+          aiPerformance: { state: "queued", taskType: "planner" },
+        },
+      },
+    });
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.snapshot-end.v1",
+    });
+
+    latest = aiPerformance("completed");
+    listener?.(latest);
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.state-upsert.v1",
+      payload: {
+        bot: {
+          botId: BOT_ID,
+          aiPerformance: {
+            state: "completed",
+            queueTimeMs: 4,
+            timeToFirstTokenMs: 40,
+            generationTokensPerSecond: 20,
+          },
+        },
+      },
     });
   });
 
@@ -359,6 +408,12 @@ async function startServer(
       assignTask: (...args: any[]) => any;
       releaseTask: (...args: any[]) => any;
     };
+    aiPerformanceSource: {
+      get: (botId: string) => BotAiPerformanceV1 | null;
+      subscribe: (
+        listener: (observation: BotAiPerformanceV1) => void,
+      ) => () => void;
+    };
   }> = {},
 ): Promise<{ registry: BotRegistry; server: ControlLinkServer; url: string }> {
   const registry = new BotRegistry({ staleAfterMs: 15_000, now: () => NOW });
@@ -397,6 +452,9 @@ async function startServer(
     ...(overrides.teamCoordinator === undefined
       ? {}
       : { teamCoordinator: overrides.teamCoordinator }),
+    ...(overrides.aiPerformanceSource === undefined
+      ? {}
+      : { aiPerformanceSource: overrides.aiPerformanceSource }),
   });
   servers.push(server);
   const address = await server.start();
@@ -404,6 +462,29 @@ async function startServer(
     registry,
     server,
     url: `ws://127.0.0.1:${address.port}/v1/control-link`,
+  };
+}
+
+function aiPerformance(state: BotAiPerformanceV1["state"]): BotAiPerformanceV1 {
+  return {
+    state,
+    observedAt: NOW.toISOString(),
+    botId: BOT_ID,
+    requestId: testUuid(state === "queued" ? 970 : 971),
+    taskId: "task-01",
+    taskType: "planner",
+    provider: "spark-vllm",
+    model: "qwen3.8-27b-nvfp4",
+    queueTimeMs: state === "queued" ? null : 4,
+    providerQueueTimeMs: state === "queued" ? null : 2,
+    totalLatencyMs: state === "queued" ? null : 92,
+    timeToFirstTokenMs: state === "queued" ? null : 40,
+    generationTimeMs: state === "queued" ? null : 50,
+    meanInterTokenLatencyMs: state === "queued" ? null : 5,
+    generationTokensPerSecond: state === "queued" ? null : 20,
+    promptTokens: state === "queued" ? null : 100,
+    outputTokens: state === "queued" ? null : 10,
+    errorCode: null,
   };
 }
 

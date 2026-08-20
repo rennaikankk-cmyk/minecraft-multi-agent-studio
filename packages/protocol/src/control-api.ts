@@ -22,6 +22,7 @@ export const controlApiPermissionSchema = z.enum([
   "bot.position.read",
   "bot.stop",
   "task.execute",
+  "ai.metrics.read",
 ]);
 
 export const publicBotSummaryV1Schema = z
@@ -40,6 +41,29 @@ const publicTaskSchema = z
     title: z.string().trim().min(1).max(200),
     status: taskStatusSchema,
     startedAt: timestampSchema.nullable(),
+  })
+  .strict();
+
+export const botAiPerformanceV1Schema = z
+  .object({
+    state: z.enum(["queued", "completed", "waiting", "failed"]),
+    observedAt: timestampSchema,
+    botId: identifierSchema,
+    requestId: z.string().uuid(),
+    taskId: identifierSchema.nullable(),
+    taskType: identifierSchema,
+    provider: identifierSchema.nullable(),
+    model: z.string().trim().min(1).max(500).nullable(),
+    queueTimeMs: z.number().finite().nonnegative().nullable(),
+    providerQueueTimeMs: z.number().finite().nonnegative().nullable(),
+    totalLatencyMs: z.number().finite().nonnegative().nullable(),
+    timeToFirstTokenMs: z.number().finite().nonnegative().nullable(),
+    generationTimeMs: z.number().finite().nonnegative().nullable(),
+    meanInterTokenLatencyMs: z.number().finite().nonnegative().nullable(),
+    generationTokensPerSecond: z.number().finite().nonnegative().nullable(),
+    promptTokens: z.number().int().nonnegative().nullable(),
+    outputTokens: z.number().int().nonnegative().nullable(),
+    errorCode: identifierSchema.nullable(),
   })
   .strict();
 
@@ -66,6 +90,7 @@ export const publicBotDetailV1Schema = publicBotSummaryV1Schema
     positionRedacted: z.boolean(),
     minecraftVersion: minecraftVersionCompatibilitySchema.nullable(),
     safety: l0SafetyStatusSchema.nullable().optional(),
+    aiPerformance: botAiPerformanceV1Schema.nullable().optional(),
   })
   .strict();
 
@@ -111,6 +136,7 @@ export const controlApiErrorCodeSchema = z.enum([
   "AI_UNAVAILABLE",
   "TASK_REJECTED",
   "TASK_TIMEOUT",
+  "AI_METRICS_UNAVAILABLE",
   "INTERNAL_ERROR",
 ]);
 
@@ -320,6 +346,7 @@ export const executeTeamTaskHttpResponseV1Schema = z
   });
 
 export type ControlApiPermission = z.infer<typeof controlApiPermissionSchema>;
+export type BotAiPerformanceV1 = z.infer<typeof botAiPerformanceV1Schema>;
 export type PublicBotSummaryV1 = z.infer<typeof publicBotSummaryV1Schema>;
 export type PublicBotDetailV1 = z.infer<typeof publicBotDetailV1Schema>;
 export type BotListResponseV1 = z.infer<typeof botListResponseV1Schema>;

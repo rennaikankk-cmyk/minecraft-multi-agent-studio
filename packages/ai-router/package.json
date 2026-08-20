@@ -16,7 +16,9 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "benchmark": "pnpm build && node dist/benchmark-cli.js"
+    "endpoint": "pnpm build && node dist/ai-endpoint-cli.js",
+    "benchmark": "pnpm build && node dist/benchmark-cli.js",
+    "soak": "pnpm build && node dist/soak-cli.js"
   },
   "dependencies": {
     "@minecraft-studio/observability": "workspace:*",

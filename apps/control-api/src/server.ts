@@ -15,6 +15,7 @@ import {
 import {
   botDetailResponseV1Schema,
   botListResponseV1Schema,
+  aiNodeMetricsHttpResponseV1Schema,
   botStreamEventV1Schema,
   botStreamSnapshotV1Schema,
   controlApiErrorV1Schema,
@@ -25,6 +26,7 @@ import {
   stopBotHttpRequestV1Schema,
   stopBotHttpResponseV1Schema,
   type ControlApiErrorCode,
+  type AiNodeMetricsSnapshotV1,
 } from "@minecraft-studio/protocol";
 import { WebSocket, WebSocketServer } from "ws";
 
@@ -76,6 +78,9 @@ export type ControlApiServerOptions = Readonly<{
   stopController?: BotStopRequester;
   taskController?: BotTaskRequester;
   teamTaskController?: TeamTaskRequester;
+  aiMetricsCollector?: Readonly<{
+    collect(signal?: AbortSignal): Promise<AiNodeMetricsSnapshotV1>;
+  }>;
   principals: readonly ApiPrincipalConfig[];
   logger: ControlApiLogger;
   requestLimitPerMinute?: number;
@@ -344,6 +349,36 @@ export class ControlApiServer {
       this.writeError(response, 429, requestId, "RATE_LIMITED", "Request rate limit exceeded.", {
         "Retry-After": "60",
       });
+      return;
+    }
+
+    if (url.pathname === "/v1/ai/metrics") {
+      if (request.method !== "GET") {
+        this.writeError(
+          response,
+          405,
+          requestId,
+          "METHOD_NOT_ALLOWED",
+          "This endpoint only accepts GET.",
+          { Allow: "GET" },
+        );
+        return;
+      }
+      if (hasRequestBody(request) || url.searchParams.size !== 0) {
+        this.writeError(response, 400, requestId, "INVALID_REQUEST", "Unexpected request input.");
+        return;
+      }
+      if (!principal.permissions.has("ai.metrics.read")) {
+        this.writeError(
+          response,
+          403,
+          requestId,
+          "PERMISSION_DENIED",
+          "AI metrics read permission is required.",
+        );
+        return;
+      }
+      await this.handleAiMetricsRequest(response, requestId);
       return;
     }
     if (url.pathname === "/v1/bots") {
@@ -885,6 +920,47 @@ export class ControlApiServer {
         parsed.data.objective.objectiveId,
         parsed.data.assignment.taskId,
         cause,
+      );
+    }
+  }
+
+  private async handleAiMetricsRequest(
+    response: ServerResponse,
+    requestId: string,
+  ): Promise<void> {
+    if (!this.options.aiMetricsCollector) {
+      this.writeError(
+        response,
+        503,
+        requestId,
+        "AI_METRICS_UNAVAILABLE",
+        "AI node metrics are not configured.",
+      );
+      return;
+    }
+    try {
+      const snapshot = await this.options.aiMetricsCollector.collect();
+      const body = aiNodeMetricsHttpResponseV1Schema.parse({
+        schemaVersion: "1.0",
+        requestId,
+        data: snapshot,
+      });
+      this.writeJson(response, 200, body);
+    } catch {
+      this.options.logger.warn("control_api_ai_metrics_failed", {
+        traceId: requestId,
+        taskId: null,
+        botId: null,
+        skillId: null,
+        modelName: null,
+        code: "AI_METRICS_UNAVAILABLE",
+      });
+      this.writeError(
+        response,
+        503,
+        requestId,
+        "AI_METRICS_UNAVAILABLE",
+        "AI node metrics could not be collected.",
       );
     }
   }

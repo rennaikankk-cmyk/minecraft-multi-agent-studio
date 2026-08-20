@@ -366,7 +366,7 @@ export default function HomePage() {
         <article><i className="ready" /><div><strong>Control API</strong><small>状态以实时请求结果为准</small></div></article>
         <article><i /><div><strong>Bot Runtime</strong><small>Runtime Link 已接入；无遥测不显示在线</small></div></article>
         <article><i /><div><strong>Coordinator</strong><small>Control Link 已接入；断线明确标记不可用</small></div></article>
-        <article><i /><div><strong>Local AI Hub</strong><small>待通过 AI Router 接入</small></div></article>
+        <article><i /><div><strong>Local AI Hub</strong><small>在线状态以 AI 节点页实时采集为准</small></div></article>
       </section>
 
       <footer>

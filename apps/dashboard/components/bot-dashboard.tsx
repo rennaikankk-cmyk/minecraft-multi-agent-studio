@@ -209,6 +209,46 @@ export function BotDashboard() {
                 value={detailBot.minecraftVersion ? `${detailBot.minecraftVersion.resolvedVersion ?? "未解析"} · ${supportLevelLabel(detailBot.minecraftVersion.supportLevel)}` : "未解析"}
               />
               <DrawerFact
+                label="AI 状态"
+                value={formatAiState(detailBot)}
+              />
+              <DrawerFact
+                label="AI 模型"
+                value={detailBot.aiPerformance?.model ?? "不可用"}
+              />
+              <DrawerFact
+                label="AI 任务类型"
+                value={detailBot.aiPerformance?.taskType ?? "不可用"}
+              />
+              <DrawerFact
+                label="协调器排队"
+                value={formatMilliseconds(detailBot.aiPerformance?.queueTimeMs)}
+              />
+              <DrawerFact
+                label="Spark 排队"
+                value={formatMilliseconds(detailBot.aiPerformance?.providerQueueTimeMs)}
+              />
+              <DrawerFact
+                label="首 Token"
+                value={formatMilliseconds(detailBot.aiPerformance?.timeToFirstTokenMs)}
+              />
+              <DrawerFact
+                label="生成速度"
+                value={detailBot.aiPerformance?.generationTokensPerSecond == null
+                  ? "不可用"
+                  : `${formatNumber(detailBot.aiPerformance.generationTokensPerSecond)} tok/s`}
+              />
+              <DrawerFact
+                label="AI 总延迟"
+                value={formatMilliseconds(detailBot.aiPerformance?.totalLatencyMs)}
+              />
+              <DrawerFact
+                label="AI Token"
+                value={detailBot.aiPerformance?.promptTokens == null || detailBot.aiPerformance.outputTokens == null
+                  ? "不可用"
+                  : `${detailBot.aiPerformance.promptTokens} 输入 / ${detailBot.aiPerformance.outputTokens} 输出`}
+              />
+              <DrawerFact
                 label="最后消息"
                 value={new Date(detailBot.lastMessageAt).toLocaleString("zh-CN")}
               />
@@ -298,6 +338,7 @@ function BotCard({
         <Fact label="饥饿" value={bot.food ? `${bot.food.level} / 20` : "不可用"} />
         <Fact label="延迟" value={bot.latencyMs === null ? "不可用" : `${bot.latencyMs} ms`} />
         <Fact label="任务" value={bot.currentTask ? `${bot.currentTask.title} · ${bot.currentTask.status}` : "无任务"} />
+        <Fact label="AI" value={formatAiState(bot)} wide />
         <Fact label="L0安全" value={formatSafety(bot)} wide />
         <Fact label="位置" value={formatPosition(bot)} wide />
         <Fact label="版本" value={bot.minecraftVersion?.resolvedVersion ?? "未解析"} wide />
@@ -382,4 +423,22 @@ function formatSafety(bot: PublicBotDetailV1): string {
 
 function formatNumber(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+function formatMilliseconds(value: number | null | undefined): string {
+  return value == null ? "不可用" : `${formatNumber(value)} ms`;
+}
+
+function formatAiState(bot: PublicBotDetailV1): string {
+  const performance = bot.aiPerformance;
+  if (!performance) return "尚无真实请求";
+  const labels: Record<typeof performance.state, string> = {
+    queued: "排队中",
+    completed: "规划完成",
+    waiting: "AI 建议等待",
+    failed: "规划失败",
+  };
+  return performance.errorCode === null
+    ? labels[performance.state]
+    : `${labels[performance.state]} · ${performance.errorCode}`;
 }

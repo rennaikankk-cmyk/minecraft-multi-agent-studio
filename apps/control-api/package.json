@@ -19,6 +19,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@minecraft-studio/ai-router": "workspace:*",
     "@minecraft-studio/coordinator": "workspace:*",
     "@minecraft-studio/observability": "workspace:*",
     "@minecraft-studio/protocol": "workspace:*",

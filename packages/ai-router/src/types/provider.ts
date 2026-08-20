@@ -14,11 +14,20 @@ export type AIUsage = Readonly<{
   completionTokens: number;
 }>;
 
+export type AIRequestMetrics = Readonly<{
+  timeToFirstTokenMs: number | null;
+  generationTimeMs: number | null;
+  queueTimeMs: number | null;
+  meanInterTokenLatencyMs: number | null;
+  tokensPerSecond: number | null;
+}>;
+
 export type AIProviderResponse = Readonly<{
   content: string;
   usage: AIUsage;
   model: string;
   finishReason?: string;
+  metrics?: AIRequestMetrics;
 }>;
 
 export interface AIProvider {
@@ -34,5 +43,6 @@ export type AIRouterResponse<T = unknown> = Readonly<{
   usage: AIUsage;
   model: string;
   finishReason?: string;
+  metrics?: AIRequestMetrics;
   validated?: T;
 }>;

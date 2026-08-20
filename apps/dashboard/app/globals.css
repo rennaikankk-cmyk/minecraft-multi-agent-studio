@@ -420,6 +420,52 @@ h1, h2, h3, h4 {
 .serviceGrid strong { font-size: 13px; }
 .serviceGrid small { margin-top: 5px; color: var(--muted); font-size: 10px; line-height: 1.35; }
 
+.aiNodeSection { margin-top: 30px; }
+.aiNodeHeading { margin-bottom: 14px; }
+.aiNodeActions { display: flex; align-items: center; gap: 9px; }
+.refreshButton.compact { margin-left: 0; padding: 6px 11px; font-size: 12px; }
+.aiMetricGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+.aiMetric {
+  min-width: 0;
+  min-height: 96px;
+  padding: 16px;
+  border: var(--bw) solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--panel-grad);
+  box-shadow: var(--shadow-card);
+}
+.aiMetric span { display: block; color: var(--muted); font-size: 11px; }
+.aiMetric strong {
+  display: block;
+  margin-top: 13px;
+  overflow-wrap: anywhere;
+  font: 700 15px/1.45 var(--font-mono);
+}
+.trendToolbar {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 18px;
+  margin: 24px 0 12px;
+}
+.trendToolbar span { display: block; color: var(--accent); font: 700 10px/1.2 var(--font-mono); letter-spacing: .18em; }
+.trendToolbar strong { display: block; margin-top: 5px; font-size: 15px; }
+.rangeButtons { display: flex; gap: 4px; padding: 3px; border: var(--bw) solid var(--line); border-radius: var(--r-sm); background: var(--chip-bg); }
+.rangeButtons button { padding: 5px 9px; border: 0; border-radius: var(--r-sm); color: var(--muted); background: transparent; cursor: pointer; font: 700 11px/1 var(--font-mono); }
+.rangeButtons button.active { color: var(--accent-contrast); background: var(--accent); }
+.trendGrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.trendCard { min-width: 0; padding: 14px; border: var(--bw) solid var(--line); border-radius: var(--r-md); background: var(--chip-bg); }
+.trendCard > span, .trendCard small { color: var(--muted); font-size: 10px; }
+.trendCard > strong { display: block; margin: 8px 0 4px; font: 700 16px/1.2 var(--font-mono); }
+.trendCard svg { display: block; width: 100%; height: 52px; overflow: visible; }
+.trendCard line { stroke: var(--line); stroke-width: 1; }
+.trendCard polyline { fill: none; stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.aiMetricFootnote { margin: 13px 0 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+
 footer { display: flex; justify-content: space-between; gap: 20px; margin-top: 34px; padding-top: 20px; border-top: var(--bw) solid var(--line); color: var(--muted); font: 10px var(--font-mono); }
 
 @media (max-width: 860px) {
@@ -428,6 +474,7 @@ footer { display: flex; justify-content: space-between; gap: 20px; margin-top: 3
   .metricCard.wide { grid-column: 1 / -1; }
   .panelGrid { grid-template-columns: 1fr; }
   .serviceGrid { grid-template-columns: repeat(2, 1fr); }
+  .aiMetricGrid, .trendGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .botGrid { grid-template-columns: 1fr; }
 }
 
@@ -441,6 +488,8 @@ footer { display: flex; justify-content: space-between; gap: 20px; margin-top: 3
   .hero { padding-bottom: 38px; }
   .hero h2 { font-size: 34px; }
   .metricGrid, .serviceGrid { grid-template-columns: 1fr; }
+  .aiMetricGrid, .trendGrid { grid-template-columns: 1fr; }
+  .trendToolbar, .aiNodeHeading { align-items: flex-start; flex-direction: column; }
   .sectionHeading { align-items: start; gap: 12px; flex-direction: column; }
   .botToolbar { width: 100%; justify-content: space-between; }
   .botMetricGrid { grid-template-columns: 1fr 1fr; }

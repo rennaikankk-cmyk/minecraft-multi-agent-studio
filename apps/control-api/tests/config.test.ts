@@ -63,4 +63,54 @@ describe("Control API configuration", () => {
       }),
     ).toThrowError(ControlApiConfigError);
   });
+
+  it("loads optional Spark metrics without exposing it by default", () => {
+    const base = {
+      CONTROL_API_AUTH_JSON: JSON.stringify([
+        {
+          subject: "ai-viewer-01",
+          tokenSha256: TOKEN_HASH,
+          permissions: ["ai.metrics.read"],
+        },
+      ]),
+    };
+    expect(loadControlApiConfig(base).sparkMetrics).toBeNull();
+    expect(
+      loadControlApiConfig({
+        ...base,
+        SPARK_AI_BASE_URL: "http://192.168.50.2:8000/v1",
+        SPARK_AI_NODE_NAME: "MSI DGX Spark",
+        SPARK_AI_BACKEND: "vllm",
+        SPARK_AI_QUANTIZATION: "modelopt_fp4",
+        SPARK_AI_API_KEY: "spark-test-api-key-0000000001",
+        SPARK_METRICS_TIMEOUT_MS: "3000",
+        AI_MAX_CONCURRENCY: "10",
+      }).sparkMetrics,
+    ).toEqual({
+      baseUrl: "http://192.168.50.2:8000/v1",
+      nodeName: "MSI DGX Spark",
+      backend: "vllm",
+      quantization: "modelopt_fp4",
+      apiKey: "spark-test-api-key-0000000001",
+      timeoutMs: 3_000,
+      maxConcurrency: 10,
+    });
+    expect(() =>
+      loadControlApiConfig({ ...base, SPARK_AI_BASE_URL: "file:///etc/passwd" }),
+    ).toThrowError(ControlApiConfigError);
+    expect(() =>
+      loadControlApiConfig({
+        ...base,
+        SPARK_AI_BASE_URL: "http://192.168.50.2:8000/v1",
+        SPARK_AI_API_KEY: "",
+      }),
+    ).toThrowError(ControlApiConfigError);
+    expect(
+      loadControlApiConfig({
+        ...base,
+        SPARK_AI_BASE_URL: "http://127.0.0.1:8000/v1",
+        SPARK_AI_API_KEY: "",
+      }).sparkMetrics,
+    ).toMatchObject({ baseUrl: "http://127.0.0.1:8000/v1" });
+  });
 });

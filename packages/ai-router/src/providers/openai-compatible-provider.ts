@@ -27,6 +27,17 @@ const chatResponseSchema = z
       })
       .passthrough()
       .optional(),
+    metrics: z
+      .object({
+        time_to_first_token_ms: z.number().finite().nonnegative().nullable().optional(),
+        generation_time_ms: z.number().finite().nonnegative().nullable().optional(),
+        queue_time_ms: z.number().finite().nonnegative().nullable().optional(),
+        mean_itl_ms: z.number().finite().nonnegative().nullable().optional(),
+        tokens_per_second: z.number().finite().nonnegative().nullable().optional(),
+      })
+      .passthrough()
+      .nullable()
+      .optional(),
   })
   .passthrough();
 
@@ -192,6 +203,7 @@ export class OpenAICompatibleProvider implements AIProvider {
         );
       }
       const choice = parsed.data.choices[0]!;
+      const metrics = parsed.data.metrics;
       return {
         content: choice.message.content,
         model: parsed.data.model ?? this.model,
@@ -202,6 +214,17 @@ export class OpenAICompatibleProvider implements AIProvider {
         ...(choice.finish_reason == null
           ? {}
           : { finishReason: choice.finish_reason }),
+        ...(metrics == null
+          ? {}
+          : {
+              metrics: {
+                timeToFirstTokenMs: metrics.time_to_first_token_ms ?? null,
+                generationTimeMs: metrics.generation_time_ms ?? null,
+                queueTimeMs: metrics.queue_time_ms ?? null,
+                meanInterTokenLatencyMs: metrics.mean_itl_ms ?? null,
+                tokensPerSecond: metrics.tokens_per_second ?? null,
+              },
+            }),
       };
     } catch (error) {
       if (signal.aborted) {

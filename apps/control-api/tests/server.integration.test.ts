@@ -5,7 +5,11 @@ import {
 } from "node:http";
 
 import { BotRegistry, type StopController } from "@minecraft-studio/coordinator";
-import type { BotStatusV1, BotStopResultV1 } from "@minecraft-studio/protocol";
+import type {
+  AiNodeMetricsSnapshotV1,
+  BotStatusV1,
+  BotStopResultV1,
+} from "@minecraft-studio/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 
@@ -23,6 +27,7 @@ const POSITION_TOKEN = "control-api-position-token-000000001";
 const DENIED_TOKEN = "control-api-position-only-token-00000001";
 const OPERATOR_TOKEN = "control-api-stop-operator-token-00000001";
 const TASK_OPERATOR_TOKEN = "control-api-task-operator-token-00000001";
+const AI_METRICS_TOKEN = "control-api-ai-metrics-token-00000000001";
 
 const principals: ApiPrincipalConfig[] = [
   {
@@ -49,6 +54,11 @@ const principals: ApiPrincipalConfig[] = [
     subject: "task-operator-01",
     tokenSha256: hash(TASK_OPERATOR_TOKEN),
     permissions: ["bot.read", "task.execute"],
+  },
+  {
+    subject: "ai-metrics-viewer-01",
+    tokenSha256: hash(AI_METRICS_TOKEN),
+    permissions: ["ai.metrics.read"],
   },
 ];
 
@@ -384,6 +394,56 @@ describe("Control API HTTP and WebSocket integration", () => {
     );
   });
 
+  it("serves strict Spark metrics only to the dedicated permission", async () => {
+    const snapshot: AiNodeMetricsSnapshotV1 = {
+      schemaVersion: "1.0",
+      nodeName: "MSI DGX Spark",
+      status: "online",
+      sampledAt: "2026-08-20T10:00:00.000Z",
+      backend: "vllm",
+      backendVersion: "0.15.0",
+      quantization: "modelopt_fp4",
+      models: ["qwen3.8-27b-nvfp4"],
+      networkRttMs: 2,
+      runningRequests: 2,
+      waitingRequests: 1,
+      maxConcurrency: 10,
+      kvCacheUsagePercent: 42,
+      promptTokensPerSecond: 120,
+      generationTokensPerSecond: 40,
+      promptTokensTotal: 1_000,
+      generationTokensTotal: 400,
+      successfulRequestsTotal: 20,
+      ttft: { p50Ms: 100, p95Ms: 500, p99Ms: 800 },
+      tpot: { p50Ms: 20, p95Ms: 50, p99Ms: 80 },
+      queueLatency: { p50Ms: 0, p95Ms: 20, p99Ms: 50 },
+      endToEndLatency: { p50Ms: 500, p95Ms: 1_000, p99Ms: 2_000 },
+      errorRate: null,
+      errorCodes: [],
+    };
+    const collect = vi.fn(async () => snapshot);
+    const { baseUrl } = await startServer({ aiMetricsCollector: { collect } });
+
+    const denied = await authenticatedFetch(`${baseUrl}/v1/ai/metrics`, READER_TOKEN);
+    expect(denied.status).toBe(403);
+    const accepted = await authenticatedFetch(`${baseUrl}/v1/ai/metrics`, AI_METRICS_TOKEN);
+    expect(accepted.status).toBe(200);
+    expect((await accepted.json()).data).toEqual(snapshot);
+    expect(collect).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed when AI metrics are not configured", async () => {
+    const { baseUrl } = await startServer();
+    const response = await authenticatedFetch(
+      `${baseUrl}/v1/ai/metrics`,
+      AI_METRICS_TOKEN,
+    );
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "AI_METRICS_UNAVAILABLE" },
+    });
+  });
+
   it("returns 503 instead of an empty list when the Coordinator mirror is unavailable", async () => {
     const unavailableSource: BotStateSource = {
       isReady: () => false,
@@ -486,6 +546,9 @@ async function startServer(
     stopController: Pick<StopController, "requestStop">;
     taskController: BotTaskRequester;
     teamTaskController: TeamTaskRequester;
+    aiMetricsCollector: {
+      collect(signal?: AbortSignal): Promise<AiNodeMetricsSnapshotV1>;
+    };
     stateSource: BotStateSource;
     maxConnectionsPerSubject: number;
   }> = {},
@@ -517,6 +580,9 @@ async function startServer(
     ...(overrides.teamTaskController === undefined
       ? {}
       : { teamTaskController: overrides.teamTaskController }),
+    ...(overrides.aiMetricsCollector === undefined
+      ? {}
+      : { aiMetricsCollector: overrides.aiMetricsCollector }),
     ...(overrides.maxConnectionsPerSubject === undefined
       ? {}
       : { maxConnectionsPerSubject: overrides.maxConnectionsPerSubject }),

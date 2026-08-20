@@ -43,6 +43,7 @@ export type {
   AIProviderHealth,
   AIProviderKind,
   AIProviderResponse,
+  AIRequestMetrics,
   AIRouterResponse,
   AIUsage,
 } from "./types/provider.js";
@@ -58,3 +59,9 @@ export {
   type AIConcurrencyBenchmarkOptions,
   type AIConcurrencyBenchmarkResult,
 } from "./benchmark.js";
+export {
+  SparkMetricsCollector,
+  type SparkLatencyPercentiles,
+  type SparkMetricsCollectorOptions,
+  type SparkMetricsSnapshot,
+} from "./spark-metrics.js";

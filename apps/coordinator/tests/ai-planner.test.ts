@@ -6,6 +6,7 @@ import {
   type AISchedulerConfig,
 } from "@minecraft-studio/ai-router";
 import { describe, expect, it } from "vitest";
+import type { BotAiPerformanceV1 } from "@minecraft-studio/protocol";
 
 import {
   BotRegistry,
@@ -109,12 +110,20 @@ function response(content: string): AIProviderResponse {
     content,
     model: "mock-model",
     usage: { promptTokens: 20, completionTokens: 10 },
+    metrics: {
+      timeToFirstTokenMs: 40,
+      generationTimeMs: 75,
+      queueTimeMs: 5,
+      meanInterTokenLatencyMs: 7.5,
+      tokensPerSecond: 133.3,
+    },
   };
 }
 
 function createPlanner(
   registry: BotRegistry,
   responder: ConstructorParameters<typeof MockAIProvider>[1],
+  onObservation?: (observation: BotAiPerformanceV1) => void,
 ) {
   const router = new AIRouter();
   router.register(new MockAIProvider("spark-mock", responder));
@@ -124,6 +133,7 @@ function createPlanner(
     scheduler,
     now: () => NOW,
     randomId: () => "11111111-1111-4111-8111-111111111111",
+    ...(onObservation === undefined ? {} : { onObservation }),
   });
   return { planner, scheduler };
 }
@@ -132,6 +142,7 @@ describe("CoordinatorAIPlanner", () => {
   it("returns a catalog-bound proposal without creating execution authorization", async () => {
     const registry = readyRegistry();
     let providerPrompt = "";
+    const observations: BotAiPerformanceV1[] = [];
     const { planner } = createPlanner(registry, (request) => {
       providerPrompt = request.systemPrompt ?? "";
       return response(JSON.stringify({
@@ -141,7 +152,7 @@ describe("CoordinatorAIPlanner", () => {
         reason: "Move to the assigned site.",
         confidence: 0.9,
       }));
-    });
+    }, (observation) => observations.push(observation));
 
     const proposal = await planner.requestPlan({
       botId: "worker-01",
@@ -162,6 +173,18 @@ describe("CoordinatorAIPlanner", () => {
     expect(proposal).not.toHaveProperty("authorization");
     expect(providerPrompt).toContain("movement.goto");
     expect(providerPrompt).not.toContain("combat.attack");
+    expect(observations).toEqual([
+      expect.objectContaining({ state: "queued", botId: "worker-01" }),
+      expect.objectContaining({
+        state: "completed",
+        botId: "worker-01",
+        providerQueueTimeMs: 5,
+        timeToFirstTokenMs: 40,
+        generationTokensPerSecond: 133.3,
+        promptTokens: 20,
+        outputTokens: 10,
+      }),
+    ]);
     planner.close();
   });
 

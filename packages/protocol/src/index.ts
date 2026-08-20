@@ -11,6 +11,15 @@ export {
 } from "./environment.js";
 
 export {
+  aiLatencyPercentilesV1Schema,
+  aiNodeMetricsHttpResponseV1Schema,
+  aiNodeMetricsSnapshotV1Schema,
+  type AiLatencyPercentilesV1,
+  type AiNodeMetricsHttpResponseV1,
+  type AiNodeMetricsSnapshotV1,
+} from "./ai-metrics.js";
+
+export {
   botDetailResponseV1Schema,
   botListResponseV1Schema,
   botStreamEventV1Schema,
@@ -23,6 +32,7 @@ export {
   executeTeamTaskHttpRequestV1Schema,
   executeTeamTaskHttpResponseV1Schema,
   publicBotDetailV1Schema,
+  botAiPerformanceV1Schema,
   publicBotSummaryV1Schema,
   stopBotHttpRequestV1Schema,
   stopBotHttpResponseV1Schema,
@@ -38,6 +48,7 @@ export {
   type ExecuteTeamTaskHttpRequestV1,
   type ExecuteTeamTaskHttpResponseV1,
   type PublicBotDetailV1,
+  type BotAiPerformanceV1,
   type PublicBotSummaryV1,
   type StopBotHttpRequestV1,
   type StopBotHttpResponseV1,

@@ -13,6 +13,7 @@ import {
   type AIRequestScheduler,
   type JSONValue,
 } from "@minecraft-studio/ai-router";
+import type { BotAiPerformanceV1 } from "@minecraft-studio/protocol";
 
 import type { BotRegistry, BotRegistryRecord } from "./bot-registry.js";
 
@@ -60,6 +61,16 @@ type ProposalMetadata = Readonly<{
   model: string;
   reason: string;
   confidence: number;
+  taskType: AITaskType;
+  queueTimeMs: number;
+  totalLatencyMs: number;
+  promptTokens: number;
+  outputTokens: number;
+  providerQueueTimeMs: number | null;
+  timeToFirstTokenMs: number | null;
+  generationTimeMs: number | null;
+  meanInterTokenLatencyMs: number | null;
+  generationTokensPerSecond: number | null;
 }>;
 
 export type CoordinatorPlanProposal =
@@ -90,6 +101,7 @@ export type CoordinatorAIPlannerOptions = Readonly<{
   timeoutMs?: number;
   now?: () => Date;
   randomId?: () => string;
+  onObservation?: (observation: BotAiPerformanceV1) => void;
 }>;
 
 const DEFAULT_SYSTEM_PROMPT = [
@@ -182,13 +194,14 @@ export class CoordinatorAIPlanner {
       task: input.task,
     });
     const requestId = this.randomId();
+    const taskType = input.taskType ?? "planner";
     const scheduled = this.options.scheduler.submit<AISkillDecision>(
       {
         requestId,
         traceId: input.traceId ?? `ai-plan-${requestId}`,
         botId: input.botId,
         ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
-        taskType: input.taskType ?? "planner",
+        taskType,
         priority: input.priority ?? AI_PRIORITIES.NORMAL_PLANNING,
         timestamp: this.now().toISOString(),
         stateVersion: status.sequence,
@@ -210,6 +223,26 @@ export class CoordinatorAIPlanner {
       input.signal === undefined ? {} : { signal: input.signal },
     );
     this.track(input.botId, scheduled);
+    this.notifyObservation({
+      state: "queued",
+      observedAt: this.now().toISOString(),
+      botId: input.botId,
+      requestId,
+      taskId: input.taskId ?? null,
+      taskType,
+      provider: this.options.preferredProvider ?? null,
+      model: null,
+      queueTimeMs: null,
+      providerQueueTimeMs: null,
+      totalLatencyMs: null,
+      timeToFirstTokenMs: null,
+      generationTimeMs: null,
+      meanInterTokenLatencyMs: null,
+      generationTokensPerSecond: null,
+      promptTokens: null,
+      outputTokens: null,
+      errorCode: null,
+    });
     const promise = scheduled.promise.then((result) => {
       const decision = result.validated;
       if (decision === undefined) {
@@ -240,6 +273,16 @@ export class CoordinatorAIPlanner {
         model: result.model,
         reason: decision.reason,
         confidence: decision.confidence,
+        taskType: result.taskType,
+        queueTimeMs: result.queueTimeMs,
+        totalLatencyMs: result.totalLatencyMs,
+        promptTokens: result.usage.promptTokens,
+        outputTokens: result.usage.completionTokens,
+        providerQueueTimeMs: result.metrics?.queueTimeMs ?? null,
+        timeToFirstTokenMs: result.metrics?.timeToFirstTokenMs ?? null,
+        generationTimeMs: result.metrics?.generationTimeMs ?? null,
+        meanInterTokenLatencyMs: result.metrics?.meanInterTokenLatencyMs ?? null,
+        generationTokensPerSecond: result.metrics?.tokensPerSecond ?? null,
       };
       if (decision.action === "wait") {
         return Object.freeze({ ...metadata, action: "wait" as const });
@@ -264,7 +307,35 @@ export class CoordinatorAIPlanner {
         selectedVariantId: selected.selectedVariantId,
         arguments: decision.arguments,
       });
-    }).finally(() => this.untrack(input.botId, scheduled));
+    }).then(
+      (proposal) => {
+        this.notifyObservation(observationFromProposal(proposal, this.now()));
+        return proposal;
+      },
+      (error: unknown) => {
+        this.notifyObservation({
+          state: "failed",
+          observedAt: this.now().toISOString(),
+          botId: input.botId,
+          requestId,
+          taskId: input.taskId ?? null,
+          taskType,
+          provider: this.options.preferredProvider ?? null,
+          model: null,
+          queueTimeMs: null,
+          providerQueueTimeMs: null,
+          totalLatencyMs: null,
+          timeToFirstTokenMs: null,
+          generationTimeMs: null,
+          meanInterTokenLatencyMs: null,
+          generationTokensPerSecond: null,
+          promptTokens: null,
+          outputTokens: null,
+          errorCode: planningErrorCode(error),
+        });
+        throw error;
+      },
+    ).finally(() => this.untrack(input.botId, scheduled));
     return Object.freeze({
       requestId,
       promise,
@@ -336,6 +407,47 @@ export class CoordinatorAIPlanner {
     handles?.delete(handle);
     if (handles?.size === 0) this.active.delete(botId);
   }
+
+  private notifyObservation(observation: BotAiPerformanceV1): void {
+    try {
+      this.options.onObservation?.(Object.freeze(observation));
+    } catch {
+      // Telemetry must never change the planning result or execution authority.
+    }
+  }
+}
+
+function observationFromProposal(
+  proposal: CoordinatorPlanProposal,
+  observedAt: Date,
+): BotAiPerformanceV1 {
+  return {
+    state: proposal.action === "wait" ? "waiting" : "completed",
+    observedAt: observedAt.toISOString(),
+    botId: proposal.botId,
+    requestId: proposal.requestId,
+    taskId: proposal.taskId ?? null,
+    taskType: proposal.taskType,
+    provider: proposal.provider,
+    model: proposal.model,
+    queueTimeMs: proposal.queueTimeMs,
+    providerQueueTimeMs: proposal.providerQueueTimeMs,
+    totalLatencyMs: proposal.totalLatencyMs,
+    timeToFirstTokenMs: proposal.timeToFirstTokenMs,
+    generationTimeMs: proposal.generationTimeMs,
+    meanInterTokenLatencyMs: proposal.meanInterTokenLatencyMs,
+    generationTokensPerSecond: proposal.generationTokensPerSecond,
+    promptTokens: proposal.promptTokens,
+    outputTokens: proposal.outputTokens,
+    errorCode: null,
+  };
+}
+
+function planningErrorCode(error: unknown): string {
+  if (error instanceof CoordinatorAIPlanningError || error instanceof AIError) {
+    return error.code;
+  }
+  return "AI_PLANNING_FAILED";
 }
 
 function validateRequest(input: CoordinatorPlanRequest): void {

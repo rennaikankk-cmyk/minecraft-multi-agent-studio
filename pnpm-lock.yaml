@@ -71,6 +71,9 @@ importers:
 
   apps/control-api:
     dependencies:
+      '@minecraft-studio/ai-router':
+        specifier: workspace:*
+        version: link:../../packages/ai-router
       '@minecraft-studio/coordinator':
         specifier: workspace:*
         version: link:../coordinator

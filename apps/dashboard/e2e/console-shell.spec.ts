@@ -26,6 +26,54 @@ test("tasks page shows no fabricated task data", async ({ page }) => {
   await expect(page.locator(".botCard")).toHaveCount(0);
 });
 
+test("AI node page renders validated live metrics without placeholders", async ({ page }) => {
+  await page.route(/\/api\/ai\/metrics$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: {
+          schemaVersion: "1.0",
+          nodeName: "MSI DGX Spark",
+          status: "online",
+          sampledAt: NOW,
+          backend: "vllm",
+          backendVersion: "0.27.1",
+          quantization: "ModelOpt-W4A16-NVFP4",
+          models: ["qwen3.8-27b-nvfp4"],
+          networkRttMs: 2,
+          runningRequests: 4,
+          waitingRequests: 0,
+          maxConcurrency: 4,
+          kvCacheUsagePercent: 1.2,
+          promptTokensPerSecond: 72,
+          generationTokensPerSecond: 44.2,
+          promptTokensTotal: 10_000,
+          generationTokensTotal: 5_000,
+          successfulRequestsTotal: 52,
+          ttft: { p50Ms: 220, p95Ms: 384, p99Ms: 492 },
+          tpot: { p50Ms: 88, p95Ms: 92, p99Ms: 100 },
+          queueLatency: { p50Ms: 0, p95Ms: 0.02, p99Ms: 0.03 },
+          endToEndLatency: { p50Ms: 11_000, p95Ms: 12_000, p99Ms: 13_000 },
+          errorRate: 0,
+          errorCodes: [],
+        },
+      }),
+    });
+  });
+  await page.goto("/ai");
+  const dashboard = page.getByTestId("ai-node-dashboard");
+  await expect(dashboard).toContainText("MSI DGX Spark");
+  await expect(dashboard).toContainText("qwen3.8-27b-nvfp4");
+  await expect(dashboard).toContainText("ModelOpt-W4A16-NVFP4");
+  await expect(dashboard).toContainText("44.2");
+  await expect(dashboard).toContainText("0.00%");
+  await dashboard.getByRole("button", { name: "1h" }).click();
+  await expect(dashboard.getByRole("button", { name: "1h" })).toHaveClass(/active/);
+});
+
 test("bots page falls back to explicit polling when the stream is unavailable", async ({ page }) => {
   await routeEmptyBots(page);
   await page.route(/\/api\/bots\/stream$/, async (route) => {
