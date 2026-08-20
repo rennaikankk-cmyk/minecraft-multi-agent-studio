@@ -22,8 +22,9 @@ Browser → Dashboard server
          Isolated Minecraft Test Server
 
 AI Router
-  ├─ Local AI Hub adapters
-  └─ Approved cloud expert adapters
+  ├─ OpenAI-compatible Spark Provider
+  ├─ Mock Provider
+  └─ future approved cloud expert adapters
 ```
 
 - Local AI Hub 是所有本地推理资源的统一名称。
@@ -47,10 +48,13 @@ packages/
 ├─ observability/          # 结构化日志和进程内指标
 ├─ safety/                 # 确定性 L0 生存策略与动作边界
 ├─ skills/                 # 版本化确定性技能注册与受限执行框架
-└─ task-system/            # PostgreSQL 事实源、BullMQ 队列与确定性 Worker
+├─ task-system/            # PostgreSQL 事实源、BullMQ 队列与确定性 Worker
+└─ ai-router/              # Provider、Router、Scheduler、Spark 指标与 Benchmark
+profiles/                  # dev-spark / controller-u9 / inference-spark
+deploy/systemd/            # Spark vLLM 服务模板
 ```
 
-尚未创建 AI Router 或生产数据库部署。Bot Runtime 已完成 Minecraft 1.21.8 隔离联机验收，并已通过认证 Runtime Link 接入独立 Coordinator 的进程内 Bot 注册表和安全停止控制边界。可选 Bot Process Supervisor 能用固定子入口托管一至三个 Bot 的进程组，通过双向 HMAC IPC、有限重启预算和活跃 PID 授权接入 CPU Resource Manager；旧单 Bot 入口仍可独立运行。Control API 通过认证 Control Link 镜像 Coordinator 状态并转发固定停止 RPC。Dashboard 通过服务端代理读取 Control API，浏览器不会收到长期令牌。四进程服务链路已用生产 Coordinator、Control API、Dashboard 和测试专用 Runtime fixture 完成真实回环验收；该结果没有连接 Minecraft，也不是浏览器 E2E。确定性技能库已注册 `movement.goto@1.0.0`，Bot Runtime 通过受限 Pathfinder 适配器执行；任务包已建立 PostgreSQL 适配器、严格 BullMQ 队列、持久取消和可嵌入 Worker。独立 `task-worker` 应用当前只允许通过显式隔离测试配置连接真实 PostgreSQL/Redis，并且只注册验收处理器，不是生产 Worker 配置。
+Coordinator 已组合 AI Provider/Router/Scheduler、严格规划器、任务执行策略和确定性团队分配器。Control API 的单 Bot 与团队任务入口只有在 Control Link 完整认证后才可用；模型输出经 Schema、实时 Bot/任务版本、技能目录、Policy 和授权验证后，才通过 Runtime Link 交给 SkillExecutor。Bot Runtime 不存在模型依赖或直接模型调用路径。可选 Bot Process Supervisor 能以一至三个 Bot 为进程组托管 1～10 Bot，CPU 拓扑不可靠时安全回退为普通核心。Dashboard 同时展示真实 Bot 状态、每 Bot AI 性能和 Spark 节点指标，不使用生产模拟数据。PostgreSQL/BullMQ 基础设施和隔离 Worker 已通过真实 PostgreSQL/Redis 集成门；U9 上的生产服务安装仍属于部署验收。
 
 ## 4. 环境检测数据流
 
@@ -183,7 +187,7 @@ ServerProfile 只接受：
 
 每个 Skill 的兼容清单包含有序变体。解析器选择第一个满足全部 feature、资源和服务端能力要求的变体；没有要求的 `portable` 变体可跨适配器支持版本继续使用。解析结果把 `availability` 与 `verification` 分离：可执行并不等于已经在该 Minecraft 版本实机验收。Runtime 在接受技能调用前重新解析并对 `unavailable` 返回稳定的 `SKILL_VERSION_UNAVAILABLE`，同时在连接后和 Runtime Link 重连时发布 `BotSkillCatalogV1`。
 
-当前六个注册 Skill 都使用 `portable` 变体，但跨版本实机验证仍为 `unverified`。面向具体物品或方块的输入仍按当前 registry 的原生名称解释；兼容清单已经能表达例如旧/新资源 ID 的有序变体，面向规划器的语义资源别名尚未实现。
+当前默认注册 16 个 Skill；只有隔离 ServerProfile 显式启用 PvP 并配置目标白名单时才注册第 17 个 R3 PvP 近战 Skill。13 个通用能力使用 `portable` 变体，睡眠、农作物、钓鱼和 PvP 使用实际 registry/服务端能力要求。跨版本实机场景仍标记为 `unverified`。面向具体物品或方块的输入按当前 registry 的原生名称解释；兼容清单能表达旧/新资源 ID 的有序变体，面向规划器的语义资源别名尚未实现。
 
 真实联机验收由 `scripts/run-isolated-minecraft-test.ps1` 编排。脚本只接受预先准备的可信 Java、Minecraft 1.21.8 官方服务端和本地 ServerProfile，启动前校验服务端哈希、用户 EULA 状态、安全属性与端口占用，测试完成后优雅关闭本地服务。运行时世界、日志和本地配置保存在忽略提交的 `runtime-data` 中。
 
@@ -295,7 +299,7 @@ Dashboard 每 3 秒通过服务端代理读取 Bot 列表与详情。代理只�
 
 Dashboard、Control API、Coordinator 和 Bot Runtime 已分别实现同一安全停止 UUID/`traceId` 的生成、校验、审计和结果绑定契约。Runtime Link 双进程验收已经核对 Coordinator 与 Bot Runtime 使用同一追踪编号；2026-08-07 的四进程服务级验收又使用生产 Coordinator、Control API、Dashboard 与测试专用 Runtime fixture 核对了同一追踪编号，两位执行者各运行一次均退出码 0。该结论不扩大为浏览器 E2E 或真实 Minecraft 联机结果。
 
-Runtime 当前记录连接尝试、心跳、断线、计划重连、停止请求、停止结果，以及 L0 安全决策、动作和失败。Runtime Link 与 Control Link 已把 Bot 遥测、公开状态、停止请求和停止结果带同一 `traceId` 传过四个服务进程；指标仍只存在于 Runtime 内存并可通过测试或运行时快照读取，Prometheus 和集中日志尚未接入。
+Runtime 记录连接尝试、心跳、断线、计划重连、停止请求、停止结果，以及 L0 安全决策、动作和失败。Runtime Link 与 Control Link 已把 Bot 遥测、公开状态、任务请求、AI 性能、技能执行和停止结果带关联 ID 传过服务链。`SparkMetricsCollector` 有界并发读取推理节点的 `/health`、`/v1/models`、`/version` 和 `/metrics`，Control API 以 `ai.metrics.read` 权限暴露严格快照；Dashboard 每 5 秒采样并只在内存保留 1m/5m/15m/1h 趋势。每 Bot AI 记录包含控制器/Provider 排队、TTFT、生成、ITL、token、总延迟、模型和任务类型。集中日志或持久 Prometheus 后端仍是部署层可选项，页面不会伪造缺失指标。
 
 ## 12. L0 确定性安全层
 
@@ -355,7 +359,7 @@ Pathfinder adapter
 ## 14. P1.3 任务基础设施
 
 ```text
-future Coordinator (pending)
+Coordinator / Task Worker
   └─ TaskDispatchV1 → BullMQ (delivery and temporary locks)
                          ↓ strict parse + exact handler lookup
                     deterministic Worker
@@ -372,4 +376,23 @@ PostgreSQL ← parameterized transaction + revision + append-only history
 
 真实基础设施测试只接受本机回环 PostgreSQL/Redis、专用 PostgreSQL Schema 和独立 Redis 前缀；清理范围不超过这些测试命名空间，也不连接 Minecraft。GitHub Actions 使用固定镜像摘要的临时服务执行迁移、并发重放/领取、outbox 对账、租约恢复、队列去重、续租、取消、超时和显式重投场景。2026-08-14 运行 `31793333384` 的 20 项真实场景全部通过，包括跨 Worker 与独立进程取消；该结果只证明隔离集成边界，不代表生产基础设施在线。
 
-当前缺少 Coordinator 任务基础设施启动编排、生产处理器注册、任务 API、Dashboard 任务看板和生产部署。事务 outbox 与 BullMQ 之间仍是至少一次投递，不得声称 exactly-once；跨 Worker 持久取消也不构成对不合作处理器的硬终止保证。
+Control API 已提供认证的单 Bot 与团队 AI→Skill 执行入口；这一低延迟执行链不会冒充 PostgreSQL 持久任务。持久任务 Worker 的生产处理器注册、Dashboard 持久任务看板和 U9 服务部署仍需按具体业务处理器配置。事务 outbox 与 BullMQ 之间是至少一次投递，不得声称 exactly-once；跨 Worker 持久取消也不构成对不合作处理器的硬终止保证。
+
+## 15. Coordinator AI 与团队调度
+
+```text
+authenticated task request
+  -> live Bot + task version + resolved Skill catalog
+  -> CompactBotContext (stable prefix first, volatile state last)
+  -> AIRequestScheduler (priority/queue/timeout/retry/cancel/per-Bot=1)
+  -> AIRouter -> AIProvider
+  -> strict execute_skill | wait decision
+  -> schema -> policy -> live-state recheck -> authorization grant
+  -> Runtime Link -> SkillExecutor
+```
+
+请求固定携带 `requestId`、`botId`、`taskType`、`priority`、时间、`stateVersion` 和 `taskVersion`。旧请求即使 Provider 无法物理取消，也会被标记 stale 并丢弃。稳定 System/规则/Skill/Schema 位于 Prompt 前缀，Bot/任务/附近状态和最近失败位于尾部，以利用 vLLM Prefix Cache。
+
+团队入口先建立 `serverProfileId` 隔离的 shared objective，再按必需 Skill、在线状态、角色偏好、现有 Bot 租约和命名/区域资源声明进行稳定排序。分配过程确定性支持 1、2、5、10 Bot；同一 Bot 或互斥资源不会同时分给冲突任务。所有租约都有期限并在任务结束时释放。
+
+Fabric/Meteor 不是当前架构的一部分。根据 `AGENTS.md`，只有 M3 真实事件循环 p99 证明 Mineflayer 无法满足时序要求后，才重新评估协议覆盖、Fabric 辅助或真实客户端双栈；提前加入会扩大故障面且违反当前验收顺序。

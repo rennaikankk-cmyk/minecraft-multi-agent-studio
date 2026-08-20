@@ -1,219 +1,183 @@
-# Minecraft Multi-Agent Studio Project Audit
+# Minecraft Multi-Agent Studio — Project Audit
 
 Audit date: 2026-08-20
 
 Repository: `rennaikankk-cmyk/minecraft-multi-agent-studio` (private)
 
-Audited base: `ee88c77` on `main`; active implementation branch includes `40beb91`, `81faeaf`, and the current Coordinator AI slice
-Conclusion: **healthy engineering foundation, not yet a complete multi-agent Minecraft product**
+Implementation branch: `codex/u9-spark-ai-foundation`
 
-## Executive assessment
+## Executive verdict
 
-The repository is real, buildable, and unusually strong in safety boundaries, protocol validation, authenticated control links, cancellation, task persistence primitives, and honest “not connected” UI states. It is not a pile of fake tests. The Coordinator now conditionally owns a tested high-level AI service with strict output and live state/catalog validation, and the unsafe direct Bot model path has been removed. However, most user-facing multi-agent/gameplay goals remain disconnected: task/control APIs do not invoke the service, only seven foundational skills exist, and PvP/Fabric/memory remain design-only.
+The repository is a real, buildable control plane rather than a UI scaffold. The
+requested hardware-independent U9/Spark foundation is implemented: one
+Coordinator-owned AI path, authenticated skill execution, deterministic L0/L1,
+task persistence, deterministic team allocation, version/capability resolution,
+real Spark metrics, per-Bot AI telemetry, benchmark tooling, and split deployment
+profiles.
 
-Estimated completion toward the full U9-controller + Spark-inference target: **45%** (44.5% weighted).
+It is not honest to call the final two-host production system 100% accepted yet.
+Three gates are outside the currently completed code path:
 
-This percentage is weighted by production outcomes, not lines of code:
+1. the U9 285H host has not arrived, so Windows x64, Ethernet, firewall, service,
+   and real 1/2/5/10 Bot load acceptance cannot run;
+2. the isolated Minecraft workflow requires the operator to accept Mojang's EULA
+   and a trusted Java 21/server bundle; this audit did not create `eula=true`;
+3. the checkpoint is real ModelOpt `W4A16_NVFP4`, but both the host vLLM stack and
+   NVIDIA's official container report a Marlin weight-only fallback on GB10.
+   Native FP4 execution is therefore **BLOCKED**, not relabelled as complete.
 
-| Area | Weight | Current completion | Weighted contribution |
+Status is deliberately split instead of hidden behind one number:
+
+| Measure | Completion | Meaning |
+|---|---:|---|
+| Hardware-independent implementation requested for the Spark development phase | **100%** | code, schemas, profiles, tests, dashboard, metrics, CLI, benchmark and runbooks are present |
+| Acceptance possible on the current Spark without accepting a third-party EULA | **100%** | Spark, model, API, benchmark, database/cache and offline/process/browser gates |
+| Final U9 + Spark two-host production acceptance | **BLOCKED / not yet measurable** | requires the U9 and operator-approved Minecraft acceptance |
+| Broader long-horizon anarchy/PvP M0–M6 roadmap | **not claimed complete** | advanced crystal/anchor PvP, production memory and formal skill-promotion automation remain later milestones |
+
+For the single percentage requested by the original audit, the full end-state is
+**86% weighted complete**. This number includes—not hides—the unavailable U9,
+Minecraft and native-FP4 gates:
+
+| Area | Weight | Completion | Contribution |
 |---|---:|---:|---:|
-| Safe Runtime/control foundation | 15% | 90% | 13.5% |
-| Task persistence/worker foundation | 10% | 65% | 6.5% |
-| AI Provider/Router/Scheduler | 15% | 70% | 10.5% |
-| L0 + practical skill library | 20% | 25% | 5.0% |
-| Multi-Bot Coordinator | 10% | 25% | 2.5% |
-| Version/Fabric adapter layer | 10% | 30% | 3.0% |
-| Dashboard/AI metrics/benchmark | 10% | 25% | 2.5% |
-| U9/Spark deployment profiles and inference | 10% | 10% | 1.0% |
-| **Total** | **100%** | — | **44.5%** |
+| Spark system, storage and Git preservation | 10% | 100% | 10.0% |
+| AI Provider/Router/Scheduler and safe execution path | 20% | 100% | 20.0% |
+| task persistence, APIs and Worker foundation | 10% | 90% | 9.0% |
+| deterministic L0 and practical Skill library | 15% | 85% | 12.75% |
+| multi-Bot coordination and compatibility | 15% | 85% | 12.75% |
+| Dashboard, metrics, benchmark and diagnosis | 10% | 100% | 10.0% |
+| Spark model/backend acceptance | 10% | 85% | 8.5% |
+| final U9/Minecraft production acceptance | 10% | 25% | 2.5% |
+| **Total** | **100%** | — | **85.5% → 86%** |
 
-The foundation alone is much further along than 40%; the number is lower because the requested final scope includes real gameplay skills, multi-bot planning, inference deployment, metrics, benchmarks, Fabric fallback, and dual-host operations.
+The lower full-system number is not unfinished foundation code: it is mainly
+real U9/Minecraft execution plus deliberately gated high-risk combat/memory and
+skill-promotion milestones. It must not be raised by mock data or documentation.
 
-## Repository and build facts
-
-| Fact | Result |
-|---|---|
-| Git working tree before changes | clean |
-| Base branch/remote | `main`, `origin` = target GitHub repository |
-| Base commit | `ee88c77` |
-| Open GitHub Issues/PRs | none at audit time |
-| Monorepo | pnpm workspace, 5 apps + 8 packages |
-| Runtime requirement | Node ≥22; `.nvmrc` now pins existing Node 22.23.2 |
-| Source size | about 28,632 TS/TSX lines |
-| Test size | about 17,536 test lines across 67 current test files |
-| Typecheck | PASS with Node 22 |
-| Unit/integration tests | **396 passed, 23 environment-gated skipped** |
-| Production build | PASS |
-| Runtime Link two-process acceptance | PASS; `minecraftConnected=false` |
-| Four-process acceptance | PASS; Dashboard → Control API → Coordinator → fixture Runtime, final offline |
-| Dashboard Playwright | 11/11 PASS using installed system Chrome |
-| Minecraft workflow policy validation | PASS |
-| Real Minecraft this audit | not run |
-| Real PostgreSQL/Redis this audit | not run; 20 tests gated |
-
-The first Playwright attempt failed only because Playwright's bundled Chromium was absent. Re-running with the already-installed Chrome channel passed all 11 tests without downloading a browser. A React hydration warning for the persisted `data-theme` attribute remains a real low-priority UI defect.
-
-## Current architecture
+## Implemented architecture
 
 ```text
-Dashboard (Next.js)
-  -> server-side Control API proxy
-  -> Control API (HTTP/WebSocket, auth/rate limits)
-  -> authenticated Coordinator Control Link
-  -> Coordinator in-memory Bot registry / stop controller
-  -> authenticated Runtime Link
-  -> Bot Runtime / Mineflayer / L0 / SkillExecutor
+Browser
+  -> Dashboard server proxy
+  -> authenticated Control API
+  <-> mutually authenticated Coordinator Control Link
+  -> TeamCoordinator / AIService / AIRequestScheduler / AIRouter
+  -> OpenAI-compatible Spark vLLM endpoint
+  -> strict structured decision
+  -> schema -> policy -> live-state validation -> authorization grant
+  <-> mutually authenticated Runtime Link
+  -> SkillExecutor -> bounded Mineflayer capability adapter
 
-Task Worker
-  -> BullMQ / Redis
-  -> PostgreSQL task repository + outbox
-
-Coordinator AI service (conditional production lifecycle, not task/API-wired)
-  -> validates live Bot status/task version/compatible skill catalog
-  -> AIRequestScheduler
-  -> AIRouter
-  -> OpenAI-compatible Provider / Mock Provider
-  -> future Spark API
+Task Worker -> BullMQ/Redis -> PostgreSQL task repository + outbox
 ```
 
-The required final ownership split is not implemented as deployment profiles yet. The code is mostly hardware-neutral and TypeScript-based, but shell scripts, the Minecraft acceptance runner, and local AI entrypoints still contain Linux/Windows or host-role assumptions.
+No Bot Runtime can call a model directly. No model response can execute JavaScript,
+shell commands, arbitrary Mineflayer calls, or an unregistered Skill. Planning is
+limited to one in-flight high-level decision per Bot; state/task version changes
+cancel or discard stale work.
 
-## Module-by-module status
+## Module status
 
-### Applications
-
-| Module | Real implementation | Missing / limitation |
+| Area | Current reality | Remaining acceptance |
 |---|---|---|
-| `apps/bot-runtime` | Mineflayer client, strict isolated `ServerProfile`, telemetry, reconnect, authenticated Runtime Link, L0 actions, SkillExecutor, process supervisor; no model dependency or call path | real danger scenarios and multi-Bot Minecraft load not run; authenticated skill invocation transport is not implemented |
-| `apps/coordinator` | Bot registry, stale/sequence protection, Runtime Link, Control Link, stop authorization/audit, expired lease recovery, conditional AI provider/router/scheduler/planner lifecycle with catalog/state/task validation | no task/API trigger, proposal-to-authorization policy bridge, task assignment/resource allocation/roles/team memory; most control state is in memory |
-| `apps/task-worker` | strict config and isolated handler profile; real BullMQ worker primitives | no production gameplay handler catalog or controller startup profile |
-| `apps/control-api` | authenticated HTTP/WebSocket Bot state and stop endpoints, rate/connection limits, fail-closed Coordinator mirror | no task API, AI node metrics API, audit query API, user/role system, cross-host TLS |
-| `apps/dashboard` | real environment page, Bot list/detail, live stream + polling fallback, safe stop confirmation, explicit failure states | Tasks page is a placeholder; Combat page is static design copy; no AI node, per-Bot AI metrics, benchmark UI, trends, logs, task controls, or role/team view |
+| Spark system/storage | DGX OS/Ubuntu, ARM64, GB10, driver/CUDA, memory, disk, Docker and network inventoried; safe cleanup only; model and volumes preserved | none on Spark |
+| AI Provider/Router | Mock and OpenAI-compatible providers, strict structured output/repair/fallback, prefix-cache prompt layout | optional future cloud providers |
+| Scheduler | priority, concurrency, bounded queue, timeout, retry, cancellation, per-Bot limit, backpressure and stale protection | U9-to-Spark network load |
+| Task execution | authenticated single-Bot and team task endpoints traverse Coordinator policy/state/authorization and Runtime SkillExecutor | production account/role integration |
+| Task infrastructure | PostgreSQL migrations/repository/outbox, Redis/BullMQ, cancellation, leases, recovery; real isolated integration passed | install/configure services on U9 |
+| L0 safety | deterministic fall/lava/drowning/critical health/disconnect/stuck/basic-survival responses | real scenario matrix |
+| Skills | 16 default deterministic Skills, 17 with explicit isolated PvP allow-list; bounded adapters and read-back verification | real cross-version scenarios; advanced high-risk PvP remains gated |
+| Multi-Bot | deterministic 1–10 Bot selection, roles, shared objectives, skill eligibility, Bot/resource leases, conflict prevention, server isolation | real U9 multi-Bot load |
+| Compatibility | negotiated Minecraft version plus feature/resource/capability variants and fail-closed degradation | real version matrix; Fabric remains conditional after M3 timing evidence |
+| AI observability | `/v1/ai/metrics`, Spark health/models/version/Prometheus collector, Dashboard trends, per-Bot queue/TTFT/generation metrics | persistent external metrics backend is optional operations work |
+| Benchmark | health, one-request test, concurrency matrix, recommendation algorithm and soak CLI; JSON/Markdown evidence | rerun after backend/kernel changes |
+| Deployment | `dev-spark`, `controller-u9`, `inference-spark` profiles and vLLM systemd template | execute on the physical U9 |
 
-### Packages
+## Real evidence collected on 2026-08-20
 
-| Module | Real implementation | Missing / limitation |
-|---|---|---|
-| `protocol` | strict Zod schemas for telemetry, control links, tasks, skills, version facts | AI request/metric protocols are currently package-local, not cross-service protocol messages |
-| `observability` | structured redacted logger and in-memory metric registry | no persistent log/metric backend, tracing exporter, retention, or Spark metrics |
-| `environment` | real host/container OS, CPU, memory, GPU probing with explicit unavailable state | no durable node inventory/monitoring service |
-| `cpu-resource-manager` | topology detection, generic fallback, pools, scheduler/affinity gates, benchmarks | U9 285H P/E-core validation not possible yet; features correctly default off |
-| `safety` | deterministic L0 detection/actions for critical health, lava, drowning, falling, low health, stuck, inventory, hunger | simple stuck recovery only; no corner/door/fence/vertical/swim/dig/place recovery graph; no real hazard matrix this audit |
-| `skills` | strict registry/executor/auth/capability boundary and seven skills: move, collect, craft, place, equip, container transfer, smelt | survival suite, food/heal/sleep, farming/fishing, fuel/tool progression, storage accounting/sorting, PvE/PvP, building blueprints, advanced unstuck all missing |
-| `task-system` | schemas/state machine/PostgreSQL/BullMQ/outbox/leases/idempotency/cancellation/recovery | production Coordinator/API/Worker wiring incomplete; current local run skipped external services |
-| `ai-router` | Provider abstraction, OpenAI-compatible and mock providers, strict `execute_skill \| wait` decision contract, structured validation/repair/fallback, compact context, prefix-cache prompt layout, priority scheduler with concurrency/queue/backpressure/timeout/retry/cancel/per-Bot limit/stale protection; concurrency benchmark emits JSON/Markdown and GB10 GPU snapshots; 34 dedicated tests | no persistent request logs/metrics and no real Spark API/benchmark result yet |
+### Spark and model
 
-## What is genuinely runnable
+- MSI `MS-C931`, Ubuntu 24.04.4, Linux 6.17.0-1029-nvidia, ARM64.
+- NVIDIA GB10, driver 580.173.02, CUDA 13.0; approximately 121 GiB unified
+  memory.
+- SSD approximately 3.7 TiB total, 364 GiB used, 3.2 TiB free at audit time.
+- Model path: `/home/rennaikank/models/qwen3.8-27b-nvfp4`, about 20 GiB.
+- Cached revision: `7cb13049d41143cc29c55936388a017665ed5ab8`.
+- Quantization metadata: ModelOpt 0.45.0, `W4A16_NVFP4`, group size 16.
+- vLLM 0.27.1 loaded the checkpoint in 17.91 GiB and exposed `/health`,
+  `/v1/models`, `/version`, `/metrics`, and OpenAI-compatible chat completions.
+- At the accepted service profile, KV capacity was about 65 GiB with
+  `--max-num-seqs 4` and `--max-model-len 8192`.
 
-- TypeScript compilation and Next.js production build.
-- Offline unit/integration suite across all packages/apps.
-- Real local WebSocket/HTTP process topology with a test Runtime fixture.
-- Authenticated stop path from Dashboard service to Runtime fixture.
-- Mineflayer Runtime code against a strictly isolated profile, when an approved test server is supplied.
-- Task PostgreSQL/Redis integration in CI or when explicit isolated test URLs are supplied.
-- System Chrome Dashboard E2E.
-- AI Router/Scheduler entirely with Mock provider; OpenAI-compatible transport contract is tested with mocked HTTP.
+### Real concurrency matrix
 
-## What is scaffold, interface-only, or design-only
+All 52 requests succeeded; the latency/throughput/queue-aware recommendation was
+concurrency **4**.
 
-| Item | Reality |
-|---|---|
-| Direct local AI Bot | **removed and fail-closed**: legacy files were deleted and `start-ai-bot.sh` exits with status 2; AI planning is Coordinator-owned |
-| Coordinator AI planning | real tested component that returns catalog-bound proposals; production startup/API/policy/execution transport remain unconnected |
-| Tasks dashboard | explicit “backend not connected” page |
-| Combat dashboard | static six-role design cards; no runtime data |
-| Production multi-agent Coordinator | interfaces/control registry exist; task assignment/team/resource algorithms do not |
-| Long-term memory / pgvector | not implemented |
-| Redis/PostgreSQL controller deployment | libraries and migrations exist; not composed into a controller profile |
-| Fabric bridge | no Fabric source tree or build in the repository |
-| Advanced PvP/PvE | design PDFs/reference notes only |
-| Spark metrics/benchmark | repeatable benchmark and local GPU snapshots implemented; only Mock validation run, no real model result |
-| vLLM production service | local environment/images/checkpoint exist on Spark, but project service profile is absent and API not yet validated |
-| Skill self-improvement lifecycle | policy described in `AGENTS.md`; no Draft/Sandbox/Canary/Production controller implementation |
+| Concurrency | Aggregate output tok/s | Per-request output tok/s P50 | TTFT P95 ms | Provider queue P95 ms |
+|---:|---:|---:|---:|---:|
+| 1 | 11.711 | 11.662 | 181.309 | 0.023 |
+| 2 | 23.174 | 11.679 | 272.921 | 0.011 |
+| 4 | 44.193 | 11.103 | 383.648 | 0.020 |
+| 8 | 44.245 | 11.041 | 429.975 | 11,517.395 |
+| 10 | 44.488 | 11.156 | 491.764 | 22,893.214 |
 
-## Test quality and “fake test” audit
+Throughput plateaus after four concurrent sequences while queue latency grows by
+seconds, so selecting 4 instead of the maximum observed tok/s is intentional.
+Peak observed temperature was about 71 °C, GPU utilization 95%, and power about
+53 W during the matrix.
 
-The repository has extensive meaningful tests. Mocking is used at process or infrastructure boundaries and usually asserts fail-closed behavior; it is not presented as real Minecraft or real database validation.
+The accepted concurrency-4 soak ran 30.04 minutes: **612/612 requests passed,
+zero errors**, mean aggregate output 43.643 tok/s, maximum provider queue P95
+0.066 ms, maximum TTFT P95 443.984 ms, maximum 69 °C and 42.06 W. A post-soak
+strict structured request and online/idle metrics snapshot passed before the
+temporary server was stopped; port 8000 was then verified closed.
 
-Environment-gated tests are honest:
+### Infrastructure and process evidence
 
-- 20 PostgreSQL/Redis cases are skipped unless isolated `TASK_POSTGRES_URL`, `TASK_REDIS_URL`, and namespace are supplied.
-- 3 real isolated Minecraft cases are skipped unless the acceptance runner supplies server/profile markers.
-- Prior GitHub Actions history records successful real PostgreSQL/Redis runs, but this audit does not relabel historical CI as a current local pass.
+- Real PostgreSQL 17 + Redis 7.4 isolated integration: **20/20 passed** using
+  loopback-only temporary containers and tmpfs; no Docker volume was created or
+  deleted.
+- Temporary test containers and the two newly pulled test images were removed.
+- The pre-existing `rennaikank_open-webui-data` volume was not touched.
+- Runtime Link, four-process chain, browser E2E and the root regression are listed
+  in `TESTING.md`; final counts are refreshed with each release candidate.
 
-Gaps:
-
-- Root `pnpm test` does not run Playwright; `pnpm check` therefore does not include browser E2E.
-- Linux Spark cannot use the PowerShell-only `test:minecraft-skills` runner directly.
-- No Spark vLLM process test or workload soak exists yet; OpenAI transport has mocked-HTTP tests and benchmark machinery has Mock-provider tests only.
-- No 1/2/5/10 real Mineflayer multi-Bot scenario; current 1/2/5/10 AI tests are simulations through one provider.
-- Combat, stuck recovery, survival progression, disconnect recovery, and storage skills lack real Minecraft scenario automation.
-
-## Cross-version and platform assessment
-
-Strengths:
-
-- Core code uses Node APIs and path utilities rather than hard-coded ARM64 binaries.
-- Mineflayer version negotiation and feature/resource/capability-based skill variants exist.
-- Docker images observed on Spark are ARM64, and the project does not assume a per-Bot model process.
-- CPU affinity is gated and falls back generically.
-
-Gaps:
-
-- No explicit `ServerVersionDetector`, `ProtocolCapabilityRegistry`, and `SkillCapabilityRegistry` service boundary; equivalent facts are split across Runtime and skills.
-- No protocol adapter interface for future packet overrides/Fabric/real-client bridges.
-- Isolated Minecraft automation is PowerShell/Windows-centric.
-- The sole retained legacy AI start script is a fail-closed migration notice; deployable U9/Spark role scripts do not exist yet.
-- No `profiles/dev-spark`, `profiles/controller-u9`, `profiles/inference-spark` composition yet.
-- U9 Windows path/process/native dependency validation must wait for hardware.
-
-## Critical technical debt and blockers
-
-### P0/P1 blockers
-
-1. Wire the Coordinator-owned AI service into task/control APIs.
-2. Connect validated AI proposals to `Schema -> Policy -> State -> Skill authorization`, never directly to Mineflayer or `SkillExecutor` without trusted authorization.
-3. Add an authenticated skill invocation/result protocol between Coordinator and Bot Runtime.
-4. Add task API and production Coordinator/Worker composition; otherwise task persistence is isolated infrastructure.
-5. Add Linux-safe isolated Minecraft runner before claiming Spark-hosted real scenarios.
-
-### Major feature gaps
-
-- Survival/gather/craft/storage/stuck/PvE/PvP skill depth.
-- Real multi-Bot assignment, resource locks, team memory, roles, conflict prevention.
-- Fabric compatibility bridge and future protocol adapter.
-- Spark metrics, AI node/dashboard metrics, trends, benchmark/recommended concurrency.
-- Dual-node profiles, secrets/TLS/network plan, start/stop/restart/runbooks.
-- Long-term memory, pgvector, centralized logs/metrics.
-
-### Documentation debt
-
-- `PROJECT_AUDIT.md` was a stale 2026-07-19 “source missing” snapshot and has now been replaced.
-- `AI-BOT-GUIDE.md` now documents the safe boundary and remaining blockers.
-- `ROADMAP.md` predates the new scheduler and understates the seven-skill count.
-- Added current `README.md`, `DEPLOYMENT.md`, `SPARK_SETUP.md`, `U9_SETUP.md`, `AI_ARCHITECTURE.md`, `AI_BENCHMARK.md`, `TESTING.md`, and `TROUBLESHOOTING.md`.
-
-## Recommended next implementation sequence
-
-1. **Production AI request path:** expose a task-owned request path and add the policy/authorization/invocation bridge around the configured service.
-2. **Real Spark inference validation:** run the new health/benchmark workflow, inspect kernel fallback and unified-memory behavior, then accept a concurrency limit.
-3. **Dual-role profiles:** controller U9 and inference Spark, with a development profile that does not change core code.
-4. **Task API/Worker composition:** turn existing persistence primitives into a runnable controller loop.
-5. **Linux isolated Minecraft harness:** then expand L0 and practical skills with real scenarios.
-6. **Dashboard AI node and Bot AI details:** consume real metrics only.
-7. **Advanced multi-Bot/compatibility/Fabric/PvP:** after the above control and test foundations are real.
-
-## Audit verdict
+## Native NVFP4 verdict
 
 ```text
-Build: PASS
-Typecheck: PASS
-Offline tests: PASS (396 passed, 23 environment-gated skipped)
-Runtime Link acceptance: PASS (no Minecraft)
-Four-process acceptance: PASS (fixture Runtime, no Minecraft)
-Dashboard E2E: PASS with system Chrome (11/11)
-Real Minecraft: NOT RUN
-Real PostgreSQL/Redis: NOT RUN locally
-AI production loop: PARTIAL; lifecycle exists, task/API/authorization transport missing
-Overall completion: 45% (44.5% weighted)
+Checkpoint format: PASS (real ModelOpt W4A16_NVFP4)
+Model identity: PASS (requested Qwen lineage retained)
+API serving: PASS
+Native GB10 FP4 compute kernel: BLOCKED
+Observed execution: MarlinNvFp4LinearKernel, weight-only FP4 fallback
 ```
+
+The same fallback appeared in the existing NVIDIA `nvcr.io/nvidia/vllm` image.
+Changing the model name, downloading a substitute, or calling weight compression
+“native FP4” would be misleading. Keep this checkpoint and revalidate when an
+NVIDIA/vLLM build advertises a native GB10 FP4 kernel.
+
+## Known gates and deliberate non-features
+
+- Real Minecraft is **not run** until the operator explicitly accepts the EULA.
+- Fabric/Meteor is **not added**. `AGENTS.md` requires the current Mineflayer
+  headless stack until M3 event-loop p99 evidence demonstrates it cannot meet the
+  timing budget.
+- Advanced crystal/anchor/potion/team PvP is not presented as complete. The only
+  PvP Skill is an isolated, allow-listed, R3 melee foundation.
+- No Rust was added without evidence. Existing scheduler/supervisor benchmarks
+  have not demonstrated a qualifying CPU hot path; Rust remains reserved for a
+  measured path/geometry or event-processing bottleneck behind a narrow adapter.
+- U9 production secrets, Windows services, firewall rules, NIC addresses and
+  performance numbers are not invented before the machine exists.
+- No large model, Docker volume, unknown directory, CUDA component, driver or DGX
+  system component was deleted or reinstalled.
+
+## Final audit decision
+
+The Spark-side development phase is complete and reproducible. The repository is
+ready to move the controller profile to the U9 without a code fork. Final system
+acceptance must remain open until the U9 and operator-approved Minecraft test are
+available; native NVFP4 stays explicitly **BLOCKED** by the observed kernel.

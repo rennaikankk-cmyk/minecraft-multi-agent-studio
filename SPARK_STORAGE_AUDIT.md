@@ -151,21 +151,21 @@ The table intentionally includes parents and children so the ownership chain is 
 
 The same LFS duplication pattern continues across all 18 BF16 shards; see `DUPLICATE_MODEL_REPORT.md`.
 
-## Recommended model/cache roots
+## Accepted model/cache roots
 
 Final Spark layout:
 
 ```text
-AI_MODEL_ROOT=/data/ai/models
-AI_CACHE_ROOT=/data/ai/cache
+AI_MODEL_ROOT=/home/rennaikank/models
+AI_CACHE_ROOT=/home/rennaikank/ai-cache
 ```
 
 Recommended policy:
 
-- Provision these directories once with a dedicated inference service account.
-- Mount the selected production checkpoint read-only into the inference container.
-- Set `HF_HOME`, `HUGGINGFACE_HUB_CACHE`, vLLM compile cache, and conversion scratch directories under `AI_CACHE_ROOT`.
-- Do not move the current 20+ GB model until the path change and service profile are approved.
+- Keep ownership restricted to the inference service account and pre-create the cache subdirectories before enabling the hardened service.
+- Read the selected production checkpoint without write access from the service; use read-only mounts if a container replaces the verified host service.
+- Set `HF_HOME`, `VLLM_CACHE_ROOT` and conversion scratch directories under `AI_CACHE_ROOT`.
+- The current 20+ GB model already lives under the accepted root, so no large move or duplicate is required.
 - Keep exactly one production checkpoint after smoke/compatibility validation; conversion sources and temporary copies must have an owner and deletion date.
 
 ## Confirmation-gated candidates
@@ -173,7 +173,7 @@ Recommended policy:
 | Candidate | Expected release | Risk | Recoverability | Recommendation |
 |---|---:|---|---|---|
 | `/~bittest00004.txt` | 564 GiB | low; confirmed benchmark temp | deleted; not recoverable through this workflow | **completed after explicit approval** |
-| BF16 repo worktree + LFS duplication | up to 104 GiB | medium; conversion/source fallback lost locally | re-download from HF, about 52 GiB | keep until NVFP4 API passes, then approve cleanup |
+| BF16 repo worktree + LFS duplication | up to 104 GiB | medium; conversion/source fallback lost locally | re-download from HF, about 52 GiB | API passed, but retain until native-FP4/backend decision, then request approval |
 | Ollama model store | 52 GiB | medium; Ollama aliases stop working | re-pull about 52 GiB | remove after vLLM is selected and validated |
 | Docker reclaimable images | about 42 GiB | medium; old experiments cannot restart locally | re-pull images | decide image-by-image after backend selection |
 | duplicate download shard | 9.3 GiB | low; byte-identical to model shard | existing model copy remains | safe candidate, but model-file rule requires approval |

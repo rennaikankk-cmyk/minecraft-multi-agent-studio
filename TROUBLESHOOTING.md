@@ -36,6 +36,11 @@ If API-key protection is enabled, supply the bearer token. Confirm the exact
 served model ID. Do not disable authentication or open the firewall broadly to
 make a health check pass.
 
+For the systemd template, also verify that the completed environment file is
+mode `0600`, `VLLM_API_KEY` is non-empty, `VLLM_HOST` is the actual Spark private
+address, and the `AI_CACHE_ROOT`/`VLLM_CACHE_ROOT` directories already exist and
+are owned by the service user. Do not put the key on the command line.
+
 ## GB10 memory fields are N/A
 
 This is expected for some `nvidia-smi --query-gpu` fields on unified-memory
@@ -81,7 +86,7 @@ The isolated PostgreSQL/Redis variables are absent or rejected. Follow
 
 ## Disk still appears large
 
-Read `SPARK_STORAGE_AUDIT.md`. The 564 GiB PassMark BurnInTest temporary file is
-still present unless the operator explicitly approved its deletion. Models,
-Docker images/volumes, and other confirmation-gated data were deliberately not
-removed.
+Read `SPARK_STORAGE_AUDIT.md`. The user-approved 564 GiB PassMark BurnInTest
+temporary file was deleted and its absence verified. Remaining large usage is
+mostly reported models, model duplicates, Docker images, the existing user
+volume and caches; those confirmation-gated targets were deliberately retained.

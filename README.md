@@ -1,64 +1,92 @@
 # Minecraft Multi-Agent Studio
 
-Hardware-neutral control foundation for safe Minecraft Bot orchestration, with a
-target deployment of a Windows U9 285H controller and an MSI/DGX Spark
-inference-only node.
+A hardware-neutral, fail-closed control plane for Minecraft Java Bots, targeting
+an Intel U9 285H controller and an MSI/DGX Spark inference-only node.
 
-Current verdict: **integrated foundation validated, deployment acceptance still
-required**. The repository builds and has meaningful protocol, safety, task,
-process, control-link, skill, AI scheduling, authenticated invocation, and
-deterministic multi-Bot allocation tests. Real Spark, Minecraft, PostgreSQL,
-Redis, and browser acceptance remain environment-gated.
+## Current status
 
-## Validate locally
+The hardware-independent U9/Spark foundation is implemented and tested. Final
+two-host acceptance still requires the physical U9 and an operator-approved
+isolated Minecraft server. The selected Qwen checkpoint is genuine ModelOpt
+NVFP4, but the current GB10 software stack uses a Marlin weight-only fallback;
+native FP4 is explicitly `BLOCKED`.
 
-Requirements: Node 22+, Corepack, and pnpm 11.9.0 from `packageManager`.
+## Safety and execution path
+
+```text
+Dashboard -> Control API -> Coordinator -> AI Scheduler/Router -> Spark vLLM
+                                     -> structured proposal
+                                     -> schema + policy + live-state validation
+                                     -> authenticated Runtime Link
+                                     -> SkillExecutor -> Mineflayer
+```
+
+- Bot Runtime has no model dependency or direct model call path.
+- L0 survival and safety never wait for an LLM.
+- One high-level planning request per Bot; stale results are cancelled/discarded.
+- Model output can only select a registered Skill with bounded arguments.
+- Single-Bot and team tasks use authenticated, authorized control links.
+- Team allocation is deterministic, server-isolated, role/skill-aware, and uses
+  Bot/resource leases for 1–10 Bots.
+
+## Quick validation
+
+Requirements: Node 22.23.2+ and pnpm 11.9.0.
 
 ```bash
 corepack enable
 pnpm install --frozen-lockfile
-pnpm typecheck
-pnpm test
-pnpm build
+pnpm check
+pnpm test:runtime-link
+pnpm test:four-process
+PLAYWRIGHT_BROWSER_CHANNEL=chrome pnpm test:e2e
+pnpm check:minecraft-workflow
 ```
 
-Root tests currently pass 438 cases plus 2 Node process cases, with 23 explicitly
-environment-gated cases. Browser, real PostgreSQL/Redis, and real Minecraft
-acceptance are separate; see `TESTING.md`.
+External infrastructure tests use explicitly isolated PostgreSQL/Redis URLs. The
+Minecraft runner never downloads files or accepts the EULA automatically.
 
-## Architecture
+## Spark AI commands
 
-- U9: Coordinator, tasks, API, Dashboard, Bot Runtime, database/cache
-- Spark: one OpenAI-compatible inference service and selected model weights
-- AI output: strict proposal only; no code or direct Mineflayer access
-- execution: authenticated policy/authorization path, L0 safety, SkillExecutor
-- team allocation: server-isolated objectives, roles, skill eligibility, Bot and
-  resource leases, deterministic selection for 1–10 Bots
+```bash
+export AI_BASE_URL=http://127.0.0.1:8000/v1
+export AI_MODEL=qwen3.8-27b-nvfp4
+export AI_QUANTIZATION=ModelOpt-W4A16-NVFP4
 
-Authenticated task entry points are `POST /v1/bots/:botId/tasks/execute` for a
-specific Bot and `POST /v1/team/tasks/execute` for Coordinator-selected team
-execution. Both traverse Control API → mutually authenticated Control Link → AI
-proposal → policy/authorization → Runtime Link → SkillExecutor.
+pnpm ai:health
+pnpm ai:test
+pnpm ai:benchmark
+pnpm ai:benchmark:concurrency
+pnpm ai:soak
+```
 
-The safe AI boundary is documented in `AI_ARCHITECTURE.md`. The legacy direct
-Bot-to-model entry point is disabled.
+Benchmark and soak reports are written to the ignored
+`runtime-data/ai/benchmarks/` directory. The real 2026-08-20 matrix completed
+52/52 requests and recommended concurrency 4; the subsequent 30.04-minute soak
+completed 612/612 requests with zero errors.
+
+## Deployment profiles
+
+- `profiles/dev-spark.env.example` — temporary single-host development
+- `profiles/controller-u9.env.example` — Coordinator/API/Dashboard/Bots/data
+- `profiles/inference-spark.env.example` — inference and metrics only
+- `deploy/systemd/minecraft-studio-vllm.service.example` — Spark service template
+
+The final Spark role contains only the NVIDIA stack, vLLM, the selected model and
+necessary AI monitoring. Minecraft, Mineflayer, PostgreSQL, Redis, Coordinator,
+Dashboard and business logs move to the U9.
 
 ## Documentation
 
-- `PROJECT_AUDIT.md` — evidence-backed status, gaps, and weighted completion
-- `SPARK_STORAGE_AUDIT.md` — disk/model/Docker inventory and cleanup gates
-- `DUPLICATE_MODEL_REPORT.md` — exact and functional model duplicates
-- `SPARK_SETUP.md` / `U9_SETUP.md` — host-specific preparation
-- `DEPLOYMENT.md` — topology, cutover gates, and rollback
-- `AI_BENCHMARK.md` — repeatable JSON/Markdown concurrency benchmark
-- `TESTING.md` / `TROUBLESHOOTING.md` — validation and failure handling
-- `README_CN.md` — earlier Chinese project overview; use the audit for current
-  readiness claims
+- `PROJECT_AUDIT.md` — evidence-backed implementation and blockers
+- `SPARK_STORAGE_AUDIT.md` / `DUPLICATE_MODEL_REPORT.md` — storage evidence
+- `ARCHITECTURE.md` / `AI_ARCHITECTURE.md` — trust and execution boundaries
+- `SPARK_SETUP.md` / `U9_SETUP.md` / `DEPLOYMENT.md` — operations
+- `AI_BENCHMARK.md` — metrics, matrix and recommendation logic
+- `SKILLS.md` — deterministic Skill contracts
+- `TESTING.md` / `TROUBLESHOOTING.md` — acceptance and recovery
 
-## Safety
-
-Do not point Bot Runtime at an unapproved Minecraft server. Do not expose
-Coordinator links, Control API, vLLM, databases, or Redis to the public network.
-Never commit real tokens or shared secrets. Storage deletions over 20 GB, model
-deletion, Docker volume deletion, and large downloads require explicit operator
-confirmation.
+Never expose vLLM, Redis, PostgreSQL, Control Link or Runtime Link to the public
+Internet. Never commit secrets. Large model/cache deletion, Docker volume
+deletion, downloads over 20 GB and system-level NVIDIA changes require explicit
+operator approval.

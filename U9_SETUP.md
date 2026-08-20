@@ -1,23 +1,16 @@
-# U9 controller-node setup
+# Intel U9 285H controller-node setup
 
-Status: preparation only. The U9 285H Windows host was not available during the
-2026-08-20 audit, so no CPU topology, adapter, path, Docker, Node, PostgreSQL,
-Redis, Minecraft, or firewall result is claimed.
+Status: hardware-dependent validation pending. No U9 result is claimed before
+the machine arrives.
 
-## Intended ownership
+## Read-only inventory first
 
-The U9 runs Coordinator, task system/worker, Control API, Dashboard, Bot Runtime
-processes, Minecraft client-side automation, PostgreSQL, Redis, and future
-memory/log services. It calls Spark only through the OpenAI-compatible provider.
-It does not host a second model by default.
-
-## Arrival checklist (read-only first)
-
-In PowerShell:
+Run in PowerShell and save the output before installing or changing anything:
 
 ```powershell
 Get-ComputerInfo | Select-Object WindowsProductName,WindowsVersion,OsBuildNumber,CsTotalPhysicalMemory
 Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors
+Get-Volume
 Get-NetAdapter | Select-Object Name,Status,LinkSpeed,MacAddress
 Get-NetIPConfiguration
 node --version
@@ -26,49 +19,68 @@ git --version
 docker version
 ```
 
-Save the output before installing or changing anything. Node must be 22 or newer;
-the repository pins 22.23.2 in `.nvmrc`. Do not enable CPU affinity until the
-existing topology profiler and scheduler benchmarks pass on this exact host.
+Node must be 22 or newer; `.nvmrc` records the Spark development version
+22.23.2. CPU affinity and P/E-core scheduling remain disabled until the existing
+topology profiler and OFF/ON benchmarks pass on this exact U9.
 
-## Repository verification
+## Repository acceptance
 
 ```powershell
 git clone git@github.com:rennaikankk-cmyk/minecraft-multi-agent-studio.git
 Set-Location minecraft-multi-agent-studio
 corepack enable
 pnpm install --frozen-lockfile
-pnpm typecheck
-pnpm test
-pnpm build
+pnpm check
+pnpm test:runtime-link
+pnpm test:four-process
+$env:PLAYWRIGHT_BROWSER_CHANNEL = 'chrome'
+pnpm test:e2e
 ```
 
-Use the implementation branch only after reviewing/pushing it. Real PostgreSQL,
-Redis, Minecraft, and Playwright checks are separate; offline unit tests do not
-prove them.
+Start from `profiles/controller-u9.env.example`; store completed settings and
+secrets outside the repository. Merge authenticated peer/client/principal data
+from `.env.example`. The Dashboard-facing Control API principal needs
+`ai.metrics.read` in addition to its Bot/task permissions, or the AI page will
+fail closed with 403.
 
-## Spark link acceptance
+## Wired Spark acceptance
 
-Replace placeholders only after reading the actual network configuration:
+After recording the real adapters and choosing private addresses:
 
 ```powershell
 $env:AI_BASE_URL = 'http://<SPARK_PRIVATE_IP>:8000/v1'
+$env:SPARK_AI_BASE_URL = $env:AI_BASE_URL
 $env:AI_MODEL = 'qwen3.8-27b-nvfp4'
+$env:AI_QUANTIZATION = 'modelopt_fp4'
+$env:SPARK_AI_QUANTIZATION = 'ModelOpt-W4A16-NVFP4'
 $env:AI_API_KEY = '<runtime secret>'
-Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:AI_API_KEY" } -Uri 'http://<SPARK_PRIVATE_IP>:8000/health'
-pnpm benchmark:ai -- --concurrency 1,2,5,10 --output-dir artifacts
+$env:SPARK_AI_API_KEY = $env:AI_API_KEY
+$env:AI_MAX_CONCURRENCY = '4'
+pnpm ai:health
+pnpm ai:test
+pnpm ai:benchmark:concurrency
+pnpm ai:soak
 ```
 
-The benchmark can run on Windows and records host architecture plus endpoint
-performance. NVIDIA GPU metrics describe the machine running the command; to
-record Spark GPU data, run the same benchmark on Spark or collect Spark metrics
-through a future authenticated exporter.
+Compare wired RTT and results with the local Spark matrix. Do not accept a
+concurrency above 4 merely because all requests complete; the local 8/10 levels
+showed large provider queues with no material throughput gain.
+
+## Services owned by U9
+
+- Coordinator, AI Router/Scheduler, TeamCoordinator
+- Bot Supervisor and Mineflayer Runtime processes
+- Minecraft isolated/production servers
+- PostgreSQL/pgvector, Redis/BullMQ, Task Worker
+- Control API, Dashboard, logs, monitoring and automated tests
+
+Spark owns none of those. U9 does not run a second production model by default.
 
 ## Fail-closed defaults
 
-- `AI_MAX_CONCURRENCY` remains unset until a real model benchmark is accepted.
-- CPU scheduler and CPU affinity remain disabled.
-- Control API, Coordinator links, and Dashboard bind to loopback in current code.
-- No public port forwarding, UPnP, or firewall broad allow rule.
-- No real credentials in repository files or shell history.
-- Do not call the system autonomous until the planner startup/API,
-  authorization, and skill invocation transport are implemented.
+- No public port forwarding or broad firewall allow rule.
+- All Coordinator/Runtime/Control API links remain loopback on U9.
+- Spark 8000 accepts only the U9 private address and requires an API key.
+- No committed credentials, production server addresses, or base coordinates.
+- Keep CPU affinity off until measured.
+- Keep MTP off until independent concurrency/soak stability passes.

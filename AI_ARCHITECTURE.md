@@ -1,109 +1,80 @@
 # AI architecture
 
-## Ownership boundary
+## Ownership and execution boundary
 
 ```text
-U9 controller
-  task/control input
-       -> CoordinatorAIPlanner
-       -> AIRequestScheduler (bounded queue, priority, per-Bot concurrency)
-       -> AIRouter (health and provider fallback)
-       -> OpenAICompatibleProvider ----------------------+
-                                                          |
-Spark inference-only                                     |
-  vLLM OpenAI-compatible API <---------------------------+
-
-validated proposal
-  -> future policy + scoped authorization bridge
-  -> authenticated skill invocation
-  -> Bot Runtime
-  -> L0 safety
-  -> SkillExecutor
-  -> Mineflayer
+U9 task/team request
+  -> CoordinatorAIPlanner
+  -> AIRequestScheduler (global bounded priority queue, per-Bot limit)
+  -> AIRouter -> OpenAI-compatible Provider
+  -> Spark vLLM
+  -> strict structured proposal
+  -> schema -> policy -> fresh state/catalog -> scoped authorization
+  -> authenticated Runtime Link -> L0 safety -> SkillExecutor -> Mineflayer
 ```
 
-Spark does not own tasks, Bot state, scheduling, memory, authorization, or
-Minecraft connections. Bot Runtime does not call a model. The model can only
-propose `execute_skill` or `wait`; it cannot emit code, shell commands, raw
-Mineflayer calls, or an authorization.
+Spark owns inference only. Bot Runtime never calls a model. The model can only
+propose `execute_skill` or `wait`; it cannot emit executable code, shell, raw
+Mineflayer calls, credentials, or authorization.
 
-## Request and stale-state contract
+## Request and freshness contract
 
-Every scheduled request carries:
+Every scheduled request carries UUID `requestId`, trace/Bot/task identity,
+`taskType`, priority, timestamp, monotonic state/task versions, timeout, token
+budget, and a strict output contract. Global and per-Bot concurrency, bounded
+queue/backpressure, timeout, retry, cancellation, and priority starvation tests
+are implemented.
 
-- UUID `requestId`, bounded `traceId`, `botId`, optional `taskId`
-- `taskType`, numeric priority, enqueue timestamp
-- monotonic `stateVersion` and `taskVersion`
-- bounded prompt/token/temperature/timeout fields
-- optional preferred provider and strict structured-output contract
+Registry changes invalidate obsolete queued/running work. After inference the
+Coordinator rechecks runtime identity, online state, state sequence, task
+version, compatible skill/version/variant, policy and authorization expiry. A
+late response cannot execute against newer state.
 
-The scheduler cancels queued or running work when a newer state/task version is
-observed. The Coordinator rechecks runtime identity, online state, status
-sequence, task version, and the current compatibility catalog after inference.
-This second check closes the race between provider completion and state change.
+## Prefix-cache layout
 
-## Prompt and output rules
+Stable content is first: system policy, Minecraft rules, compatible skill
+catalog, output schema. Volatile compact Bot context, team state, failures and
+task are last. Missing inventory/entity data remains empty rather than invented.
 
-Stable prompt sections come first for prefix caching: system rules, Minecraft
-rules, compatible skill catalog, then output schema. Volatile compact Bot state
-and current task come last. The context is deliberately bounded; current
-telemetry does not yet contain inventory/entity details, so those arrays remain
-empty instead of being invented.
+## Multi-Bot path
 
-Structured output is a strict discriminated union:
+One `TeamCoordinator` deterministically assigns roles and compatible online
+Bots, enforces one active task per Bot, uses expiring named/area resource claims,
+prevents cross-objective collisions, recovers expired leases, and provides team
+state to the planner. Tests cover 1/2/5/10 Bots. All requests still share one
+Scheduler and one Spark model instance.
 
-```json
-{
-  "action": "execute_skill",
-  "skill": "movement.goto",
-  "arguments": { "x": 10, "y": 64, "z": 10 },
-  "reason": "Move to the assigned site.",
-  "confidence": 0.9
-}
+## Metrics path
+
+```text
+Spark /health, /v1/models, /version, /metrics
+  -> SparkMetricsCollector
+  -> authenticated Control API GET /v1/ai/metrics
+  -> server-only Dashboard proxy
+  -> AI Node cards and 1m/5m/15m/1h browser-session trends
+
+vLLM chat-completion metrics
+  -> Provider normalized per-request metrics
+  -> Planner observation tracker
+  -> Control Link Bot state
+  -> Bot detail AI performance
 ```
 
-or:
+Controller queue and provider queue are separate. Missing metrics remain null;
+the UI never substitutes simulated values. Per-Bot detail includes AI state,
+task type, model, prompt/output tokens, controller/provider queue, TTFT,
+generation latency/rate and total latency.
 
-```json
-{
-  "action": "wait",
-  "reason": "No compatible safe action is available.",
-  "confidence": 1
-}
-```
+## Configuration
 
-Only JSON values are accepted. A proposed skill must be present and `available`
-in the latest version-bound Bot catalog. The resulting object is a proposal with
-the chosen skill version and variant, not `SkillExecutionAuthorization`.
+`AI_MAX_CONCURRENCY` has no code default and is selected by benchmark. Current
+accepted Spark fallback-path result is 4. Queue defaults to 64, per-Bot
+concurrency to 1, stale window to 30 seconds, and retries to one bounded attempt.
+See `.env.example` and `AI_BENCHMARK.md`.
 
-## Scheduling defaults and configuration
+## Current inference limitation
 
-`AI_MAX_CONCURRENCY` intentionally has no default. Set it only from a real
-benchmark on the selected model/backend. Defaults that do exist are bounded:
-
-| Variable | Default |
-|---|---:|
-| `AI_MAX_QUEUE` | 64 |
-| `AI_PER_BOT_CONCURRENCY` | 1 |
-| `AI_STALE_AFTER_MS` | 30,000 ms |
-| `AI_MAX_RETRIES` | 1 |
-| retry delay | 250–2,000 ms |
-
-Priority order places critical planning and combat strategy ahead of recovery,
-normal planning, exploration, chat, and background summaries. Concurrency is
-global plus per-Bot, so one Bot cannot occupy multiple planning slots by default.
-
-## Current readiness
-
-Implemented and tested: provider abstraction, OpenAI-compatible transport,
-fallback, health, strict structured output, scheduler, compact/prefix prompt,
-Coordinator state/task/catalog validation, and fail-closed legacy removal.
-
-Production Coordinator startup now conditionally owns the provider, router,
-scheduler, and planner when `COORDINATOR_AI_ENABLED=true`. Provider health is
-reported without taking down the stop/control plane when Spark is unavailable.
-
-Not yet implemented: task/API trigger, proposal policy and authorization,
-authenticated skill invocation/result protocol, durable AI metrics, and real
-Spark inference validation. See
-`PROJECT_AUDIT.md` for the weighted status.
+The selected checkpoint is genuine ModelOpt W4A16 NVFP4 and functional. Both
+installed host and NVIDIA-container backends chose weight-only Marlin instead of
+native FP4 compute. This is recorded as `BLOCKED` for native NVFP4 performance,
+without changing the production model target.

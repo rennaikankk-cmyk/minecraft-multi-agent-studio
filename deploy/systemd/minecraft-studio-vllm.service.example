@@ -1,0 +1,24 @@
+[Unit]
+Description=Minecraft Studio Spark vLLM inference node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rennaikank
+Group=rennaikank
+EnvironmentFile=/etc/minecraft-studio/inference-spark.env
+Environment=PATH=/home/rennaikank/vllm-env/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/rennaikank/vllm-env/bin/vllm serve ${AI_MODEL_PATH} --host ${VLLM_HOST} --port ${VLLM_PORT} --served-model-name ${AI_SERVED_MODEL_NAME} --trust-remote-code --language-model-only --quantization ${AI_QUANTIZATION} --gpu-memory-utilization ${VLLM_GPU_MEMORY_UTILIZATION} --max-model-len ${VLLM_MAX_MODEL_LEN} --max-num-seqs ${VLLM_MAX_NUM_SEQS} --enable-prefix-caching --enable-per-request-metrics
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=900
+TimeoutStopSec=120
+KillSignal=SIGINT
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/rennaikank/ai-cache
+
+[Install]
+WantedBy=multi-user.target

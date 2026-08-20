@@ -1,50 +1,46 @@
-# Spark inference-node setup
+# MSI DGX Spark inference-node runbook
 
-## Audited host state (2026-08-20)
+## Verified host state — 2026-08-20
 
-- MSI MS-C931 / NVIDIA GB10 / ARM64 / 128 GB-class unified memory
-- Ubuntu 24.04.4, kernel 6.17, driver 580.173.02, CUDA 13.0
-- Docker 29.2.1, NVIDIA Container Toolkit 1.20.0
-- CDI GPU container test passed with `--device=nvidia.com/gpu=all`
-- installed Python environment: vLLM 0.27.1, Transformers 5.15.1,
-  Torch 2.13.0+cu130
-- selected validation candidate:
-  `/home/rennaikank/models/qwen3.8-27b-nvfp4` (20.60 GB)
+- MSI MS-C931, NVIDIA GB10, ARM64, 128 GB-class unified memory
+- Ubuntu 24.04.4, kernel 6.17.0-1029-nvidia
+- driver 580.173.02, CUDA 13.0
+- Docker 29.2.1, NVIDIA Container Toolkit 1.20.0; CDI GPU test passed
+- host vLLM 0.27.1, Transformers 5.15.1, Torch 2.13.0+cu130
+- SSD: 3.7 TiB total, about 364 GiB used, 3.2 TiB available after cleanup
+- production candidate: `/home/rennaikank/models/qwen3.8-27b-nvfp4`, 20.60 GB
+- checkpoint revision recorded by Hugging Face cache:
+  `7cb13049d41143cc29c55936388a017665ed5ab8`
 
 See `SPARK_STORAGE_AUDIT.md` and `DUPLICATE_MODEL_REPORT.md` before changing
-storage. The 564 GiB BurnInTest file and all model/image cleanup remain
-confirmation-gated.
+storage. The confirmed BurnInTest file was removed earlier; no model, user
+Docker Volume, driver, CUDA, or unknown container/image was deleted. Temporary
+PostgreSQL/Redis acceptance containers and their two known test images were
+removed after their tests; no Docker Volume was created.
 
-## Preflight
+## Storage policy
 
-```bash
-nvidia-smi
-docker version
-nvidia-ctk cdi list
-source /home/rennaikank/vllm-env/bin/activate
-python -c 'import vllm, torch, transformers; print(vllm.__version__, torch.__version__, transformers.__version__)'
+```text
+AI_MODEL_ROOT=/home/rennaikank/models
+AI_CACHE_ROOT=/home/rennaikank/ai-cache
 ```
 
-Do not update the driver, CUDA, kernel, vLLM, or checkpoint together. Record one
-change per validation cycle so rollback remains possible.
+Keep one accepted production weight set. Do not move or delete the current
+checkpoint until a replacement has a recorded repository, revision, hash,
+backend, kernel, quality test, and rollback result. Never delete SSH keys,
+`/var/lib/docker`, the user Docker Volume, DGX OS, driver, or CUDA directories as
+cache cleanup.
 
-## First model-load candidate (not yet executed)
+## Verified foreground start
 
-The installed CLI confirms support for `--language-model-only`,
-`--gpu-memory-utilization`, `--max-num-seqs`, prefix caching, quantization, and
-selectable linear backends. The local metadata identifies ModelOpt
-`W4A16_NVFP4`. Current vLLM documentation names the checkpoint mode
-`modelopt_fp4` and auto-selects an available kernel.
-
-Start conservatively in a private terminal, with MTP disabled:
+MTP remains off. Activating the venv is required because its `ninja` executable
+is needed by FlashInfer JIT:
 
 ```bash
 source /home/rennaikank/vllm-env/bin/activate
-export VLLM_API_KEY='<generate and store outside Git>'
 vllm serve /home/rennaikank/models/qwen3.8-27b-nvfp4 \
-  --host 0.0.0.0 \
+  --host 127.0.0.1 \
   --port 8000 \
-  --api-key "$VLLM_API_KEY" \
   --served-model-name qwen3.8-27b-nvfp4 \
   --trust-remote-code \
   --language-model-only \
@@ -52,45 +48,85 @@ vllm serve /home/rennaikank/models/qwen3.8-27b-nvfp4 \
   --gpu-memory-utilization 0.70 \
   --max-model-len 8192 \
   --max-num-seqs 4 \
-  --enable-prefix-caching
+  --enable-prefix-caching \
+  --enable-per-request-metrics
 ```
 
-This is a **candidate command**, not a recorded pass. Capture the full startup
-log, selected kernel/backend, memory pressure, and any fallback warning. Do not
-force `--linear-backend` until auto-selection is observed. If vLLM rejects the
-checkpoint, stop and diagnose; do not patch installed libraries ad hoc.
+This exact loopback command passed cold start, structured output, concurrency,
+restart and a 30.04-minute soak (612/612, zero errors). Stop the foreground process with `Ctrl+C`. It consumes about
+17.91 GiB for model loading and configures about 65 GiB of KV cache at 0.70.
 
-Official guidance warns that unified-memory devices can OOM under aggressive
-default allocation, so the first run uses 0.70. Official vLLM docs also state
-that unsupported native FP4 kernels can fall back to W4A16/Marlin; a successful
-load alone therefore does not prove native NVFP4 acceleration.
+Before exposing the service to U9, bind only the verified wired private
+interface/firewall scope and add `--api-key`. Do not use `0.0.0.0` without a
+source-restricted firewall and runtime secret.
 
-References: [NVIDIA Spark vLLM playbook](https://build.nvidia.com/spark/vllm),
-[vLLM ModelOpt NVFP4 docs](https://docs.vllm.ai/en/v0.27.0/features/quantization/modelopt/),
-[NVIDIA vLLM unified-memory known issue](https://docs.nvidia.com/deeplearning/frameworks/vllm-release-notes/rel-26-07.html).
-
-## Health and rollback
+## Health, metrics, benchmark
 
 ```bash
-curl -fsS -H "Authorization: Bearer $VLLM_API_KEY" http://127.0.0.1:8000/health
-curl -fsS -H "Authorization: Bearer $VLLM_API_KEY" http://127.0.0.1:8000/v1/models
-nvidia-smi
+curl -fsS http://127.0.0.1:8000/health
+curl -fsS http://127.0.0.1:8000/v1/models
+curl -fsS http://127.0.0.1:8000/version
+curl -fsS http://127.0.0.1:8000/metrics
+
+export AI_BASE_URL=http://127.0.0.1:8000/v1
+export AI_MODEL=qwen3.8-27b-nvfp4
+export AI_QUANTIZATION=modelopt_fp4
+export AI_MAX_CONCURRENCY=4
+pnpm ai:health
+pnpm ai:test
+pnpm ai:benchmark:concurrency
+pnpm ai:soak
 ```
 
-Stop with `Ctrl+C` for the first foreground validation. This leaves the model,
-environment, and existing Docker objects intact. Do not configure automatic
-restart until cold start, structured output, benchmark, and restart all pass.
+See `AI_BENCHMARK.md` for the recorded result.
 
-## Network policy for the U9 cutover
+## Kernel verdict
 
-- Prefer wired Ethernet; measured Wi-Fi address `192.168.5.27` is not the final
-  production plan.
-- Assign stable private addresses after inspecting the real adapter/subnet.
-- Allow TCP 8000 only from the U9 controller address; never expose it to WAN.
-- Keep SSH key authentication and restrict port 22 to the management subnet.
-- Put API keys only in process/service secret storage, never `.env` committed to
-  Git.
-- Add TLS or an authenticated reverse proxy before crossing an untrusted network.
+The files and runtime both identify ModelOpt `W4A16_NVFP4`; this is not a fake
+4-bit/GGUF checkpoint. However:
 
-Final address, MTU, firewall backend, and link speed are `NOT_VERIFIED` until the
-U9 arrives.
+- host vLLM 0.27.1 selected `MarlinNvFp4LinearKernel`;
+- NVIDIA vLLM 26.05.post1 also warned that native FP4 computation was
+  unavailable and used weight-only Marlin.
+
+Therefore API functionality and performance are validated, while the requested
+**native/TRUE NVFP4 compute path is BLOCKED** on the installed stacks. Do not
+silently switch models. Resolve by testing a documented GB10/sm_121 native
+kernel build in an isolated environment, then repeat the full benchmark. Do not
+upgrade driver, CUDA, and vLLM together.
+
+## Service lifecycle template
+
+The committed profile is `profiles/inference-spark.env.example`; the hardened
+unit template is `deploy/systemd/minecraft-studio-vllm.service.example`.
+Install completed copies under `/etc/minecraft-studio/` only after U9 network,
+API key, firewall, and kernel decisions are approved.
+
+Before first service start, pre-create the configured `AI_CACHE_ROOT`/vLLM/HF
+cache directories owned by the service user and make the completed environment
+file mode `0600`. The unit reads `VLLM_API_KEY` from that protected environment
+file; it deliberately does not place the key in `ExecStart`/the process list.
+`VLLM_CACHE_ROOT`, `XDG_CACHE_HOME`, `CUDA_CACHE_PATH` and
+`FLASHINFER_WORKSPACE_BASE` point writable compiler/kernel/backend state into
+`/home/rennaikank/ai-cache`, the only home path reopened by the strict unit.
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl start minecraft-studio-vllm
+sudo systemctl status minecraft-studio-vllm --no-pager
+sudo systemctl restart minecraft-studio-vllm
+sudo systemctl stop minecraft-studio-vllm
+```
+
+Use `enable` only after cold-start/restart/soak and U9 connectivity pass. Roll
+back by stopping/disabling the unit; keep weights and caches intact.
+
+## U9 connection policy
+
+- wired private Ethernet only; final IP, MTU, firewall backend, and link speed
+  remain `NOT_VERIFIED` until U9 arrives;
+- allow TCP 8000 only from the U9 controller;
+- never expose vLLM or metrics to WAN;
+- keep API keys in OS secret storage, never committed env files;
+- Spark runs inference and necessary monitoring only—no Minecraft, Bots,
+  Coordinator, PostgreSQL, Redis, Dashboard, IDE, or business logs.

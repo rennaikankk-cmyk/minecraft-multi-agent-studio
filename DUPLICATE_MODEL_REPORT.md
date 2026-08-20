@@ -6,17 +6,17 @@ Status: **report only — no model weight was deleted**
 
 ## Summary
 
-Three Qwen3.8-27B families are present, plus one exact shard duplicate. They are not all bit-identical model derivatives, so the safe sequence is:
+Three Qwen3.8-27B families are present, plus one exact shard duplicate. They are not all bit-identical model derivatives. The existing NVFP4 checkpoint has now passed model load, health, strict API output, restart, real 1/2/4/8/10 concurrency and a 30.04-minute soak with 612/612 successful requests. The current software stacks still use weight-only Marlin instead of native GB10 FP4, so the safe sequence is:
 
-1. Validate the existing true ModelOpt NVFP4 candidate with the installed vLLM/GB10 stack.
-2. If validation passes, select it as the single production checkpoint.
-3. Only then request approval to remove the BF16 + Git LFS copy, Ollama copy, and download shard.
+1. Retain the verified NVFP4 checkpoint as the serving candidate.
+2. Keep the BF16/source fallback until the native-FP4/backend decision is made.
+3. Only then request explicit approval to remove the BF16 + Git LFS copy, Ollama copy, or download shard.
 
 ## Inventory
 
 | Model / copy | Format | Size | Path / source | Duplicate status | Recommendation |
 |---|---|---:|---|---|---|
-| `hwkranger/Qwen3.8-27B-heretic-ara-NVFP4` | ModelOpt W4A16 NVFP4, packed U8 weights + FP8/F32 scales; BF16 exclusions/MTP | 20.60 GB | `/home/rennaikank/models/qwen3.8-27b-nvfp4`; download metadata revision `7cb13049d41143cc29c55936388a017665ed5ab8` | functional target candidate; different abliteration lineage from Huihui | **retain and validate first** |
+| `hwkranger/Qwen3.8-27B-heretic-ara-NVFP4` | ModelOpt W4A16 NVFP4, packed U8 weights + FP8/F32 scales; BF16 exclusions/MTP | 20.60 GB | `/home/rennaikank/models/qwen3.8-27b-nvfp4`; download metadata revision `7cb13049d41143cc29c55936388a017665ed5ab8` | verified serving candidate; different abliteration lineage from Huihui | **retain** |
 | `huihui-ai/Huihui-Qwen3.8-27B-abliterated` working tree | BF16 safetensors, 18 shards | about 55.58 GB | `/home/rennaikank/models/Huihui-Qwen3.8-27B-abliterated`; Git commit `d42ca8978c5a66e92c3446d46e8adfe03ef692ff` | source/fallback; not the same derivative as heretic-ara | retain only until NVFP4 validation decision |
 | Same Huihui repo Git LFS objects | exact byte copies of the 18 checked-out BF16 shards | 55.58 GB | `.git/lfs/objects/*` inside the Huihui directory | **confirmed physical duplicate**: different inodes, identical LFS SHA-256 IDs and sizes | remove only through an approved model-repository cleanup |
 | Ollama `qwen3.8-27b-abliterated:latest` | Ollama blob | 55.59 GB including projector | `/var/snap/ollama/common/models` | functional duplicate of a Qwen3.8 abliterated serving copy | remove after vLLM selection, with approval |
@@ -35,7 +35,7 @@ Local metadata and safetensors headers show:
 - Architecture: `Qwen3_5ForConditionalGeneration` / `qwen3_5_text`, 64 layers, hidden size 5120, vocabulary 248320.
 - The two main shards and MTP file are present and indexed.
 
-This is strong local evidence of an actual NVIDIA ModelOpt NVFP4 checkpoint. It still needs an end-to-end vLLM load/API test and benchmark on this exact installed stack before being called production-ready.
+This is strong local evidence of an actual NVIDIA ModelOpt NVFP4 checkpoint. End-to-end vLLM load/API/restart/concurrency and 30-minute soak tests on this exact host have passed. That validates the ModelOpt checkpoint and API path, not native FP4 compute: both tested stacks selected `MarlinNvFp4LinearKernel` and reported weight-only fallback.
 
 ## BF16/LFS physical duplication
 
@@ -60,12 +60,10 @@ projector: sha256-d466586...    931,145,568 B
 
 Therefore the two Ollama names do not consume 2 × 55 GB. Removing only `qwen-fast` would not materially free space.
 
-## Proposed single-production-weight outcome
-
-If the local API smoke test succeeds:
+## Selected serving-weight outcome
 
 ```text
-/data/ai/models/qwen3.8-27b-heretic-ara-nvfp4/
+/home/rennaikank/models/qwen3.8-27b-nvfp4/
 ```
 
 Retain:
@@ -84,4 +82,4 @@ Cleanup candidates after explicit approval:
 | duplicate downloaded NVFP4 shard | 9.3 GiB |
 | **Potential model-related total** | **about 165 GiB** |
 
-Do not execute that cleanup until the NVFP4 checkpoint passes model-load, `/health`, `/v1/models`, structured-output, concurrent-request, and restart tests.
+Those functional gates have passed, but native FP4 is still blocked and no model deletion has been approved. Do not execute the cleanup without a separate explicit confirmation that names each target, size, risk and recovery method.
