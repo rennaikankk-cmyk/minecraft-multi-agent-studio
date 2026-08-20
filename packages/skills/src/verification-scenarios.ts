@@ -123,13 +123,17 @@ function scenario(
 }
 
 const baseInputs = {
-  "movement.goto": { target: { x: 4, y: 64, z: 0 }, dimension, serverProfileId: server },
+  "movement.goto": { target: { x: 4, y: 64, z: 0, dimension, serverProfileId: server }, radius: 1 },
   "collect.block": { blockName: "oak_log", maxCount: 4, maxDistance: 16, dimension, serverProfileId: server },
   "craft.item": { itemName: "crafting_table", count: 1, craftingTable: null, dimension, serverProfileId: server },
   "world.place-block": { itemName: "cobblestone", referenceBlock: { x: 1, y: 63, z: 0 }, face: { x: 0, y: 1, z: 0 }, dimension, serverProfileId: server },
   "container.transfer": { direction: "deposit", itemName: "cobblestone", count: 4, container: { x: 3, y: 64, z: 0 }, dimension, serverProfileId: server },
-  "equipment.equip-armor": { minimumScoreGain: 1 },
+  "inventory.equip-armor": { serverProfileId: server },
   "smelt.item": { inputItemName: "raw_iron", fuelItemName: "coal", fuelCount: 1, count: 5, furnace: { x: 2, y: 64, z: 0 }, dimension, serverProfileId: server },
+  "survival.consume-food": { maximumFoodLevel: 18, serverProfileId: server },
+  "survival.sleep": { bed: { x: 1, y: 64, z: 0 }, dimension, serverProfileId: server },
+  "inventory.compact": { maxMoves: 36, serverProfileId: server },
+  "movement.recover": { maxAttempts: 3, dimension, serverProfileId: server },
 } as const;
 
 export const builtinSkillVerificationManifestsV1: readonly SkillVerificationManifestV1[] =

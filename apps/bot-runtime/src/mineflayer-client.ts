@@ -16,12 +16,20 @@ import {
   armorSnapshotCapabilityOutputSchema,
   collectBlockCapabilityInputSchema,
   collectBlockCapabilityOutputSchema,
+  consumeFoodCapabilityInputSchema,
+  consumeFoodCapabilityOutputSchema,
   containerTransferCapabilityInputSchema,
   containerTransferCapabilityOutputSchema,
   craftItemCapabilityInputSchema,
   craftItemCapabilityOutputSchema,
+  inventoryCompactCapabilityInputSchema,
+  inventoryCompactCapabilityOutputSchema,
+  movementRecoverCapabilityInputSchema,
+  movementRecoverCapabilityOutputSchema,
   placeBlockCapabilityInputSchema,
   placeBlockCapabilityOutputSchema,
+  sleepCapabilityInputSchema,
+  sleepCapabilityOutputSchema,
   smeltItemCapabilityInputSchema,
   smeltItemCapabilityOutputSchema,
   SAFE_PATH_MAX_DISTANCE,
@@ -479,6 +487,30 @@ export class MineflayerBotClient implements BotClient {
       request.operation === "container.transfer-safe"
     ) {
       return this.invokeContainerTransfer(request);
+    }
+    if (
+      request.capability === "inventory.write" &&
+      request.operation === "food.consume-best-safe"
+    ) {
+      return this.invokeConsumeFood(request);
+    }
+    if (
+      request.capability === "world.interact" &&
+      request.operation === "bed.sleep-safe"
+    ) {
+      return this.invokeSleep(request);
+    }
+    if (
+      request.capability === "inventory.write" &&
+      request.operation === "inventory.compact-safe"
+    ) {
+      return this.invokeInventoryCompact(request);
+    }
+    if (
+      request.capability === "bot.move" &&
+      request.operation === "movement.recover-bounded"
+    ) {
+      return this.invokeMovementRecover(request);
     }
     throw new SkillFault("SKILL_CAPABILITY_UNSUPPORTED");
   }
@@ -1111,6 +1143,209 @@ export class MineflayerBotClient implements BotClient {
     });
   }
 
+  /** Consume only the highest-ranked item from the immutable safe-food list. */
+  private async invokeConsumeFood(
+    request: SkillCapabilityRequest,
+  ): Promise<unknown> {
+    const input = consumeFoodCapabilityInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+
+    const foodLevelBefore = this.bot.food;
+    if (!Number.isInteger(foodLevelBefore) || foodLevelBefore < 0 || foodLevelBefore > 20) {
+      throw new SkillFault("FOOD_LEVEL_UNAVAILABLE");
+    }
+    if (foodLevelBefore > input.data.maximumFoodLevel) {
+      return consumeFoodCapabilityOutputSchema.parse({
+        consumed: false,
+        itemName: null,
+        foodLevelBefore,
+        foodLevelAfter: foodLevelBefore,
+      });
+    }
+
+    const food = this.safeFoodItems()[0];
+    if (!food) throw new SkillFault("NO_SAFE_FOOD");
+    const itemName = food.item.name;
+    const countBefore = this.countInventoryItem(itemName);
+    if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+    try {
+      this.bot.clearControlStates();
+      await this.bot.equip(food.item, "hand");
+      if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      await this.bot.consume();
+    } catch (error) {
+      if (error instanceof SkillFault) throw error;
+      if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      throw new SkillFault("FOOD_CONSUME_FAILED");
+    }
+
+    const foodLevelAfter = this.bot.food;
+    const countAfter = this.countInventoryItem(itemName);
+    if (
+      !Number.isInteger(foodLevelAfter) ||
+      foodLevelAfter < 0 ||
+      foodLevelAfter > 20 ||
+      (foodLevelAfter <= foodLevelBefore && countAfter >= countBefore)
+    ) {
+      throw new SkillFault("FOOD_CONSUMPTION_NOT_CONFIRMED");
+    }
+    return consumeFoodCapabilityOutputSchema.parse({
+      consumed: true,
+      itemName,
+      foodLevelBefore,
+      foodLevelAfter,
+    });
+  }
+
+  /** Sleep in one explicitly authorized, nearby bed and verify client state. */
+  private async invokeSleep(request: SkillCapabilityRequest): Promise<unknown> {
+    const input = sleepCapabilityInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    this.assertDimensionMatch(input.data.dimension);
+
+    const bed = this.bot.blockAt(
+      new Vec3(input.data.bed.x, input.data.bed.y, input.data.bed.z),
+    );
+    if (!bed || !bed.name.endsWith("_bed")) {
+      throw new SkillFault("BED_NOT_FOUND");
+    }
+    if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+    try {
+      await this.bot.sleep(bed);
+    } catch {
+      if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      throw new SkillFault("SLEEP_FAILED");
+    }
+    if (!this.bot.isSleeping) throw new SkillFault("SLEEP_NOT_CONFIRMED");
+    return sleepCapabilityOutputSchema.parse({
+      sleeping: true,
+      bed: input.data.bed,
+    });
+  }
+
+  /**
+   * Fill earlier empty inventory slots from the tail. Destinations are always
+   * empty, so the operation never swaps, merges, drops, or touches equipment.
+   */
+  private async invokeInventoryCompact(
+    request: SkillCapabilityRequest,
+  ): Promise<unknown> {
+    const input = inventoryCompactCapabilityInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    if (this.bot.currentWindow !== null) {
+      throw new SkillFault("INVENTORY_WINDOW_OPEN");
+    }
+
+    const start = this.bot.inventory.inventoryStart;
+    const end = this.bot.inventory.inventoryEnd;
+    if (!Number.isInteger(start) || !Number.isInteger(end) || end <= start || end - start > 36) {
+      throw new SkillFault("INVENTORY_RANGE_UNAVAILABLE");
+    }
+    const inventoryStats = () => {
+      const slots = this.bot.inventory.slots.slice(start, end);
+      return {
+        occupied: slots.filter((item) => item !== null).length,
+        total: slots.reduce((sum, item) => sum + (item?.count ?? 0), 0),
+      };
+    };
+    const before = inventoryStats();
+    let movedStacks = 0;
+
+    for (let destination = start; destination < end; destination += 1) {
+      if (movedStacks >= input.data.maxMoves) break;
+      if (this.bot.inventory.slots[destination] !== null) continue;
+      let source = end - 1;
+      while (
+        source > destination &&
+        this.bot.inventory.slots[source] === null
+      ) {
+        source -= 1;
+      }
+      if (source <= destination) break;
+      if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      try {
+        await this.bot.moveSlotItem(source, destination);
+      } catch {
+        if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+        throw new SkillFault("INVENTORY_COMPACT_FAILED");
+      }
+      if (
+        this.bot.inventory.slots[destination] === null ||
+        this.bot.inventory.slots[source] !== null
+      ) {
+        throw new SkillFault("INVENTORY_MOVE_NOT_CONFIRMED");
+      }
+      movedStacks += 1;
+    }
+
+    const after = inventoryStats();
+    if (after.occupied !== before.occupied || after.total !== before.total) {
+      throw new SkillFault("INVENTORY_PRESERVATION_FAILED");
+    }
+    return inventoryCompactCapabilityOutputSchema.parse({
+      movedStacks,
+      occupiedSlotsBefore: before.occupied,
+      occupiedSlotsAfter: after.occupied,
+      totalItemsBefore: before.total,
+      totalItemsAfter: after.total,
+      preserved: true,
+    });
+  }
+
+  /** Try a small fixed sequence of non-destructive movements and read back displacement. */
+  private async invokeMovementRecover(
+    request: SkillCapabilityRequest,
+  ): Promise<unknown> {
+    const input = movementRecoverCapabilityInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    this.assertDimensionMatch(input.data.dimension);
+    if (this.activePathInvocationId !== null) {
+      throw new SkillFault("BOT_MOVEMENT_BUSY");
+    }
+
+    const start = this.bot.entity.position.clone();
+    const patterns = [
+      ["jump", "back"],
+      ["jump", "forward"],
+      ["left", "jump"],
+    ] as const;
+    let attempts = 0;
+    let distanceMoved = 0;
+    this.activePathInvocationId = request.invocationId;
+    this.stopPathfinder();
+    try {
+      for (const controls of patterns.slice(0, input.data.maxAttempts)) {
+        attempts += 1;
+        await this.applyBoundedSkillControls(550, controls, request.signal);
+        distanceMoved = this.bot.entity.position.distanceTo(start);
+        if (distanceMoved >= 0.35) break;
+      }
+    } finally {
+      this.bot.clearControlStates();
+      if (this.activePathInvocationId === request.invocationId) {
+        this.activePathInvocationId = null;
+      }
+    }
+
+    const final = this.bot.entity.position;
+    return movementRecoverCapabilityOutputSchema.parse({
+      recovered: distanceMoved >= 0.35,
+      attempts,
+      distanceMoved,
+      finalPosition: {
+        x: final.x,
+        y: final.y,
+        z: final.z,
+        dimension: normalizeDimension(String(this.bot.game.dimension)),
+        serverProfileId: this.serverProfileId,
+      },
+    });
+  }
+
   versionCompatibility() {
     const protocolVersion = Number(this.bot.protocolVersion);
     return resolvedVersionCompatibility(
@@ -1238,6 +1473,27 @@ export class MineflayerBotClient implements BotClient {
     this.bot.clearControlStates();
     for (const control of controls) this.bot.setControlState(control, true);
     await new Promise<void>((resolve) => setTimeout(resolve, durationMs));
+    this.bot.clearControlStates();
+  }
+
+  private async applyBoundedSkillControls(
+    durationMs: number,
+    controls: readonly ("forward" | "back" | "left" | "right" | "jump" | "sprint")[],
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+    this.bot.clearControlStates();
+    for (const control of controls) this.bot.setControlState(control, true);
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(finish, durationMs);
+      const onAbort = () => finish(new SkillFault("SKILL_CANCELLED"));
+      function finish(error?: Error) {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        error ? reject(error) : resolve();
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
     this.bot.clearControlStates();
   }
 

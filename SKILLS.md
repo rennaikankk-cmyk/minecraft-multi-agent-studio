@@ -6,7 +6,7 @@
 
 - Skill ID 后的 SemVer 表示技能输入、输出和行为契约，不表示 Minecraft 服务器版本。
 - 每个 Skill 另有有序 `compatibility.variants`。Runtime 只使用连接后真实协商出的版本/协议，以及当前 registry 的 feature、物品、方块、实体和显式服务端能力探针解析变体；不以 `minVersion/maxVersion` 一刀切。
-- 当前目录中的六个 Skill 都声明无额外资源要求的 `portable` 变体，因此在当前 Mineflayer 适配器能够连接的版本上保持可用。它们的跨版本真实场景矩阵尚未执行，所以目录上报 `availability=available`、`verification=unverified`，不冒充实机已验证。
+- 当前目录包含 11 个 Skill。除 `survival.sleep` 依据真实 registry 检查床资源外，其余声明无额外资源要求的 `portable` 变体。跨版本真实场景矩阵尚未执行，所以目录仍上报 `verification=unverified`，不冒充实机已验证。
 - 新版本特色 Skill 必须声明它实际依赖的 feature/资源；如果还依赖服务器插件、数据包或规则，则必须等待显式探针。能力为 `unknown` 时 fail-closed，不从版本号猜测。
 - `collect.block`、`craft.item`、`world.place-block` 和 `container.transfer` 当前仍接收目标版本 registry 的原生资源名。兼容变体可以表达旧/新 ID 的替代顺序，但规划器使用的语义资源别名尚未接入。
 
@@ -196,3 +196,46 @@
 - 只允许箱子/木桶/潜影盒（白名单），漏斗等红石敏感容器拒绝。
 - 容器必须在 4.5 格内；坐标处不是允许的容器报 `CONTAINER_NOT_FOUND`。
 - 这是基地分类存储与按角色补货的原子底座。
+
+## `smelt.item@1.0.0`
+
+- 权限：`craft.execute`
+- 风险：R1
+- 适配器操作：`smelt.item-safe`
+- 单次最多 64 个原料，只使用输入指定且当前为空的熔炉/高炉/烟熏炉。
+- 每批产物从熔炉真实取出并累计；混入既有物品或产物不一致时失败关闭。
+
+## `survival.consume-food@1.0.0`
+
+- 权限：`inventory.write`
+- 风险：R1
+- 适配器操作：`food.consume-best-safe`
+- 输入：`serverProfileId` 与 `maximumFoodLevel`（0～19）。
+- 只从 Runtime 不可变安全食物白名单中按 registry 营养值选择；不吃河豚、腐肉、生食、金苹果或任何模型提供的任意物品名。
+- 饱食度高于调用阈值时合法无操作；实际进食必须由食物数量或饱食度读回确认。
+- L0 紧急进食仍是独立的更高优先级反射，本技能不能禁用或替代 L0。
+
+## `survival.sleep@1.0.0`
+
+- 权限：`world.interact`
+- 风险：R1
+- 适配器操作：`bed.sleep-safe`
+- 目标床必须与当前 ServerProfile/维度一致、距离不超过 4.5 格，坐标处必须真实读回为 `*_bed`。
+- `bot.sleep` 返回后还会校验 `isSleeping`；白天、危险环境或服务端拒绝睡眠时不伪造成功。
+
+## `inventory.compact@1.0.0`
+
+- 权限：`inventory.write`
+- 风险：R1
+- 适配器操作：`inventory.compact-safe`
+- 只把尾部完整堆栈搬到前面的空背包槽，不交换、不合并、不丢弃、不触碰装备槽，也不打开容器。
+- 最多 36 次移动；完成后强制验证占用槽数和物品总数都完全守恒，否则失败关闭。
+
+## `movement.recover@1.0.0`
+
+- 权限：`bot.move`
+- 风险：R1
+- 适配器操作：`movement.recover-bounded`
+- 最多依次尝试 `后退+跳`、`前进+跳`、`左移+跳` 三种 550ms 模式；不挖掘、不放块、不开门、不传送。
+- 每次从真实坐标读回位移，至少移动 0.35 格才报告 `recovered=true`；失败时返回实际尝试数和位移供上层升级处理。
+- L0 检测到持续卡住时仍会先抢占并执行自身紧急脱困；L1 技能适合路径失败后、尚未进入 L0 风险态的主动恢复。

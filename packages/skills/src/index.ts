@@ -84,6 +84,45 @@ export {
   smeltItemSkill,
   smeltItemStateSchema,
 } from "./builtin/smelt-item.js";
+export {
+  CONSUME_FOOD_TIMEOUT_MS,
+  consumeFoodCapabilityInputSchema,
+  consumeFoodCapabilityOutputSchema,
+  consumeFoodInputSchema,
+  consumeFoodOutputSchema,
+  consumeFoodSkill,
+  consumeFoodStateSchema,
+} from "./builtin/consume-food.js";
+export {
+  SLEEP_MAX_DISTANCE,
+  SLEEP_TIMEOUT_MS,
+  sleepCapabilityInputSchema,
+  sleepCapabilityOutputSchema,
+  sleepInputSchema,
+  sleepOutputSchema,
+  sleepSkill,
+  sleepStateSchema,
+} from "./builtin/sleep.js";
+export {
+  INVENTORY_COMPACT_MAX_MOVES,
+  INVENTORY_COMPACT_TIMEOUT_MS,
+  inventoryCompactCapabilityInputSchema,
+  inventoryCompactCapabilityOutputSchema,
+  inventoryCompactInputSchema,
+  inventoryCompactOutputSchema,
+  inventoryCompactSkill,
+  inventoryCompactStateSchema,
+} from "./builtin/inventory-compact.js";
+export {
+  MOVEMENT_RECOVER_MAX_ATTEMPTS,
+  MOVEMENT_RECOVER_TIMEOUT_MS,
+  movementRecoverCapabilityInputSchema,
+  movementRecoverCapabilityOutputSchema,
+  movementRecoverInputSchema,
+  movementRecoverOutputSchema,
+  movementRecoverSkill,
+  movementRecoverStateSchema,
+} from "./builtin/movement-recover.js";
 export { SkillExecutor } from "./executor.js";
 export { SkillRegistry } from "./registry.js";
 export { resolveSkillCompatibility } from "./compatibility.js";

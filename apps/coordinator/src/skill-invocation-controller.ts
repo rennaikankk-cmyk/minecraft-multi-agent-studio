@@ -20,6 +20,10 @@ const DEFAULT_SKILL_RISKS = new Map<string, SkillRiskLevel>([
   ["place.block", "R1"],
   ["container.transfer", "R1"],
   ["smelt.item", "R1"],
+  ["survival.consume-food", "R1"],
+  ["survival.sleep", "R1"],
+  ["inventory.compact", "R1"],
+  ["movement.recover", "R1"],
 ]);
 
 export type SkillRiskLevel = (typeof RISK_ORDER)[number];

@@ -38,11 +38,15 @@ import {
 } from "@minecraft-studio/safety";
 import {
   collectBlockSkill,
+  consumeFoodSkill,
   containerTransferSkill,
   craftItemSkill,
   equipArmorSkill,
+  inventoryCompactSkill,
   movementGotoSkill,
+  movementRecoverSkill,
   placeBlockSkill,
+  sleepSkill,
   smeltItemSkill,
   SkillExecutor,
   SkillFault,
@@ -127,6 +131,15 @@ function skillResultTelemetryDigest(
     "craftedCount",
     "movedCount",
     "smeltedCount",
+    "foodLevelBefore",
+    "foodLevelAfter",
+    "movedStacks",
+    "occupiedSlotsBefore",
+    "occupiedSlotsAfter",
+    "totalItemsBefore",
+    "totalItemsAfter",
+    "attempts",
+    "distanceMoved",
   ] as const;
   const digest: Record<string, number> = {};
   for (const key of summaryKeys) {
@@ -249,6 +262,10 @@ export class SingleBotRuntime {
       skillRegistry.register(placeBlockSkill);
       skillRegistry.register(containerTransferSkill);
       skillRegistry.register(smeltItemSkill);
+      skillRegistry.register(consumeFoodSkill);
+      skillRegistry.register(sleepSkill);
+      skillRegistry.register(inventoryCompactSkill);
+      skillRegistry.register(movementRecoverSkill);
     }
     this.skillRegistry = skillRegistry;
     this.skillExecutor = new SkillExecutor(skillRegistry, {

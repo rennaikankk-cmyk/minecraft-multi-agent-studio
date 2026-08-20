@@ -145,7 +145,7 @@ pnpm test:minecraft-skills
 ### 版本化场景清单
 
 `@minecraft-studio/skills` 导出 `builtinSkillVerificationManifestsV1`。清单由严格的
-`skillVerificationManifestV1Schema` 校验，当前为 7 个内置技能固定 Minecraft 1.21.8
+`skillVerificationManifestV1Schema` 校验，当前为 11 个内置技能固定 Minecraft 1.21.8
 的验收矩阵。每个技能必须包含成功、材料不足、权限/位置拒绝、L0 抢占、取消、断线和
 部分成功读回七类场景，否则校验失败。
 
