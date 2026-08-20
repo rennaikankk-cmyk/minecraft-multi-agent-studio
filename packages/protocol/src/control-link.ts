@@ -3,6 +3,11 @@ import { z } from "zod";
 import { botStopResultV1Schema, identifierSchema } from "./bot-messages.js";
 import { publicBotDetailV1Schema } from "./control-api.js";
 import { skillExecutionResultV1Schema } from "./skill-messages.js";
+import {
+  teamObjectiveInputV1Schema,
+  teamTaskAssignmentInputV1Schema,
+  teamTaskAssignmentV1Schema,
+} from "./team.js";
 
 export const CONTROL_LINK_PATH = "/v1/control-link";
 export const CONTROL_LINK_SUBPROTOCOL = "minecraft-studio.control-link.v1";
@@ -371,10 +376,158 @@ export const controlLinkTaskResponseV1Schema = z.discriminatedUnion("ok", [
     .strict(),
 ]);
 
+export const controlLinkTeamTaskRequestV1Schema = z
+  .object({
+    ...controlLinkEnvelopeShape,
+    type: z.literal("control.link.team-task-request.v1"),
+    payload: z
+      .object({
+        coordinatorInstanceId: identifierSchema,
+        clientId: identifierSchema,
+        controlApiInstanceId: identifierSchema,
+        operationId: z.string().uuid(),
+        objective: teamObjectiveInputV1Schema,
+        assignment: teamTaskAssignmentInputV1Schema,
+        task: z.string().trim().min(1).max(10_000),
+        taskVersion: sequenceSchema,
+        priority: z.number().int().min(0).max(100),
+        actorId: identifierSchema,
+        issuedAt: timestampSchema,
+        expiresAt: timestampSchema,
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((message, context) => {
+    const { assignment, objective } = message.payload;
+    if (assignment.objectiveId !== objective.objectiveId) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "assignment", "objectiveId"],
+        message: "Team task objective identity does not match.",
+      });
+    }
+    const issuedAt = Date.parse(message.payload.issuedAt);
+    const expiresAt = Date.parse(message.payload.expiresAt);
+    if (expiresAt <= issuedAt || expiresAt - issuedAt > 2 * 60_000) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "expiresAt"],
+        message: "Team task authorization must remain within a two minute window.",
+      });
+    }
+  });
+
+export const controlLinkTeamTaskErrorCodeSchema = z.enum([
+  "REQUEST_INVALID",
+  "AUTHORIZATION_REJECTED",
+  "AI_UNAVAILABLE",
+  "TEAM_INPUT_INVALID",
+  "TEAM_OBJECTIVE_NOT_FOUND",
+  "TEAM_OBJECTIVE_INACTIVE",
+  "TEAM_OBJECTIVE_CAPACITY",
+  "TEAM_TASK_CONFLICT",
+  "TEAM_RESOURCE_CONFLICT",
+  "TEAM_BOT_NOT_FOUND",
+  "TEAM_BOT_SERVER_MISMATCH",
+  "TEAM_NO_ELIGIBLE_BOT",
+  "BOT_NOT_EXECUTABLE",
+  "PROPOSAL_STALE",
+  "SKILL_NOT_AVAILABLE",
+  "TASK_VERSION_STALE",
+  "BOT_SKILL_BUSY",
+  "POLICY_DENIED",
+  "TASK_TIMEOUT",
+  "TASK_EXECUTION_FAILED",
+  "CONTROL_LINK_BACKPRESSURE",
+  "CONTROL_LINK_STOPPED",
+  "CONTROL_LINK_INTERNAL_ERROR",
+]);
+
+const teamTaskResponseIdentityShape = {
+  coordinatorInstanceId: identifierSchema,
+  requestMessageId: z.string().uuid(),
+  operationId: z.string().uuid(),
+  objectiveId: identifierSchema,
+  taskId: identifierSchema,
+};
+
+export const controlLinkTeamTaskResponseV1Schema = z.discriminatedUnion("ok", [
+  z
+    .object({
+      ...controlLinkEnvelopeShape,
+      type: z.literal("control.link.team-task-response.v1"),
+      ok: z.literal(true),
+      payload: z
+        .object({
+          ...teamTaskResponseIdentityShape,
+          plannerRequestId: z.string().uuid(),
+          assignment: teamTaskAssignmentV1Schema,
+          execution: z.discriminatedUnion("action", [
+            z
+              .object({
+                action: z.literal("wait"),
+                provider: identifierSchema,
+                model: z.string().trim().min(1).max(512),
+                reason: z.string().trim().min(1).max(2_000),
+                confidence: z.number().finite().min(0).max(1),
+              })
+              .strict(),
+            z
+              .object({
+                action: z.literal("skill_result"),
+                result: skillExecutionResultV1Schema,
+              })
+              .strict(),
+          ]),
+        })
+        .strict(),
+    })
+    .strict()
+    .superRefine((message, context) => {
+      const { assignment, execution } = message.payload;
+      if (
+        assignment.objectiveId !== message.payload.objectiveId ||
+        assignment.taskId !== message.payload.taskId
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["payload", "assignment"],
+          message: "Team assignment identity does not match its request.",
+        });
+      }
+      if (
+        execution.action === "skill_result" &&
+        (execution.result.botId !== assignment.botId ||
+          execution.result.taskId !== message.payload.taskId)
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["payload", "execution", "result"],
+          message: "Team task execution result identity does not match its request.",
+        });
+      }
+    }),
+  z
+    .object({
+      ...controlLinkEnvelopeShape,
+      type: z.literal("control.link.team-task-response.v1"),
+      ok: z.literal(false),
+      payload: z
+        .object({
+          ...teamTaskResponseIdentityShape,
+          errorCode: controlLinkTeamTaskErrorCodeSchema,
+        })
+        .strict(),
+    })
+    .strict(),
+]);
+
 export const controlLinkClientMessageV1Schema = z.union([
   controlLinkAuthenticateV1Schema,
   controlLinkStopRequestV1Schema,
   controlLinkTaskRequestV1Schema,
+  controlLinkTeamTaskRequestV1Schema,
 ]);
 
 export const controlLinkServerMessageV1Schema = z.union([
@@ -386,6 +539,7 @@ export const controlLinkServerMessageV1Schema = z.union([
   controlLinkStateUpsertV1Schema,
   controlLinkStopResponseV1Schema,
   controlLinkTaskResponseV1Schema,
+  controlLinkTeamTaskResponseV1Schema,
 ]);
 
 export type ControlLinkCapability = z.infer<typeof controlLinkCapabilitySchema>;
@@ -424,6 +578,15 @@ export type ControlLinkTaskErrorCode = z.infer<
 >;
 export type ControlLinkTaskResponseV1 = z.infer<
   typeof controlLinkTaskResponseV1Schema
+>;
+export type ControlLinkTeamTaskRequestV1 = z.infer<
+  typeof controlLinkTeamTaskRequestV1Schema
+>;
+export type ControlLinkTeamTaskErrorCode = z.infer<
+  typeof controlLinkTeamTaskErrorCodeSchema
+>;
+export type ControlLinkTeamTaskResponseV1 = z.infer<
+  typeof controlLinkTeamTaskResponseV1Schema
 >;
 export type ControlLinkClientMessageV1 = z.infer<
   typeof controlLinkClientMessageV1Schema

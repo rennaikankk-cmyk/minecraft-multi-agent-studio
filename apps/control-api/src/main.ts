@@ -30,6 +30,7 @@ async function main(): Promise<void> {
     registry: coordinatorLink,
     stopController: coordinatorLink,
     taskController: coordinatorLink,
+    teamTaskController: coordinatorLink,
     principals: config.principals,
     requestLimitPerMinute: config.requestLimitPerMinute,
     handshakeLimitPerMinute: config.handshakeLimitPerMinute,

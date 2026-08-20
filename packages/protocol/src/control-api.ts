@@ -9,6 +9,11 @@ import {
   taskStatusSchema,
 } from "./bot-messages.js";
 import { skillExecutionResultV1Schema } from "./skill-messages.js";
+import {
+  teamObjectiveInputV1Schema,
+  teamTaskAssignmentInputV1Schema,
+  teamTaskAssignmentV1Schema,
+} from "./team.js";
 
 const timestampSchema = z.string().datetime({ offset: true });
 
@@ -235,6 +240,85 @@ export const executeBotTaskHttpResponseV1Schema = z
     }
   });
 
+export const executeTeamTaskHttpRequestV1Schema = z
+  .object({
+    schemaVersion: z.literal("1.0"),
+    requestId: z.string().uuid(),
+    objective: teamObjectiveInputV1Schema,
+    assignment: teamTaskAssignmentInputV1Schema,
+    task: z.string().trim().min(1).max(10_000),
+    taskVersion: z.number().int().nonnegative().safe(),
+    priority: z.number().int().min(0).max(100).default(50),
+  })
+  .strict()
+  .superRefine((request, context) => {
+    if (request.objective.objectiveId !== request.assignment.objectiveId) {
+      context.addIssue({
+        code: "custom",
+        path: ["assignment", "objectiveId"],
+        message: "Team task objective identity does not match.",
+      });
+    }
+  });
+
+const executeTeamTaskResponseIdentity = {
+  objectiveId: identifierSchema,
+  taskId: identifierSchema,
+  operationId: z.string().uuid(),
+  plannerRequestId: z.string().uuid(),
+  assignment: teamTaskAssignmentV1Schema,
+};
+
+export const executeTeamTaskHttpResponseV1Schema = z
+  .object({
+    schemaVersion: z.literal("1.0"),
+    requestId: z.string().uuid(),
+    data: z.discriminatedUnion("action", [
+      z
+        .object({
+          ...executeTeamTaskResponseIdentity,
+          action: z.literal("wait"),
+          provider: identifierSchema,
+          model: z.string().trim().min(1).max(512),
+          reason: z.string().trim().min(1).max(2_000),
+          confidence: z.number().finite().min(0).max(1),
+        })
+        .strict(),
+      z
+        .object({
+          ...executeTeamTaskResponseIdentity,
+          action: z.literal("skill_result"),
+          result: skillExecutionResultV1Schema,
+        })
+        .strict(),
+    ]),
+  })
+  .strict()
+  .superRefine((message, context) => {
+    const { data } = message;
+    if (
+      data.assignment.objectiveId !== data.objectiveId ||
+      data.assignment.taskId !== data.taskId
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["data", "assignment"],
+        message: "Team assignment identity does not match the HTTP response.",
+      });
+    }
+    if (
+      data.action === "skill_result" &&
+      (data.result.botId !== data.assignment.botId ||
+        data.result.taskId !== data.taskId)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["data", "result"],
+        message: "Team task result identity does not match the HTTP response.",
+      });
+    }
+  });
+
 export type ControlApiPermission = z.infer<typeof controlApiPermissionSchema>;
 export type PublicBotSummaryV1 = z.infer<typeof publicBotSummaryV1Schema>;
 export type PublicBotDetailV1 = z.infer<typeof publicBotDetailV1Schema>;
@@ -251,4 +335,10 @@ export type ExecuteBotTaskHttpRequestV1 = z.infer<
 >;
 export type ExecuteBotTaskHttpResponseV1 = z.infer<
   typeof executeBotTaskHttpResponseV1Schema
+>;
+export type ExecuteTeamTaskHttpRequestV1 = z.infer<
+  typeof executeTeamTaskHttpRequestV1Schema
+>;
+export type ExecuteTeamTaskHttpResponseV1 = z.infer<
+  typeof executeTeamTaskHttpResponseV1Schema
 >;

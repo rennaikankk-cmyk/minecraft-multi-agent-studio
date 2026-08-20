@@ -7,6 +7,7 @@ import {
   controlLinkClientProofInput,
   controlLinkServerProofInput,
   controlLinkStopRequestV1Schema,
+  controlLinkTeamTaskRequestV1Schema,
   controlLinkTaskRequestV1Schema,
   parseControlLinkServerMessage,
   type BotHeartbeatV1,
@@ -213,6 +214,74 @@ describe("Coordinator Control Link server", () => {
     );
   });
 
+  it("allocates, executes, and releases an authenticated team task", async () => {
+    const assignment = {
+      taskId: "team-task-01",
+      objectiveId: "objective-01",
+      serverProfileId: "isolated-control-link-test",
+      botId: BOT_ID,
+      role: "infrastructure" as const,
+      requiredSkills: ["movement.goto"],
+      claims: [{ kind: "named" as const, key: "work-site" }],
+      assignedAt: NOW.toISOString(),
+      leaseExpiresAt: new Date(NOW.getTime() + 60_000).toISOString(),
+    };
+    const teamCoordinator = {
+      createObjective: vi.fn((objective) => objective),
+      assignTask: vi.fn(() => assignment),
+      releaseTask: vi.fn(() => true),
+    };
+    const requestAndExecute = vi.fn((request, grant) => ({
+      requestId: testUuid(940),
+      promise: Promise.resolve({
+        requestId: testUuid(940),
+        botId: request.botId,
+        runtimeInstanceId: RUNTIME_ID,
+        taskId: request.taskId,
+        stateVersion: 1,
+        taskVersion: request.taskVersion,
+        provider: "spark-vllm",
+        model: "qwen3.8-27b-nvfp4",
+        reason: "State is insufficient.",
+        confidence: 0.7,
+        action: "wait" as const,
+      }),
+      cancel: vi.fn(() => true),
+    }));
+    const { registry, url } = await startServer({
+      taskExecutor: { requestAndExecute },
+      teamCoordinator,
+    });
+    registry.ingest(statusMessage(1), NOW);
+    const { socket, reader } = await authenticate(url);
+    await readSnapshot(reader);
+
+    const operationId = testUuid(941);
+    socket.send(JSON.stringify(teamTaskRequest(operationId, testUuid(942))));
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.team-task-response.v1",
+      ok: true,
+      payload: {
+        operationId,
+        objectiveId: "objective-01",
+        taskId: "team-task-01",
+        assignment: { botId: BOT_ID, role: "infrastructure" },
+        execution: { action: "wait", provider: "spark-vllm" },
+      },
+    });
+    expect(teamCoordinator.createObjective).toHaveBeenCalledTimes(1);
+    expect(teamCoordinator.assignTask).toHaveBeenCalledTimes(1);
+    expect(requestAndExecute).toHaveBeenCalledWith(
+      expect.objectContaining({ botId: BOT_ID, taskId: "team-task-01" }),
+      expect.objectContaining({
+        decisionId: operationId,
+        permissions: new Set(["skill.invoke"]),
+        maxRisk: "R1",
+      }),
+    );
+    expect(teamCoordinator.releaseTask).toHaveBeenCalledWith("team-task-01");
+  });
+
   it("rejects browser Origin and binary application frames", async () => {
     const { url } = await startServer();
     await expect(rejectedWebSocketStatus(url, "https://untrusted.example")).resolves.toBe(
@@ -285,6 +354,11 @@ async function startServer(
     maxPendingStops: number;
     stopController: { requestStop: (...args: any[]) => Promise<any> };
     taskExecutor: { requestAndExecute: (...args: any[]) => any };
+    teamCoordinator: {
+      createObjective: (...args: any[]) => any;
+      assignTask: (...args: any[]) => any;
+      releaseTask: (...args: any[]) => any;
+    };
   }> = {},
 ): Promise<{ registry: BotRegistry; server: ControlLinkServer; url: string }> {
   const registry = new BotRegistry({ staleAfterMs: 15_000, now: () => NOW });
@@ -320,6 +394,9 @@ async function startServer(
     ...(overrides.taskExecutor === undefined
       ? {}
       : { taskExecutor: overrides.taskExecutor }),
+    ...(overrides.teamCoordinator === undefined
+      ? {}
+      : { teamCoordinator: overrides.teamCoordinator }),
   });
   servers.push(server);
   const address = await server.start();
@@ -508,6 +585,42 @@ function taskRequest(operationId: string, messageId: string) {
       operationId,
       botId: BOT_ID,
       taskId: "task-01",
+      task: "Move to the work site",
+      taskVersion: 1,
+      priority: 50,
+      actorId: "operator-01",
+      issuedAt: NOW.toISOString(),
+      expiresAt: new Date(NOW.getTime() + 90_000).toISOString(),
+    },
+  });
+}
+
+function teamTaskRequest(operationId: string, messageId: string) {
+  return controlLinkTeamTaskRequestV1Schema.parse({
+    schemaVersion: "1.0",
+    messageId,
+    timestamp: NOW.toISOString(),
+    type: "control.link.team-task-request.v1",
+    payload: {
+      coordinatorInstanceId: "coordinator-test",
+      clientId: CLIENT_ID,
+      controlApiInstanceId: CONTROL_API_INSTANCE_ID,
+      operationId,
+      objective: {
+        objectiveId: "objective-01",
+        serverProfileId: "isolated-control-link-test",
+        title: "Prepare the work site",
+        maxBots: 5,
+        preferredRoles: ["infrastructure"],
+      },
+      assignment: {
+        taskId: "team-task-01",
+        objectiveId: "objective-01",
+        requiredSkills: ["movement.goto"],
+        preferredRoles: ["infrastructure"],
+        claims: [{ kind: "named", key: "work-site" }],
+        leaseMs: 60_000,
+      },
       task: "Move to the work site",
       taskVersion: 1,
       priority: 50,

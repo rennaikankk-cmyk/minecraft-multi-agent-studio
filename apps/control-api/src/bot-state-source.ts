@@ -4,8 +4,12 @@ import {
 } from "@minecraft-studio/coordinator";
 import type {
   BotStopResultV1,
+  ControlLinkTeamTaskResponseV1,
   ControlLinkTaskResponseV1,
   PublicBotDetailV1,
+  TeamObjectiveInputV1,
+  TeamTaskAssignmentInputV1,
+  TeamTaskAssignmentV1,
 } from "@minecraft-studio/protocol";
 import type { StopBotRequest } from "@minecraft-studio/coordinator";
 
@@ -54,6 +58,30 @@ export type BotTaskExecution = Pick<
 
 export type BotTaskRequester = Readonly<{
   requestTask(request: BotTaskRequest): Promise<BotTaskExecution>;
+}>;
+
+export type TeamTaskRequest = Readonly<{
+  operationId: string;
+  objective: TeamObjectiveInputV1;
+  assignment: TeamTaskAssignmentInputV1;
+  task: string;
+  taskVersion: number;
+  priority: number;
+  authorization: Readonly<{
+    actorId: string;
+    permissions: ReadonlySet<"task.execute">;
+    issuedAt: Date;
+    expiresAt: Date;
+  }>;
+}>;
+
+export type TeamTaskExecution = Pick<
+  Extract<ControlLinkTeamTaskResponseV1, { ok: true }>["payload"],
+  "plannerRequestId" | "execution"
+> & Readonly<{ assignment: TeamTaskAssignmentV1 }>;
+
+export type TeamTaskRequester = Readonly<{
+  requestTeamTask(request: TeamTaskRequest): Promise<TeamTaskExecution>;
 }>;
 
 /**

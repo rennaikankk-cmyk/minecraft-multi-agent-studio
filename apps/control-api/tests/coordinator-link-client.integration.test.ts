@@ -706,6 +706,80 @@ describe("Control API Coordinator Link client", () => {
     });
     expect(requestAndExecute).toHaveBeenCalledTimes(1);
   });
+
+  it("round-trips team allocation with the selected Bot and lease", async () => {
+    const assignment = {
+      taskId: "team-task-01",
+      objectiveId: "objective-01",
+      serverProfileId: "isolated-control-link-test",
+      botId: BOT_ID,
+      role: "infrastructure" as const,
+      requiredSkills: ["movement.goto"],
+      claims: [{ kind: "named" as const, key: "work-site" }],
+      assignedAt: NOW.toISOString(),
+      leaseExpiresAt: new Date(NOW.getTime() + 60_000).toISOString(),
+    };
+    const teamCoordinator = {
+      createObjective: vi.fn((objective) => objective),
+      assignTask: vi.fn(() => assignment),
+      releaseTask: vi.fn(() => true),
+    };
+    const requestAndExecute = vi.fn((request) => ({
+      requestId: "15151515-1515-4515-8515-151515151515",
+      promise: Promise.resolve({
+        requestId: "15151515-1515-4515-8515-151515151515",
+        botId: request.botId,
+        runtimeInstanceId: RUNTIME_ID,
+        taskId: request.taskId,
+        stateVersion: 1,
+        taskVersion: request.taskVersion,
+        provider: "spark-vllm",
+        model: "qwen3.8-27b-nvfp4",
+        reason: "State is insufficient.",
+        confidence: 0.7,
+        action: "wait" as const,
+      }),
+      cancel: vi.fn(() => true),
+    }));
+    const { client } = await startLinkPair({
+      coordinatorInstanceId: "coordinator-team-task-test",
+      taskExecutor: { requestAndExecute },
+      teamCoordinator,
+    });
+    const result = await client.requestTeamTask({
+      operationId: "16161616-1616-4616-8616-161616161616",
+      objective: {
+        objectiveId: "objective-01",
+        serverProfileId: "isolated-control-link-test",
+        title: "Prepare the work site",
+        maxBots: 5,
+        preferredRoles: ["infrastructure"],
+      },
+      assignment: {
+        taskId: "team-task-01",
+        objectiveId: "objective-01",
+        requiredSkills: ["movement.goto"],
+        preferredRoles: ["infrastructure"],
+        claims: [{ kind: "named", key: "work-site" }],
+        leaseMs: 60_000,
+      },
+      task: "Move to the work site",
+      taskVersion: 1,
+      priority: 50,
+      authorization: {
+        actorId: "operator-01",
+        permissions: new Set(["task.execute"]),
+        issuedAt: NOW,
+        expiresAt: new Date(NOW.getTime() + 90_000),
+      },
+    });
+    expect(result).toMatchObject({
+      plannerRequestId: "15151515-1515-4515-8515-151515151515",
+      assignment: { botId: BOT_ID, role: "infrastructure" },
+      execution: { action: "wait", provider: "spark-vllm" },
+    });
+    expect(teamCoordinator.releaseTask).toHaveBeenCalledWith("team-task-01");
+  });
 });
 
 type LinkServerOptions = Readonly<{
@@ -715,6 +789,11 @@ type LinkServerOptions = Readonly<{
   now?: () => Date;
   requestStop?: (request: StopBotRequest) => Promise<BotStopResultV1>;
   taskExecutor?: { requestAndExecute: (...args: any[]) => any };
+  teamCoordinator?: {
+    createObjective: (...args: any[]) => any;
+    assignTask: (...args: any[]) => any;
+    releaseTask: (...args: any[]) => any;
+  };
 }>;
 
 async function startCoordinatorServer(
@@ -744,6 +823,7 @@ async function startCoordinatorServer(
         (async (request) => confirmedStopResult(request)),
     },
     ...(options.taskExecutor ? { taskExecutor: options.taskExecutor } : {}),
+    ...(options.teamCoordinator ? { teamCoordinator: options.teamCoordinator } : {}),
     logger,
     now,
     ...(options.pingIntervalMs === undefined

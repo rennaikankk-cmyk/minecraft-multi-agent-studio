@@ -17,6 +17,8 @@ import {
   controlLinkStateUpsertV1Schema,
   controlLinkStopRequestV1Schema,
   controlLinkStopResponseV1Schema,
+  controlLinkTeamTaskRequestV1Schema,
+  controlLinkTeamTaskResponseV1Schema,
   controlLinkTaskRequestV1Schema,
   controlLinkTaskResponseV1Schema,
   parseControlLinkClientMessage,
@@ -318,5 +320,76 @@ describe("Control Link protocol", () => {
         payload: { ...request.payload, shell: "rm -rf" },
       }).success,
     ).toBe(false);
+  });
+
+  it("strictly transports authenticated team allocation and execution", () => {
+    const request = controlLinkTeamTaskRequestV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: "12121212-1212-4212-8212-121212121212",
+      timestamp: NOW,
+      type: "control.link.team-task-request.v1",
+      payload: {
+        coordinatorInstanceId: "coordinator-01",
+        clientId: "control-api",
+        controlApiInstanceId: "control-api-01",
+        operationId: OPERATION_ID,
+        objective: {
+          objectiveId: "objective-01",
+          serverProfileId: "survival-01",
+          title: "Prepare the work site",
+          maxBots: 5,
+          preferredRoles: ["infrastructure"],
+        },
+        assignment: {
+          taskId: "team-task-01",
+          objectiveId: "objective-01",
+          requiredSkills: ["movement.goto"],
+          preferredRoles: ["infrastructure"],
+          claims: [{ kind: "named", key: "work-site" }],
+          leaseMs: 60_000,
+        },
+        task: "Move to the work site",
+        taskVersion: 1,
+        priority: 50,
+        actorId: "operator-01",
+        issuedAt: NOW,
+        expiresAt: "2026-08-07T10:01:30.000Z",
+      },
+    });
+    expect(parseControlLinkClientMessage(request)).toEqual(request);
+    const response = controlLinkTeamTaskResponseV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: "13131313-1313-4313-8313-131313131313",
+      timestamp: LATER,
+      type: "control.link.team-task-response.v1",
+      ok: true,
+      payload: {
+        coordinatorInstanceId: "coordinator-01",
+        requestMessageId: request.messageId,
+        operationId: OPERATION_ID,
+        objectiveId: "objective-01",
+        taskId: "team-task-01",
+        plannerRequestId: "14141414-1414-4414-8414-141414141414",
+        assignment: {
+          taskId: "team-task-01",
+          objectiveId: "objective-01",
+          serverProfileId: "survival-01",
+          botId: bot.botId,
+          role: "infrastructure",
+          requiredSkills: ["movement.goto"],
+          claims: [{ kind: "named", key: "work-site" }],
+          assignedAt: NOW,
+          leaseExpiresAt: "2026-08-07T10:01:00.000Z",
+        },
+        execution: {
+          action: "wait",
+          provider: "spark-vllm",
+          model: "qwen3.8-27b-nvfp4",
+          reason: "State is insufficient.",
+          confidence: 0.7,
+        },
+      },
+    });
+    expect(parseControlLinkServerMessage(response)).toEqual(response);
   });
 });

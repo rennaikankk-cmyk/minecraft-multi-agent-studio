@@ -4,10 +4,11 @@ Hardware-neutral control foundation for safe Minecraft Bot orchestration, with a
 target deployment of a Windows U9 285H controller and an MSI/DGX Spark
 inference-only node.
 
-Current verdict: **foundation validated, not production-ready**. The repository
-builds and has meaningful protocol, safety, task, process, control-link, skill,
-and AI scheduler tests. It does not yet have the production policy/authorization
-and skill invocation bridge required for autonomous AI play.
+Current verdict: **integrated foundation validated, deployment acceptance still
+required**. The repository builds and has meaningful protocol, safety, task,
+process, control-link, skill, AI scheduling, authenticated invocation, and
+deterministic multi-Bot allocation tests. Real Spark, Minecraft, PostgreSQL,
+Redis, and browser acceptance remain environment-gated.
 
 ## Validate locally
 
@@ -21,7 +22,7 @@ pnpm test
 pnpm build
 ```
 
-Root tests currently pass 394 cases plus 2 Node process cases, with 23 explicitly
+Root tests currently pass 438 cases plus 2 Node process cases, with 23 explicitly
 environment-gated cases. Browser, real PostgreSQL/Redis, and real Minecraft
 acceptance are separate; see `TESTING.md`.
 
@@ -31,6 +32,13 @@ acceptance are separate; see `TESTING.md`.
 - Spark: one OpenAI-compatible inference service and selected model weights
 - AI output: strict proposal only; no code or direct Mineflayer access
 - execution: authenticated policy/authorization path, L0 safety, SkillExecutor
+- team allocation: server-isolated objectives, roles, skill eligibility, Bot and
+  resource leases, deterministic selection for 1–10 Bots
+
+Authenticated task entry points are `POST /v1/bots/:botId/tasks/execute` for a
+specific Bot and `POST /v1/team/tasks/execute` for Coordinator-selected team
+execution. Both traverse Control API → mutually authenticated Control Link → AI
+proposal → policy/authorization → Runtime Link → SkillExecutor.
 
 The safe AI boundary is documented in `AI_ARCHITECTURE.md`. The legacy direct
 Bot-to-model entry point is disabled.

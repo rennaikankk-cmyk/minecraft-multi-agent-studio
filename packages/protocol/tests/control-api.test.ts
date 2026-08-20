@@ -9,6 +9,8 @@ import {
   dashboardApiErrorV1Schema,
   dashboardBotListResponseV1Schema,
   dashboardStopRequestV1Schema,
+  executeTeamTaskHttpRequestV1Schema,
+  executeTeamTaskHttpResponseV1Schema,
   stopBotHttpRequestV1Schema,
   stopBotHttpResponseV1Schema,
 } from "../src/index.js";
@@ -169,5 +171,65 @@ describe("Control API v1 protocol", () => {
         },
       }).error.code,
     ).toBe("CONTROL_API_UNAVAILABLE");
+  });
+
+  it("strictly binds a team task to its objective, lease, and selected Bot", () => {
+    const request = executeTeamTaskHttpRequestV1Schema.parse({
+      schemaVersion: "1.0",
+      requestId: UUID,
+      objective: {
+        objectiveId: "objective-01",
+        serverProfileId: "survival-01",
+        title: "Prepare the work site",
+        maxBots: 5,
+        preferredRoles: ["infrastructure", "logistics"],
+      },
+      assignment: {
+        taskId: "team-task-01",
+        objectiveId: "objective-01",
+        requiredSkills: ["movement.goto"],
+        preferredRoles: ["infrastructure"],
+        claims: [{ kind: "named", key: "work-site" }],
+        leaseMs: 60_000,
+      },
+      task: "Move to the work site",
+      taskVersion: 1,
+      priority: 50,
+    });
+    expect(request.objective.maxBots).toBe(5);
+    expect(
+      executeTeamTaskHttpRequestV1Schema.safeParse({
+        ...request,
+        assignment: { ...request.assignment, objectiveId: "objective-02" },
+      }).success,
+    ).toBe(false);
+
+    const response = executeTeamTaskHttpResponseV1Schema.parse({
+      schemaVersion: "1.0",
+      requestId: UUID,
+      data: {
+        objectiveId: "objective-01",
+        taskId: "team-task-01",
+        operationId: UUID,
+        plannerRequestId: "22222222-2222-4222-8222-222222222222",
+        assignment: {
+          taskId: "team-task-01",
+          objectiveId: "objective-01",
+          serverProfileId: "survival-01",
+          botId: "worker-01",
+          role: "infrastructure",
+          requiredSkills: ["movement.goto"],
+          claims: [{ kind: "named", key: "work-site" }],
+          assignedAt: NOW,
+          leaseExpiresAt: "2026-07-20T06:01:00.000Z",
+        },
+        action: "wait",
+        provider: "spark-vllm",
+        model: "qwen3.8-27b-nvfp4",
+        reason: "State is insufficient.",
+        confidence: 0.7,
+      },
+    });
+    expect(response.data.assignment.botId).toBe("worker-01");
   });
 });

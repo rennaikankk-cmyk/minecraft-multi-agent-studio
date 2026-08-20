@@ -15,6 +15,7 @@ import {
   type BotStateSource,
   type BotTaskRequester,
   type ControlApiLogger,
+  type TeamTaskRequester,
 } from "../src/index.js";
 
 const READER_TOKEN = "control-api-reader-token-000000000001";
@@ -319,6 +320,70 @@ describe("Control API HTTP and WebSocket integration", () => {
     );
   });
 
+  it("authenticates team task allocation and returns the selected Bot lease", async () => {
+    const requestTeamTask = vi.fn<TeamTaskRequester["requestTeamTask"]>(async (request) => ({
+      plannerRequestId: testUuid(2_201),
+      assignment: {
+        taskId: request.assignment.taskId,
+        objectiveId: request.objective.objectiveId,
+        serverProfileId: request.objective.serverProfileId,
+        botId: "worker-01",
+        role: "infrastructure",
+        requiredSkills: [...request.assignment.requiredSkills],
+        claims: [...request.assignment.claims],
+        assignedAt: "2026-08-20T10:00:00.000Z",
+        leaseExpiresAt: "2026-08-20T10:01:00.000Z",
+      },
+      execution: {
+        action: "wait",
+        provider: "spark-vllm",
+        model: "qwen3.8-27b-nvfp4",
+        reason: "State is insufficient.",
+        confidence: 0.7,
+      },
+    }));
+    const { registry, baseUrl } = await startServer({
+      teamTaskController: { requestTeamTask },
+    });
+    registry.ingest(statusMessage(1), new Date());
+    const operationId = testUuid(2_202);
+
+    const denied = await teamTaskFetch(baseUrl, READER_TOKEN, operationId);
+    expect(denied.status).toBe(403);
+    const accepted = await teamTaskFetch(baseUrl, TASK_OPERATOR_TOKEN, operationId);
+    expect(accepted.status).toBe(200);
+    expect((await accepted.json()).data).toMatchObject({
+      objectiveId: "objective-api-01",
+      taskId: "team-task-api-01",
+      operationId,
+      plannerRequestId: testUuid(2_201),
+      assignment: {
+        botId: "worker-01",
+        role: "infrastructure",
+        leaseExpiresAt: "2026-08-20T10:01:00.000Z",
+      },
+      action: "wait",
+      provider: "spark-vllm",
+    });
+    expect(requestTeamTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operationId,
+        objective: expect.objectContaining({
+          objectiveId: "objective-api-01",
+          maxBots: 5,
+        }),
+        assignment: expect.objectContaining({
+          taskId: "team-task-api-01",
+          requiredSkills: ["movement.goto"],
+        }),
+        authorization: expect.objectContaining({
+          actorId: "task-operator-01",
+          permissions: new Set(["task.execute"]),
+        }),
+      }),
+    );
+  });
+
   it("returns 503 instead of an empty list when the Coordinator mirror is unavailable", async () => {
     const unavailableSource: BotStateSource = {
       isReady: () => false,
@@ -420,6 +485,7 @@ async function startServer(
     requestLimitPerMinute: number;
     stopController: Pick<StopController, "requestStop">;
     taskController: BotTaskRequester;
+    teamTaskController: TeamTaskRequester;
     stateSource: BotStateSource;
     maxConnectionsPerSubject: number;
   }> = {},
@@ -448,6 +514,9 @@ async function startServer(
     ...(overrides.taskController === undefined
       ? {}
       : { taskController: overrides.taskController }),
+    ...(overrides.teamTaskController === undefined
+      ? {}
+      : { teamTaskController: overrides.teamTaskController }),
     ...(overrides.maxConnectionsPerSubject === undefined
       ? {}
       : { maxConnectionsPerSubject: overrides.maxConnectionsPerSubject }),
@@ -532,6 +601,38 @@ function taskFetch(baseUrl: string, token: string, requestId: string): Promise<R
       schemaVersion: "1.0",
       requestId,
       taskId: "task-api-01",
+      task: "Move to the work site",
+      taskVersion: 1,
+      priority: 50,
+    }),
+  });
+}
+
+function teamTaskFetch(baseUrl: string, token: string, requestId: string): Promise<Response> {
+  return fetch(`${baseUrl}/v1/team/tasks/execute`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      schemaVersion: "1.0",
+      requestId,
+      objective: {
+        objectiveId: "objective-api-01",
+        serverProfileId: "isolated-control-api-test",
+        title: "Prepare the work site",
+        maxBots: 5,
+        preferredRoles: ["infrastructure"],
+      },
+      assignment: {
+        taskId: "team-task-api-01",
+        objectiveId: "objective-api-01",
+        requiredSkills: ["movement.goto"],
+        preferredRoles: ["infrastructure"],
+        claims: [{ kind: "named", key: "work-site" }],
+        leaseMs: 60_000,
+      },
       task: "Move to the work site",
       taskVersion: 1,
       priority: 50,

@@ -58,6 +58,7 @@ async function main(): Promise<void> {
     clients: controlConfig.clients,
     registry,
     stopController,
+    teamCoordinator,
     ...(aiService ? { taskExecutor: aiService } : {}),
     logger,
   });

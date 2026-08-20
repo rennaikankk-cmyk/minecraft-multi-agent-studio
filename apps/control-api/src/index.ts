@@ -21,6 +21,9 @@ export {
   type BotTaskRequest,
   type BotTaskRequester,
   type BotStopRequester,
+  type TeamTaskExecution,
+  type TeamTaskRequest,
+  type TeamTaskRequester,
 } from "./bot-state-source.js";
 export {
   ControlApiConfigError,
@@ -31,6 +34,7 @@ export {
   CoordinatorLinkClient,
   CoordinatorLinkClientError,
   CoordinatorTaskError,
+  CoordinatorTeamTaskError,
   type CoordinatorLinkClientErrorCode,
   type CoordinatorLinkClientOptions,
 } from "./coordinator-link-client.js";

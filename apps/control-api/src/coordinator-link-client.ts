@@ -17,6 +17,7 @@ import {
   controlLinkClientProofInput,
   controlLinkServerProofInput,
   controlLinkStopRequestV1Schema,
+  controlLinkTeamTaskRequestV1Schema,
   controlLinkTaskRequestV1Schema,
   parseControlLinkServerMessage,
   type BotStopResultV1,
@@ -31,6 +32,8 @@ import {
   type ControlLinkStopErrorCode,
   type ControlLinkTaskErrorCode,
   type ControlLinkTaskResponseV1,
+  type ControlLinkTeamTaskErrorCode,
+  type ControlLinkTeamTaskResponseV1,
   type PublicBotDetailV1,
 } from "@minecraft-studio/protocol";
 import WebSocket, { type RawData } from "ws";
@@ -43,6 +46,9 @@ import type {
   BotTaskRequest,
   BotTaskRequester,
   BotStopRequester,
+  TeamTaskExecution,
+  TeamTaskRequest,
+  TeamTaskRequester,
 } from "./bot-state-source.js";
 import type { CoordinatorLinkClientConfig } from "./coordinator-link-config.js";
 import type { ControlApiLogger } from "./server.js";
@@ -81,6 +87,16 @@ export class CoordinatorTaskError extends Error {
   ) {
     super(message);
     this.name = "CoordinatorTaskError";
+  }
+}
+
+export class CoordinatorTeamTaskError extends Error {
+  constructor(
+    readonly code: ControlLinkTeamTaskErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "CoordinatorTeamTaskError";
   }
 }
 
@@ -130,6 +146,17 @@ type PendingTask = {
   reject: (error: Error) => void;
 };
 
+type PendingTeamTask = {
+  fingerprint: string;
+  message: ReturnType<typeof controlLinkTeamTaskRequestV1Schema.parse>;
+  serialized: string;
+  sent: boolean;
+  timer: ReturnType<typeof setTimeout>;
+  promise: Promise<TeamTaskExecution>;
+  resolve: (result: TeamTaskExecution) => void;
+  reject: (error: Error) => void;
+};
+
 type RetiredStop = Readonly<{
   operationId: string;
   requestMessageId: string;
@@ -138,7 +165,7 @@ type RetiredStop = Readonly<{
 }>;
 
 export class CoordinatorLinkClient
-  implements BotStateSource, BotStopRequester, BotTaskRequester
+  implements BotStateSource, BotStopRequester, BotTaskRequester, TeamTaskRequester
 {
   private readonly now: () => Date;
   private readonly randomId: () => string;
@@ -151,6 +178,7 @@ export class CoordinatorLinkClient
     new Set<BotStateAvailabilityListener>();
   private readonly pendingStops = new Map<string, PendingStop>();
   private readonly pendingTasks = new Map<string, PendingTask>();
+  private readonly pendingTeamTasks = new Map<string, PendingTeamTask>();
   private readonly retiredStops = new Map<string, RetiredStop>();
   private readonly failedSockets = new WeakSet<WebSocket>();
   private socket: WebSocket | null = null;
@@ -312,6 +340,12 @@ export class CoordinatorLinkClient
   requestTask(request: BotTaskRequest): Promise<BotTaskExecution> {
     validateTaskRequest(request);
     const fingerprint = taskFingerprint(request);
+    if (this.pendingTeamTasks.has(request.operationId)) {
+      throw new CoordinatorLinkClientError(
+        "COORDINATOR_LINK_TASK_REJECTED",
+        "The operation ID is already pending as a team task.",
+      );
+    }
     const existing = this.pendingTasks.get(request.operationId);
     if (existing) {
       if (existing.fingerprint !== fingerprint) {
@@ -389,6 +423,92 @@ export class CoordinatorLinkClient
     return promise;
   }
 
+  requestTeamTask(request: TeamTaskRequest): Promise<TeamTaskExecution> {
+    validateTeamTaskRequest(request);
+    const fingerprint = teamTaskFingerprint(request);
+    if (this.pendingTasks.has(request.operationId)) {
+      throw new CoordinatorLinkClientError(
+        "COORDINATOR_LINK_TASK_REJECTED",
+        "The operation ID is already pending as a single-Bot task.",
+      );
+    }
+    const existing = this.pendingTeamTasks.get(request.operationId);
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) {
+        throw new CoordinatorLinkClientError(
+          "COORDINATOR_LINK_TASK_REJECTED",
+          "The team task operation ID is pending with different parameters.",
+        );
+      }
+      return existing.promise;
+    }
+    if (!this.ready || !this.coordinatorInstanceId) {
+      throw new CoordinatorLinkClientError(
+        "COORDINATOR_LINK_UNAVAILABLE",
+        "Coordinator Link has no complete authoritative snapshot.",
+      );
+    }
+    if (this.pendingTasks.size + this.pendingTeamTasks.size >= this.options.config.maxPendingTasks) {
+      throw new CoordinatorLinkClientError(
+        "COORDINATOR_LINK_BACKPRESSURE",
+        "Coordinator Link has reached its pending task limit.",
+      );
+    }
+
+    const now = validDate(this.now());
+    const message = controlLinkTeamTaskRequestV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: this.randomId(),
+      timestamp: now.toISOString(),
+      type: "control.link.team-task-request.v1",
+      payload: {
+        coordinatorInstanceId: this.coordinatorInstanceId,
+        clientId: this.options.config.clientId,
+        controlApiInstanceId: this.options.instanceId,
+        operationId: request.operationId,
+        objective: request.objective,
+        assignment: request.assignment,
+        task: request.task,
+        taskVersion: request.taskVersion,
+        priority: request.priority,
+        actorId: request.authorization.actorId,
+        issuedAt: request.authorization.issuedAt.toISOString(),
+        expiresAt: request.authorization.expiresAt.toISOString(),
+      },
+    });
+    const serialized = JSON.stringify(message);
+    let resolve!: (result: TeamTaskExecution) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<TeamTaskExecution>((resolveValue, rejectValue) => {
+      resolve = resolveValue;
+      reject = rejectValue;
+    });
+    const timer = setTimeout(() => {
+      const pending = this.pendingTeamTasks.get(request.operationId);
+      if (!pending || pending.message.messageId !== message.messageId) return;
+      this.pendingTeamTasks.delete(request.operationId);
+      pending.reject(
+        new CoordinatorLinkClientError(
+          "COORDINATOR_LINK_TASK_TIMEOUT",
+          "Coordinator Link did not return a team task result before the deadline.",
+        ),
+      );
+    }, this.options.config.taskTimeoutMs);
+    const pending: PendingTeamTask = {
+      fingerprint,
+      message,
+      serialized,
+      sent: false,
+      timer,
+      promise,
+      resolve,
+      reject,
+    };
+    this.pendingTeamTasks.set(request.operationId, pending);
+    this.sendPendingTeamTask(pending);
+    return promise;
+  }
+
   async close(): Promise<void> {
     if (this.closing) return;
     this.closing = true;
@@ -403,6 +523,7 @@ export class CoordinatorLinkClient
     this.firstReadyReject = null;
     this.rejectPendingStops(error);
     this.rejectPendingTasks(error);
+    this.rejectPendingTeamTasks(error);
     const socket = this.socket;
     this.socket = null;
     if (socket && socket.readyState !== WebSocket.CLOSED) {
@@ -543,6 +664,9 @@ export class CoordinatorLinkClient
           return;
         case "control.link.task-response.v1":
           this.handleTaskResponse(message);
+          return;
+        case "control.link.team-task-response.v1":
+          this.handleTeamTaskResponse(message);
           return;
       }
     } catch (cause) {
@@ -773,6 +897,33 @@ export class CoordinatorLinkClient
     pending.reject(taskResponseError(message.payload.errorCode));
   }
 
+  private handleTeamTaskResponse(message: ControlLinkTeamTaskResponseV1): void {
+    this.assertAuthenticatedIdentity(message.payload.coordinatorInstanceId);
+    const pending = this.pendingTeamTasks.get(message.payload.operationId);
+    if (!pending) return;
+    if (
+      message.payload.requestMessageId !== pending.message.messageId ||
+      message.payload.objectiveId !== pending.message.payload.objective.objectiveId ||
+      message.payload.taskId !== pending.message.payload.assignment.taskId
+    ) {
+      throw new CoordinatorLinkClientError(
+        "COORDINATOR_LINK_IDENTITY_MISMATCH",
+        "Coordinator Link team task response identity does not match its request.",
+      );
+    }
+    clearTimeout(pending.timer);
+    this.pendingTeamTasks.delete(message.payload.operationId);
+    if (message.ok) {
+      pending.resolve({
+        plannerRequestId: message.payload.plannerRequestId,
+        assignment: structuredClone(message.payload.assignment),
+        execution: structuredClone(message.payload.execution),
+      });
+      return;
+    }
+    pending.reject(teamTaskResponseError(message.payload.errorCode));
+  }
+
   private retireStop(pending: PendingStop): void {
     const nowMs = validDate(this.now()).getTime();
     this.pruneRetiredStops(nowMs);
@@ -853,12 +1004,28 @@ export class CoordinatorLinkClient
     }
   }
 
+  private sendPendingTeamTask(pending: PendingTeamTask): void {
+    const socket = this.socket;
+    if (!this.ready || !socket || socket.readyState !== WebSocket.OPEN) return;
+    try {
+      this.sendSerialized(socket, pending.serialized);
+      pending.sent = true;
+    } catch {
+      this.failedSockets.add(socket);
+      this.invalidateSession();
+      socket.close(1013, "backpressure");
+    }
+  }
+
   private flushPending(): void {
     for (const pending of this.pendingStops.values()) {
       if (!pending.sent) this.sendPending(pending);
     }
     for (const pending of this.pendingTasks.values()) {
       if (!pending.sent) this.sendPendingTask(pending);
+    }
+    for (const pending of this.pendingTeamTasks.values()) {
+      if (!pending.sent) this.sendPendingTeamTask(pending);
     }
   }
 
@@ -956,6 +1123,7 @@ export class CoordinatorLinkClient
     this.clearLivenessTimer();
     for (const pending of this.pendingStops.values()) pending.sent = false;
     for (const pending of this.pendingTasks.values()) pending.sent = false;
+    for (const pending of this.pendingTeamTasks.values()) pending.sent = false;
     this.markUnavailable();
   }
 
@@ -987,6 +1155,16 @@ export class CoordinatorLinkClient
       this.pendingTasks.delete(operationId);
       pending.reject(error);
     }
+    for (const [operationId, pending] of this.pendingTeamTasks) {
+      if (
+        pending.message.payload.coordinatorInstanceId === coordinatorInstanceId
+      ) {
+        continue;
+      }
+      clearTimeout(pending.timer);
+      this.pendingTeamTasks.delete(operationId);
+      pending.reject(error);
+    }
   }
 
   private permanentFailure(error: CoordinatorLinkClientError): void {
@@ -998,6 +1176,7 @@ export class CoordinatorLinkClient
     this.firstReadyReject = null;
     this.rejectPendingStops(error);
     this.rejectPendingTasks(error);
+    this.rejectPendingTeamTasks(error);
   }
 
   private rejectPendingStops(error: Error): void {
@@ -1014,6 +1193,14 @@ export class CoordinatorLinkClient
       pending.reject(error);
     }
     this.pendingTasks.clear();
+  }
+
+  private rejectPendingTeamTasks(error: Error): void {
+    for (const pending of this.pendingTeamTasks.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pendingTeamTasks.clear();
   }
 
   private markUnavailable(): void {
@@ -1149,11 +1336,50 @@ function validateTaskRequest(request: BotTaskRequest): void {
   }
 }
 
+function validateTeamTaskRequest(request: TeamTaskRequest): void {
+  const issuedAt = validDate(request.authorization.issuedAt);
+  const expiresAt = validDate(request.authorization.expiresAt);
+  if (
+    request.objective.objectiveId !== request.assignment.objectiveId ||
+    request.task.trim().length < 1 ||
+    request.task.length > 10_000 ||
+    !Number.isSafeInteger(request.taskVersion) ||
+    request.taskVersion < 0 ||
+    !Number.isSafeInteger(request.priority) ||
+    request.priority < 0 ||
+    request.priority > 100 ||
+    !request.authorization.permissions.has("task.execute") ||
+    request.authorization.permissions.size !== 1 ||
+    expiresAt.getTime() <= issuedAt.getTime() ||
+    expiresAt.getTime() - issuedAt.getTime() > 2 * 60_000
+  ) {
+    throw new CoordinatorTeamTaskError(
+      "REQUEST_INVALID",
+      "Coordinator Link rejected an invalid team task execution contract.",
+    );
+  }
+}
+
 function taskFingerprint(request: BotTaskRequest): string {
   return JSON.stringify({
     operationId: request.operationId,
     botId: request.botId,
     taskId: request.taskId,
+    task: request.task,
+    taskVersion: request.taskVersion,
+    priority: request.priority,
+    actorId: request.authorization.actorId,
+    permissions: [...request.authorization.permissions].sort(),
+    issuedAt: request.authorization.issuedAt.toISOString(),
+    expiresAt: request.authorization.expiresAt.toISOString(),
+  });
+}
+
+function teamTaskFingerprint(request: TeamTaskRequest): string {
+  return JSON.stringify({
+    operationId: request.operationId,
+    objective: request.objective,
+    assignment: request.assignment,
     task: request.task,
     taskVersion: request.taskVersion,
     priority: request.priority,
@@ -1206,6 +1432,15 @@ function taskResponseError(
   return new CoordinatorTaskError(
     code,
     "Coordinator rejected or could not complete the task operation.",
+  );
+}
+
+function teamTaskResponseError(
+  code: ControlLinkTeamTaskErrorCode,
+): CoordinatorTeamTaskError {
+  return new CoordinatorTeamTaskError(
+    code,
+    "Coordinator rejected or could not complete the team task operation.",
   );
 }
 

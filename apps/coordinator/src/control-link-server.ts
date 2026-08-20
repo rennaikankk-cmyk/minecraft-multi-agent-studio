@@ -22,6 +22,7 @@ import {
   controlLinkSnapshotItemV1Schema,
   controlLinkStateUpsertV1Schema,
   controlLinkStopResponseV1Schema,
+  controlLinkTeamTaskResponseV1Schema,
   controlLinkTaskResponseV1Schema,
   parseControlLinkClientMessage,
   type ControlLinkAuthenticateV1,
@@ -32,6 +33,8 @@ import {
   type ControlLinkStopRequestV1,
   type ControlLinkTaskErrorCode,
   type ControlLinkTaskRequestV1,
+  type ControlLinkTeamTaskErrorCode,
+  type ControlLinkTeamTaskRequestV1,
   type PublicBotDetailV1,
 } from "@minecraft-studio/protocol";
 import { WebSocket, WebSocketServer } from "ws";
@@ -54,6 +57,11 @@ import {
   SkillInvocationControllerError,
   type SkillInvocationGrant,
 } from "./skill-invocation-controller.js";
+import {
+  TeamCoordinatorError,
+  type TeamCoordinator,
+  type TeamTaskAssignment,
+} from "./team-coordinator.js";
 
 const HANDSHAKE_TIMEOUT_MS = 5_000;
 const STOP_TIMEOUT_MS = 15_000;
@@ -82,6 +90,7 @@ export type ControlLinkServerOptions = Readonly<{
       grant: SkillInvocationGrant,
     ): CoordinatorAIExecutionHandle;
   }>;
+  teamCoordinator?: Pick<TeamCoordinator, "createObjective" | "assignTask" | "releaseTask">;
   logger: AppLogger;
   now?: () => Date;
   randomId?: () => string;
@@ -132,6 +141,13 @@ type PendingTask = {
   handle: CoordinatorAIExecutionHandle | null;
 };
 
+type PendingTeamTask = {
+  fingerprint: string;
+  request: ControlLinkTeamTaskRequestV1;
+  responders: Map<string, TaskResponder>;
+  handle: CoordinatorAIExecutionHandle | null;
+};
+
 export class ControlLinkServer {
   private readonly now: () => Date;
   private readonly randomId: () => string;
@@ -141,6 +157,7 @@ export class ControlLinkServer {
   private readonly activeSessions = new Map<string, ControlSession>();
   private readonly pendingStops = new Map<string, PendingStop>();
   private readonly pendingTasks = new Map<string, PendingTask>();
+  private readonly pendingTeamTasks = new Map<string, PendingTeamTask>();
   private readonly httpServer: HttpServer;
   private readonly webSocketServer: WebSocketServer;
   private readonly unsubscribeRegistry: () => void;
@@ -312,7 +329,11 @@ export class ControlLinkServer {
     for (const pending of this.pendingTasks.values()) {
       pending.handle?.cancel("control_link_stopped");
     }
+    for (const pending of this.pendingTeamTasks.values()) {
+      pending.handle?.cancel("control_link_stopped");
+    }
     this.pendingTasks.clear();
+    this.pendingTeamTasks.clear();
     this.pendingStops.clear();
     const closures = [...this.sessions].map((session) => {
       this.revokeSession(session);
@@ -468,7 +489,11 @@ export class ControlLinkServer {
       this.handleStopRequest(session, message);
       return;
     }
-    this.handleTaskRequest(session, message);
+    if (message.type === "control.link.task-request.v1") {
+      this.handleTaskRequest(session, message);
+      return;
+    }
+    this.handleTeamTaskRequest(session, message);
   }
 
   private authenticate(
@@ -831,6 +856,10 @@ export class ControlLinkServer {
     }
     const operationId = request.payload.operationId;
     const fingerprint = JSON.stringify(request.payload);
+    if (this.pendingTeamTasks.has(operationId)) {
+      this.sendTaskFailure(session, request, "REQUEST_INVALID");
+      return;
+    }
     const existing = this.pendingTasks.get(operationId);
     if (existing) {
       if (existing.fingerprint !== fingerprint) {
@@ -1021,6 +1050,222 @@ export class ControlLinkServer {
     });
   }
 
+  private handleTeamTaskRequest(
+    session: ControlSession,
+    request: ControlLinkTeamTaskRequestV1,
+  ): void {
+    if (session.closing || !session.authenticated || !session.ready) return;
+    if (
+      !this.options.taskExecutor ||
+      !this.options.teamCoordinator ||
+      !session.client?.capabilities.includes("task.execute")
+    ) {
+      this.sendTeamTaskFailure(session, request, "AI_UNAVAILABLE");
+      return;
+    }
+    const operationId = request.payload.operationId;
+    const fingerprint = JSON.stringify(request.payload);
+    if (this.pendingTasks.has(operationId)) {
+      this.sendTeamTaskFailure(session, request, "REQUEST_INVALID");
+      return;
+    }
+    const existing = this.pendingTeamTasks.get(operationId);
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) {
+        this.sendTeamTaskFailure(session, request, "REQUEST_INVALID");
+        return;
+      }
+      if (existing.responders.size >= MAX_RESPONDERS_PER_TASK) {
+        this.sendTeamTaskFailure(session, request, "CONTROL_LINK_BACKPRESSURE");
+        return;
+      }
+      existing.responders.set(request.messageId, {
+        session,
+        requestMessageId: request.messageId,
+      });
+      return;
+    }
+    if (this.pendingTasks.size + this.pendingTeamTasks.size >= this.maxPendingTasks) {
+      this.sendTeamTaskFailure(session, request, "CONTROL_LINK_BACKPRESSURE");
+      return;
+    }
+
+    const now = validNow(this.now());
+    const issuedAt = new Date(request.payload.issuedAt);
+    const expiresAt = new Date(request.payload.expiresAt);
+    if (
+      issuedAt.getTime() > now.getTime() ||
+      expiresAt.getTime() <= now.getTime()
+    ) {
+      this.sendTeamTaskFailure(session, request, "AUTHORIZATION_REJECTED");
+      return;
+    }
+    const pending: PendingTeamTask = {
+      fingerprint,
+      request,
+      responders: new Map([
+        [request.messageId, { session, requestMessageId: request.messageId }],
+      ]),
+      handle: null,
+    };
+    this.pendingTeamTasks.set(operationId, pending);
+    void this.executeTeamTask(pending, now);
+  }
+
+  private async executeTeamTask(
+    pending: PendingTeamTask,
+    requestedAt: Date,
+  ): Promise<void> {
+    const request = pending.request;
+    let assignment: TeamTaskAssignment | null = null;
+    try {
+      const executor = this.options.taskExecutor;
+      const coordinator = this.options.teamCoordinator;
+      if (!executor || !coordinator) {
+        throw new Error("AI team task execution is unavailable.");
+      }
+      coordinator.createObjective(request.payload.objective);
+      assignment = coordinator.assignTask(request.payload.assignment);
+      const handle = executor.requestAndExecute(
+        {
+          botId: assignment.botId,
+          task: request.payload.task,
+          taskId: request.payload.assignment.taskId,
+          taskVersion: request.payload.taskVersion,
+          traceId: request.payload.operationId,
+          priority: request.payload.priority,
+        },
+        {
+          decisionId: request.payload.operationId,
+          actorId: request.payload.actorId,
+          permissions: new Set(["skill.invoke"]),
+          maxRisk: "R1",
+          issuedAt: new Date(request.payload.issuedAt),
+          expiresAt: new Date(request.payload.expiresAt),
+        },
+      );
+      pending.handle = handle;
+      const result = await handle.promise;
+      for (const responder of pending.responders.values()) {
+        this.sendTeamTaskSuccess(responder, request, assignment, handle.requestId, result);
+      }
+      safeLog(this.options.logger, "info", "coordinator_control_link_team_task_result", {
+        traceId: request.payload.operationId,
+        objectiveId: request.payload.objective.objectiveId,
+        taskId: request.payload.assignment.taskId,
+        botId: assignment.botId,
+        role: assignment.role,
+        clientId: request.payload.clientId,
+        plannerRequestId: handle.requestId,
+        action: "type" in result ? "skill_result" : "wait",
+        requestedAt: requestedAt.toISOString(),
+      });
+    } catch (cause) {
+      const errorCode = teamTaskErrorCode(
+        cause,
+        Boolean(this.options.taskExecutor && this.options.teamCoordinator),
+      );
+      for (const responder of pending.responders.values()) {
+        this.sendTeamTaskFailure(
+          responder.session,
+          request,
+          errorCode,
+          responder.requestMessageId,
+        );
+      }
+      safeLog(this.options.logger, "warn", "coordinator_control_link_team_task_failed", {
+        traceId: request.payload.operationId,
+        objectiveId: request.payload.objective.objectiveId,
+        taskId: request.payload.assignment.taskId,
+        botId: assignment?.botId ?? null,
+        clientId: request.payload.clientId,
+        code: errorCode,
+      });
+    } finally {
+      if (assignment) this.options.teamCoordinator?.releaseTask(assignment.taskId);
+      if (this.pendingTeamTasks.get(request.payload.operationId) === pending) {
+        this.pendingTeamTasks.delete(request.payload.operationId);
+      }
+    }
+  }
+
+  private sendTeamTaskSuccess(
+    responder: TaskResponder,
+    request: ControlLinkTeamTaskRequestV1,
+    assignment: TeamTaskAssignment,
+    plannerRequestId: string,
+    result: CoordinatorAIExecutionResult,
+  ): void {
+    if (responder.session.closing) return;
+    let response: ReturnType<typeof controlLinkTeamTaskResponseV1Schema.parse>;
+    try {
+      response = controlLinkTeamTaskResponseV1Schema.parse({
+        schemaVersion: "1.0",
+        messageId: this.randomId(),
+        timestamp: validNow(this.now()).toISOString(),
+        type: "control.link.team-task-response.v1",
+        ok: true,
+        payload: {
+          coordinatorInstanceId: this.options.instanceId,
+          requestMessageId: responder.requestMessageId,
+          operationId: request.payload.operationId,
+          objectiveId: request.payload.objective.objectiveId,
+          taskId: request.payload.assignment.taskId,
+          plannerRequestId,
+          assignment,
+          execution: "type" in result
+            ? { action: "skill_result", result }
+            : {
+                action: "wait",
+                provider: result.provider,
+                model: result.model,
+                reason: result.reason,
+                confidence: result.confidence,
+              },
+        },
+      });
+    } catch {
+      this.closeSession(responder.session, 1011, "team_task_response_invalid");
+      return;
+    }
+    this.sendFrame(responder.session.socket, response, (error) => {
+      if (error) this.closeSession(responder.session, 1013, "team_task_response_failed");
+    });
+  }
+
+  private sendTeamTaskFailure(
+    session: ControlSession,
+    request: ControlLinkTeamTaskRequestV1,
+    errorCode: ControlLinkTeamTaskErrorCode,
+    requestMessageId = request.messageId,
+  ): void {
+    if (session.closing) return;
+    let response: ReturnType<typeof controlLinkTeamTaskResponseV1Schema.parse>;
+    try {
+      response = controlLinkTeamTaskResponseV1Schema.parse({
+        schemaVersion: "1.0",
+        messageId: this.randomId(),
+        timestamp: validNow(this.now()).toISOString(),
+        type: "control.link.team-task-response.v1",
+        ok: false,
+        payload: {
+          coordinatorInstanceId: this.options.instanceId,
+          requestMessageId,
+          operationId: request.payload.operationId,
+          objectiveId: request.payload.objective.objectiveId,
+          taskId: request.payload.assignment.taskId,
+          errorCode,
+        },
+      });
+    } catch {
+      this.closeSession(session, 1011, "team_task_response_invalid");
+      return;
+    }
+    this.sendFrame(session.socket, response, (error) => {
+      if (error) this.closeSession(session, 1013, "team_task_response_failed");
+    });
+  }
+
   private sendStopSuccess(
     responder: StopResponder,
     request: ControlLinkStopRequestV1,
@@ -1088,7 +1333,10 @@ export class ControlLinkServer {
 
   private matchesSession(
     session: ControlSession,
-    request: ControlLinkStopRequestV1 | ControlLinkTaskRequestV1,
+    request:
+      | ControlLinkStopRequestV1
+      | ControlLinkTaskRequestV1
+      | ControlLinkTeamTaskRequestV1,
   ): boolean {
     return (
       request.payload.coordinatorInstanceId === this.options.instanceId &&
@@ -1187,6 +1435,13 @@ export class ControlLinkServer {
       }
     }
     for (const pending of this.pendingTasks.values()) {
+      for (const [requestMessageId, responder] of pending.responders) {
+        if (responder.session === session) {
+          pending.responders.delete(requestMessageId);
+        }
+      }
+    }
+    for (const pending of this.pendingTeamTasks.values()) {
       for (const [requestMessageId, responder] of pending.responders) {
         if (responder.session === session) {
           pending.responders.delete(requestMessageId);
@@ -1357,6 +1612,15 @@ function taskErrorCode(
     return code === "AI_REQUEST_STALE" ? "PROPOSAL_STALE" : "TASK_TIMEOUT";
   }
   return "TASK_EXECUTION_FAILED";
+}
+
+function teamTaskErrorCode(
+  cause: unknown,
+  executorAvailable: boolean,
+): ControlLinkTeamTaskErrorCode {
+  if (!executorAvailable) return "AI_UNAVAILABLE";
+  if (cause instanceof TeamCoordinatorError) return cause.code;
+  return taskErrorCode(cause, true);
 }
 
 function boundedInteger(

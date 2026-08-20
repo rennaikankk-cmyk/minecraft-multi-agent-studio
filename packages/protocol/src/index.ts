@@ -20,6 +20,8 @@ export {
   controlApiPermissionSchema,
   executeBotTaskHttpRequestV1Schema,
   executeBotTaskHttpResponseV1Schema,
+  executeTeamTaskHttpRequestV1Schema,
+  executeTeamTaskHttpResponseV1Schema,
   publicBotDetailV1Schema,
   publicBotSummaryV1Schema,
   stopBotHttpRequestV1Schema,
@@ -33,11 +35,27 @@ export {
   type ControlApiPermission,
   type ExecuteBotTaskHttpRequestV1,
   type ExecuteBotTaskHttpResponseV1,
+  type ExecuteTeamTaskHttpRequestV1,
+  type ExecuteTeamTaskHttpResponseV1,
   type PublicBotDetailV1,
   type PublicBotSummaryV1,
   type StopBotHttpRequestV1,
   type StopBotHttpResponseV1,
 } from "./control-api.js";
+
+export {
+  TEAM_ROLES,
+  teamObjectiveInputV1Schema,
+  teamResourceClaimV1Schema,
+  teamRoleSchema,
+  teamTaskAssignmentInputV1Schema,
+  teamTaskAssignmentV1Schema,
+  type TeamObjectiveInputV1,
+  type TeamResourceClaimV1,
+  type TeamRole,
+  type TeamTaskAssignmentInputV1,
+  type TeamTaskAssignmentV1,
+} from "./team.js";
 
 export {
   dashboardApiErrorCodeSchema,
@@ -153,6 +171,9 @@ export {
   controlLinkTaskErrorCodeSchema,
   controlLinkTaskRequestV1Schema,
   controlLinkTaskResponseV1Schema,
+  controlLinkTeamTaskErrorCodeSchema,
+  controlLinkTeamTaskRequestV1Schema,
+  controlLinkTeamTaskResponseV1Schema,
   parseControlLinkClientMessage,
   parseControlLinkServerMessage,
   type ControlLinkAcceptedV1,
@@ -174,6 +195,9 @@ export {
   type ControlLinkTaskErrorCode,
   type ControlLinkTaskRequestV1,
   type ControlLinkTaskResponseV1,
+  type ControlLinkTeamTaskErrorCode,
+  type ControlLinkTeamTaskRequestV1,
+  type ControlLinkTeamTaskResponseV1,
 } from "./control-link.js";
 
 export {

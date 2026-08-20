@@ -20,6 +20,8 @@ import {
   controlApiErrorV1Schema,
   executeBotTaskHttpRequestV1Schema,
   executeBotTaskHttpResponseV1Schema,
+  executeTeamTaskHttpRequestV1Schema,
+  executeTeamTaskHttpResponseV1Schema,
   stopBotHttpRequestV1Schema,
   stopBotHttpResponseV1Schema,
   type ControlApiErrorCode,
@@ -43,9 +45,11 @@ import {
   type BotStateSource,
   type BotTaskRequester,
   type BotStopRequester,
+  type TeamTaskRequester,
 } from "./bot-state-source.js";
 import {
   CoordinatorLinkClientError,
+  CoordinatorTeamTaskError,
   CoordinatorTaskError,
 } from "./coordinator-link-client.js";
 import { toPublicBotDetail, toPublicBotSummary } from "./public-view.js";
@@ -71,6 +75,7 @@ export type ControlApiServerOptions = Readonly<{
   registry: BotRegistry | BotStateSource;
   stopController?: BotStopRequester;
   taskController?: BotTaskRequester;
+  teamTaskController?: TeamTaskRequester;
   principals: readonly ApiPrincipalConfig[];
   logger: ControlApiLogger;
   requestLimitPerMinute?: number;
@@ -444,6 +449,32 @@ export class ControlApiServer {
       return;
     }
 
+    if (url.pathname === "/v1/team/tasks/execute") {
+      if (request.method !== "POST") {
+        this.writeError(
+          response,
+          405,
+          requestId,
+          "METHOD_NOT_ALLOWED",
+          "This endpoint only accepts POST.",
+          { Allow: "POST" },
+        );
+        return;
+      }
+      if (!principal.permissions.has("task.execute")) {
+        this.writeError(
+          response,
+          403,
+          requestId,
+          "PERMISSION_DENIED",
+          "Task execute permission is required.",
+        );
+        return;
+      }
+      await this.handleTeamTaskRequest(request, response, requestId, now, principal);
+      return;
+    }
+
     const detailMatch = /^\/v1\/bots\/([^/]+)$/u.exec(url.pathname);
     if (!detailMatch) {
       this.writeError(response, 404, requestId, "ROUTE_NOT_FOUND", "API route was not found.");
@@ -753,6 +784,154 @@ export class ControlApiServer {
       return;
     }
     this.writeError(response, 409, requestId, "TASK_REJECTED", "Task execution was rejected.");
+  }
+
+  private async handleTeamTaskRequest(
+    request: IncomingMessage,
+    response: ServerResponse,
+    responseRequestId: string,
+    now: Date,
+    principal: ApiPrincipal,
+  ): Promise<void> {
+    if (!this.stateSource.isReady() || !this.options.teamTaskController) {
+      this.writeControlUnavailable(response, responseRequestId);
+      return;
+    }
+    const contentType = request.headers["content-type"]
+      ?.split(";", 1)[0]
+      ?.trim()
+      .toLowerCase();
+    if (contentType !== "application/json") {
+      this.writeError(
+        response,
+        400,
+        responseRequestId,
+        "INVALID_REQUEST",
+        "A JSON request body is required.",
+      );
+      return;
+    }
+    let input: unknown;
+    try {
+      input = await readLimitedJson(request, 32_768);
+    } catch {
+      this.writeError(
+        response,
+        400,
+        responseRequestId,
+        "INVALID_REQUEST",
+        "The team task request body is invalid.",
+      );
+      return;
+    }
+    const parsed = executeTeamTaskHttpRequestV1Schema.safeParse(input);
+    if (!parsed.success) {
+      this.writeError(
+        response,
+        400,
+        responseRequestId,
+        "INVALID_REQUEST",
+        "The team task request body is invalid.",
+      );
+      return;
+    }
+    if (!this.stateSource.isReady()) {
+      this.writeControlUnavailable(response, responseRequestId);
+      return;
+    }
+    this.options.logger.info("control_api_team_task_requested", {
+      traceId: parsed.data.requestId,
+      objectiveId: parsed.data.objective.objectiveId,
+      taskId: parsed.data.assignment.taskId,
+      botId: null,
+      skillId: null,
+      modelName: null,
+      taskVersion: parsed.data.taskVersion,
+      maxBots: parsed.data.objective.maxBots,
+    });
+    try {
+      const result = await this.options.teamTaskController.requestTeamTask({
+        operationId: parsed.data.requestId,
+        objective: parsed.data.objective,
+        assignment: parsed.data.assignment,
+        task: parsed.data.task,
+        taskVersion: parsed.data.taskVersion,
+        priority: parsed.data.priority,
+        authorization: {
+          actorId: principal.subject,
+          permissions: new Set(["task.execute"]),
+          issuedAt: now,
+          expiresAt: new Date(now.getTime() + 110_000),
+        },
+      });
+      const body = executeTeamTaskHttpResponseV1Schema.parse({
+        schemaVersion: "1.0",
+        requestId: responseRequestId,
+        data: {
+          objectiveId: parsed.data.objective.objectiveId,
+          taskId: parsed.data.assignment.taskId,
+          operationId: parsed.data.requestId,
+          plannerRequestId: result.plannerRequestId,
+          assignment: result.assignment,
+          ...result.execution,
+        },
+      });
+      this.writeJson(response, 200, body);
+    } catch (cause) {
+      this.writeTeamTaskError(
+        response,
+        responseRequestId,
+        parsed.data.requestId,
+        parsed.data.objective.objectiveId,
+        parsed.data.assignment.taskId,
+        cause,
+      );
+    }
+  }
+
+  private writeTeamTaskError(
+    response: ServerResponse,
+    requestId: string,
+    traceId: string,
+    objectiveId: string,
+    taskId: string,
+    cause: unknown,
+  ): void {
+    const code = cause instanceof CoordinatorTeamTaskError
+      ? cause.code
+      : cause instanceof CoordinatorLinkClientError
+        ? cause.code
+        : "TASK_EXECUTION_FAILED";
+    this.options.logger.warn("control_api_team_task_failed", {
+      traceId,
+      objectiveId,
+      taskId,
+      botId: null,
+      skillId: null,
+      modelName: null,
+      code,
+    });
+    if (
+      cause instanceof CoordinatorLinkClientError &&
+      cause.code !== "COORDINATOR_LINK_TASK_TIMEOUT" &&
+      cause.code !== "COORDINATOR_LINK_TASK_REJECTED"
+    ) {
+      this.writeControlUnavailable(response, requestId);
+      return;
+    }
+    if (code === "AI_UNAVAILABLE") {
+      this.writeError(response, 503, requestId, "AI_UNAVAILABLE", "AI planning is unavailable.");
+      return;
+    }
+    if (code === "AUTHORIZATION_REJECTED") {
+      this.writeError(response, 403, requestId, "PERMISSION_DENIED", "Task authorization was rejected.");
+      return;
+    }
+    if (code === "TASK_TIMEOUT" || code === "COORDINATOR_LINK_TASK_TIMEOUT") {
+      this.writeError(response, 504, requestId, "TASK_TIMEOUT", "Team task execution timed out.");
+      return;
+    }
+    this.writeError(response, 409, requestId, "TASK_REJECTED", "Team task execution was rejected.");
   }
 
   private writeStopError(
