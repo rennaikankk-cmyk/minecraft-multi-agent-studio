@@ -19,6 +19,12 @@ export {
 } from "./compact-context.js";
 export { buildPrefixCachePrompt, type PrefixCachePromptInput } from "./prompt.js";
 export { parseStructuredOutput } from "./structured-output.js";
+export {
+  aiSkillDecisionJsonSchema,
+  aiSkillDecisionSchema,
+  type AISkillDecision,
+  type JSONValue,
+} from "./decision.js";
 export { loadAISchedulerConfig } from "./config.js";
 export {
   OpenAICompatibleProvider,

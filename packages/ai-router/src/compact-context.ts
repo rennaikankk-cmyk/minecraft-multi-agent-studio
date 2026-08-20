@@ -10,7 +10,7 @@ export const compactBotContextSchema = z
   .object({
     botId: z.string().min(1).max(128),
     currentTask: z.string().max(1_024).nullable(),
-    health: z.number().min(0).max(20),
+    health: z.number().min(0).max(2_048),
     food: z.number().min(0).max(20),
     position: positionSchema,
     dimension: z.string().min(1).max(128),

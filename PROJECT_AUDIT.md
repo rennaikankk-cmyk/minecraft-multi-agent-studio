@@ -4,14 +4,14 @@ Audit date: 2026-08-20
 
 Repository: `rennaikankk-cmyk/minecraft-multi-agent-studio` (private)
 
-Audited base: `ee88c77` on `main`; active implementation branch includes `40beb91`
+Audited base: `ee88c77` on `main`; active implementation branch includes `40beb91`, `81faeaf`, and the current Coordinator AI slice
 Conclusion: **healthy engineering foundation, not yet a complete multi-agent Minecraft product**
 
 ## Executive assessment
 
-The repository is real, buildable, and unusually strong in safety boundaries, protocol validation, authenticated control links, cancellation, task persistence primitives, and honest “not connected” UI states. It is not a pile of fake tests. However, most of the user-facing multi-agent/AI/gameplay goal remains disconnected: the production Coordinator does not yet use the AI scheduler, the task API/dashboard are absent, only seven foundational skills exist, PvP/Fabric/memory are design-only, and the current direct Bot AI loop is an unsafe scaffold that never executes a skill.
+The repository is real, buildable, and unusually strong in safety boundaries, protocol validation, authenticated control links, cancellation, task persistence primitives, and honest “not connected” UI states. It is not a pile of fake tests. The Coordinator now has a tested high-level AI planning component with strict output and live state/catalog validation, and the unsafe direct Bot model path has been removed. However, most of the user-facing multi-agent/gameplay goal remains disconnected: production startup and task/control APIs do not yet invoke the planner, only seven foundational skills exist, and PvP/Fabric/memory remain design-only.
 
-Estimated completion toward the full U9-controller + Spark-inference target: **40%**.
+Estimated completion toward the full U9-controller + Spark-inference target: **43%**.
 
 This percentage is weighted by production outcomes, not lines of code:
 
@@ -19,13 +19,13 @@ This percentage is weighted by production outcomes, not lines of code:
 |---|---:|---:|---:|
 | Safe Runtime/control foundation | 15% | 90% | 13.5% |
 | Task persistence/worker foundation | 10% | 65% | 6.5% |
-| AI Provider/Router/Scheduler | 15% | 55% | 8.3% |
+| AI Provider/Router/Scheduler | 15% | 70% | 10.5% |
 | L0 + practical skill library | 20% | 25% | 5.0% |
-| Multi-Bot Coordinator | 10% | 20% | 2.0% |
+| Multi-Bot Coordinator | 10% | 25% | 2.5% |
 | Version/Fabric adapter layer | 10% | 30% | 3.0% |
 | Dashboard/AI metrics/benchmark | 10% | 15% | 1.5% |
 | U9/Spark deployment profiles and inference | 10% | 5% | 0.5% |
-| **Total** | **100%** | — | **40.3%** |
+| **Total** | **100%** | — | **43.0%** |
 
 The foundation alone is much further along than 40%; the number is lower because the requested final scope includes real gameplay skills, multi-bot planning, inference deployment, metrics, benchmarks, Fabric fallback, and dual-host operations.
 
@@ -42,7 +42,7 @@ The foundation alone is much further along than 40%; the number is lower because
 | Source size | about 28,632 TS/TSX lines |
 | Test size | about 17,536 test lines across 67 current test files |
 | Typecheck | PASS with Node 22 |
-| Unit/integration tests | **381 passed, 23 environment-gated skipped** |
+| Unit/integration tests | **389 passed, 23 environment-gated skipped** |
 | Production build | PASS |
 | Runtime Link two-process acceptance | PASS; `minecraftConnected=false` |
 | Four-process acceptance | PASS; Dashboard → Control API → Coordinator → fixture Runtime, final offline |
@@ -68,7 +68,8 @@ Task Worker
   -> BullMQ / Redis
   -> PostgreSQL task repository + outbox
 
-AI package (implemented but not production-wired)
+Coordinator AI planner (implemented component, not startup/API-wired)
+  -> validates live Bot status/task version/compatible skill catalog
   -> AIRequestScheduler
   -> AIRouter
   -> OpenAI-compatible Provider / Mock Provider
@@ -83,8 +84,8 @@ The required final ownership split is not implemented as deployment profiles yet
 
 | Module | Real implementation | Missing / limitation |
 |---|---|---|
-| `apps/bot-runtime` | Mineflayer client, strict isolated `ServerProfile`, telemetry, reconnect, authenticated Runtime Link, L0 actions, SkillExecutor, process supervisor | direct `AIRuntimeLoop` violates the documented Bot Runtime boundary, calls model API directly, parses arbitrary JSON, and only logs `Would execute`; real danger scenarios and multi-Bot Minecraft load not run |
-| `apps/coordinator` | Bot registry, stale/sequence protection, Runtime Link, Control Link, stop authorization/audit, expired lease recovery component | no production task assignment/resource allocation/roles/team memory; no AI scheduler lifecycle or planner; most control state is in memory |
+| `apps/bot-runtime` | Mineflayer client, strict isolated `ServerProfile`, telemetry, reconnect, authenticated Runtime Link, L0 actions, SkillExecutor, process supervisor; no model dependency or call path | real danger scenarios and multi-Bot Minecraft load not run; authenticated skill invocation transport is not implemented |
+| `apps/coordinator` | Bot registry, stale/sequence protection, Runtime Link, Control Link, stop authorization/audit, expired lease recovery, tested AI planning component with catalog/state/task validation | production startup/task API does not instantiate the planner; no proposal-to-authorization policy bridge, task assignment/resource allocation/roles/team memory; most control state is in memory |
 | `apps/task-worker` | strict config and isolated handler profile; real BullMQ worker primitives | no production gameplay handler catalog or controller startup profile |
 | `apps/control-api` | authenticated HTTP/WebSocket Bot state and stop endpoints, rate/connection limits, fail-closed Coordinator mirror | no task API, AI node metrics API, audit query API, user/role system, cross-host TLS |
 | `apps/dashboard` | real environment page, Bot list/detail, live stream + polling fallback, safe stop confirmation, explicit failure states | Tasks page is a placeholder; Combat page is static design copy; no AI node, per-Bot AI metrics, benchmark UI, trends, logs, task controls, or role/team view |
@@ -100,7 +101,7 @@ The required final ownership split is not implemented as deployment profiles yet
 | `safety` | deterministic L0 detection/actions for critical health, lava, drowning, falling, low health, stuck, inventory, hunger | simple stuck recovery only; no corner/door/fence/vertical/swim/dig/place recovery graph; no real hazard matrix this audit |
 | `skills` | strict registry/executor/auth/capability boundary and seven skills: move, collect, craft, place, equip, container transfer, smelt | survival suite, food/heal/sleep, farming/fishing, fuel/tool progression, storage accounting/sorting, PvE/PvP, building blueprints, advanced unstuck all missing |
 | `task-system` | schemas/state machine/PostgreSQL/BullMQ/outbox/leases/idempotency/cancellation/recovery | production Coordinator/API/Worker wiring incomplete; current local run skipped external services |
-| `ai-router` | Provider abstraction, OpenAI-compatible and mock providers, structured validation/repair/fallback, compact context, prefix-cache prompt layout, priority scheduler with concurrency/queue/backpressure/timeout/retry/cancel/per-Bot limit/stale protection; 29 dedicated tests | no Coordinator service integration, no policy/state validator bridge, no persistent request logs/metrics, no real Spark API test yet, no benchmark commands yet |
+| `ai-router` | Provider abstraction, OpenAI-compatible and mock providers, strict `execute_skill \| wait` decision contract, structured validation/repair/fallback, compact context, prefix-cache prompt layout, priority scheduler with concurrency/queue/backpressure/timeout/retry/cancel/per-Bot limit/stale protection; 32 dedicated tests | no persistent request logs/metrics, no real Spark API test yet, no benchmark commands yet |
 
 ## What is genuinely runnable
 
@@ -117,7 +118,8 @@ The required final ownership split is not implemented as deployment profiles yet
 
 | Item | Reality |
 |---|---|
-| Direct local AI Bot | **broken/unsafe scaffold**: model call is inside Bot Runtime, no scheduler, weak JSON parse, execution is TODO/log only |
+| Direct local AI Bot | **removed and fail-closed**: legacy files were deleted and `start-ai-bot.sh` exits with status 2; AI planning is Coordinator-owned |
+| Coordinator AI planning | real tested component that returns catalog-bound proposals; production startup/API/policy/execution transport remain unconnected |
 | Tasks dashboard | explicit “backend not connected” page |
 | Combat dashboard | static six-role design cards; no runtime data |
 | Production multi-agent Coordinator | interfaces/control registry exist; task assignment/team/resource algorithms do not |
@@ -161,7 +163,7 @@ Gaps:
 - No explicit `ServerVersionDetector`, `ProtocolCapabilityRegistry`, and `SkillCapabilityRegistry` service boundary; equivalent facts are split across Runtime and skills.
 - No protocol adapter interface for future packet overrides/Fabric/real-client bridges.
 - Isolated Minecraft automation is PowerShell/Windows-centric.
-- Two shell scripts still hard-code a local vLLM URL/model and launch the unsafe Bot AI scaffold.
+- The sole retained legacy AI start script is a fail-closed migration notice; deployable U9/Spark role scripts do not exist yet.
 - No `profiles/dev-spark`, `profiles/controller-u9`, `profiles/inference-spark` composition yet.
 - U9 Windows path/process/native dependency validation must wait for hardware.
 
@@ -169,9 +171,9 @@ Gaps:
 
 ### P0/P1 blockers
 
-1. Remove the direct model call from Bot Runtime; AI must live behind the Coordinator-owned scheduler/router.
-2. Connect validated AI decisions to `Schema -> Policy -> State -> Skill authorization`, never directly to Mineflayer or `SkillExecutor` without trusted authorization.
-3. Add Scheduler/AI request protocol and lifecycle integration so each Bot state update invalidates old planning.
+1. Wire the Coordinator-owned planner into production startup and task/control APIs.
+2. Connect validated AI proposals to `Schema -> Policy -> State -> Skill authorization`, never directly to Mineflayer or `SkillExecutor` without trusted authorization.
+3. Add an authenticated skill invocation/result protocol between Coordinator and Bot Runtime.
 4. Add task API and production Coordinator/Worker composition; otherwise task persistence is isolated infrastructure.
 5. Add Linux-safe isolated Minecraft runner before claiming Spark-hosted real scenarios.
 
@@ -187,13 +189,13 @@ Gaps:
 ### Documentation debt
 
 - `PROJECT_AUDIT.md` was a stale 2026-07-19 “source missing” snapshot and has now been replaced.
-- `AI-BOT-GUIDE.md` describes Qwen2.5 and an unsafe direct Bot AI loop; it must be replaced, not trusted operationally.
+- `AI-BOT-GUIDE.md` now documents the safe boundary and remaining blockers.
 - `ROADMAP.md` predates the new scheduler and understates the seven-skill count.
 - Missing root deliverables: `README.md`, `DEPLOYMENT.md`, `SPARK_SETUP.md`, `U9_SETUP.md`, `AI_ARCHITECTURE.md`, `AI_BENCHMARK.md`, `TESTING.md`, and root `TROUBLESHOOTING.md`.
 
 ## Recommended next implementation sequence
 
-1. **Coordinator AI planning service:** own `AIRequestScheduler`, consume compact Bot facts, invalidate on state/task version changes, validate structured decisions, and emit only trusted skill proposals.
+1. **Production AI lifecycle:** instantiate the Coordinator planner, expose a task-owned request path, and add the policy/authorization/invocation bridge.
 2. **AI observability + benchmark:** health/test/benchmark commands, Spark metrics collector, JSON/Markdown output, concurrency recommendation.
 3. **Dual-role profiles:** controller U9 and inference Spark, with a development profile that does not change core code.
 4. **Task API/Worker composition:** turn existing persistence primitives into a runnable controller loop.
@@ -206,12 +208,12 @@ Gaps:
 ```text
 Build: PASS
 Typecheck: PASS
-Offline tests: PASS (381 passed, 23 environment-gated skipped)
+Offline tests: PASS (389 passed, 23 environment-gated skipped)
 Runtime Link acceptance: PASS (no Minecraft)
 Four-process acceptance: PASS (fixture Runtime, no Minecraft)
 Dashboard E2E: PASS with system Chrome (11/11)
 Real Minecraft: NOT RUN
 Real PostgreSQL/Redis: NOT RUN locally
-AI production loop: BLOCKED by missing Coordinator integration
-Overall completion: 40%
+AI production loop: PARTIAL; Coordinator planner exists, startup/API/authorization transport missing
+Overall completion: 43%
 ```

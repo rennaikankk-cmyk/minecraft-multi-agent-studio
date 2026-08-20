@@ -60,3 +60,13 @@ export {
   type ExpiredLeaseRecoveryRepository,
   type ExpiredLeaseRecoveryResult,
 } from "./expired-lease-recovery.js";
+
+export {
+  CoordinatorAIPlanner,
+  CoordinatorAIPlanningError,
+  type CoordinatorAIPlannerOptions,
+  type CoordinatorAIPlanningErrorCode,
+  type CoordinatorPlanHandle,
+  type CoordinatorPlanProposal,
+  type CoordinatorPlanRequest,
+} from "./ai-planner.js";
