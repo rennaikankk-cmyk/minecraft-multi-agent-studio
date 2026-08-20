@@ -31,6 +31,9 @@ Dashboard -> Control API -> Coordinator -> AI Scheduler/Router -> Spark vLLM
 - U9 world memory uses immutable PostgreSQL/pgvector facts with mandatory
   server/dimension/coordinates, ACL filtering before cosine search, and a
   model-safe planner context that excludes base/storage/player coordinates.
+- Authorized read-only Scout scans and storage read-back results are projected
+  deterministically into that memory; model output never receives a database
+  write capability.
 
 ## Quick validation
 

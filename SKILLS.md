@@ -6,7 +6,7 @@
 
 - Skill ID 后的 SemVer 表示技能输入、输出和行为契约，不表示 Minecraft 服务器版本。
 - 每个 Skill 另有有序 `compatibility.variants`。Runtime 只使用连接后真实协商出的版本/协议，以及当前 registry 的 feature、物品、方块、实体和显式服务端能力探针解析变体；不以 `minVersion/maxVersion` 一刀切。
-- 默认目录包含 16 个 Skill；隔离 PvP 白名单启用后为 17 个。睡眠、农作物、钓鱼依据真实 registry 检查资源，PvP 依据显式服务端能力，其余声明 `portable` 变体。跨版本真实场景矩阵尚未执行，所以目录仍上报 `verification=unverified`，不冒充实机已验证。
+- 默认目录包含 17 个 Skill；隔离 PvP 白名单启用后为 18 个。睡眠、农作物、钓鱼依据真实 registry 检查资源，PvP 依据显式服务端能力，其余声明 `portable` 变体。跨版本真实场景矩阵尚未执行，所以目录仍上报 `verification=unverified`，不冒充实机已验证。
 - 新版本特色 Skill 必须声明它实际依赖的 feature/资源；如果还依赖服务器插件、数据包或规则，则必须等待显式探针。能力为 `unknown` 时 fail-closed，不从版本号猜测。
 - `collect.block`、`craft.item`、`world.place-block` 和 `container.transfer` 当前仍接收目标版本 registry 的原生资源名。兼容变体可以表达旧/新 ID 的替代顺序，但规划器使用的语义资源别名尚未接入。
 
@@ -171,6 +171,42 @@
 
 - 参照方块必须在 4.5 格内且非空气；目标位已被占用报 `PLACE_TARGET_OCCUPIED`。
 - 放置后读回校验，读不到实体方块报 `PLACE_NOT_CONFIRMED`——不伪造成功。
+
+## `scout.scan-blocks@1.0.0`
+
+- 权限：`world.read`
+- 风险：R0（只读）
+- 适配器操作：`scout.scan-blocks-safe`
+- 超时：8 秒
+- 自动重试：最多 2 次，只重试 `SKILL_CAPABILITY_FAILED`
+- 幂等：是（只扫描客户端已经加载的区块，不移动、不加载新区块、不改变世界）
+
+输入：
+
+```json
+{
+  "serverProfileId": "isolated-local",
+  "dimension": "minecraft:overworld",
+  "blockNames": ["diamond_ore", "lava"],
+  "maxDistance": 32,
+  "maxResults": 16
+}
+```
+
+输出包含扫描起点和已读回的 `{blockName, position}` 列表。方块名最多 16 个，半径最多 64 格，结果最多 64 个；Runtime 会先用当前版本 registry 校验名称，再对 `findBlocks` 命中的每个坐标执行 `blockAt` 读回，并按距离、名称、坐标稳定排序。
+
+约束：
+
+- 输入 ServerProfile/维度必须与 Bot 当前权威状态一致；观察值只能包含请求白名单内、授权半径和数量内的真实方块。
+- 扫描不寻路、不挖掘、不放置、不打开容器，也不把未加载区块当成“没有方块”。
+- 完成结果本身不授予数据库写权限。Coordinator 的确定性投影器会再次校验调用/结果身份、权威世界与调用前位置、名称白名单、半径和数量；只有通过校验的事实才能写入 PostgreSQL。
+- 团队可见事实的坐标保存在受 ServerProfile/维度/ACL 硬隔离的记录中，给模型的摘要不含坐标；精确基地、白名单和受限存储信息不进入模型提示词。
+
+当前验证：
+
+- Schema、授权、边界、Runtime 适配器、结果交叉校验和确定性排序单元测试：已完成。
+- 真实 PostgreSQL/pgvector 投影、幂等重放和检索：已完成。
+- 真实隔离 Minecraft 服务器扫描与跨版本矩阵：等待用户批准 EULA、Java 21 和 U9 环境后执行。
 
 ## `container.transfer@1.0.0`
 

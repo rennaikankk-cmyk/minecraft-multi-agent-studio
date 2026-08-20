@@ -187,7 +187,7 @@ ServerProfile 只接受：
 
 每个 Skill 的兼容清单包含有序变体。解析器选择第一个满足全部 feature、资源和服务端能力要求的变体；没有要求的 `portable` 变体可跨适配器支持版本继续使用。解析结果把 `availability` 与 `verification` 分离：可执行并不等于已经在该 Minecraft 版本实机验收。Runtime 在接受技能调用前重新解析并对 `unavailable` 返回稳定的 `SKILL_VERSION_UNAVAILABLE`，同时在连接后和 Runtime Link 重连时发布 `BotSkillCatalogV1`。
 
-当前默认注册 16 个 Skill；只有隔离 ServerProfile 显式启用 PvP 并配置目标白名单时才注册第 17 个 R3 PvP 近战 Skill。13 个通用能力使用 `portable` 变体，睡眠、农作物、钓鱼和 PvP 使用实际 registry/服务端能力要求。跨版本实机场景仍标记为 `unverified`。面向具体物品或方块的输入按当前 registry 的原生名称解释；兼容清单能表达旧/新资源 ID 的有序变体，面向规划器的语义资源别名尚未实现。
+当前默认注册 17 个 Skill；只有隔离 ServerProfile 显式启用 PvP 并配置目标白名单时才注册第 18 个 R3 PvP 近战 Skill。14 个通用能力使用 `portable` 变体，睡眠、农作物、钓鱼和 PvP 使用实际 registry/服务端能力要求。跨版本实机场景仍标记为 `unverified`。面向具体物品或方块的输入按当前 registry 的原生名称解释；兼容清单能表达旧/新 ID 的有序变体，面向规划器的语义资源别名尚未实现。
 
 真实联机验收由 `scripts/run-isolated-minecraft-test.ps1` 编排。脚本只接受预先准备的可信 Java、Minecraft 1.21.8 官方服务端和本地 ServerProfile，启动前校验服务端哈希、用户 EULA 状态、安全属性与端口占用，测试完成后优雅关闭本地服务。运行时世界、日志和本地配置保存在忽略提交的 `runtime-data` 中。
 
@@ -234,7 +234,7 @@ Runtime Link 固定使用 `minecraft-studio.runtime.v1` 子协议、`/v1/runtime
 
 普通检索与语义检索都必须显式给出当前服、当前维度和调用主体。仓储查询先用 `MATERIALIZED` CTE 做同服、维度、ACL、过期、supersede 和模型权限筛选，然后才执行 pgvector cosine distance；没有“先全库向量排序再过滤”的跨服泄漏路径。规划器只接收 `modelAccess=true` 的团队 hazard/landmark/portal/resource/route 摘要，不格式化精确坐标；基地、仓库、玩家活动和 restricted 记录由 Zod 与数据库双重禁止进入模型上下文。状态版本变化会取消尚未入队的记忆查询，数据库失败时 AI 请求不发送。
 
-当前已实现并真实测试持久化、ACL、同服过滤、精确 pgvector 排序、不可变与规划器读取。生产事实写入器、具体 Embedding/Reranker Provider 和非空间任务经验属于下一条记忆增量，不通过下载未知模型来伪造完成。
+当前已实现并真实测试持久化、ACL、同服过滤、精确 pgvector 排序、不可变、规划器读取，以及授权 `scout.scan-blocks`、`storage.account`、`container.transfer` 结果的确定性写入。模型没有数据库写权限；投影器重新校验原调用、Runtime 结果身份、权威 ServerProfile/维度/位置、扫描白名单与半径。具体 Embedding/Reranker Provider、数据库故障后的持久 ingestion outbox/replay 和非空间任务经验属于后续记忆增量，不通过下载未知模型来伪造完成。
 
 ## 9. Control Link、Control API 与实时状态流
 

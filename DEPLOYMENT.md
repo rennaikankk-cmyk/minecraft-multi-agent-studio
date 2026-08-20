@@ -67,6 +67,13 @@ unavailable. The migration is forward-only and creates immutable facts; rollback
 means stopping the Coordinator and returning to the previous reviewed code,
 not deleting the database. Back up the database before future schema changes.
 
+When enabled, the same runtime persists validated `scout.scan-blocks`,
+`storage.account`, and `container.transfer` completions. Monitor
+`coordinator_skill_result_observer_failed`; it means the game action completed
+but its derived memory did not persist. Do not automatically retry a
+non-idempotent Minecraft action to repair memory—schedule a fresh read-only scan
+or account operation until the durable ingestion outbox is implemented.
+
 ## Spark validation
 
 Follow `SPARK_SETUP.md`, then:

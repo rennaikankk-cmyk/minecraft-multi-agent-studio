@@ -10,8 +10,8 @@ This performs package builds, all TypeScript checks, Vitest/Node process tests,
 and production builds. Environment-gated PostgreSQL/Redis and Minecraft cases
 remain visibly skipped unless their explicit guards are present.
 
-The final 2026-08-20 Spark tree passed **471 Vitest cases plus 2 real Node child
-process cases**; 28 external-environment cases remained visibly skipped. The
+The final 2026-08-20 Spark tree passed **480 Vitest cases plus 2 real Node child
+process cases**; 29 external-environment cases remained visibly skipped. The
 production build generated `/ai` and `/api/ai/metrics` successfully.
 
 ## Process and browser acceptance
@@ -64,19 +64,20 @@ pnpm test:task-infra
 The PostgreSQL image/service must provide pgvector 0.8 or newer. The same
 command runs task delivery/recovery first, then a separate disposable schema
 covering immutable memory writes, idempotent replay, ACLs, hard server/dimension
-isolation, cross-server supersede rejection and exact cosine ranking. The CI
+isolation, cross-server supersede rejection, exact cosine ranking and authorized
+Scout-result ingestion. The CI
 service is pinned to the official multi-architecture
 `pgvector/pgvector:0.8.6-pg17-trixie` manifest digest; no floating database tag
 is used.
 
-The 2026-08-20 combined real-infrastructure run passed **25/25** cases: 20 task
-delivery/recovery cases and 5 world-memory/pgvector cases. It used temporary
-ARM64 PostgreSQL 17 + pgvector 0.8.6 and Redis 7.4 containers backed by tmpfs.
+The final 2026-08-20 combined real-infrastructure run passed **26/26** cases: 20
+task delivery/recovery cases and 6 world-memory/pgvector cases. It used temporary
+ARM64 PostgreSQL 17 + pgvector 0.8.6 and Redis 8.8.0 containers backed by tmpfs.
 The exact containers and newly pulled images were removed afterward, both test
 ports were verified closed, and no Docker Volume was created, deleted or
-modified. After hardening custom-schema pgvector resolution, the final migration
-hash and all 5 world-memory cases were rerun successfully in a fresh container;
-that container and image were also removed.
+modified. The sixth memory case traverses the production authorized
+`scout.scan-blocks` projector, verifies PostgreSQL writes, then replays the same
+invocation to prove idempotency.
 
 ## Minecraft
 

@@ -102,6 +102,11 @@ invalid. Every spatial lookup is bound to the authoritative ServerProfile and
 dimension. Exact base/storage locations and restricted player activity are not
 eligible for model context.
 
+With world memory enabled, completed authorized Scout scans and storage
+read-backs are written through the same loopback database. Alert on
+`coordinator_skill_result_observer_failed`; recovery is a fresh read-only scan,
+not replaying a possibly irreversible container transfer.
+
 ## Fail-closed defaults
 
 - No public port forwarding or broad firewall allow rule.

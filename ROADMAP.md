@@ -306,7 +306,8 @@ Entity Snapshot 协议。旧 `pnpm bot:start` 保持回滚可用，affinity 和 
 - [x] 仓储层强制同服/同维度/主体 ACL，先物化过滤候选再做 pgvector cosine 排序；复合外键拒绝跨服 supersede。
 - [x] 规划器异步读取受限上下文，Bot 状态/任务变化会取消；基地、仓库、玩家活动和 restricted 事实禁止进入模型提示。
 - [x] 提供有界 Embedding/Reranker 接口和真实 pgvector 门禁，不自动下载或偷换 embedding 模型。
-- [ ] 接入生产侦察/箱子摘要写入器、选定并实测具体 Embedding/Reranker Provider；任务轨迹与失败经验使用非空间记忆表单独实现。
+- [x] 接入只读 `scout.scan-blocks` 真实区块扫描，以及 `storage.account`/`container.transfer` 授权结果写入器；原调用、Runtime 结果、同服位置和扫描边界必须全部匹配。
+- [ ] 增加数据库/进程同时故障时的持久 ingestion outbox/replay，选定并实测具体 Embedding/Reranker Provider；任务轨迹与失败经验使用非空间记忆表单独实现。
 
 ### P2.2 本地规划
 

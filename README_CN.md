@@ -26,6 +26,7 @@ Dashboard → Control API → Coordinator → AI Scheduler / Router → Spark vL
 - 单 Bot 与团队任务都经过认证、授权和状态校验。
 - Coordinator 支持 1/2/5/10 Bot 的确定性角色/技能匹配、共享目标、Bot/资源租约和冲突预防。
 - U9 世界记忆使用不可变 PostgreSQL/pgvector 事实：空间记录强制携带服务器、维度和坐标，先做同服/ACL 过滤再计算向量距离；基地、仓库和玩家活动坐标禁止进入模型提示。
+- 授权后的只读侦察扫描和箱子读回结果由确定性投影器写入记忆；模型没有数据库写权限，也不能伪造扫描坐标。
 
 ## 本地检查
 

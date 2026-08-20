@@ -41,6 +41,14 @@ distance is evaluated. Facts are immutable and corrected only by a new
 same-world `supersedesMemoryId` record. Operation UUIDs provide idempotent
 writes.
 
+The model has no memory-write API. A completed, authorized
+`scout.scan-blocks`, `storage.account`, or `container.transfer` result is
+independently reparsed by the Coordinator together with the original invocation
+and authoritative Bot world. Only then can the deterministic projector create
+idempotent facts. Scout block names, count, radius, origin and result identity
+must match the authorization; storage facts remain restricted and
+`modelAccess=false`.
+
 Only explicitly team-visible, `modelAccess=true` hazard/landmark/portal/resource
 and route summaries can enter the compact planner context. Base, storage,
 player-activity and restricted facts are rejected by both Zod and SQL checks;
@@ -48,6 +56,11 @@ exact coordinates are not formatted into the model context. Memory lookup is
 cancelled when Bot state/task changes and fails closed before any AI request if
 the configured database is unavailable. Embedding and reranker interfaces are
 bounded; no embedding model is silently downloaded or substituted.
+
+Memory persistence failure after a game action is logged with a stable error and
+does not turn the already completed action into a retryable failure. Durable
+ingestion outbox/replay across a simultaneous database or Coordinator outage is
+still pending.
 
 ## Prefix-cache layout
 
