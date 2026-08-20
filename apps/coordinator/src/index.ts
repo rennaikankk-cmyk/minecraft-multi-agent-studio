@@ -92,6 +92,8 @@ export {
   type CoordinatorPlanHandle,
   type CoordinatorPlanProposal,
   type CoordinatorPlanRequest,
+  type CoordinatorRelevantMemoryProvider,
+  type CoordinatorRelevantMemoryRequest,
 } from "./ai-planner.js";
 
 export {
@@ -123,3 +125,12 @@ export {
   type TeamTaskAssignment,
   type TeamTaskAssignmentInput,
 } from "./team-coordinator.js";
+
+export {
+  CoordinatorWorldMemoryError,
+  createCoordinatorWorldMemoryRuntimeFromEnv,
+  loadCoordinatorWorldMemoryConfig,
+  type CoordinatorWorldMemoryConfig,
+  type CoordinatorWorldMemoryErrorCode,
+  type CoordinatorWorldMemoryRuntime,
+} from "./world-memory-runtime.js";

@@ -48,7 +48,7 @@ jobs:
     timeout-minutes: 10
     services:
       postgres:
-        image: postgres:17.10-alpine3.23@sha256:8189a1f6e40904781fc9e2612687877791d21679866db58b1de996b31fc312e4
+        image: pgvector/pgvector:0.8.6-pg17-trixie@sha256:a74b9af952f5609c090120bf938b0c8bca56c33ed9fb05643fd9fceec52c4a08
         env:
           POSTGRES_DB: studio_tasks
           POSTGRES_USER: studio
@@ -90,5 +90,5 @@ jobs:
           corepack prepare pnpm@11.9.0+sha512.bd682d5d03fe525ef7c9fd6780c6884d1e756ac4c9c9fe00c538782824310dcf90e3ddc4f53835f06dfaebd5085e41855e0bcbb3b60de2ac5bbab89e5036f03b --activate
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
-      - name: Run real isolated PostgreSQL and Redis tests
+      - name: Run real isolated PostgreSQL, pgvector, and Redis tests
         run: pnpm test:task-infra

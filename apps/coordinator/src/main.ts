@@ -19,6 +19,10 @@ import { RuntimeLinkServer } from "./runtime-link-server.js";
 import { InMemorySkillInvocationAuditSink } from "./skill-invocation-controller.js";
 import { InMemoryStopAuditSink, StopController } from "./stop-controller.js";
 import { TeamCoordinator } from "./team-coordinator.js";
+import {
+  CoordinatorWorldMemoryError,
+  createCoordinatorWorldMemoryRuntimeFromEnv,
+} from "./world-memory-runtime.js";
 
 const instanceId = `coordinator-${randomUUID()}`;
 const logger = createStructuredLogger({ service: "coordinator", instanceId });
@@ -39,14 +43,24 @@ async function main(): Promise<void> {
   });
   const teamCoordinator = new TeamCoordinator({ registry });
   const aiPerformance = new BotAiPerformanceTracker();
-  const aiService = createCoordinatorAIServiceFromEnv(registry, {
-    instanceId,
-    transport: runtimeServer,
-    auditSink: new InMemorySkillInvocationAuditSink(),
-    logger,
-    teamStateProvider: (botId) => teamCoordinator.teamStateForBot(botId),
-    onPlanningObservation: (observation) => aiPerformance.record(observation),
-  });
+  const worldMemory = await createCoordinatorWorldMemoryRuntimeFromEnv();
+  let aiService: ReturnType<typeof createCoordinatorAIServiceFromEnv>;
+  try {
+    aiService = createCoordinatorAIServiceFromEnv(registry, {
+      instanceId,
+      transport: runtimeServer,
+      auditSink: new InMemorySkillInvocationAuditSink(),
+      logger,
+      teamStateProvider: (botId) => teamCoordinator.teamStateForBot(botId),
+      ...(worldMemory === null
+        ? {}
+        : { relevantMemoryProvider: worldMemory.relevantMemoryProvider }),
+      onPlanningObservation: (observation) => aiPerformance.record(observation),
+    });
+  } catch (error) {
+    await worldMemory?.close();
+    throw error;
+  }
   const stopController = new StopController({
     instanceId,
     registry,
@@ -98,10 +112,17 @@ async function main(): Promise<void> {
       bindScope: "loopback",
       port: controlAddress.port,
     });
+    logger.info("coordinator_world_memory_status", {
+      enabled: worldMemory !== null,
+    });
   } catch (cause) {
     if (staleTimer) clearInterval(staleTimer);
     aiService?.close();
-    await Promise.allSettled([controlServer.stop(), runtimeServer.stop()]);
+    await Promise.allSettled([
+      controlServer.stop(),
+      runtimeServer.stop(),
+      worldMemory?.close(),
+    ]);
     throw cause;
   }
 
@@ -112,7 +133,11 @@ async function main(): Promise<void> {
     if (staleTimer) clearInterval(staleTimer);
     aiService?.close();
     logger.info("coordinator_stopping", { signal });
-    await Promise.allSettled([controlServer.stop(), runtimeServer.stop()]);
+    await Promise.allSettled([
+      controlServer.stop(),
+      runtimeServer.stop(),
+      worldMemory?.close(),
+    ]);
   };
   process.once("SIGINT", () => void stop("SIGINT"));
   process.once("SIGTERM", () => void stop("SIGTERM"));
@@ -122,7 +147,8 @@ void main().catch((cause: unknown) => {
   const code =
     cause instanceof RuntimeLinkConfigError ||
     cause instanceof ControlLinkConfigError ||
-    cause instanceof CoordinatorAIConfigError
+    cause instanceof CoordinatorAIConfigError ||
+    cause instanceof CoordinatorWorldMemoryError
       ? cause.code
       : "COORDINATOR_START_FAILED";
   logger.error("coordinator_start_failed", { code });

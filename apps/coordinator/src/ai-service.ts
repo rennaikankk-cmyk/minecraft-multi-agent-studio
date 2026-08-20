@@ -17,6 +17,7 @@ import {
   type CoordinatorPlanHandle,
   type CoordinatorPlanProposal,
   type CoordinatorPlanRequest,
+  type CoordinatorRelevantMemoryProvider,
 } from "./ai-planner.js";
 import {
   loadCoordinatorAIServiceConfig,
@@ -36,6 +37,7 @@ export type CoordinatorAIExecutionOptions = Readonly<{
   auditSink: SkillInvocationAuditSink;
   logger: AppLogger;
   teamStateProvider?: (botId: string) => readonly string[];
+  relevantMemoryProvider?: CoordinatorRelevantMemoryProvider;
   onPlanningObservation?: (observation: BotAiPerformanceV1) => void;
 }>;
 
@@ -43,6 +45,7 @@ export type CoordinatorAIServiceOptions = Readonly<{
   registry: BotRegistry;
   provider: AIProvider;
   config: Extract<CoordinatorAIServiceConfig, { enabled: true }>;
+  relevantMemoryProvider?: CoordinatorRelevantMemoryProvider;
   execution?: CoordinatorAIExecutionOptions;
 }>;
 
@@ -72,6 +75,9 @@ export class CoordinatorAIService {
       maxTokens: options.config.maxTokens,
       temperature: options.config.temperature,
       timeoutMs: options.config.timeoutMs,
+      ...(options.relevantMemoryProvider === undefined
+        ? {}
+        : { relevantMemoryProvider: options.relevantMemoryProvider }),
       ...(options.execution?.onPlanningObservation === undefined
         ? {}
         : { onObservation: options.execution.onPlanningObservation }),
@@ -158,6 +164,9 @@ export function createCoordinatorAIServiceFromEnv(
   return new CoordinatorAIService({
     registry,
     config,
+    ...(execution?.relevantMemoryProvider === undefined
+      ? {}
+      : { relevantMemoryProvider: execution.relevantMemoryProvider }),
     ...(execution ? { execution } : {}),
     provider: new OpenAICompatibleProvider({
       name: config.providerName,

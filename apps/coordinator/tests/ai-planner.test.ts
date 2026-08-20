@@ -12,6 +12,7 @@ import {
   BotRegistry,
   CoordinatorAIPlanner,
   CoordinatorAIPlanningError,
+  type CoordinatorRelevantMemoryProvider,
 } from "../src/index.js";
 
 const NOW = new Date("2026-08-20T03:00:00.000Z");
@@ -124,6 +125,7 @@ function createPlanner(
   registry: BotRegistry,
   responder: ConstructorParameters<typeof MockAIProvider>[1],
   onObservation?: (observation: BotAiPerformanceV1) => void,
+  relevantMemoryProvider?: CoordinatorRelevantMemoryProvider,
 ) {
   const router = new AIRouter();
   router.register(new MockAIProvider("spark-mock", responder));
@@ -134,11 +136,118 @@ function createPlanner(
     now: () => NOW,
     randomId: () => "11111111-1111-4111-8111-111111111111",
     ...(onObservation === undefined ? {} : { onObservation }),
+    ...(relevantMemoryProvider === undefined
+      ? {}
+      : { relevantMemoryProvider }),
   });
   return { planner, scheduler };
 }
 
 describe("CoordinatorAIPlanner", () => {
+  it("retrieves memory only for the Bot's current server, dimension, and position", async () => {
+    const registry = readyRegistry();
+    let providerPrompt = "";
+    let memoryRequest: Parameters<CoordinatorRelevantMemoryProvider>[0] | null = null;
+    const { planner } = createPlanner(
+      registry,
+      (request) => {
+        providerPrompt = `${request.systemPrompt ?? ""}\n${request.prompt}`;
+        return response(JSON.stringify({
+          action: "wait",
+          reason: "Use the verified safe route.",
+          confidence: 0.8,
+        }));
+      },
+      undefined,
+      async (request) => {
+        memoryRequest = request;
+        return ["[hazard; confidence=0.90] Lava blocks the eastern tunnel."];
+      },
+    );
+
+    await expect(
+      planner.requestPlan({
+        botId: "worker-01",
+        task: "Find a safe route",
+        taskVersion: 1,
+      }).promise,
+    ).resolves.toMatchObject({ action: "wait" });
+    expect(memoryRequest).toMatchObject({
+      botId: "worker-01",
+      serverProfileId: "isolated-test",
+      dimension: "minecraft:overworld",
+      position: { x: 1, y: 64, z: 2 },
+      taskVersion: 1,
+    });
+    expect(providerPrompt).toContain("Lava blocks the eastern tunnel");
+    planner.close();
+  });
+
+  it("fails closed before contacting AI when memory retrieval fails", async () => {
+    const registry = readyRegistry();
+    let providerCalled = false;
+    const { planner } = createPlanner(
+      registry,
+      () => {
+        providerCalled = true;
+        return response(JSON.stringify({
+          action: "wait",
+          reason: "must not run",
+          confidence: 1,
+        }));
+      },
+      undefined,
+      async () => {
+        throw new Error("database unavailable");
+      },
+    );
+    await expect(
+      planner.requestPlan({
+        botId: "worker-01",
+        task: "Plan with authoritative memory",
+        taskVersion: 1,
+      }).promise,
+    ).rejects.toMatchObject({ code: "MEMORY_LOOKUP_FAILED" });
+    expect(providerCalled).toBe(false);
+    planner.close();
+  });
+
+  it("cancels an unscheduled memory lookup when Bot state advances", async () => {
+    const registry = readyRegistry();
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const { planner } = createPlanner(
+      registry,
+      () => response(JSON.stringify({
+        action: "wait",
+        reason: "must not run",
+        confidence: 1,
+      })),
+      undefined,
+      async ({ signal }) => {
+        markStarted?.();
+        return await new Promise<readonly string[]>((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => reject(new Error("cancelled")),
+            { once: true },
+          );
+        });
+      },
+    );
+    const handle = planner.requestPlan({
+      botId: "worker-01",
+      task: "Slow memory lookup",
+      taskVersion: 1,
+    });
+    await started;
+    registry.ingest(status(3), NOW);
+    await expect(handle.promise).rejects.toMatchObject({ code: "AI_CANCELLED" });
+    planner.close();
+  });
+
   it("returns a catalog-bound proposal without creating execution authorization", async () => {
     const registry = readyRegistry();
     let providerPrompt = "";

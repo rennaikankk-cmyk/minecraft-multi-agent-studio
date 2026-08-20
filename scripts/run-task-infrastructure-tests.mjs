@@ -36,7 +36,7 @@ if (!existsSync(vitestEntry)) {
   process.exit(1);
 }
 
-const result = spawnSync(
+const taskResult = spawnSync(
   process.execPath,
   [
     vitestEntry,
@@ -55,8 +55,37 @@ const result = spawnSync(
   },
 );
 
-if (result.error) {
+if (taskResult.error) {
   console.error("Task infrastructure test runner failed to start.");
   process.exit(1);
 }
-process.exit(result.status ?? 1);
+if (taskResult.status !== 0) {
+  process.exit(taskResult.status ?? 1);
+}
+
+const memoryResult = spawnSync(
+  process.execPath,
+  [
+    vitestEntry,
+    "run",
+    "tests/real-infrastructure.integration.test.ts",
+  ],
+  {
+    cwd: path.join(repositoryRoot, "packages", "world-memory"),
+    env: {
+      ...process.env,
+      RUN_REAL_WORLD_MEMORY_TEST: "1",
+      WORLD_MEMORY_POSTGRES_URL: process.env.TASK_POSTGRES_URL,
+      WORLD_MEMORY_TEST_NAMESPACE: process.env.TASK_INFRA_TEST_NAMESPACE,
+    },
+    shell: false,
+    stdio: "inherit",
+    timeout: 120_000,
+  },
+);
+
+if (memoryResult.error) {
+  console.error("World-memory infrastructure test runner failed to start.");
+  process.exit(1);
+}
+process.exit(memoryResult.status ?? 1);
