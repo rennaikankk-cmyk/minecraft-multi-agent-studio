@@ -11,7 +11,7 @@ Conclusion: **healthy engineering foundation, not yet a complete multi-agent Min
 
 The repository is real, buildable, and unusually strong in safety boundaries, protocol validation, authenticated control links, cancellation, task persistence primitives, and honest “not connected” UI states. It is not a pile of fake tests. The Coordinator now has a tested high-level AI planning component with strict output and live state/catalog validation, and the unsafe direct Bot model path has been removed. However, most of the user-facing multi-agent/gameplay goal remains disconnected: production startup and task/control APIs do not yet invoke the planner, only seven foundational skills exist, and PvP/Fabric/memory remain design-only.
 
-Estimated completion toward the full U9-controller + Spark-inference target: **43%**.
+Estimated completion toward the full U9-controller + Spark-inference target: **45%** (44.5% weighted).
 
 This percentage is weighted by production outcomes, not lines of code:
 
@@ -23,9 +23,9 @@ This percentage is weighted by production outcomes, not lines of code:
 | L0 + practical skill library | 20% | 25% | 5.0% |
 | Multi-Bot Coordinator | 10% | 25% | 2.5% |
 | Version/Fabric adapter layer | 10% | 30% | 3.0% |
-| Dashboard/AI metrics/benchmark | 10% | 15% | 1.5% |
-| U9/Spark deployment profiles and inference | 10% | 5% | 0.5% |
-| **Total** | **100%** | — | **43.0%** |
+| Dashboard/AI metrics/benchmark | 10% | 25% | 2.5% |
+| U9/Spark deployment profiles and inference | 10% | 10% | 1.0% |
+| **Total** | **100%** | — | **44.5%** |
 
 The foundation alone is much further along than 40%; the number is lower because the requested final scope includes real gameplay skills, multi-bot planning, inference deployment, metrics, benchmarks, Fabric fallback, and dual-host operations.
 
@@ -42,7 +42,7 @@ The foundation alone is much further along than 40%; the number is lower because
 | Source size | about 28,632 TS/TSX lines |
 | Test size | about 17,536 test lines across 67 current test files |
 | Typecheck | PASS with Node 22 |
-| Unit/integration tests | **389 passed, 23 environment-gated skipped** |
+| Unit/integration tests | **391 passed, 23 environment-gated skipped** |
 | Production build | PASS |
 | Runtime Link two-process acceptance | PASS; `minecraftConnected=false` |
 | Four-process acceptance | PASS; Dashboard → Control API → Coordinator → fixture Runtime, final offline |
@@ -101,7 +101,7 @@ The required final ownership split is not implemented as deployment profiles yet
 | `safety` | deterministic L0 detection/actions for critical health, lava, drowning, falling, low health, stuck, inventory, hunger | simple stuck recovery only; no corner/door/fence/vertical/swim/dig/place recovery graph; no real hazard matrix this audit |
 | `skills` | strict registry/executor/auth/capability boundary and seven skills: move, collect, craft, place, equip, container transfer, smelt | survival suite, food/heal/sleep, farming/fishing, fuel/tool progression, storage accounting/sorting, PvE/PvP, building blueprints, advanced unstuck all missing |
 | `task-system` | schemas/state machine/PostgreSQL/BullMQ/outbox/leases/idempotency/cancellation/recovery | production Coordinator/API/Worker wiring incomplete; current local run skipped external services |
-| `ai-router` | Provider abstraction, OpenAI-compatible and mock providers, strict `execute_skill \| wait` decision contract, structured validation/repair/fallback, compact context, prefix-cache prompt layout, priority scheduler with concurrency/queue/backpressure/timeout/retry/cancel/per-Bot limit/stale protection; 32 dedicated tests | no persistent request logs/metrics, no real Spark API test yet, no benchmark commands yet |
+| `ai-router` | Provider abstraction, OpenAI-compatible and mock providers, strict `execute_skill \| wait` decision contract, structured validation/repair/fallback, compact context, prefix-cache prompt layout, priority scheduler with concurrency/queue/backpressure/timeout/retry/cancel/per-Bot limit/stale protection; concurrency benchmark emits JSON/Markdown and GB10 GPU snapshots; 34 dedicated tests | no persistent request logs/metrics and no real Spark API/benchmark result yet |
 
 ## What is genuinely runnable
 
@@ -127,7 +127,7 @@ The required final ownership split is not implemented as deployment profiles yet
 | Redis/PostgreSQL controller deployment | libraries and migrations exist; not composed into a controller profile |
 | Fabric bridge | no Fabric source tree or build in the repository |
 | Advanced PvP/PvE | design PDFs/reference notes only |
-| Spark metrics/benchmark | not implemented at audit point |
+| Spark metrics/benchmark | repeatable benchmark and local GPU snapshots implemented; only Mock validation run, no real model result |
 | vLLM production service | local environment/images/checkpoint exist on Spark, but project service profile is absent and API not yet validated |
 | Skill self-improvement lifecycle | policy described in `AGENTS.md`; no Draft/Sandbox/Canary/Production controller implementation |
 
@@ -145,7 +145,7 @@ Gaps:
 
 - Root `pnpm test` does not run Playwright; `pnpm check` therefore does not include browser E2E.
 - Linux Spark cannot use the PowerShell-only `test:minecraft-skills` runner directly.
-- No AI real-HTTP fixture, Spark vLLM process test, workload soak, or metrics assertion exists yet.
+- No Spark vLLM process test or workload soak exists yet; OpenAI transport has mocked-HTTP tests and benchmark machinery has Mock-provider tests only.
 - No 1/2/5/10 real Mineflayer multi-Bot scenario; current 1/2/5/10 AI tests are simulations through one provider.
 - Combat, stuck recovery, survival progression, disconnect recovery, and storage skills lack real Minecraft scenario automation.
 
@@ -191,12 +191,12 @@ Gaps:
 - `PROJECT_AUDIT.md` was a stale 2026-07-19 “source missing” snapshot and has now been replaced.
 - `AI-BOT-GUIDE.md` now documents the safe boundary and remaining blockers.
 - `ROADMAP.md` predates the new scheduler and understates the seven-skill count.
-- Missing root deliverables: `README.md`, `DEPLOYMENT.md`, `SPARK_SETUP.md`, `U9_SETUP.md`, `AI_ARCHITECTURE.md`, `AI_BENCHMARK.md`, `TESTING.md`, and root `TROUBLESHOOTING.md`.
+- Added current `README.md`, `DEPLOYMENT.md`, `SPARK_SETUP.md`, `U9_SETUP.md`, `AI_ARCHITECTURE.md`, `AI_BENCHMARK.md`, `TESTING.md`, and `TROUBLESHOOTING.md`.
 
 ## Recommended next implementation sequence
 
 1. **Production AI lifecycle:** instantiate the Coordinator planner, expose a task-owned request path, and add the policy/authorization/invocation bridge.
-2. **AI observability + benchmark:** health/test/benchmark commands, Spark metrics collector, JSON/Markdown output, concurrency recommendation.
+2. **Real Spark inference validation:** run the new health/benchmark workflow, inspect kernel fallback and unified-memory behavior, then accept a concurrency limit.
 3. **Dual-role profiles:** controller U9 and inference Spark, with a development profile that does not change core code.
 4. **Task API/Worker composition:** turn existing persistence primitives into a runnable controller loop.
 5. **Linux isolated Minecraft harness:** then expand L0 and practical skills with real scenarios.
@@ -208,12 +208,12 @@ Gaps:
 ```text
 Build: PASS
 Typecheck: PASS
-Offline tests: PASS (389 passed, 23 environment-gated skipped)
+Offline tests: PASS (391 passed, 23 environment-gated skipped)
 Runtime Link acceptance: PASS (no Minecraft)
 Four-process acceptance: PASS (fixture Runtime, no Minecraft)
 Dashboard E2E: PASS with system Chrome (11/11)
 Real Minecraft: NOT RUN
 Real PostgreSQL/Redis: NOT RUN locally
 AI production loop: PARTIAL; Coordinator planner exists, startup/API/authorization transport missing
-Overall completion: 43%
+Overall completion: 45% (44.5% weighted)
 ```

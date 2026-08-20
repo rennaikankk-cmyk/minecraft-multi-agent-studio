@@ -23,6 +23,7 @@
     "test": "pnpm build:control-plane && pnpm --filter @minecraft-studio/observability test && pnpm --filter @minecraft-studio/protocol test && pnpm --filter @minecraft-studio/ai-router test && pnpm --filter @minecraft-studio/cpu-resource-manager test && pnpm --filter @minecraft-studio/environment test && pnpm --filter @minecraft-studio/safety test && pnpm --filter @minecraft-studio/skills test && pnpm --filter @minecraft-studio/task-system test && pnpm --filter @minecraft-studio/coordinator test && pnpm --filter @minecraft-studio/task-worker test && pnpm --filter @minecraft-studio/control-api test && pnpm --filter @minecraft-studio/bot-runtime test && pnpm --filter @minecraft-studio/dashboard test",
     "test:cpu-resource-manager:node": "pnpm --filter @minecraft-studio/cpu-resource-manager test:node",
     "benchmark:cpu-scheduler": "pnpm --filter @minecraft-studio/cpu-resource-manager benchmark",
+    "benchmark:ai": "pnpm --filter @minecraft-studio/ai-router benchmark",
     "hardware:profile": "pnpm --filter @minecraft-studio/cpu-resource-manager build && pnpm --filter @minecraft-studio/cpu-resource-manager run profile",
     "test:task-infra": "pnpm build:packages && pnpm --filter @minecraft-studio/task-worker build && node scripts/run-task-infrastructure-tests.mjs",
     "test:runtime-link": "pnpm build:control-plane && pnpm --filter @minecraft-studio/bot-runtime build && node scripts/run-runtime-link-acceptance.mjs",

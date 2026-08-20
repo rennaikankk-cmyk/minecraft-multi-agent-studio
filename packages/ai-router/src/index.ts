@@ -52,3 +52,9 @@ export type {
   GenerateResult,
   HealthResult,
 } from "./types/adapter.js";
+export {
+  runAIConcurrencyBenchmark,
+  type AIConcurrencyBenchmarkLevel,
+  type AIConcurrencyBenchmarkOptions,
+  type AIConcurrencyBenchmarkResult,
+} from "./benchmark.js";
