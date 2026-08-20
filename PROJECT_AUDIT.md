@@ -1,155 +1,217 @@
-# Minecraft 多智能体机器人项目审查报告
+# Minecraft Multi-Agent Studio Project Audit
 
-> 历史快照：本报告记录 2026-07-19 创建项目基线之前的状态。用户随后授权在源码缺失时创建项目；当前进度以 `ROADMAP.md` 和 `CHANGELOG.md` 为准。
+Audit date: 2026-08-20
 
-审查日期：2026-07-19
-审查阶段：阶段 0——现有项目审查
-结论状态：**阻塞：当前工作区未提供项目源码**
+Repository: `rennaikankk-cmyk/minecraft-multi-agent-studio` (private)
 
-## 1. 审查范围
+Audited base: `ee88c77` on `main`; active implementation branch includes `40beb91`
+Conclusion: **healthy engineering foundation, not yet a complete multi-agent Minecraft product**
 
-已只读检查以下位置：
+## Executive assessment
 
-- 当前工作目录 `C:\Users\baichengbo\Documents\Codex\2026-07-19\chu`
-- 共享工作区 `C:\Users\baichengbo\Documents\Codex`
-- 本次附件目录
+The repository is real, buildable, and unusually strong in safety boundaries, protocol validation, authenticated control links, cancellation, task persistence primitives, and honest “not connected” UI states. It is not a pile of fake tests. However, most of the user-facing multi-agent/AI/gameplay goal remains disconnected: the production Coordinator does not yet use the AI scheduler, the task API/dashboard are absent, only seven foundational skills exist, PvP/Fabric/memory are design-only, and the current direct Bot AI loop is an unsafe scaffold that never executes a skill.
 
-检查目标包括：
+Estimated completion toward the full U9-controller + Spark-inference target: **40%**.
 
-- `package.json`、包管理器锁文件和 monorepo 配置
-- Git 仓库
-- 前端、后端、脚本、文档和测试目录
-- `README.md`、`README_CN.md`、`AGENTS.md`
-- 名称包含 Minecraft、Mineflayer、Agent 或 Bot 的项目目录
+This percentage is weighted by production outcomes, not lines of code:
 
-## 2. 事实结果
+| Area | Weight | Current completion | Weighted contribution |
+|---|---:|---:|---:|
+| Safe Runtime/control foundation | 15% | 90% | 13.5% |
+| Task persistence/worker foundation | 10% | 65% | 6.5% |
+| AI Provider/Router/Scheduler | 15% | 55% | 8.3% |
+| L0 + practical skill library | 20% | 25% | 5.0% |
+| Multi-Bot Coordinator | 10% | 20% | 2.0% |
+| Version/Fabric adapter layer | 10% | 30% | 3.0% |
+| Dashboard/AI metrics/benchmark | 10% | 15% | 1.5% |
+| U9/Spark deployment profiles and inference | 10% | 5% | 0.5% |
+| **Total** | **100%** | — | **40.3%** |
 
-当前工作目录只包含：
+The foundation alone is much further along than 40%; the number is lower because the requested final scope includes real gameplay skills, multi-bot planning, inference deployment, metrics, benchmarks, Fabric fallback, and dual-host operations.
+
+## Repository and build facts
+
+| Fact | Result |
+|---|---|
+| Git working tree before changes | clean |
+| Base branch/remote | `main`, `origin` = target GitHub repository |
+| Base commit | `ee88c77` |
+| Open GitHub Issues/PRs | none at audit time |
+| Monorepo | pnpm workspace, 5 apps + 8 packages |
+| Runtime requirement | Node ≥22; `.nvmrc` now pins existing Node 22.23.2 |
+| Source size | about 28,632 TS/TSX lines |
+| Test size | about 17,536 test lines across 67 current test files |
+| Typecheck | PASS with Node 22 |
+| Unit/integration tests | **381 passed, 23 environment-gated skipped** |
+| Production build | PASS |
+| Runtime Link two-process acceptance | PASS; `minecraftConnected=false` |
+| Four-process acceptance | PASS; Dashboard → Control API → Coordinator → fixture Runtime, final offline |
+| Dashboard Playwright | 11/11 PASS using installed system Chrome |
+| Minecraft workflow policy validation | PASS |
+| Real Minecraft this audit | not run |
+| Real PostgreSQL/Redis this audit | not run; 20 tests gated |
+
+The first Playwright attempt failed only because Playwright's bundled Chromium was absent. Re-running with the already-installed Chrome channel passed all 11 tests without downloading a browser. A React hydration warning for the persisted `data-theme` attribute remains a real low-priority UI defect.
+
+## Current architecture
 
 ```text
-chu/
-├─ outputs/
-└─ work/
+Dashboard (Next.js)
+  -> server-side Control API proxy
+  -> Control API (HTTP/WebSocket, auth/rate limits)
+  -> authenticated Coordinator Control Link
+  -> Coordinator in-memory Bot registry / stop controller
+  -> authenticated Runtime Link
+  -> Bot Runtime / Mineflayer / L0 / SkillExecutor
+
+Task Worker
+  -> BullMQ / Redis
+  -> PostgreSQL task repository + outbox
+
+AI package (implemented but not production-wired)
+  -> AIRequestScheduler
+  -> AIRouter
+  -> OpenAI-compatible Provider / Mock Provider
+  -> future Spark API
 ```
 
-附件目录只包含需求说明 `pasted-text.txt`。共享工作区中没有找到 Minecraft 项目的源码、依赖清单、Git 元数据或已有文档。
+The required final ownership split is not implemented as deployment profiles yet. The code is mostly hardware-neutral and TypeScript-based, but shell scripts, the Minecraft acceptance runner, and local AI entrypoints still contain Linux/Windows or host-role assumptions.
 
-因此目前能确认的真实状态是：
+## Module-by-module status
 
-| 项目项 | 状态 | 证据或说明 |
+### Applications
+
+| Module | Real implementation | Missing / limitation |
 |---|---|---|
-| 现有前端 | 无法找到 | 没有源码或依赖清单 |
-| 现有后端 | 无法找到 | 没有源码或依赖清单 |
-| Mineflayer Bot Runtime | 无法找到 | 没有相关源码 |
-| Coordinator | 无法找到 | 没有相关源码 |
-| WebSocket/API | 无法找到 | 没有相关源码 |
-| Dashboard 八个页面 | 无法核验 | 需求称已存在，但附件未包含代码 |
-| 脚本 | 无法找到 | 没有脚本目录 |
-| 测试 | 无法找到 | 没有测试配置或用例 |
-| 文档 | 仅有需求文本 | 没有项目内文档 |
-| 构建能力 | 无法核验 | 没有 `package.json` |
-| 启动能力 | 无法核验 | 没有启动入口 |
-| Git 状态 | 无法核验 | 没有项目仓库 |
+| `apps/bot-runtime` | Mineflayer client, strict isolated `ServerProfile`, telemetry, reconnect, authenticated Runtime Link, L0 actions, SkillExecutor, process supervisor | direct `AIRuntimeLoop` violates the documented Bot Runtime boundary, calls model API directly, parses arbitrary JSON, and only logs `Would execute`; real danger scenarios and multi-Bot Minecraft load not run |
+| `apps/coordinator` | Bot registry, stale/sequence protection, Runtime Link, Control Link, stop authorization/audit, expired lease recovery component | no production task assignment/resource allocation/roles/team memory; no AI scheduler lifecycle or planner; most control state is in memory |
+| `apps/task-worker` | strict config and isolated handler profile; real BullMQ worker primitives | no production gameplay handler catalog or controller startup profile |
+| `apps/control-api` | authenticated HTTP/WebSocket Bot state and stop endpoints, rate/connection limits, fail-closed Coordinator mirror | no task API, AI node metrics API, audit query API, user/role system, cross-host TLS |
+| `apps/dashboard` | real environment page, Bot list/detail, live stream + polling fallback, safe stop confirmation, explicit failure states | Tasks page is a placeholder; Combat page is static design copy; no AI node, per-Bot AI metrics, benchmark UI, trends, logs, task controls, or role/team view |
 
-## 3. 未执行项
+### Packages
 
-以下命令没有伪造执行，因为不存在可用的项目根目录和依赖清单：
+| Module | Real implementation | Missing / limitation |
+|---|---|---|
+| `protocol` | strict Zod schemas for telemetry, control links, tasks, skills, version facts | AI request/metric protocols are currently package-local, not cross-service protocol messages |
+| `observability` | structured redacted logger and in-memory metric registry | no persistent log/metric backend, tracing exporter, retention, or Spark metrics |
+| `environment` | real host/container OS, CPU, memory, GPU probing with explicit unavailable state | no durable node inventory/monitoring service |
+| `cpu-resource-manager` | topology detection, generic fallback, pools, scheduler/affinity gates, benchmarks | U9 285H P/E-core validation not possible yet; features correctly default off |
+| `safety` | deterministic L0 detection/actions for critical health, lava, drowning, falling, low health, stuck, inventory, hunger | simple stuck recovery only; no corner/door/fence/vertical/swim/dig/place recovery graph; no real hazard matrix this audit |
+| `skills` | strict registry/executor/auth/capability boundary and seven skills: move, collect, craft, place, equip, container transfer, smelt | survival suite, food/heal/sleep, farming/fishing, fuel/tool progression, storage accounting/sorting, PvE/PvP, building blueprints, advanced unstuck all missing |
+| `task-system` | schemas/state machine/PostgreSQL/BullMQ/outbox/leases/idempotency/cancellation/recovery | production Coordinator/API/Worker wiring incomplete; current local run skipped external services |
+| `ai-router` | Provider abstraction, OpenAI-compatible and mock providers, structured validation/repair/fallback, compact context, prefix-cache prompt layout, priority scheduler with concurrency/queue/backpressure/timeout/retry/cancel/per-Bot limit/stale protection; 29 dedicated tests | no Coordinator service integration, no policy/state validator bridge, no persistent request logs/metrics, no real Spark API test yet, no benchmark commands yet |
 
-- 依赖安装
-- TypeScript 类型检查
-- 单元测试和集成测试
-- 前端或后端构建
-- 服务启动
-- Mineflayer 连接测试
-- Dashboard 真实状态链路测试
-- 依赖漏洞扫描
+## What is genuinely runnable
 
-这些项目的状态是“**不可执行**”，不是“通过”。
+- TypeScript compilation and Next.js production build.
+- Offline unit/integration suite across all packages/apps.
+- Real local WebSocket/HTTP process topology with a test Runtime fixture.
+- Authenticated stop path from Dashboard service to Runtime fixture.
+- Mineflayer Runtime code against a strictly isolated profile, when an approved test server is supplied.
+- Task PostgreSQL/Redis integration in CI or when explicit isolated test URLs are supplied.
+- System Chrome Dashboard E2E.
+- AI Router/Scheduler entirely with Mock provider; OpenAI-compatible transport contract is tested with mocked HTTP.
 
-## 4. 真实、模拟和未完成能力
+## What is scaffold, interface-only, or design-only
 
-基于现有证据，只能做以下判断：
+| Item | Reality |
+|---|---|
+| Direct local AI Bot | **broken/unsafe scaffold**: model call is inside Bot Runtime, no scheduler, weak JSON parse, execution is TODO/log only |
+| Tasks dashboard | explicit “backend not connected” page |
+| Combat dashboard | static six-role design cards; no runtime data |
+| Production multi-agent Coordinator | interfaces/control registry exist; task assignment/team/resource algorithms do not |
+| Long-term memory / pgvector | not implemented |
+| Redis/PostgreSQL controller deployment | libraries and migrations exist; not composed into a controller profile |
+| Fabric bridge | no Fabric source tree or build in the repository |
+| Advanced PvP/PvE | design PDFs/reference notes only |
+| Spark metrics/benchmark | not implemented at audit point |
+| vLLM production service | local environment/images/checkpoint exist on Spark, but project service profile is absent and API not yet validated |
+| Skill self-improvement lifecycle | policy described in `AGENTS.md`; no Draft/Sandbox/Canary/Production controller implementation |
 
-- 真实功能：无可验证代码。
-- 模拟功能：需求称现有控制台主要影响本地演示状态，但因缺少源码，无法定位具体实现。
-- 空按钮：无法核验。
-- 未完成接口：需求明确说明真实 Mineflayer 后端和 GLM-5.2 API 尚未接入；无法通过源码复核。
-- Minecraft 连接：未执行，也不会连接正式服务器。
-- GLM-5.2：未调用。
+## Test quality and “fake test” audit
 
-## 5. 安全审查
+The repository has extensive meaningful tests. Mocking is used at process or infrastructure boundaries and usually asserts fail-closed behavior; it is not presented as real Minecraft or real database validation.
 
-### 已能确认
+Environment-gated tests are honest:
 
-- 附件需求文本本身没有包含 API Key、访问令牌、数据库密码或服务器密码。
-- 本次审查未登录服务器、未连接 Minecraft、未执行部署，也未运行破坏性命令。
+- 20 PostgreSQL/Redis cases are skipped unless isolated `TASK_POSTGRES_URL`, `TASK_REDIS_URL`, and namespace are supplied.
+- 3 real isolated Minecraft cases are skipped unless the acceptance runner supplies server/profile markers.
+- Prior GitHub Actions history records successful real PostgreSQL/Redis runs, but this audit does not relabel historical CI as a current local pass.
 
-### 尚不能确认
+Gaps:
 
-由于缺少源码和配置，无法检查：
+- Root `pnpm test` does not run Playwright; `pnpm check` therefore does not include browser E2E.
+- Linux Spark cannot use the PowerShell-only `test:minecraft-skills` runner directly.
+- No AI real-HTTP fixture, Spark vLLM process test, workload soak, or metrics assertion exists yet.
+- No 1/2/5/10 real Mineflayer multi-Bot scenario; current 1/2/5/10 AI tests are simulations through one provider.
+- Combat, stuck recovery, survival progression, disconnect recovery, and storage skills lack real Minecraft scenario automation.
 
-- `.env` 或历史提交中的密钥泄露
-- 危险 Shell、Docker 或文件系统调用
-- 未校验的聊天指令执行
-- WebSocket/API 的认证和授权
-- 依赖漏洞和供应链风险
-- 日志脱敏
-- Bot 停止权限与紧急停止逻辑
-- 候选技能沙盒边界
+## Cross-version and platform assessment
 
-## 6. 差距清单
+Strengths:
 
-### P0：阻止真实链路运行
+- Core code uses Node APIs and path utilities rather than hard-coded ARM64 binaries.
+- Mineflayer version negotiation and feature/resource/capability-based skill variants exist.
+- Docker images observed on Spark are ARM64, and the project does not assume a per-Bot model process.
+- CPU affinity is gated and falls back generically.
 
-1. 缺少现有项目源码或准确项目路径。
-2. 无法确认八个控制台页面的实际代码和模拟状态来源。
-3. 无法建立基线构建、测试和安全扫描结果。
-4. 无法检查或复用现有数据模型、API、WebSocket 与 Zustand 状态。
-5. 没有可验证的 Mineflayer Bot Runtime。
-6. 没有可验证的 Bot Runtime → Coordinator 协议。
-7. 没有可验证的 Coordinator → Dashboard 状态链路。
-8. 没有可验证的安全停止和断线状态更新。
+Gaps:
 
-### P1：单 Bot 稳定运行后的必要能力
+- No explicit `ServerVersionDetector`, `ProtocolCapabilityRegistry`, and `SkillCapabilityRegistry` service boundary; equivalent facts are split across Runtime and skills.
+- No protocol adapter interface for future packet overrides/Fabric/real-client bridges.
+- Isolated Minecraft automation is PowerShell/Windows-centric.
+- Two shell scripts still hard-code a local vLLM URL/model and launch the unsafe Bot AI scaffold.
+- No `profiles/dev-spark`, `profiles/controller-u9`, `profiles/inference-spark` composition yet.
+- U9 Windows path/process/native dependency validation must wait for hardware.
 
-1. 版本化消息协议和 Zod 校验。
-2. 心跳、状态过期、自动重连和优雅退出。
-3. L0 安全反射层。
-4. 确定性技能注册、版本和测试。
-5. 任务状态机、BullMQ、锁、租约和幂等。
-6. PostgreSQL、Redis 与可观测性。
-7. Dashboard 真实数据标识、错误态和权限控制。
+## Critical technical debt and blockers
 
-### P2：基础链路稳定后的扩展
+### P0/P1 blockers
 
-1. 多机器人协作与角色分配。
-2. 世界记忆、任务经验和 pgvector。
-3. 本地 AI Router、Gemma 4、Embedding 和 Reranker。
-4. GLM-5.2 失败升级路径。
-5. 受监管自我改进和隔离沙盒。
-6. 战斗客户端桥接、高级 PvP 和正式服务器灰度。
+1. Remove the direct model call from Bot Runtime; AI must live behind the Coordinator-owned scheduler/router.
+2. Connect validated AI decisions to `Schema -> Policy -> State -> Skill authorization`, never directly to Mineflayer or `SkillExecutor` without trusted authorization.
+3. Add Scheduler/AI request protocol and lifecycle integration so each Bot state update invalidates old planning.
+4. Add task API and production Coordinator/Worker composition; otherwise task persistence is isolated infrastructure.
+5. Add Linux-safe isolated Minecraft runner before claiming Spark-hosted real scenarios.
 
-## 7. 恢复审查所需输入
+### Major feature gaps
 
-继续开发只需要满足以下任一条件：
+- Survival/gather/craft/storage/stuck/PvE/PvP skill depth.
+- Real multi-Bot assignment, resource locks, team memory, roles, conflict prevention.
+- Fabric compatibility bridge and future protocol adapter.
+- Spark metrics, AI node/dashboard metrics, trends, benchmark/recommended concurrency.
+- Dual-node profiles, secrets/TLS/network plan, start/stop/restart/runbooks.
+- Long-term memory, pgvector, centralized logs/metrics.
 
-1. 将现有项目目录放入当前工作区；或
-2. 提供现有项目的本机绝对路径；或
-3. 上传包含源码但不含密钥的项目压缩包。
+### Documentation debt
 
-拿到源码后必须先重新执行阶段 0，不能直接套用本报告中的假设。
+- `PROJECT_AUDIT.md` was a stale 2026-07-19 “source missing” snapshot and has now been replaced.
+- `AI-BOT-GUIDE.md` describes Qwen2.5 and an unsafe direct Bot AI loop; it must be replaced, not trusted operationally.
+- `ROADMAP.md` predates the new scheduler and understates the seven-skill count.
+- Missing root deliverables: `README.md`, `DEPLOYMENT.md`, `SPARK_SETUP.md`, `U9_SETUP.md`, `AI_ARCHITECTURE.md`, `AI_BENCHMARK.md`, `TESTING.md`, and root `TROUBLESHOOTING.md`.
 
-## 8. 下一验收门槛
+## Recommended next implementation sequence
 
-完成源码基线审查后，最小模块仅实现并验证：
+1. **Coordinator AI planning service:** own `AIRequestScheduler`, consume compact Bot facts, invalidate on state/task version changes, validate structured decisions, and emit only trusted skill proposals.
+2. **AI observability + benchmark:** health/test/benchmark commands, Spark metrics collector, JSON/Markdown output, concurrency recommendation.
+3. **Dual-role profiles:** controller U9 and inference Spark, with a development profile that does not change core code.
+4. **Task API/Worker composition:** turn existing persistence primitives into a runnable controller loop.
+5. **Linux isolated Minecraft harness:** then expand L0 and practical skills with real scenarios.
+6. **Dashboard AI node and Bot AI details:** consume real metrics only.
+7. **Advanced multi-Bot/compatibility/Fabric/PvP:** after the above control and test foundations are real.
+
+## Audit verdict
 
 ```text
-隔离测试服
-→ Mineflayer Bot
-→ Bot Runtime
-→ Coordinator
-→ WebSocket/API
-→ Dashboard 真实状态
+Build: PASS
+Typecheck: PASS
+Offline tests: PASS (381 passed, 23 environment-gated skipped)
+Runtime Link acceptance: PASS (no Minecraft)
+Four-process acceptance: PASS (fixture Runtime, no Minecraft)
+Dashboard E2E: PASS with system Chrome (11/11)
+Real Minecraft: NOT RUN
+Real PostgreSQL/Redis: NOT RUN locally
+AI production loop: BLOCKED by missing Coordinator integration
+Overall completion: 40%
 ```
-
-必须同时满足：真实在线状态、真实血量/饥饿/位置/当前任务、断线更新、安全停止、自动化测试、不连接正式服务器、不调用 GLM-5.2。
