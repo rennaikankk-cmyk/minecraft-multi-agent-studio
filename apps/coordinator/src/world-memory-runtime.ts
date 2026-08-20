@@ -1,10 +1,16 @@
 import { isIP } from "node:net";
+import { isAbsolute, parse, resolve } from "node:path";
 
+import type { AppLogger } from "@minecraft-studio/observability";
 import { PgTaskPoolAdapter } from "@minecraft-studio/task-system";
 import {
+  DurableWorldMemorySkillResultIngestor,
+  FileWorldMemoryIngestionOutbox,
+  MAX_WORLD_MEMORY_OUTBOX_BATCH_SIZE,
+  MAX_WORLD_MEMORY_OUTBOX_PENDING_BATCHES,
   PostgresWorldMemoryRepository,
+  WorldMemoryError,
   WorldMemoryPlannerContextService,
-  WorldMemorySkillResultIngestor,
 } from "@minecraft-studio/world-memory";
 
 import type { CoordinatorRelevantMemoryProvider } from "./ai-planner.js";
@@ -19,6 +25,12 @@ export type CoordinatorWorldMemoryConfig =
       maxEntries: number;
       radius: number;
       minimumConfidence: number;
+      ingestionSpoolDirectory: string;
+      ingestionBatchSize: number;
+      ingestionMaxPendingBatches: number;
+      ingestionPollIntervalMs: number;
+      ingestionRetryBaseMs: number;
+      ingestionRetryMaxMs: number;
     }>;
 
 export type CoordinatorWorldMemoryErrorCode =
@@ -44,6 +56,42 @@ export type CoordinatorWorldMemoryRuntime = Readonly<{
   skillResultObserver: SkillInvocationResultObserver;
   close(): Promise<void>;
 }>;
+
+export type CoordinatorWorldMemoryRuntimeOptions = Readonly<{
+  logger?: AppLogger;
+}>;
+
+export class CoordinatorWorldMemoryIngestionHealth {
+  private healthy = true;
+
+  noteReconcile(result: Readonly<{
+    failed: number;
+    pendingBatchCount: number;
+  }>): void {
+    this.healthy = result.failed === 0 && result.pendingBatchCount === 0;
+  }
+
+  noteIngestion(result: Readonly<{
+    deferredCount: number;
+    pendingBatchCount: number;
+  }>): void {
+    this.healthy =
+      result.deferredCount === 0 && result.pendingBatchCount === 0;
+  }
+
+  noteFailure(): void {
+    this.healthy = false;
+  }
+
+  assertPlanningAllowed(): void {
+    if (!this.healthy) {
+      throw new WorldMemoryError(
+        "WORLD_MEMORY_INGESTION_FAILED",
+        "World-memory ingestion backlog must recover before new planning.",
+      );
+    }
+  }
+}
 
 function loopbackHostname(hostname: string): boolean {
   const normalized = hostname
@@ -119,6 +167,23 @@ function finiteNumber(
   return value;
 }
 
+function ingestionSpoolDirectory(input: string | undefined): string {
+  if (!input || input.trim().length === 0 || input.length > 1_024) {
+    throw new CoordinatorWorldMemoryError(
+      "WORLD_MEMORY_CONFIG_INVALID",
+      "WORLD_MEMORY_INGESTION_SPOOL_DIR is required and must be at most 1024 characters.",
+    );
+  }
+  const directory = resolve(input);
+  if (!isAbsolute(input) || directory === parse(directory).root) {
+    throw new CoordinatorWorldMemoryError(
+      "WORLD_MEMORY_CONFIG_INVALID",
+      "WORLD_MEMORY_INGESTION_SPOOL_DIR must be a non-root absolute path.",
+    );
+  }
+  return directory;
+}
+
 export function loadCoordinatorWorldMemoryConfig(
   environment: NodeJS.ProcessEnv = process.env,
 ): CoordinatorWorldMemoryConfig {
@@ -136,6 +201,26 @@ export function loadCoordinatorWorldMemoryConfig(
     throw new CoordinatorWorldMemoryError(
       "WORLD_MEMORY_CONFIG_INVALID",
       "WORLD_MEMORY_SCHEMA must be a safe unquoted PostgreSQL identifier.",
+    );
+  }
+  const ingestionRetryBaseMs = integer(
+    environment.WORLD_MEMORY_INGESTION_RETRY_BASE_MS,
+    250,
+    10,
+    60_000,
+    "WORLD_MEMORY_INGESTION_RETRY_BASE_MS",
+  );
+  const ingestionRetryMaxMs = integer(
+    environment.WORLD_MEMORY_INGESTION_RETRY_MAX_MS,
+    60_000,
+    100,
+    5 * 60_000,
+    "WORLD_MEMORY_INGESTION_RETRY_MAX_MS",
+  );
+  if (ingestionRetryBaseMs > ingestionRetryMaxMs) {
+    throw new CoordinatorWorldMemoryError(
+      "WORLD_MEMORY_CONFIG_INVALID",
+      "World-memory ingestion retry base must not exceed its maximum.",
     );
   }
   return Object.freeze({
@@ -163,11 +248,38 @@ export function loadCoordinatorWorldMemoryConfig(
       1,
       "WORLD_MEMORY_MIN_CONFIDENCE",
     ),
+    ingestionSpoolDirectory: ingestionSpoolDirectory(
+      environment.WORLD_MEMORY_INGESTION_SPOOL_DIR,
+    ),
+    ingestionBatchSize: integer(
+      environment.WORLD_MEMORY_INGESTION_BATCH_SIZE,
+      25,
+      1,
+      MAX_WORLD_MEMORY_OUTBOX_BATCH_SIZE,
+      "WORLD_MEMORY_INGESTION_BATCH_SIZE",
+    ),
+    ingestionMaxPendingBatches: integer(
+      environment.WORLD_MEMORY_INGESTION_MAX_PENDING_BATCHES,
+      10_000,
+      1,
+      MAX_WORLD_MEMORY_OUTBOX_PENDING_BATCHES,
+      "WORLD_MEMORY_INGESTION_MAX_PENDING_BATCHES",
+    ),
+    ingestionPollIntervalMs: integer(
+      environment.WORLD_MEMORY_INGESTION_POLL_INTERVAL_MS,
+      1_000,
+      50,
+      60_000,
+      "WORLD_MEMORY_INGESTION_POLL_INTERVAL_MS",
+    ),
+    ingestionRetryBaseMs,
+    ingestionRetryMaxMs,
   });
 }
 
 export async function createCoordinatorWorldMemoryRuntimeFromEnv(
   environment: NodeJS.ProcessEnv = process.env,
+  options: CoordinatorWorldMemoryRuntimeOptions = {},
 ): Promise<CoordinatorWorldMemoryRuntime | null> {
   const config = loadCoordinatorWorldMemoryConfig(environment);
   if (!config.enabled) return null;
@@ -176,6 +288,7 @@ export async function createCoordinatorWorldMemoryRuntimeFromEnv(
     connectionString: config.postgresUrl,
     options: `-c search_path=${config.schemaName},public`,
   });
+  let outbox: FileWorldMemoryIngestionOutbox | null = null;
   try {
     await pool.verifyConnection();
     const repository = new PostgresWorldMemoryRepository(pool);
@@ -185,33 +298,76 @@ export async function createCoordinatorWorldMemoryRuntimeFromEnv(
       radius: config.radius,
       minimumConfidence: config.minimumConfidence,
     });
-    const ingestor = new WorldMemorySkillResultIngestor(repository);
+    const ingestionHealth = new CoordinatorWorldMemoryIngestionHealth();
+    outbox = new FileWorldMemoryIngestionOutbox({
+      directory: config.ingestionSpoolDirectory,
+      writer: repository,
+      batchSize: config.ingestionBatchSize,
+      maxPendingBatches: config.ingestionMaxPendingBatches,
+      pollIntervalMs: config.ingestionPollIntervalMs,
+      retryBaseMs: config.ingestionRetryBaseMs,
+      retryMaxMs: config.ingestionRetryMaxMs,
+      onReconcile: (result) => {
+        ingestionHealth.noteReconcile(result);
+        if (result.examined === 0) return;
+        const log = result.failed === 0
+          ? options.logger?.info.bind(options.logger)
+          : options.logger?.warn.bind(options.logger);
+        log?.("coordinator_world_memory_outbox_reconciled", {
+          examined: result.examined,
+          delivered: result.delivered,
+          failed: result.failed,
+          deferredCount: result.deferredCount,
+          pendingBatchCount: result.pendingBatchCount,
+        });
+      },
+      onError: (error) => {
+        ingestionHealth.noteFailure();
+        options.logger?.error("coordinator_world_memory_outbox_failed", {
+          errorCode: error.code,
+        });
+      },
+    });
+    await outbox.start();
+    const ingestor = new DurableWorldMemorySkillResultIngestor(outbox);
     let closed = false;
     return Object.freeze({
-      relevantMemoryProvider: async (request) =>
-        await context.retrieve({
+      relevantMemoryProvider: async (request) => {
+        ingestionHealth.assertPlanningAllowed();
+        return await context.retrieve({
           serverProfileId: request.serverProfileId,
           dimension: request.dimension,
           position: request.position,
           subjectId: request.botId,
           task: request.task,
           signal: request.signal,
-        }),
-      skillResultObserver: async (observation) =>
-        await ingestor.ingest({
-          command: observation.command,
-          result: observation.result,
-          authoritativeServerProfileId:
-            observation.authoritativeServerProfileId,
-          authoritativePosition: observation.authoritativePosition,
-        }),
+        });
+      },
+      skillResultObserver: async (observation) => {
+        try {
+          const result = await ingestor.ingest({
+            command: observation.command,
+            result: observation.result,
+            authoritativeServerProfileId:
+              observation.authoritativeServerProfileId,
+            authoritativePosition: observation.authoritativePosition,
+          });
+          ingestionHealth.noteIngestion(result);
+          return result;
+        } catch (error) {
+          ingestionHealth.noteFailure();
+          throw error;
+        }
+      },
       close: async () => {
         if (closed) return;
         closed = true;
+        await outbox?.stop();
         await pool.close();
       },
     });
   } catch (error) {
+    await outbox?.stop().catch(() => undefined);
     await pool.close().catch(() => undefined);
     if (error instanceof CoordinatorWorldMemoryError) throw error;
     throw new CoordinatorWorldMemoryError(

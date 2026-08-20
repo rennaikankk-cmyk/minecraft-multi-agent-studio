@@ -131,9 +131,11 @@ export {
 
 export {
   CoordinatorWorldMemoryError,
+  CoordinatorWorldMemoryIngestionHealth,
   createCoordinatorWorldMemoryRuntimeFromEnv,
   loadCoordinatorWorldMemoryConfig,
   type CoordinatorWorldMemoryConfig,
   type CoordinatorWorldMemoryErrorCode,
   type CoordinatorWorldMemoryRuntime,
+  type CoordinatorWorldMemoryRuntimeOptions,
 } from "./world-memory-runtime.js";

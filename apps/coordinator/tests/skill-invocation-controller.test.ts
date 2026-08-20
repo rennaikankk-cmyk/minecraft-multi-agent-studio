@@ -198,10 +198,14 @@ describe("SkillInvocationController", () => {
   });
 
   it("observes a completed authorized result with its authoritative world", async () => {
+    vi.mocked(logger.info).mockClear();
     const observer = vi.fn<SkillInvocationResultObserver>(async () => ({
       projectedCount: 1,
-      createdCount: 1,
+      createdCount: 0,
       replayedCount: 0,
+      deferredCount: 1,
+      pendingBatchCount: 1,
+      durableBatchCreated: true,
     }));
     const sendSkillInvocation = vi.fn(
       async (command: SkillInvocationV1) => completed(command),
@@ -228,6 +232,15 @@ describe("SkillInvocationController", () => {
           z: 2,
           dimension: "minecraft:overworld",
         },
+      }),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      "coordinator_skill_result_observed",
+      expect.objectContaining({
+        projectedCount: 1,
+        deferredCount: 1,
+        pendingBatchCount: 1,
+        durableBatchCreated: true,
       }),
     );
   });

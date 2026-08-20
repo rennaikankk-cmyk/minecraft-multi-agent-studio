@@ -31,8 +31,23 @@ export {
   type WorldMemoryWriterLike,
 } from "./repository.js";
 export {
+  FileWorldMemoryIngestionOutbox,
+  MAX_WORLD_MEMORY_OUTBOX_BATCH_SIZE,
+  MAX_WORLD_MEMORY_OUTBOX_COMMANDS,
+  MAX_WORLD_MEMORY_OUTBOX_FILE_BYTES,
+  MAX_WORLD_MEMORY_OUTBOX_PENDING_BATCHES,
+  type DurableWorldMemoryOutboxEnvelope,
+  type FileWorldMemoryIngestionOutboxOptions,
+  type WorldMemoryIngestionOutboxLike,
+  type WorldMemoryOutboxDeliveryResult,
+  type WorldMemoryOutboxEnqueueResult,
+  type WorldMemoryOutboxReconcileResult,
+} from "./durable-ingestion-outbox.js";
+export {
+  DurableWorldMemorySkillResultIngestor,
   WorldMemorySkillResultIngestor,
   projectWorldMemoryFromSkillResult,
+  type DurableWorldMemoryIngestionResult,
   type WorldMemoryIngestionResult,
   type WorldMemorySkillResultEvent,
 } from "./skill-result-ingestion.js";

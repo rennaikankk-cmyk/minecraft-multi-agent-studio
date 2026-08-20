@@ -68,6 +68,9 @@ export type SkillInvocationResultObservationOutcome = Readonly<{
   projectedCount: number;
   createdCount: number;
   replayedCount: number;
+  deferredCount?: number;
+  pendingBatchCount?: number;
+  durableBatchCreated?: boolean;
 }>;
 
 export type SkillInvocationResultObserver = (
@@ -448,6 +451,9 @@ export class SkillInvocationController {
             projectedCount: observation.projectedCount,
             createdCount: observation.createdCount,
             replayedCount: observation.replayedCount,
+            deferredCount: observation.deferredCount ?? 0,
+            pendingBatchCount: observation.pendingBatchCount ?? 0,
+            durableBatchCreated: observation.durableBatchCreated ?? false,
           });
         } catch (cause) {
           this.options.logger.error("coordinator_skill_result_observer_failed", {

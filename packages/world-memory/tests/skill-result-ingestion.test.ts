@@ -2,13 +2,21 @@ import type {
   SkillExecutionResultV1,
   SkillInvocationV1,
 } from "@minecraft-studio/protocol";
-import { describe, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  DurableWorldMemorySkillResultIngestor,
+  FileWorldMemoryIngestionOutbox,
+  WorldMemoryError,
   WorldMemorySkillResultIngestor,
   projectWorldMemoryFromSkillResult,
   type RecordWorldMemoryResult,
   type WorldMemorySkillResultEvent,
+  type WorldMemoryIngestionOutboxLike,
   type WorldMemoryWriteCommand,
   type WorldMemoryWriterLike,
 } from "../src/index.js";
@@ -98,10 +106,17 @@ function event(
 
 class FakeWriter implements WorldMemoryWriterLike {
   readonly commands: WorldMemoryWriteCommand[] = [];
+  unavailable = false;
 
   async record(
     input: WorldMemoryWriteCommand,
   ): Promise<RecordWorldMemoryResult> {
+    if (this.unavailable) {
+      throw new WorldMemoryError(
+        "WORLD_MEMORY_INGESTION_FAILED",
+        "simulated PostgreSQL outage",
+      );
+    }
     const created = !this.commands.some(
       ({ operationId }) => operationId === input.operationId,
     );
@@ -135,6 +150,16 @@ class FakeWriter implements WorldMemoryWriterLike {
     };
   }
 }
+
+const temporaryRoots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryRoots.splice(0).map(async (directory) => {
+      await rm(directory, { recursive: true, force: true });
+    }),
+  );
+});
 
 describe("authorized skill-result world-memory projection", () => {
   it("projects real scout observations into deterministic model-safe facts", () => {
@@ -279,5 +304,86 @@ describe("authorized skill-result world-memory projection", () => {
       replayedCount: 1,
     });
     expect(writer.commands).toHaveLength(1);
+  });
+
+  it("durably defers an authorized result and replays it after restart", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "studio-memory-result-ingestion-"),
+    );
+    temporaryRoots.push(directory);
+    const invocation = command("scout.scan-blocks", {
+      serverProfileId: SERVER,
+      dimension: DIMENSION,
+      blockNames: ["iron_ore"],
+      maxDistance: 8,
+      maxResults: 4,
+    });
+    const observation = event(invocation, completed(invocation, {
+      origin: { x: 0, y: 64, z: 0 },
+      observations: [
+        { blockName: "iron_ore", position: { x: 2, y: 62, z: 1 } },
+      ],
+    }));
+    const unavailable = new FakeWriter();
+    unavailable.unavailable = true;
+    const firstOutbox = new FileWorldMemoryIngestionOutbox({
+      directory,
+      writer: unavailable,
+      now: () => new Date(NOW),
+    });
+    const ingestor = new DurableWorldMemorySkillResultIngestor(firstOutbox);
+
+    await expect(ingestor.ingest(observation)).resolves.toEqual({
+      projectedCount: 1,
+      createdCount: 0,
+      replayedCount: 0,
+      deferredCount: 1,
+      pendingBatchCount: 1,
+      durableBatchCreated: true,
+    });
+
+    const recovered = new FakeWriter();
+    const restartedOutbox = new FileWorldMemoryIngestionOutbox({
+      directory,
+      writer: recovered,
+      now: () => new Date(NOW),
+    });
+    await expect(restartedOutbox.reconcileOnce()).resolves.toMatchObject({
+      delivered: 1,
+      failed: 0,
+      pendingBatchCount: 0,
+    });
+    expect(recovered.commands).toHaveLength(1);
+    expect(recovered.commands[0]).toMatchObject({
+      kind: "resource",
+      serverProfileId: SERVER,
+      sourceBotId: "scout-01",
+    });
+  });
+
+  it("preserves backlog health when a completed skill projects no facts", async () => {
+    const pendingOnlyOutbox: WorldMemoryIngestionOutboxLike = {
+      enqueue: async () => {
+        throw new Error("zero-fact results must not enqueue");
+      },
+      deliverBatch: async () => {
+        throw new Error("zero-fact results must not deliver");
+      },
+      pendingCount: async () => 2,
+    };
+    const invocation = command("movement.goto", {});
+    const ingestor = new DurableWorldMemorySkillResultIngestor(
+      pendingOnlyOutbox,
+    );
+    await expect(
+      ingestor.ingest(event(invocation, completed(invocation, { reached: true }))),
+    ).resolves.toEqual({
+      projectedCount: 0,
+      createdCount: 0,
+      replayedCount: 0,
+      deferredCount: 0,
+      pendingBatchCount: 2,
+      durableBatchCreated: false,
+    });
   });
 });

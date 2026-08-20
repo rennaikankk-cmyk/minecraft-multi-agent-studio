@@ -16,6 +16,7 @@ import {
 } from "@minecraft-studio/skills";
 
 import { WorldMemoryError } from "./errors.js";
+import type { WorldMemoryIngestionOutboxLike } from "./durable-ingestion-outbox.js";
 import {
   worldMemoryWriteCommandSchema,
   type WorldMemoryKind,
@@ -77,6 +78,13 @@ export type WorldMemoryIngestionResult = Readonly<{
   createdCount: number;
   replayedCount: number;
 }>;
+
+export type DurableWorldMemoryIngestionResult = WorldMemoryIngestionResult &
+  Readonly<{
+    deferredCount: number;
+    pendingBatchCount: number;
+    durableBatchCreated: boolean;
+  }>;
 
 type CompletedSkillResult = Omit<SkillExecutionResultV1, "payload"> &
   Readonly<{
@@ -389,6 +397,40 @@ export class WorldMemorySkillResultIngestor {
       projectedCount: commands.length,
       createdCount,
       replayedCount: commands.length - createdCount,
+    });
+  }
+}
+
+export class DurableWorldMemorySkillResultIngestor {
+  constructor(private readonly outbox: WorldMemoryIngestionOutboxLike) {}
+
+  async ingest(
+    event: WorldMemorySkillResultEvent,
+  ): Promise<DurableWorldMemoryIngestionResult> {
+    const commands = projectWorldMemoryFromSkillResult(event);
+    if (commands.length === 0) {
+      return Object.freeze({
+        projectedCount: 0,
+        createdCount: 0,
+        replayedCount: 0,
+        deferredCount: 0,
+        pendingBatchCount: await this.outbox.pendingCount(),
+        durableBatchCreated: false,
+      });
+    }
+    const invocation = parseSkillInvocation(event.command);
+    const batchId = stableUuid(
+      `world-memory-ingestion-batch:${invocation.payload.invocationId}`,
+    );
+    const enqueued = await this.outbox.enqueue(batchId, commands);
+    const delivery = await this.outbox.deliverBatch(batchId, { force: true });
+    return Object.freeze({
+      projectedCount: commands.length,
+      createdCount: delivery?.createdCount ?? 0,
+      replayedCount: delivery?.replayedCount ?? 0,
+      deferredCount: delivery?.deferredCount ?? 0,
+      pendingBatchCount: await this.outbox.pendingCount(),
+      durableBatchCreated: enqueued.created,
     });
   }
 }

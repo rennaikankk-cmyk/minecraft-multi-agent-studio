@@ -43,7 +43,10 @@ async function main(): Promise<void> {
   });
   const teamCoordinator = new TeamCoordinator({ registry });
   const aiPerformance = new BotAiPerformanceTracker();
-  const worldMemory = await createCoordinatorWorldMemoryRuntimeFromEnv();
+  const worldMemory = await createCoordinatorWorldMemoryRuntimeFromEnv(
+    process.env,
+    { logger },
+  );
   let aiService: ReturnType<typeof createCoordinatorAIServiceFromEnv>;
   try {
     aiService = createCoordinatorAIServiceFromEnv(registry, {
