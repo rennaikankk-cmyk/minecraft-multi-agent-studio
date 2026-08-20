@@ -52,6 +52,7 @@ export type CoordinatorPlanRequest = Readonly<{
 type ProposalMetadata = Readonly<{
   requestId: string;
   botId: string;
+  runtimeInstanceId: string;
   taskId?: string;
   stateVersion: number;
   taskVersion: number;
@@ -231,6 +232,7 @@ export class CoordinatorAIPlanner {
       const metadata = {
         requestId,
         botId: input.botId,
+        runtimeInstanceId: record.runtimeInstanceId,
         ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
         stateVersion: status.sequence,
         taskVersion: input.taskVersion,

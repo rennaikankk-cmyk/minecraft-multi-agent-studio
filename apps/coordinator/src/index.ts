@@ -38,7 +38,25 @@ export {
   type RuntimeLinkAddress,
   type RuntimeLinkServerOptions,
   type RuntimeLinkTransportErrorCode,
+  type SkillCommandAuthorizationContext,
 } from "./runtime-link-server.js";
+
+export {
+  DefaultSkillInvocationPolicy,
+  InMemorySkillInvocationAuditSink,
+  SkillInvocationController,
+  SkillInvocationControllerError,
+  type SkillInvocationAuditEntry,
+  type SkillInvocationAuditSink,
+  type SkillInvocationAuditStatus,
+  type SkillInvocationControllerErrorCode,
+  type SkillInvocationControllerOptions,
+  type SkillInvocationGrant,
+  type SkillInvocationPolicy,
+  type SkillInvocationPolicyInput,
+  type SkillInvocationTransport,
+  type SkillRiskLevel,
+} from "./skill-invocation-controller.js";
 
 export {
   ControlLinkConfigError,
@@ -80,5 +98,8 @@ export {
 export {
   CoordinatorAIService,
   createCoordinatorAIServiceFromEnv,
+  type CoordinatorAIExecutionHandle,
+  type CoordinatorAIExecutionOptions,
+  type CoordinatorAIExecutionResult,
   type CoordinatorAIServiceOptions,
 } from "./ai-service.js";

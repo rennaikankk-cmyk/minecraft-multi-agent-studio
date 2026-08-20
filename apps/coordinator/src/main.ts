@@ -15,6 +15,7 @@ import {
   loadRuntimeLinkConfig,
 } from "./runtime-link-config.js";
 import { RuntimeLinkServer } from "./runtime-link-server.js";
+import { InMemorySkillInvocationAuditSink } from "./skill-invocation-controller.js";
 import { InMemoryStopAuditSink, StopController } from "./stop-controller.js";
 
 const instanceId = `coordinator-${randomUUID()}`;
@@ -26,13 +27,18 @@ async function main(): Promise<void> {
   const registry = new BotRegistry({
     staleAfterMs: runtimeConfig.botStaleAfterMs,
   });
-  const aiService = createCoordinatorAIServiceFromEnv(registry);
   const runtimeServer = new RuntimeLinkServer({
     host: runtimeConfig.host,
     port: runtimeConfig.port,
     instanceId,
     peers: runtimeConfig.peers,
     registry,
+    logger,
+  });
+  const aiService = createCoordinatorAIServiceFromEnv(registry, {
+    instanceId,
+    transport: runtimeServer,
+    auditSink: new InMemorySkillInvocationAuditSink(),
     logger,
   });
   const stopController = new StopController({
