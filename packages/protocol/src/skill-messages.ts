@@ -4,6 +4,7 @@ import { identifierSchema } from "./bot-messages.js";
 
 const timestampSchema = z.string().datetime({ offset: true });
 const MAX_INVOCATION_LIFETIME_MS = 5 * 60_000;
+const safeVersionSchema = z.number().int().nonnegative().safe();
 
 export const skillIdentifierSchema = z
   .string()
@@ -74,6 +75,9 @@ export const skillInvocationV1Schema = z
         invocationId: z.string().uuid(),
         skillId: skillIdentifierSchema,
         skillVersion: skillVersionSchema,
+        expectedRuntimeInstanceId: identifierSchema,
+        expectedStateSequence: safeVersionSchema,
+        taskVersion: safeVersionSchema,
         expiresAt: timestampSchema,
         input: skillJsonValueSchema,
         authorization: skillAuthorizationReferenceSchema,

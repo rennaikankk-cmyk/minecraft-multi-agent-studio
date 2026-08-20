@@ -175,6 +175,9 @@ function movementInvocation(): SkillInvocationV1 {
       invocationId: "33333333-3333-4333-8333-333333333333",
       skillId: "movement.goto",
       skillVersion: "1.0.0",
+      expectedRuntimeInstanceId: `runtime-${FIXED_UUID}`,
+      expectedStateSequence: 1,
+      taskVersion: 1,
       expiresAt: "2026-07-19T10:01:00.000Z",
       input: {
         target: {
@@ -508,6 +511,59 @@ describe("SingleBotRuntime", () => {
     expect(rejected.payload).toMatchObject({
       outcome: "rejected",
       errorCode: "NORMAL_ACTIONS_PAUSED",
+    });
+    expect(client.capabilityCalls).toHaveLength(1);
+    await runtime.stop("test_cleanup");
+  });
+
+  it("executes authenticated Coordinator skills and rejects stale state or task versions", async () => {
+    const messages: BotTelemetryMessageV1[] = [];
+    const client = new FakeBotClient();
+    const runtime = new SingleBotRuntime(profile, {
+      createClient: () => client,
+      messageSink: (message) => messages.push(message),
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+    runtime.start();
+    client.spawn();
+    const status = messages.findLast(
+      (message) => message.type === "bot.status.v1",
+    );
+    if (status?.type !== "bot.status.v1") throw new Error("status required");
+
+    const invocation = movementInvocation();
+    invocation.payload.expectedStateSequence = status.payload.sequence;
+    invocation.payload.taskVersion = 2;
+    const completed = await runtime.handleCoordinatorSkillInvocation(
+      invocation,
+      invocation.source.instanceId,
+    );
+    expect(completed.payload).toMatchObject({ outcome: "completed" });
+
+    const staleState = structuredClone(invocation);
+    staleState.payload.invocationId = "55555555-5555-4555-8555-555555555555";
+    staleState.payload.expectedStateSequence = status.payload.sequence + 1;
+    await expect(
+      runtime.handleCoordinatorSkillInvocation(
+        staleState,
+        staleState.source.instanceId,
+      ),
+    ).resolves.toMatchObject({
+      payload: { outcome: "rejected", errorCode: "SKILL_STATE_STALE" },
+    });
+
+    const staleTask = structuredClone(invocation);
+    staleTask.payload.invocationId = "66666666-6666-4666-8666-666666666666";
+    staleTask.payload.taskVersion = 1;
+    await expect(
+      runtime.handleCoordinatorSkillInvocation(
+        staleTask,
+        staleTask.source.instanceId,
+      ),
+    ).resolves.toMatchObject({
+      payload: { outcome: "rejected", errorCode: "SKILL_TASK_STALE" },
     });
     expect(client.capabilityCalls).toHaveLength(1);
     await runtime.stop("test_cleanup");

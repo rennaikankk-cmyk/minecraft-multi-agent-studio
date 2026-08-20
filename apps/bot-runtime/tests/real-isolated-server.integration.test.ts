@@ -174,6 +174,9 @@ integrationDescribe("real isolated Minecraft 1.21.8 server", () => {
             invocationId: "72222222-2222-4222-8222-222222222222",
             skillId: "smelt.item",
             skillVersion: "1.0.0",
+            expectedRuntimeInstanceId: runtime.getRuntimeInstanceId(),
+            expectedStateSequence: status.payload.sequence,
+            taskVersion: 1,
             expiresAt,
             input: {
               inputItemName: "raw_iron",
@@ -277,4 +280,3 @@ integrationDescribe("real isolated Minecraft 1.21.8 server", () => {
     75_000,
   );
 });
-

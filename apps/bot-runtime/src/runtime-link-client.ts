@@ -21,6 +21,8 @@ import {
   type ControlAuthorizationContext,
   type RuntimeLinkAuthenticateV1,
   type RuntimeLinkChallengeV1,
+  type SkillExecutionResultV1,
+  type SkillInvocationV1,
   type StopBotCommandV1,
 } from "@minecraft-studio/protocol";
 import WebSocket, { type RawData } from "ws";
@@ -72,6 +74,10 @@ export type RuntimeLinkClientOptions = Readonly<{
     command: StopBotCommandV1,
     authorizationContext: ControlAuthorizationContext,
   ) => Promise<BotStopResultV1>;
+  handleSkillInvocation: (
+    command: SkillInvocationV1,
+    trustedCoordinatorInstanceId: string,
+  ) => Promise<SkillExecutionResultV1>;
   publishCurrentState: () => void;
   failClosed: (error: RuntimeLinkClientError) => Promise<void> | void;
   now?: () => Date;
@@ -290,7 +296,11 @@ export class RuntimeLinkClient {
         this.handleTelemetryAck(socket, message);
         return;
       }
-      void this.handleStopCommand(socket, message);
+      if (message.type === "bot.stop.command.v1") {
+        void this.handleStopCommand(socket, message);
+        return;
+      }
+      void this.handleSkillInvocation(socket, message);
     } catch {
       this.rejectSocket(socket, "client_state_invalid");
     }
@@ -503,6 +513,58 @@ export class RuntimeLinkClient {
         code: "RUNTIME_LINK_STOP_REJECTED",
       });
       this.rejectSocket(socket, "stop_rejected");
+    }
+  }
+
+  private async handleSkillInvocation(
+    socket: WebSocket,
+    command: SkillInvocationV1,
+  ): Promise<void> {
+    const coordinatorInstanceId = this.coordinatorInstanceId;
+    if (
+      !coordinatorInstanceId ||
+      command.source.service !== "coordinator" ||
+      command.source.instanceId !== coordinatorInstanceId ||
+      command.botId !== this.options.botId ||
+      command.payload.expectedRuntimeInstanceId !== this.options.runtimeInstanceId
+    ) {
+      this.rejectSocket(socket, "skill_identity_mismatch");
+      return;
+    }
+
+    try {
+      const result = await this.options.handleSkillInvocation(
+        command,
+        coordinatorInstanceId,
+      );
+      if (
+        result.botId !== this.options.botId ||
+        result.taskId !== command.taskId ||
+        result.traceId !== command.traceId ||
+        result.payload.invocationId !== command.payload.invocationId ||
+        result.payload.skillId !== command.payload.skillId ||
+        result.payload.skillVersion !== command.payload.skillVersion ||
+        result.source.instanceId !== this.options.runtimeInstanceId
+      ) {
+        throw new RuntimeLinkClientError(
+          "RUNTIME_LINK_IDENTITY_MISMATCH",
+          "Runtime skill result does not match the authenticated invocation.",
+        );
+      }
+      if (!this.isCurrent(this.generation, socket) || !this.authenticated) {
+        return;
+      }
+      this.sendClientFrame(socket, result);
+    } catch {
+      this.log("warn", "runtime_link_skill_rejected", {
+        traceId: command.traceId,
+        taskId: command.taskId,
+        botId: command.botId,
+        skillId: command.payload.skillId,
+        invocationId: command.payload.invocationId,
+        code: "RUNTIME_LINK_SKILL_REJECTED",
+      });
+      this.rejectSocket(socket, "skill_rejected");
     }
   }
 

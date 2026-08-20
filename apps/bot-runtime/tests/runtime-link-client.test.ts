@@ -10,10 +10,14 @@ import {
   runtimeLinkClientProofInput,
   runtimeLinkServerProofInput,
   runtimeLinkTelemetryAckV1Schema,
+  skillExecutionResultV1Schema,
+  skillInvocationV1Schema,
   stopBotCommandV1Schema,
   type BotStopResultV1,
   type BotTelemetryMessageV1,
   type RuntimeLinkAuthenticateV1,
+  type SkillExecutionResultV1,
+  type SkillInvocationV1,
   type StopBotCommandV1,
 } from "@minecraft-studio/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -37,6 +41,7 @@ type TestServer = {
   sockets: Set<WebSocket>;
   telemetry: BotTelemetryMessageV1[];
   stopResults: BotStopResultV1[];
+  skillResults: SkillExecutionResultV1[];
   receivedTelemetryIds: string[];
   connectionCount: () => number;
   authenticated: Promise<WebSocket>;
@@ -137,6 +142,44 @@ describe("RuntimeLinkClient", () => {
     await client.close();
   });
 
+  it("executes a runtime-bound skill only for the authenticated Coordinator", async () => {
+    const testServer = await createTestServer();
+    const handled = vi.fn<RuntimeLinkClientOptions["handleSkillInvocation"]>(
+      async (command, coordinatorInstanceId) => {
+        expect(coordinatorInstanceId).toBe(COORDINATOR_ID);
+        return skillResult(command);
+      },
+    );
+    const failClosed = vi.fn();
+    const client = runtimeLinkClient(testServer.url, {
+      handleSkillInvocation: handled,
+      failClosed,
+    });
+
+    await client.start();
+    const socket = await testServer.authenticated;
+    const command = skillCommand();
+    socket.send(JSON.stringify(command));
+
+    await vi.waitFor(() => {
+      expect(handled).toHaveBeenCalledTimes(1);
+      expect(testServer.skillResults).toEqual([
+        expect.objectContaining({
+          traceId: command.traceId,
+          taskId: command.taskId,
+          botId: BOT_ID,
+          type: "skill.result.v1",
+          payload: expect.objectContaining({
+            invocationId: command.payload.invocationId,
+            outcome: "completed",
+          }),
+        }),
+      ]);
+    });
+    expect(failClosed).not.toHaveBeenCalled();
+    await client.close();
+  });
+
   it("rejects a forged server proof and fails closed after bounded retries", async () => {
     const testServer = await createTestServer({ forgeServerProof: true });
     const failClosed = vi.fn();
@@ -232,6 +275,9 @@ function runtimeLinkClient(
     }),
     handleStopCommand:
       overrides.handleStopCommand ?? (async (command) => stopResult(command)),
+    handleSkillInvocation:
+      overrides.handleSkillInvocation ??
+      (async (command) => skillResult(command)),
     publishCurrentState: overrides.publishCurrentState ?? (() => undefined),
     failClosed: overrides.failClosed ?? (() => undefined),
   });
@@ -246,6 +292,7 @@ async function createTestServer(
 ): Promise<TestServer> {
   const telemetry: BotTelemetryMessageV1[] = [];
   const stopResults: BotStopResultV1[] = [];
+  const skillResults: SkillExecutionResultV1[] = [];
   const receivedTelemetryIds: string[] = [];
   const sockets = new Set<WebSocket>();
   let connectionCount = 0;
@@ -327,6 +374,10 @@ async function createTestServer(
         stopResults.push(message);
         return;
       }
+      if (message.type === "skill.result.v1") {
+        skillResults.push(message);
+        return;
+      }
       receivedTelemetryIds.push(message.messageId);
       if (options.closeBeforeFirstAck && receivedTelemetryIds.length === 1) {
         socket.close(1013, "test_retry");
@@ -366,6 +417,7 @@ async function createTestServer(
     sockets,
     telemetry,
     stopResults,
+    skillResults,
     receivedTelemetryIds,
     connectionCount: () => connectionCount,
     authenticated,
@@ -492,6 +544,60 @@ function stopResult(command: StopBotCommandV1): BotStopResultV1 {
       completedAt,
     },
   };
+}
+
+function skillCommand(): SkillInvocationV1 {
+  const requestedAt = new Date();
+  const expiresAt = new Date(requestedAt.getTime() + 5_000).toISOString();
+  return skillInvocationV1Schema.parse({
+    schemaVersion: "1.0",
+    messageId: "77777777-7777-4777-8777-777777777777",
+    traceId: "trace-runtime-skill",
+    timestamp: requestedAt.toISOString(),
+    source: { service: "coordinator", instanceId: COORDINATOR_ID },
+    botId: BOT_ID,
+    taskId: "task-runtime-skill",
+    type: "skill.invoke.v1",
+    payload: {
+      invocationId: "88888888-8888-4888-8888-888888888888",
+      skillId: "movement.goto",
+      skillVersion: "1.0.0",
+      expectedRuntimeInstanceId: RUNTIME_ID,
+      expectedStateSequence: 7,
+      taskVersion: 3,
+      expiresAt,
+      input: { target: { x: 1, y: 64, z: 1 } },
+      authorization: {
+        decisionId: "99999999-9999-4999-8999-999999999999",
+        actorId: "coordinator-policy",
+        issuedAt: requestedAt.toISOString(),
+        expiresAt,
+      },
+    },
+  });
+}
+
+function skillResult(command: SkillInvocationV1): SkillExecutionResultV1 {
+  const completedAt = new Date().toISOString();
+  return skillExecutionResultV1Schema.parse({
+    schemaVersion: "1.0",
+    messageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    traceId: command.traceId,
+    timestamp: completedAt,
+    source: { service: "bot-runtime", instanceId: RUNTIME_ID },
+    botId: BOT_ID,
+    taskId: command.taskId,
+    type: "skill.result.v1",
+    payload: {
+      invocationId: command.payload.invocationId,
+      skillId: command.payload.skillId,
+      skillVersion: command.payload.skillVersion,
+      outcome: "completed",
+      attempts: 1,
+      completedAt,
+      output: { reached: true },
+    },
+  });
 }
 
 function uuid(value: number): string {

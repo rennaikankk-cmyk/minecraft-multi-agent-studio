@@ -52,6 +52,9 @@ function makeInvocation(
       invocationId: "22222222-2222-4222-8222-222222222222",
       skillId,
       skillVersion: "1.0.0",
+      expectedRuntimeInstanceId: "runtime-skill-test",
+      expectedStateSequence: 1,
+      taskVersion: 1,
       expiresAt: "2026-08-08T12:01:00.000Z",
       input,
       authorization: {

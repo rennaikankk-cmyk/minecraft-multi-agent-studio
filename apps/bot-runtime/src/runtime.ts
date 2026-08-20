@@ -7,13 +7,16 @@ import {
   botDisconnectedV1Schema,
   botHeartbeatV1Schema,
   botStatusV1Schema,
+  parseSkillInvocation,
   parseBotProtocolMessage,
   parseBotTelemetryMessage,
+  skillExecutionResultV1Schema,
   type BotDisconnectedV1,
   type BotHeartbeatV1,
   type BotSkillCatalogEntryV1,
   type BotSkillCatalogV1,
   type SkillExecutionResultV1,
+  type SkillInvocationV1,
   type BotStopResultV1,
   type BotStatusV1,
   type BotVersionV1,
@@ -221,6 +224,12 @@ export class SingleBotRuntime {
     { fingerprint: string; result: Promise<BotStopResultV1> }
   >();
   private readonly activeSkillControllers = new Set<AbortController>();
+  private readonly skillExecutions = new Map<
+    string,
+    { fingerprint: string; result: Promise<SkillExecutionResultV1> }
+  >();
+  private latestTaskVersion = 0;
+  private activeCoordinatorInvocationId: string | null = null;
 
   constructor(
     private readonly profile: ServerProfile,
@@ -409,6 +418,150 @@ export class SingleBotRuntime {
     }
   }
 
+  handleCoordinatorSkillInvocation(
+    input: unknown,
+    trustedCoordinatorInstanceId: string,
+  ): Promise<SkillExecutionResultV1> {
+    const invocation = parseSkillInvocation(input);
+    if (
+      invocation.source.instanceId !== trustedCoordinatorInstanceId ||
+      invocation.botId !== this.profile.botId ||
+      invocation.payload.expectedRuntimeInstanceId !== this.runtimeInstanceId
+    ) {
+      throw new RuntimeControlError(
+        "CONTROL_MESSAGE_REQUIRED",
+        "Skill invocation identity does not match the authenticated control session.",
+      );
+    }
+
+    const fingerprint = JSON.stringify(invocation);
+    const existing = this.skillExecutions.get(invocation.payload.invocationId);
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) {
+        throw new RuntimeControlError(
+          "COMMAND_ID_CONFLICT",
+          "The invocation ID was already used with different skill parameters.",
+        );
+      }
+      return existing.result;
+    }
+
+    const result = this.executeCoordinatorSkillInvocation(invocation);
+    this.skillExecutions.set(invocation.payload.invocationId, {
+      fingerprint,
+      result,
+    });
+    void result.then(
+      () => this.trimSkillExecutions(),
+      () => this.trimSkillExecutions(),
+    );
+    return result;
+  }
+
+  private async executeCoordinatorSkillInvocation(
+    invocation: SkillInvocationV1,
+  ): Promise<SkillExecutionResultV1> {
+    if (invocation.payload.expectedStateSequence !== this.lastStatusSequence) {
+      return this.rejectCoordinatorSkill(invocation, "SKILL_STATE_STALE");
+    }
+    if (invocation.payload.taskVersion < this.latestTaskVersion) {
+      return this.rejectCoordinatorSkill(invocation, "SKILL_TASK_STALE");
+    }
+    if (!this.canAcceptNormalActions()) {
+      return this.rejectCoordinatorSkill(invocation, "NORMAL_ACTIONS_PAUSED");
+    }
+    if (invocation.payload.taskVersion > this.latestTaskVersion) {
+      this.latestTaskVersion = invocation.payload.taskVersion;
+      this.cancelActiveSkills();
+    }
+    if (
+      this.activeCoordinatorInvocationId !== null &&
+      this.activeCoordinatorInvocationId !== invocation.payload.invocationId
+    ) {
+      return this.rejectCoordinatorSkill(invocation, "SKILL_ALREADY_RUNNING");
+    }
+
+    const definition = this.skillRegistry.resolve(
+      invocation.payload.skillId,
+      invocation.payload.skillVersion,
+    );
+    const authorization: SkillExecutionAuthorization = {
+      decisionId: invocation.payload.authorization.decisionId,
+      actorId: invocation.payload.authorization.actorId,
+      sourceInstanceId: invocation.source.instanceId,
+      traceId: invocation.traceId,
+      taskId: invocation.taskId,
+      botId: invocation.botId,
+      invocationId: invocation.payload.invocationId,
+      skillId: invocation.payload.skillId,
+      skillVersion: invocation.payload.skillVersion,
+      issuedAt: invocation.payload.authorization.issuedAt,
+      expiresAt: invocation.payload.authorization.expiresAt,
+      allowedCapabilities: new Set(definition?.requiredCapabilities ?? []),
+    };
+    this.activeCoordinatorInvocationId = invocation.payload.invocationId;
+    try {
+      return await this.handleSkillInvocation(invocation, authorization);
+    } finally {
+      if (
+        this.activeCoordinatorInvocationId === invocation.payload.invocationId
+      ) {
+        this.activeCoordinatorInvocationId = null;
+      }
+    }
+  }
+
+  private rejectCoordinatorSkill(
+    invocation: SkillInvocationV1,
+    errorCode: string,
+  ): SkillExecutionResultV1 {
+    const completedAt = this.now().toISOString();
+    const result = skillExecutionResultV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: this.randomId(),
+      traceId: invocation.traceId,
+      timestamp: completedAt,
+      source: {
+        service: "bot-runtime",
+        instanceId: this.runtimeInstanceId,
+      },
+      botId: invocation.botId,
+      taskId: invocation.taskId,
+      type: "skill.result.v1",
+      payload: {
+        invocationId: invocation.payload.invocationId,
+        skillId: invocation.payload.skillId,
+        skillVersion: invocation.payload.skillVersion,
+        outcome: "rejected",
+        attempts: 0,
+        completedAt,
+        errorCode,
+      },
+    });
+    this.metrics.increment("bot_skill_results_total", {
+      bot_id: this.profile.botId,
+      outcome: result.payload.outcome,
+      skill_id: result.payload.skillId,
+    });
+    this.dependencies.logger.warn(
+      "bot_runtime_skill_result",
+      this.logFields(
+        {
+          skillVersion: result.payload.skillVersion,
+          outcome: result.payload.outcome,
+          attempts: result.payload.attempts,
+          durationMs: 0,
+          telemetry: null,
+          errorCode,
+        },
+        result.traceId,
+        result.taskId,
+        result.payload.skillId,
+      ),
+    );
+    return result;
+  }
+
   private async performStop(
     reason: string,
     operationTraceId: string,
@@ -535,6 +688,16 @@ export class SingleBotRuntime {
         | undefined;
       if (!oldest) return;
       this.stopExecutions.delete(oldest);
+    }
+  }
+
+  private trimSkillExecutions(): void {
+    while (this.skillExecutions.size > 256) {
+      const oldest = this.skillExecutions.keys().next().value as
+        | string
+        | undefined;
+      if (!oldest) return;
+      this.skillExecutions.delete(oldest);
     }
   }
 

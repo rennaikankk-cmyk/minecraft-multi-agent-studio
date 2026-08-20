@@ -43,6 +43,11 @@ export class BotRuntimeHost {
       logger: options.logger,
       handleStopCommand: (command, authorizationContext) =>
         this.runtime.handleStopCommand(command, authorizationContext),
+      handleSkillInvocation: (command, coordinatorInstanceId) =>
+        this.runtime.handleCoordinatorSkillInvocation(
+          command,
+          coordinatorInstanceId,
+        ),
       publishCurrentState: () => this.runtime.publishCurrentState(),
       failClosed: async (error) => {
         options.logger.error("bot_runtime_control_link_lost", {

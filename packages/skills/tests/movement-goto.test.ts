@@ -21,6 +21,9 @@ const invocation = {
     invocationId: "22222222-2222-4222-8222-222222222222",
     skillId: "movement.goto",
     skillVersion: "1.0.0",
+    expectedRuntimeInstanceId: "runtime-01",
+    expectedStateSequence: 1,
+    taskVersion: 1,
     expiresAt: "2026-07-27T10:01:00.000Z",
     input: {
       target: {

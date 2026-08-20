@@ -8,10 +8,13 @@ import {
   runtimeLinkAuthenticateV1Schema,
   runtimeLinkClientProofInput,
   runtimeLinkServerProofInput,
+  skillInvocationV1Schema,
   type BotHeartbeatV1,
   type ControlAuthorizationContext,
   type RuntimeLinkChallengeV1,
   type RuntimeLinkProofContext,
+  type SkillExecutionResultV1,
+  type SkillInvocationV1,
   type StopBotCommandV1,
 } from "@minecraft-studio/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -146,6 +149,23 @@ describe("Coordinator Runtime Link server", () => {
       payload: { accepted: false, reason: "duplicate_message" },
     });
     expect(registry.get(BOT_ID, NOW)?.lastSequence).toBe(1);
+  });
+
+  it("round-trips an authorized, version-bound skill invocation", async () => {
+    const { server, url } = await startServer();
+    const socket = await authenticateAndActivate(url);
+    const command = skillCommand(testUuid(740), testUuid(741));
+    const commandReceived = nextServerMessage(socket);
+    const resultPromise = server.sendSkillInvocation(
+      command,
+      skillAuthorizationContext(command),
+      new AbortController().signal,
+    );
+
+    await expect(commandReceived).resolves.toEqual(command);
+    const result = skillResult(command);
+    socket.send(JSON.stringify(result));
+    await expect(resultPromise).resolves.toEqual(result);
   });
 
   it("rejects an invalid client proof before registry mutation", async () => {
@@ -439,6 +459,72 @@ function authorizationContext(
     commandId: command.payload.commandId,
     permissions: new Set(["bot.stop"]),
     now: NOW,
+  };
+}
+
+function skillCommand(messageId: string, invocationId: string): SkillInvocationV1 {
+  const expiresAt = new Date(NOW.getTime() + 10_000).toISOString();
+  return skillInvocationV1Schema.parse({
+    schemaVersion: "1.0",
+    messageId,
+    traceId: "trace-runtime-link-skill",
+    timestamp: NOW.toISOString(),
+    source: { service: "coordinator", instanceId: "coordinator-test" },
+    botId: BOT_ID,
+    taskId: "task-runtime-link-skill",
+    type: "skill.invoke.v1",
+    payload: {
+      invocationId,
+      skillId: "movement.goto",
+      skillVersion: "1.0.0",
+      expectedRuntimeInstanceId: RUNTIME_ID,
+      expectedStateSequence: 5,
+      taskVersion: 2,
+      expiresAt,
+      input: { target: { x: 1, y: 64, z: 1 } },
+      authorization: {
+        decisionId: testUuid(742),
+        actorId: "coordinator-policy",
+        issuedAt: NOW.toISOString(),
+        expiresAt,
+      },
+    },
+  });
+}
+
+function skillAuthorizationContext(command: SkillInvocationV1) {
+  return {
+    decisionId: command.payload.authorization.decisionId,
+    actorId: command.payload.authorization.actorId,
+    botId: command.botId,
+    taskId: command.taskId,
+    invocationId: command.payload.invocationId,
+    skillId: command.payload.skillId,
+    skillVersion: command.payload.skillVersion,
+    permissions: new Set(["skill.invoke" as const]),
+    now: NOW,
+  };
+}
+
+function skillResult(command: SkillInvocationV1): SkillExecutionResultV1 {
+  return {
+    schemaVersion: "1.0",
+    messageId: testUuid(743),
+    traceId: command.traceId,
+    timestamp: NOW.toISOString(),
+    source: { service: "bot-runtime", instanceId: RUNTIME_ID },
+    botId: BOT_ID,
+    taskId: command.taskId,
+    type: "skill.result.v1",
+    payload: {
+      invocationId: command.payload.invocationId,
+      skillId: command.payload.skillId,
+      skillVersion: command.payload.skillVersion,
+      outcome: "completed",
+      attempts: 1,
+      completedAt: NOW.toISOString(),
+      output: { reached: true },
+    },
   };
 }
 
