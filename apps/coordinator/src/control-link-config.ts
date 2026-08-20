@@ -6,6 +6,10 @@ const REQUIRED_CAPABILITIES = new Set<ControlLinkCapability>([
   "bot.read",
   "bot.stop",
 ]);
+const ALLOWED_CAPABILITIES = new Set<ControlLinkCapability>([
+  ...REQUIRED_CAPABILITIES,
+  "task.execute",
+]);
 
 export type ControlLinkClientConfig = Readonly<{
   clientId: string;
@@ -130,16 +134,20 @@ function parseClient(value: unknown): ControlLinkClientConfig {
   }
   const capabilities = record.capabilities;
   if (
-    capabilities.length !== REQUIRED_CAPABILITIES.size ||
+    capabilities.length < REQUIRED_CAPABILITIES.size ||
+    capabilities.length > ALLOWED_CAPABILITIES.size ||
     capabilities.some(
       (capability) =>
         typeof capability !== "string" ||
-        !REQUIRED_CAPABILITIES.has(capability as ControlLinkCapability),
+        !ALLOWED_CAPABILITIES.has(capability as ControlLinkCapability),
     ) ||
-    new Set(capabilities).size !== capabilities.length
+    new Set(capabilities).size !== capabilities.length ||
+    [...REQUIRED_CAPABILITIES].some(
+      (capability) => !capabilities.includes(capability),
+    )
   ) {
     throw invalidClients(
-      "Control Link clients require unique bot.read and bot.stop capabilities.",
+      "Control Link clients require bot.read and bot.stop; task.execute is optional.",
     );
   }
   return {

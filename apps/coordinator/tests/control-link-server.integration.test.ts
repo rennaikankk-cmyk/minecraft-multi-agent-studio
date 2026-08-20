@@ -7,6 +7,7 @@ import {
   controlLinkClientProofInput,
   controlLinkServerProofInput,
   controlLinkStopRequestV1Schema,
+  controlLinkTaskRequestV1Schema,
   parseControlLinkServerMessage,
   type BotHeartbeatV1,
   type BotStatusV1,
@@ -160,6 +161,58 @@ describe("Coordinator Control Link server", () => {
     await expect(closed).resolves.toBe(1008);
   });
 
+  it("rebuilds R1 task authorization and returns the AI wait result", async () => {
+    const requestAndExecute = vi.fn((request, grant) => ({
+      requestId: testUuid(925),
+      promise: Promise.resolve({
+        requestId: testUuid(925),
+        botId: request.botId,
+        runtimeInstanceId: RUNTIME_ID,
+        taskId: request.taskId,
+        stateVersion: 1,
+        taskVersion: request.taskVersion,
+        provider: "spark-vllm",
+        model: "qwen3.8-27b-nvfp4",
+        reason: "State is insufficient.",
+        confidence: 0.7,
+        action: "wait" as const,
+      }),
+      cancel: vi.fn(() => true),
+    }));
+    const { registry, url } = await startServer({
+      taskExecutor: { requestAndExecute },
+    });
+    registry.ingest(statusMessage(1), NOW);
+    const { socket, reader } = await authenticate(url);
+    await readSnapshot(reader);
+
+    const operationId = testUuid(926);
+    socket.send(JSON.stringify(taskRequest(operationId, testUuid(927))));
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.task-response.v1",
+      ok: true,
+      payload: {
+        operationId,
+        taskId: "task-01",
+        plannerRequestId: testUuid(925),
+        execution: { action: "wait", provider: "spark-vllm" },
+      },
+    });
+    expect(requestAndExecute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        botId: BOT_ID,
+        taskId: "task-01",
+        taskVersion: 1,
+      }),
+      expect.objectContaining({
+        decisionId: operationId,
+        actorId: "operator-01",
+        permissions: new Set(["skill.invoke"]),
+        maxRisk: "R1",
+      }),
+    );
+  });
+
   it("rejects browser Origin and binary application frames", async () => {
     const { url } = await startServer();
     await expect(rejectedWebSocketStatus(url, "https://untrusted.example")).resolves.toBe(
@@ -231,6 +284,7 @@ async function startServer(
     maxSessions: number;
     maxPendingStops: number;
     stopController: { requestStop: (...args: any[]) => Promise<any> };
+    taskExecutor: { requestAndExecute: (...args: any[]) => any };
   }> = {},
 ): Promise<{ registry: BotRegistry; server: ControlLinkServer; url: string }> {
   const registry = new BotRegistry({ staleAfterMs: 15_000, now: () => NOW });
@@ -248,7 +302,7 @@ async function startServer(
         clientId: CLIENT_ID,
         keyId: KEY_ID,
         secretSha256: SECRET_SHA256,
-        capabilities: ["bot.read", "bot.stop"],
+        capabilities: ["bot.read", "bot.stop", "task.execute"],
       },
     ],
     registry,
@@ -263,6 +317,9 @@ async function startServer(
     ...(overrides.maxPendingStops === undefined
       ? {}
       : { maxPendingStops: overrides.maxPendingStops }),
+    ...(overrides.taskExecutor === undefined
+      ? {}
+      : { taskExecutor: overrides.taskExecutor }),
   });
   servers.push(server);
   const address = await server.start();
@@ -434,6 +491,29 @@ function stopRequest(operationId: string, messageId: string) {
       actorId: "operator-01",
       issuedAt: NOW.toISOString(),
       expiresAt: new Date(NOW.getTime() + 30_000).toISOString(),
+    },
+  });
+}
+
+function taskRequest(operationId: string, messageId: string) {
+  return controlLinkTaskRequestV1Schema.parse({
+    schemaVersion: "1.0",
+    messageId,
+    timestamp: NOW.toISOString(),
+    type: "control.link.task-request.v1",
+    payload: {
+      coordinatorInstanceId: "coordinator-test",
+      clientId: CLIENT_ID,
+      controlApiInstanceId: CONTROL_API_INSTANCE_ID,
+      operationId,
+      botId: BOT_ID,
+      taskId: "task-01",
+      task: "Move to the work site",
+      taskVersion: 1,
+      priority: 50,
+      actorId: "operator-01",
+      issuedAt: NOW.toISOString(),
+      expiresAt: new Date(NOW.getTime() + 90_000).toISOString(),
     },
   });
 }

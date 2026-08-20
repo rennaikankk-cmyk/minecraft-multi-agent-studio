@@ -225,7 +225,7 @@ $clients = @(@{
   clientId = 'local-control-api'
   keyId = 'control-api-key-01'
   secretSha256 = $controlSecretHash
-  capabilities = @('bot.read', 'bot.stop')
+  capabilities = @('bot.read', 'bot.stop', 'task.execute')
 })
 $env:COORDINATOR_CONTROL_LINK_CLIENTS_JSON = ConvertTo-Json -InputObject $clients -Depth 3 -Compress
 pnpm coordinator:start
@@ -254,7 +254,7 @@ $token
 $principal = @(@{
   subject = 'local-dashboard'
   tokenSha256 = $tokenHash
-  permissions = @('bot.read', 'bot.position.read', 'bot.stop')
+  permissions = @('bot.read', 'bot.position.read', 'bot.stop', 'task.execute')
 })
 $env:CONTROL_API_AUTH_JSON = ConvertTo-Json -InputObject $principal -Compress
 $env:CONTROL_API_COORDINATOR_LINK_URL = 'ws://127.0.0.1:3221/v1/control-link'
@@ -269,11 +269,12 @@ pnpm api:start
 - `GET http://127.0.0.1:3210/v1/bots`
 - `GET http://127.0.0.1:3210/v1/bots/{botId}`
 - `POST http://127.0.0.1:3210/v1/bots/{botId}/stop`
+- `POST http://127.0.0.1:3210/v1/bots/{botId}/tasks/execute`
 - `WS ws://127.0.0.1:3210/v1/bots/stream`
 
-HTTP 使用 `Authorization: Bearer <明文令牌>`。浏览器 WebSocket 使用子协议 `minecraft-studio.v1` 和 `auth.<明文令牌的 base64url>`。停止 POST 固定为优雅停止并要求 `bot.stop`。
+HTTP 使用 `Authorization: Bearer <明文令牌>`。浏览器 WebSocket 使用子协议 `minecraft-studio.v1` 和 `auth.<明文令牌的 base64url>`。停止 POST 固定为优雅停止并要求 `bot.stop`。任务入口要求 `task.execute`，请求体包含严格的 `requestId/taskId/task/taskVersion/priority`；Coordinator 只自动授权内置 R0/R1 Skill，重新校验 Runtime、状态序列、任务版本和兼容目录后才执行。
 
-生产 Control API 启动时必须先通过 Control Link 双向 HMAC，并完整接收 Coordinator 原子快照；首个快照未完成时不开放 HTTP 服务。运行中链路断开或快照/增量序列无效时，内存镜像立即失效，读取和停止返回 `503 CONTROL_UNAVAILABLE`，不会创建模拟 Bot、沿用旧在线状态或伪造停止成功。
+生产 Control API 启动时必须先通过 Control Link 双向 HMAC，并完整接收 Coordinator 原子快照；首个快照未完成时不开放 HTTP 服务。运行中链路断开或快照/增量序列无效时，内存镜像立即失效，读取、停止和任务执行返回 `503 CONTROL_UNAVAILABLE`，不会创建模拟 Bot、沿用旧在线状态或伪造操作成功。
 
 ## 验证四进程控制链路
 

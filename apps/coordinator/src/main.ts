@@ -55,6 +55,7 @@ async function main(): Promise<void> {
     clients: controlConfig.clients,
     registry,
     stopController,
+    ...(aiService ? { taskExecutor: aiService } : {}),
     logger,
   });
   let staleTimer: ReturnType<typeof setInterval> | null = null;

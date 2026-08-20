@@ -211,7 +211,8 @@ export class SkillInvocationController {
       !record ||
       record.connectionState !== "online" ||
       record.currentStatus === null ||
-      record.skillCatalog === null
+      record.skillCatalog === null ||
+      record.currentStatus.safety?.normalTasksPaused === true
     ) {
       throw new SkillInvocationControllerError(
         "BOT_NOT_EXECUTABLE",

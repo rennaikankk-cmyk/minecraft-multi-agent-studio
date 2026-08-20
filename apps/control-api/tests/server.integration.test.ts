@@ -13,6 +13,7 @@ import {
   ControlApiServer,
   type ApiPrincipalConfig,
   type BotStateSource,
+  type BotTaskRequester,
   type ControlApiLogger,
 } from "../src/index.js";
 
@@ -20,6 +21,7 @@ const READER_TOKEN = "control-api-reader-token-000000000001";
 const POSITION_TOKEN = "control-api-position-token-000000001";
 const DENIED_TOKEN = "control-api-position-only-token-00000001";
 const OPERATOR_TOKEN = "control-api-stop-operator-token-00000001";
+const TASK_OPERATOR_TOKEN = "control-api-task-operator-token-00000001";
 
 const principals: ApiPrincipalConfig[] = [
   {
@@ -41,6 +43,11 @@ const principals: ApiPrincipalConfig[] = [
     subject: "operator-01",
     tokenSha256: hash(OPERATOR_TOKEN),
     permissions: ["bot.read", "bot.position.read", "bot.stop"],
+  },
+  {
+    subject: "task-operator-01",
+    tokenSha256: hash(TASK_OPERATOR_TOKEN),
+    permissions: ["bot.read", "task.execute"],
   },
 ];
 
@@ -266,6 +273,52 @@ describe("Control API HTTP and WebSocket integration", () => {
     expect((await response.json()).error.code).toBe("CONTROL_UNAVAILABLE");
   });
 
+  it("requires task permission and returns the authenticated Coordinator result", async () => {
+    const requestTask = vi.fn<BotTaskRequester["requestTask"]>(async () => ({
+      plannerRequestId: testUuid(2_101),
+      execution: {
+        action: "wait",
+        provider: "spark-vllm",
+        model: "qwen3.8-27b-nvfp4",
+        reason: "State is insufficient.",
+        confidence: 0.7,
+      },
+    }));
+    const { registry, baseUrl } = await startServer({
+      taskController: { requestTask },
+    });
+    registry.ingest(statusMessage(1), new Date());
+    const operationId = testUuid(2_102);
+
+    const denied = await taskFetch(baseUrl, READER_TOKEN, operationId);
+    expect(denied.status).toBe(403);
+    const accepted = await taskFetch(baseUrl, TASK_OPERATOR_TOKEN, operationId);
+    expect(accepted.status).toBe(200);
+    expect((await accepted.json()).data).toEqual({
+      botId: "worker-01",
+      taskId: "task-api-01",
+      operationId,
+      plannerRequestId: testUuid(2_101),
+      action: "wait",
+      provider: "spark-vllm",
+      model: "qwen3.8-27b-nvfp4",
+      reason: "State is insufficient.",
+      confidence: 0.7,
+    });
+    expect(requestTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operationId,
+        botId: "worker-01",
+        taskId: "task-api-01",
+        taskVersion: 1,
+        authorization: expect.objectContaining({
+          actorId: "task-operator-01",
+          permissions: new Set(["task.execute"]),
+        }),
+      }),
+    );
+  });
+
   it("returns 503 instead of an empty list when the Coordinator mirror is unavailable", async () => {
     const unavailableSource: BotStateSource = {
       isReady: () => false,
@@ -366,6 +419,7 @@ async function startServer(
   overrides: Partial<{
     requestLimitPerMinute: number;
     stopController: Pick<StopController, "requestStop">;
+    taskController: BotTaskRequester;
     stateSource: BotStateSource;
     maxConnectionsPerSubject: number;
   }> = {},
@@ -391,6 +445,9 @@ async function startServer(
     ...(overrides.stopController === undefined
       ? {}
       : { stopController: overrides.stopController }),
+    ...(overrides.taskController === undefined
+      ? {}
+      : { taskController: overrides.taskController }),
     ...(overrides.maxConnectionsPerSubject === undefined
       ? {}
       : { maxConnectionsPerSubject: overrides.maxConnectionsPerSubject }),
@@ -460,6 +517,24 @@ function stopFetch(baseUrl: string, token: string, requestId: string): Promise<R
       schemaVersion: "1.0",
       requestId,
       confirmation: "confirmed",
+    }),
+  });
+}
+
+function taskFetch(baseUrl: string, token: string, requestId: string): Promise<Response> {
+  return fetch(`${baseUrl}/v1/bots/worker-01/tasks/execute`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      schemaVersion: "1.0",
+      requestId,
+      taskId: "task-api-01",
+      task: "Move to the work site",
+      taskVersion: 1,
+      priority: 50,
     }),
   });
 }

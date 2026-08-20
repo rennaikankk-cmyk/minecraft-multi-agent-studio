@@ -6,6 +6,7 @@ const PERMISSIONS = new Set<ControlApiPermission>([
   "bot.read",
   "bot.position.read",
   "bot.stop",
+  "task.execute",
 ]);
 
 export type ControlApiRuntimeConfig = Readonly<{

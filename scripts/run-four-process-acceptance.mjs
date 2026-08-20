@@ -125,7 +125,7 @@ async function runAcceptance() {
         clientId: controlClientId,
         keyId: controlKeyId,
         secretSha256: controlSecretSha256,
-        capabilities: ["bot.read", "bot.stop"],
+        capabilities: ["bot.read", "bot.stop", "task.execute"],
       },
     ]),
   });
@@ -142,7 +142,7 @@ async function runAcceptance() {
       {
         subject: "four-process-dashboard",
         tokenSha256: dashboardTokenSha256,
-        permissions: ["bot.read", "bot.position.read", "bot.stop"],
+        permissions: ["bot.read", "bot.position.read", "bot.stop", "task.execute"],
       },
     ]),
     [ENV.controlCoordinatorUrl]: `ws://${HOST}:${controlLinkPort}${CONTROL_LINK_PATH}`,

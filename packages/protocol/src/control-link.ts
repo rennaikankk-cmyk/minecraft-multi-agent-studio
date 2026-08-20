@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { botStopResultV1Schema, identifierSchema } from "./bot-messages.js";
 import { publicBotDetailV1Schema } from "./control-api.js";
+import { skillExecutionResultV1Schema } from "./skill-messages.js";
 
 export const CONTROL_LINK_PATH = "/v1/control-link";
 export const CONTROL_LINK_SUBPROTOCOL = "minecraft-studio.control-link.v1";
@@ -21,7 +22,11 @@ const controlLinkEnvelopeShape = {
   timestamp: timestampSchema,
 };
 
-export const controlLinkCapabilitySchema = z.enum(["bot.read", "bot.stop"]);
+export const controlLinkCapabilitySchema = z.enum([
+  "bot.read",
+  "bot.stop",
+  "task.execute",
+]);
 
 export const controlLinkBotStateV1Schema = publicBotDetailV1Schema.superRefine(
   (bot, context) => {
@@ -247,9 +252,129 @@ export const controlLinkStopResponseV1Schema = z.discriminatedUnion("ok", [
     .strict(),
 ]);
 
+export const controlLinkTaskRequestV1Schema = z
+  .object({
+    ...controlLinkEnvelopeShape,
+    type: z.literal("control.link.task-request.v1"),
+    payload: z
+      .object({
+        coordinatorInstanceId: identifierSchema,
+        clientId: identifierSchema,
+        controlApiInstanceId: identifierSchema,
+        operationId: z.string().uuid(),
+        botId: identifierSchema,
+        taskId: identifierSchema,
+        task: z.string().trim().min(1).max(10_000),
+        taskVersion: sequenceSchema,
+        priority: z.number().int().min(0).max(100),
+        actorId: identifierSchema,
+        issuedAt: timestampSchema,
+        expiresAt: timestampSchema,
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((message, context) => {
+    const issuedAt = Date.parse(message.payload.issuedAt);
+    const expiresAt = Date.parse(message.payload.expiresAt);
+    if (expiresAt <= issuedAt || expiresAt - issuedAt > 2 * 60_000) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "expiresAt"],
+        message: "Task authorization must remain within a two minute window.",
+      });
+    }
+  });
+
+export const controlLinkTaskErrorCodeSchema = z.enum([
+  "REQUEST_INVALID",
+  "AUTHORIZATION_REJECTED",
+  "AI_UNAVAILABLE",
+  "BOT_NOT_EXECUTABLE",
+  "PROPOSAL_STALE",
+  "SKILL_NOT_AVAILABLE",
+  "TASK_VERSION_STALE",
+  "BOT_SKILL_BUSY",
+  "POLICY_DENIED",
+  "TASK_TIMEOUT",
+  "TASK_EXECUTION_FAILED",
+  "CONTROL_LINK_BACKPRESSURE",
+  "CONTROL_LINK_STOPPED",
+  "CONTROL_LINK_INTERNAL_ERROR",
+]);
+
+const taskResponseIdentityShape = {
+  coordinatorInstanceId: identifierSchema,
+  requestMessageId: z.string().uuid(),
+  operationId: z.string().uuid(),
+  botId: identifierSchema,
+  taskId: identifierSchema,
+};
+
+export const controlLinkTaskResponseV1Schema = z.discriminatedUnion("ok", [
+  z
+    .object({
+      ...controlLinkEnvelopeShape,
+      type: z.literal("control.link.task-response.v1"),
+      ok: z.literal(true),
+      payload: z
+        .object({
+          ...taskResponseIdentityShape,
+          plannerRequestId: z.string().uuid(),
+          execution: z.discriminatedUnion("action", [
+            z
+              .object({
+                action: z.literal("wait"),
+                provider: identifierSchema,
+                model: z.string().trim().min(1).max(512),
+                reason: z.string().trim().min(1).max(2_000),
+                confidence: z.number().finite().min(0).max(1),
+              })
+              .strict(),
+            z
+              .object({
+                action: z.literal("skill_result"),
+                result: skillExecutionResultV1Schema,
+              })
+              .strict(),
+          ]),
+        })
+        .strict(),
+    })
+    .strict()
+    .superRefine((message, context) => {
+      const execution = message.payload.execution;
+      if (
+        execution.action === "skill_result" &&
+        (execution.result.botId !== message.payload.botId ||
+          execution.result.taskId !== message.payload.taskId)
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["payload", "execution", "result"],
+          message: "Task execution result identity does not match its request.",
+        });
+      }
+    }),
+  z
+    .object({
+      ...controlLinkEnvelopeShape,
+      type: z.literal("control.link.task-response.v1"),
+      ok: z.literal(false),
+      payload: z
+        .object({
+          ...taskResponseIdentityShape,
+          errorCode: controlLinkTaskErrorCodeSchema,
+        })
+        .strict(),
+    })
+    .strict(),
+]);
+
 export const controlLinkClientMessageV1Schema = z.union([
   controlLinkAuthenticateV1Schema,
   controlLinkStopRequestV1Schema,
+  controlLinkTaskRequestV1Schema,
 ]);
 
 export const controlLinkServerMessageV1Schema = z.union([
@@ -260,6 +385,7 @@ export const controlLinkServerMessageV1Schema = z.union([
   controlLinkSnapshotEndV1Schema,
   controlLinkStateUpsertV1Schema,
   controlLinkStopResponseV1Schema,
+  controlLinkTaskResponseV1Schema,
 ]);
 
 export type ControlLinkCapability = z.infer<typeof controlLinkCapabilitySchema>;
@@ -289,6 +415,15 @@ export type ControlLinkStopErrorCode = z.infer<
 >;
 export type ControlLinkStopResponseV1 = z.infer<
   typeof controlLinkStopResponseV1Schema
+>;
+export type ControlLinkTaskRequestV1 = z.infer<
+  typeof controlLinkTaskRequestV1Schema
+>;
+export type ControlLinkTaskErrorCode = z.infer<
+  typeof controlLinkTaskErrorCodeSchema
+>;
+export type ControlLinkTaskResponseV1 = z.infer<
+  typeof controlLinkTaskResponseV1Schema
 >;
 export type ControlLinkClientMessageV1 = z.infer<
   typeof controlLinkClientMessageV1Schema

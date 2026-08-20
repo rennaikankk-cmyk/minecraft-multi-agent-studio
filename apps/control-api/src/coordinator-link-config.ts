@@ -10,11 +10,13 @@ export type CoordinatorLinkClientConfig = Readonly<{
   handshakeTimeoutMs: number;
   livenessTimeoutMs: number;
   stopTimeoutMs: number;
+  taskTimeoutMs: number;
   reconnect: Readonly<{
     baseDelayMs: number;
     maxDelayMs: number;
   }>;
   maxPendingStops: number;
+  maxPendingTasks: number;
   maxSocketBufferedBytes: number;
 }>;
 
@@ -76,8 +78,10 @@ export function loadCoordinatorLinkConfig(
     handshakeTimeoutMs: 5_000,
     livenessTimeoutMs: 75_000,
     stopTimeoutMs: 17_000,
+    taskTimeoutMs: 95_000,
     reconnect: { baseDelayMs: 250, maxDelayMs: 8_000 },
     maxPendingStops: 128,
+    maxPendingTasks: 128,
     maxSocketBufferedBytes: 256 * 1_024,
   };
 }

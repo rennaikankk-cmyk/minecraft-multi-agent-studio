@@ -127,16 +127,17 @@
 
 - Coordinator 服务端和 Control API 客户端只接受 `ws://127.0.0.1` 或 `ws://[::1]`、固定 `/v1/control-link` 路径和 `minecraft-studio.control-link.v1` 子协议；拒绝域名、其他私网/公网地址、凭据 URL、查询、片段、重定向和带浏览器 `Origin` 的升级请求。
 - `COORDINATOR_CONTROL_LINK_CLIENTS_JSON` 只保存共享密钥 SHA-256；该摘要会直接参与 HMAC，是可用于冒充客户端的等价认证密钥，必须按明文密钥同等级保护。`CONTROL_API_COORDINATOR_LINK_SECRET` 明文只存在于 Control API 进程环境。`clientId`、`keyId` 和摘要必须各自唯一，配置不得进入日志或仓库。
-- 双方使用独立随机 nonce、方向绑定 HMAC proof 和时序安全比较完成相互认证；proof 绑定 challenge、Coordinator 实例、Control API 实例、客户端和 key 身份。认证前不发送状态、不接受停止。
-- 客户端当前必须精确具有 `bot.read` 与 `bot.stop` 两项能力；未知、缺失、重复能力或配置字段默认拒绝。
+- 双方使用独立随机 nonce、方向绑定 HMAC proof 和时序安全比较完成相互认证；proof 绑定 challenge、Coordinator 实例、Control API 实例、客户端和 key 身份。认证前不发送状态、不接受停止或任务。
+- 客户端必须具有 `bot.read` 与 `bot.stop`；仅在需要提交 R0/R1 任务时额外授予 `task.execute`。未知、缺失必需项、重复能力或配置字段默认拒绝。
 - 只接受严格 Control Link v1 文本 JSON，单帧最大 64 KiB并禁用压缩；会话、快照期间增量缓冲、待处理停止、重复应答者和发送缓冲均有硬上限，溢出时断链或返回稳定背压错误。
 - Coordinator 以 begin/item/end 发送一致性快照，并在其后按连续序列发送增量。Control API 只在完整快照末尾原子提交；半包快照、重复 Bot/索引、序列跳号、实例身份变化或断线会清空镜像并关闭外部状态流。
 - Bot 失联阈值只由持有权威注册表的 Coordinator 读取 `COORDINATOR_BOT_STALE_AFTER_MS`；配置必须是 1000～300000 的整数毫秒值。Control API 不得暴露或接受不会影响权威状态的伪配置。
-- 镜像不可用时，Control API 列表、详情和停止统一返回 `503 CONTROL_UNAVAILABLE`，不得返回旧快照、空列表冒充当前权威状态或伪造停止成功。
+- 镜像不可用时，Control API 列表、详情、停止和任务统一返回 `503 CONTROL_UNAVAILABLE`，不得返回旧快照、空列表冒充当前权威状态或伪造操作成功。
 - Control API 使用默认 75 秒入站看门狗检测未关闭但已失活的 Coordinator socket；协议、序列、背压、看门狗或传输失败必须先同步撤销镜像与认证状态，再关闭并重连。关闭握手中的排队帧不得恢复可用状态或升级为永久认证失败。
 - 待处理停止只允许在同一 `coordinatorInstanceId` 的短暂重连中重投；Coordinator 身份变化时必须拒绝旧操作并清除其计时器，不能向新实例发送绑定旧身份的帧。
 - Coordinator 与 Control API 的实例身份必须在每次进程启动时由高熵随机 UUID 生成，不得只使用可能复用的 PID；boot ID 变化是拒绝跨重启旧停止操作的安全边界。
 - Control Link 停止固定为已确认的 `graceful`、`dashboard_operator_confirmed`、5 秒宽限和 15 秒超时；同一 UUID 绑定命令、追踪、授权决策和 operation，权限集合只能包含 `bot.stop`。客户端能力、操作者、Bot、期限、幂等指纹和返回身份必须全部匹配。
+- Control Link 任务入口只把已认证 `task.execute` 主体降权为 Coordinator 内部 `skill.invoke` 决策；默认策略只允许已登记的 R0/R1 Skill。AI proposal 不能携带授权，执行前必须重新匹配 Bot、Runtime、状态序列、任务版本、Skill 版本与兼容变体。
 - 2026-08-07 四进程服务级验收由两位执行者独立通过，覆盖固定追踪、凭据扫描和清理；测试 Runtime 是 fixture、`minecraftConnected=false`，该结果不授权正式 Minecraft、跨主机传输或浏览器执行控制。
 
 ## 8. Control API 边界

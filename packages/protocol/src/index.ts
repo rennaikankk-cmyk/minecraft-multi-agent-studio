@@ -18,6 +18,8 @@ export {
   controlApiErrorCodeSchema,
   controlApiErrorV1Schema,
   controlApiPermissionSchema,
+  executeBotTaskHttpRequestV1Schema,
+  executeBotTaskHttpResponseV1Schema,
   publicBotDetailV1Schema,
   publicBotSummaryV1Schema,
   stopBotHttpRequestV1Schema,
@@ -29,6 +31,8 @@ export {
   type ControlApiErrorCode,
   type ControlApiErrorV1,
   type ControlApiPermission,
+  type ExecuteBotTaskHttpRequestV1,
+  type ExecuteBotTaskHttpResponseV1,
   type PublicBotDetailV1,
   type PublicBotSummaryV1,
   type StopBotHttpRequestV1,
@@ -146,6 +150,9 @@ export {
   controlLinkStopErrorCodeSchema,
   controlLinkStopRequestV1Schema,
   controlLinkStopResponseV1Schema,
+  controlLinkTaskErrorCodeSchema,
+  controlLinkTaskRequestV1Schema,
+  controlLinkTaskResponseV1Schema,
   parseControlLinkClientMessage,
   parseControlLinkServerMessage,
   type ControlLinkAcceptedV1,
@@ -164,6 +171,9 @@ export {
   type ControlLinkStopErrorCode,
   type ControlLinkStopRequestV1,
   type ControlLinkStopResponseV1,
+  type ControlLinkTaskErrorCode,
+  type ControlLinkTaskRequestV1,
+  type ControlLinkTaskResponseV1,
 } from "./control-link.js";
 
 export {

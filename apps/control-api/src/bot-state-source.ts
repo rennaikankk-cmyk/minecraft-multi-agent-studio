@@ -4,6 +4,7 @@ import {
 } from "@minecraft-studio/coordinator";
 import type {
   BotStopResultV1,
+  ControlLinkTaskResponseV1,
   PublicBotDetailV1,
 } from "@minecraft-studio/protocol";
 import type { StopBotRequest } from "@minecraft-studio/coordinator";
@@ -29,6 +30,30 @@ export type BotStateSource = Readonly<{
 
 export type BotStopRequester = Readonly<{
   requestStop(request: StopBotRequest): Promise<BotStopResultV1>;
+}>;
+
+export type BotTaskRequest = Readonly<{
+  operationId: string;
+  botId: string;
+  taskId: string;
+  task: string;
+  taskVersion: number;
+  priority: number;
+  authorization: Readonly<{
+    actorId: string;
+    permissions: ReadonlySet<"task.execute">;
+    issuedAt: Date;
+    expiresAt: Date;
+  }>;
+}>;
+
+export type BotTaskExecution = Pick<
+  Extract<ControlLinkTaskResponseV1, { ok: true }>["payload"],
+  "plannerRequestId" | "execution"
+>;
+
+export type BotTaskRequester = Readonly<{
+  requestTask(request: BotTaskRequest): Promise<BotTaskExecution>;
 }>;
 
 /**

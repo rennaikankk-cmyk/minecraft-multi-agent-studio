@@ -17,6 +17,9 @@ export {
   type BotStateAvailabilityListener,
   type BotStateListener,
   type BotStateSource,
+  type BotTaskExecution,
+  type BotTaskRequest,
+  type BotTaskRequester,
   type BotStopRequester,
 } from "./bot-state-source.js";
 export {
@@ -27,6 +30,7 @@ export {
 export {
   CoordinatorLinkClient,
   CoordinatorLinkClientError,
+  CoordinatorTaskError,
   type CoordinatorLinkClientErrorCode,
   type CoordinatorLinkClientOptions,
 } from "./coordinator-link-client.js";

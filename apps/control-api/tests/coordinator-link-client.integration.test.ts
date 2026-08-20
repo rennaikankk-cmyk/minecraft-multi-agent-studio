@@ -83,7 +83,7 @@ describe("Control API Coordinator Link client", () => {
           secretSha256: createHash("sha256")
             .update(SECRET, "utf8")
             .digest("hex"),
-          capabilities: ["bot.read", "bot.stop"],
+          capabilities: ["bot.read", "bot.stop", "task.execute"],
         },
       ],
       registry,
@@ -102,8 +102,10 @@ describe("Control API Coordinator Link client", () => {
         handshakeTimeoutMs: 2_000,
         livenessTimeoutMs: 75_000,
         stopTimeoutMs: 3_000,
+        taskTimeoutMs: 3_000,
         reconnect: { baseDelayMs: 10, maxDelayMs: 50 },
         maxPendingStops: 8,
+        maxPendingTasks: 8,
         maxSocketBufferedBytes: 256 * 1_024,
       },
       instanceId: "control-api-test-instance",
@@ -182,8 +184,10 @@ describe("Control API Coordinator Link client", () => {
         handshakeTimeoutMs: 2_000,
         livenessTimeoutMs: 75_000,
         stopTimeoutMs: 3_000,
+        taskTimeoutMs: 3_000,
         reconnect: { baseDelayMs: 10, maxDelayMs: 50 },
         maxPendingStops: 8,
+        maxPendingTasks: 8,
         maxSocketBufferedBytes: 256 * 1_024,
       },
       instanceId: "control-api-auth-test",
@@ -659,6 +663,49 @@ describe("Control API Coordinator Link client", () => {
       `ws://127.0.0.1:${firstServer.port}/v1/control-link`,
     );
   });
+
+  it("round-trips an authenticated task request and wait result", async () => {
+    const requestAndExecute = vi.fn((request) => ({
+      requestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      promise: Promise.resolve({
+        requestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        botId: request.botId,
+        runtimeInstanceId: RUNTIME_ID,
+        taskId: request.taskId,
+        stateVersion: 1,
+        taskVersion: request.taskVersion,
+        provider: "spark-vllm",
+        model: "qwen3.8-27b-nvfp4",
+        reason: "State is insufficient.",
+        confidence: 0.7,
+        action: "wait" as const,
+      }),
+      cancel: vi.fn(() => true),
+    }));
+    const { client } = await startLinkPair({
+      coordinatorInstanceId: "coordinator-task-test",
+      taskExecutor: { requestAndExecute },
+    });
+    const result = await client.requestTask({
+      operationId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      botId: BOT_ID,
+      taskId: "task-01",
+      task: "Move to the work site",
+      taskVersion: 1,
+      priority: 50,
+      authorization: {
+        actorId: "operator-01",
+        permissions: new Set(["task.execute"]),
+        issuedAt: NOW,
+        expiresAt: new Date(NOW.getTime() + 90_000),
+      },
+    });
+    expect(result).toMatchObject({
+      plannerRequestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      execution: { action: "wait", provider: "spark-vllm" },
+    });
+    expect(requestAndExecute).toHaveBeenCalledTimes(1);
+  });
 });
 
 type LinkServerOptions = Readonly<{
@@ -667,6 +714,7 @@ type LinkServerOptions = Readonly<{
   pingIntervalMs?: number;
   now?: () => Date;
   requestStop?: (request: StopBotRequest) => Promise<BotStopResultV1>;
+  taskExecutor?: { requestAndExecute: (...args: any[]) => any };
 }>;
 
 async function startCoordinatorServer(
@@ -686,7 +734,7 @@ async function startCoordinatorServer(
         secretSha256: createHash("sha256")
           .update(SECRET, "utf8")
           .digest("hex"),
-        capabilities: ["bot.read", "bot.stop"],
+        capabilities: ["bot.read", "bot.stop", "task.execute"],
       },
     ],
     registry,
@@ -695,6 +743,7 @@ async function startCoordinatorServer(
         options.requestStop ??
         (async (request) => confirmedStopResult(request)),
     },
+    ...(options.taskExecutor ? { taskExecutor: options.taskExecutor } : {}),
     logger,
     now,
     ...(options.pingIntervalMs === undefined
@@ -720,8 +769,10 @@ function createLinkClient(
     handshakeTimeoutMs: 2_000,
     livenessTimeoutMs,
     stopTimeoutMs: 10_000,
+    taskTimeoutMs: 10_000,
     reconnect: { baseDelayMs: 10, maxDelayMs: 50 },
     maxPendingStops: 8,
+    maxPendingTasks: 8,
     maxSocketBufferedBytes: 256 * 1_024,
   };
   const client = new CoordinatorLinkClient({

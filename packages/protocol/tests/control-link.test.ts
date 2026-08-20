@@ -17,6 +17,8 @@ import {
   controlLinkStateUpsertV1Schema,
   controlLinkStopRequestV1Schema,
   controlLinkStopResponseV1Schema,
+  controlLinkTaskRequestV1Schema,
+  controlLinkTaskResponseV1Schema,
   parseControlLinkClientMessage,
   parseControlLinkServerMessage,
 } from "../src/index.js";
@@ -262,6 +264,59 @@ describe("Control Link protocol", () => {
           errorCode: "CONTROL_LINK_BACKPRESSURE",
         },
       }).ok,
+    ).toBe(false);
+  });
+
+  it("strictly binds task requests and wait responses to one operation", () => {
+    const request = controlLinkTaskRequestV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      timestamp: NOW,
+      type: "control.link.task-request.v1",
+      payload: {
+        coordinatorInstanceId: "coordinator-01",
+        clientId: "control-api",
+        controlApiInstanceId: "control-api-01",
+        operationId: OPERATION_ID,
+        botId: bot.botId,
+        taskId: "task-01",
+        task: "Move to the work site",
+        taskVersion: 1,
+        priority: 50,
+        actorId: "operator-01",
+        issuedAt: NOW,
+        expiresAt: "2026-08-07T10:01:30.000Z",
+      },
+    });
+    expect(parseControlLinkClientMessage(request)).toEqual(request);
+    const response = controlLinkTaskResponseV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      timestamp: LATER,
+      type: "control.link.task-response.v1",
+      ok: true,
+      payload: {
+        coordinatorInstanceId: "coordinator-01",
+        requestMessageId: request.messageId,
+        operationId: OPERATION_ID,
+        botId: bot.botId,
+        taskId: "task-01",
+        plannerRequestId: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        execution: {
+          action: "wait",
+          provider: "spark-vllm",
+          model: "qwen3.8-27b-nvfp4",
+          reason: "State is insufficient.",
+          confidence: 0.7,
+        },
+      },
+    });
+    expect(parseControlLinkServerMessage(response)).toEqual(response);
+    expect(
+      controlLinkTaskRequestV1Schema.safeParse({
+        ...request,
+        payload: { ...request.payload, shell: "rm -rf" },
+      }).success,
     ).toBe(false);
   });
 });

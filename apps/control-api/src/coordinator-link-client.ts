@@ -17,6 +17,7 @@ import {
   controlLinkClientProofInput,
   controlLinkServerProofInput,
   controlLinkStopRequestV1Schema,
+  controlLinkTaskRequestV1Schema,
   parseControlLinkServerMessage,
   type BotStopResultV1,
   type ControlLinkAcceptedV1,
@@ -28,6 +29,8 @@ import {
   type ControlLinkStopRequestV1,
   type ControlLinkStopResponseV1,
   type ControlLinkStopErrorCode,
+  type ControlLinkTaskErrorCode,
+  type ControlLinkTaskResponseV1,
   type PublicBotDetailV1,
 } from "@minecraft-studio/protocol";
 import WebSocket, { type RawData } from "ws";
@@ -36,6 +39,9 @@ import type {
   BotStateAvailabilityListener,
   BotStateListener,
   BotStateSource,
+  BotTaskExecution,
+  BotTaskRequest,
+  BotTaskRequester,
   BotStopRequester,
 } from "./bot-state-source.js";
 import type { CoordinatorLinkClientConfig } from "./coordinator-link-config.js";
@@ -54,7 +60,9 @@ export type CoordinatorLinkClientErrorCode =
   | "COORDINATOR_LINK_IDENTITY_MISMATCH"
   | "COORDINATOR_LINK_IDENTITY_CHANGED"
   | "COORDINATOR_LINK_BACKPRESSURE"
-  | "COORDINATOR_LINK_STOP_TIMEOUT";
+  | "COORDINATOR_LINK_STOP_TIMEOUT"
+  | "COORDINATOR_LINK_TASK_TIMEOUT"
+  | "COORDINATOR_LINK_TASK_REJECTED";
 
 export class CoordinatorLinkClientError extends Error {
   constructor(
@@ -63,6 +71,16 @@ export class CoordinatorLinkClientError extends Error {
   ) {
     super(message);
     this.name = "CoordinatorLinkClientError";
+  }
+}
+
+export class CoordinatorTaskError extends Error {
+  constructor(
+    readonly code: ControlLinkTaskErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "CoordinatorTaskError";
   }
 }
 
@@ -101,6 +119,17 @@ type PendingStop = {
   reject: (error: Error) => void;
 };
 
+type PendingTask = {
+  fingerprint: string;
+  message: ReturnType<typeof controlLinkTaskRequestV1Schema.parse>;
+  serialized: string;
+  sent: boolean;
+  timer: ReturnType<typeof setTimeout>;
+  promise: Promise<BotTaskExecution>;
+  resolve: (result: BotTaskExecution) => void;
+  reject: (error: Error) => void;
+};
+
 type RetiredStop = Readonly<{
   operationId: string;
   requestMessageId: string;
@@ -109,7 +138,7 @@ type RetiredStop = Readonly<{
 }>;
 
 export class CoordinatorLinkClient
-  implements BotStateSource, BotStopRequester
+  implements BotStateSource, BotStopRequester, BotTaskRequester
 {
   private readonly now: () => Date;
   private readonly randomId: () => string;
@@ -121,6 +150,7 @@ export class CoordinatorLinkClient
   private readonly availabilityListeners =
     new Set<BotStateAvailabilityListener>();
   private readonly pendingStops = new Map<string, PendingStop>();
+  private readonly pendingTasks = new Map<string, PendingTask>();
   private readonly retiredStops = new Map<string, RetiredStop>();
   private readonly failedSockets = new WeakSet<WebSocket>();
   private socket: WebSocket | null = null;
@@ -279,6 +309,86 @@ export class CoordinatorLinkClient
     return promise;
   }
 
+  requestTask(request: BotTaskRequest): Promise<BotTaskExecution> {
+    validateTaskRequest(request);
+    const fingerprint = taskFingerprint(request);
+    const existing = this.pendingTasks.get(request.operationId);
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) {
+        throw new CoordinatorLinkClientError(
+          "COORDINATOR_LINK_TASK_REJECTED",
+          "The task operation ID is pending with different parameters.",
+        );
+      }
+      return existing.promise;
+    }
+    if (!this.ready || !this.coordinatorInstanceId) {
+      throw new CoordinatorLinkClientError(
+        "COORDINATOR_LINK_UNAVAILABLE",
+        "Coordinator Link has no complete authoritative snapshot.",
+      );
+    }
+    if (this.pendingTasks.size >= this.options.config.maxPendingTasks) {
+      throw new CoordinatorLinkClientError(
+        "COORDINATOR_LINK_BACKPRESSURE",
+        "Coordinator Link has reached its pending task limit.",
+      );
+    }
+
+    const now = validDate(this.now());
+    const message = controlLinkTaskRequestV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: this.randomId(),
+      timestamp: now.toISOString(),
+      type: "control.link.task-request.v1",
+      payload: {
+        coordinatorInstanceId: this.coordinatorInstanceId,
+        clientId: this.options.config.clientId,
+        controlApiInstanceId: this.options.instanceId,
+        operationId: request.operationId,
+        botId: request.botId,
+        taskId: request.taskId,
+        task: request.task,
+        taskVersion: request.taskVersion,
+        priority: request.priority,
+        actorId: request.authorization.actorId,
+        issuedAt: request.authorization.issuedAt.toISOString(),
+        expiresAt: request.authorization.expiresAt.toISOString(),
+      },
+    });
+    const serialized = JSON.stringify(message);
+    let resolve!: (result: BotTaskExecution) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<BotTaskExecution>((resolveValue, rejectValue) => {
+      resolve = resolveValue;
+      reject = rejectValue;
+    });
+    const timer = setTimeout(() => {
+      const pending = this.pendingTasks.get(request.operationId);
+      if (!pending || pending.message.messageId !== message.messageId) return;
+      this.pendingTasks.delete(request.operationId);
+      pending.reject(
+        new CoordinatorLinkClientError(
+          "COORDINATOR_LINK_TASK_TIMEOUT",
+          "Coordinator Link did not return a task result before the deadline.",
+        ),
+      );
+    }, this.options.config.taskTimeoutMs);
+    const pending: PendingTask = {
+      fingerprint,
+      message,
+      serialized,
+      sent: false,
+      timer,
+      promise,
+      resolve,
+      reject,
+    };
+    this.pendingTasks.set(request.operationId, pending);
+    this.sendPendingTask(pending);
+    return promise;
+  }
+
   async close(): Promise<void> {
     if (this.closing) return;
     this.closing = true;
@@ -292,6 +402,7 @@ export class CoordinatorLinkClient
     this.firstReadyResolve = null;
     this.firstReadyReject = null;
     this.rejectPendingStops(error);
+    this.rejectPendingTasks(error);
     const socket = this.socket;
     this.socket = null;
     if (socket && socket.readyState !== WebSocket.CLOSED) {
@@ -429,6 +540,9 @@ export class CoordinatorLinkClient
           return;
         case "control.link.stop-response.v1":
           this.handleStopResponse(message);
+          return;
+        case "control.link.task-response.v1":
+          this.handleTaskResponse(message);
           return;
       }
     } catch (cause) {
@@ -633,6 +747,32 @@ export class CoordinatorLinkClient
     pending.reject(stopResponseError(message.payload.errorCode));
   }
 
+  private handleTaskResponse(message: ControlLinkTaskResponseV1): void {
+    this.assertAuthenticatedIdentity(message.payload.coordinatorInstanceId);
+    const pending = this.pendingTasks.get(message.payload.operationId);
+    if (!pending) return;
+    if (
+      message.payload.requestMessageId !== pending.message.messageId ||
+      message.payload.botId !== pending.message.payload.botId ||
+      message.payload.taskId !== pending.message.payload.taskId
+    ) {
+      throw new CoordinatorLinkClientError(
+        "COORDINATOR_LINK_IDENTITY_MISMATCH",
+        "Coordinator Link task response identity does not match its request.",
+      );
+    }
+    clearTimeout(pending.timer);
+    this.pendingTasks.delete(message.payload.operationId);
+    if (message.ok) {
+      pending.resolve({
+        plannerRequestId: message.payload.plannerRequestId,
+        execution: structuredClone(message.payload.execution),
+      });
+      return;
+    }
+    pending.reject(taskResponseError(message.payload.errorCode));
+  }
+
   private retireStop(pending: PendingStop): void {
     const nowMs = validDate(this.now()).getTime();
     this.pruneRetiredStops(nowMs);
@@ -700,9 +840,25 @@ export class CoordinatorLinkClient
     }
   }
 
+  private sendPendingTask(pending: PendingTask): void {
+    const socket = this.socket;
+    if (!this.ready || !socket || socket.readyState !== WebSocket.OPEN) return;
+    try {
+      this.sendSerialized(socket, pending.serialized);
+      pending.sent = true;
+    } catch {
+      this.failedSockets.add(socket);
+      this.invalidateSession();
+      socket.close(1013, "backpressure");
+    }
+  }
+
   private flushPending(): void {
     for (const pending of this.pendingStops.values()) {
       if (!pending.sent) this.sendPending(pending);
+    }
+    for (const pending of this.pendingTasks.values()) {
+      if (!pending.sent) this.sendPendingTask(pending);
     }
   }
 
@@ -799,6 +955,7 @@ export class CoordinatorLinkClient
     this.clearHandshakeTimer();
     this.clearLivenessTimer();
     for (const pending of this.pendingStops.values()) pending.sent = false;
+    for (const pending of this.pendingTasks.values()) pending.sent = false;
     this.markUnavailable();
   }
 
@@ -820,6 +977,16 @@ export class CoordinatorLinkClient
       this.pendingStops.delete(operationId);
       pending.reject(error);
     }
+    for (const [operationId, pending] of this.pendingTasks) {
+      if (
+        pending.message.payload.coordinatorInstanceId === coordinatorInstanceId
+      ) {
+        continue;
+      }
+      clearTimeout(pending.timer);
+      this.pendingTasks.delete(operationId);
+      pending.reject(error);
+    }
   }
 
   private permanentFailure(error: CoordinatorLinkClientError): void {
@@ -830,6 +997,7 @@ export class CoordinatorLinkClient
     this.firstReadyResolve = null;
     this.firstReadyReject = null;
     this.rejectPendingStops(error);
+    this.rejectPendingTasks(error);
   }
 
   private rejectPendingStops(error: Error): void {
@@ -838,6 +1006,14 @@ export class CoordinatorLinkClient
       pending.reject(error);
     }
     this.pendingStops.clear();
+  }
+
+  private rejectPendingTasks(error: Error): void {
+    for (const pending of this.pendingTasks.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pendingTasks.clear();
   }
 
   private markUnavailable(): void {
@@ -950,6 +1126,44 @@ function validateStopRequest(request: StopBotRequest): void {
   }
 }
 
+function validateTaskRequest(request: BotTaskRequest): void {
+  const issuedAt = validDate(request.authorization.issuedAt);
+  const expiresAt = validDate(request.authorization.expiresAt);
+  if (
+    request.task.trim().length < 1 ||
+    request.task.length > 10_000 ||
+    !Number.isSafeInteger(request.taskVersion) ||
+    request.taskVersion < 0 ||
+    !Number.isSafeInteger(request.priority) ||
+    request.priority < 0 ||
+    request.priority > 100 ||
+    !request.authorization.permissions.has("task.execute") ||
+    request.authorization.permissions.size !== 1 ||
+    expiresAt.getTime() <= issuedAt.getTime() ||
+    expiresAt.getTime() - issuedAt.getTime() > 2 * 60_000
+  ) {
+    throw new CoordinatorTaskError(
+      "REQUEST_INVALID",
+      "Coordinator Link rejected an invalid task execution contract.",
+    );
+  }
+}
+
+function taskFingerprint(request: BotTaskRequest): string {
+  return JSON.stringify({
+    operationId: request.operationId,
+    botId: request.botId,
+    taskId: request.taskId,
+    task: request.task,
+    taskVersion: request.taskVersion,
+    priority: request.priority,
+    actorId: request.authorization.actorId,
+    permissions: [...request.authorization.permissions].sort(),
+    issuedAt: request.authorization.issuedAt.toISOString(),
+    expiresAt: request.authorization.expiresAt.toISOString(),
+  });
+}
+
 function stopFingerprint(request: StopBotRequest): string {
   return JSON.stringify({
     commandId: request.commandId,
@@ -983,6 +1197,15 @@ function stopResponseError(
   return new CoordinatorStopError(
     normalized as ConstructorParameters<typeof CoordinatorStopError>[0],
     "Coordinator Link rejected or could not confirm the stop operation.",
+  );
+}
+
+function taskResponseError(
+  code: ControlLinkTaskErrorCode,
+): CoordinatorTaskError {
+  return new CoordinatorTaskError(
+    code,
+    "Coordinator rejected or could not complete the task operation.",
   );
 }
 

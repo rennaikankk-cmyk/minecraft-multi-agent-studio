@@ -8,6 +8,7 @@ import {
   minecraftVersionCompatibilitySchema,
   taskStatusSchema,
 } from "./bot-messages.js";
+import { skillExecutionResultV1Schema } from "./skill-messages.js";
 
 const timestampSchema = z.string().datetime({ offset: true });
 
@@ -15,6 +16,7 @@ export const controlApiPermissionSchema = z.enum([
   "bot.read",
   "bot.position.read",
   "bot.stop",
+  "task.execute",
 ]);
 
 export const publicBotSummaryV1Schema = z
@@ -101,6 +103,9 @@ export const controlApiErrorCodeSchema = z.enum([
   "CONTROL_UNAVAILABLE",
   "STOP_TIMEOUT",
   "STOP_FAILED",
+  "AI_UNAVAILABLE",
+  "TASK_REJECTED",
+  "TASK_TIMEOUT",
   "INTERNAL_ERROR",
 ]);
 
@@ -173,6 +178,63 @@ export const stopBotHttpResponseV1Schema = z
   })
   .strict();
 
+export const executeBotTaskHttpRequestV1Schema = z
+  .object({
+    schemaVersion: z.literal("1.0"),
+    requestId: z.string().uuid(),
+    taskId: identifierSchema,
+    task: z.string().trim().min(1).max(10_000),
+    taskVersion: z.number().int().nonnegative().safe(),
+    priority: z.number().int().min(0).max(100).default(50),
+  })
+  .strict();
+
+const executeTaskResponseIdentity = {
+  botId: identifierSchema,
+  taskId: identifierSchema,
+  operationId: z.string().uuid(),
+  plannerRequestId: z.string().uuid(),
+};
+
+export const executeBotTaskHttpResponseV1Schema = z
+  .object({
+    schemaVersion: z.literal("1.0"),
+    requestId: z.string().uuid(),
+    data: z.discriminatedUnion("action", [
+      z
+        .object({
+          ...executeTaskResponseIdentity,
+          action: z.literal("wait"),
+          provider: identifierSchema,
+          model: z.string().trim().min(1).max(512),
+          reason: z.string().trim().min(1).max(2_000),
+          confidence: z.number().finite().min(0).max(1),
+        })
+        .strict(),
+      z
+        .object({
+          ...executeTaskResponseIdentity,
+          action: z.literal("skill_result"),
+          result: skillExecutionResultV1Schema,
+        })
+        .strict(),
+    ]),
+  })
+  .strict()
+  .superRefine((message, context) => {
+    if (
+      message.data.action === "skill_result" &&
+      (message.data.result.botId !== message.data.botId ||
+        message.data.result.taskId !== message.data.taskId)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["data", "result"],
+        message: "Task result identity does not match the HTTP response.",
+      });
+    }
+  });
+
 export type ControlApiPermission = z.infer<typeof controlApiPermissionSchema>;
 export type PublicBotSummaryV1 = z.infer<typeof publicBotSummaryV1Schema>;
 export type PublicBotDetailV1 = z.infer<typeof publicBotDetailV1Schema>;
@@ -184,3 +246,9 @@ export type BotStreamSnapshotV1 = z.infer<typeof botStreamSnapshotV1Schema>;
 export type BotStreamEventV1 = z.infer<typeof botStreamEventV1Schema>;
 export type StopBotHttpRequestV1 = z.infer<typeof stopBotHttpRequestV1Schema>;
 export type StopBotHttpResponseV1 = z.infer<typeof stopBotHttpResponseV1Schema>;
+export type ExecuteBotTaskHttpRequestV1 = z.infer<
+  typeof executeBotTaskHttpRequestV1Schema
+>;
+export type ExecuteBotTaskHttpResponseV1 = z.infer<
+  typeof executeBotTaskHttpResponseV1Schema
+>;
