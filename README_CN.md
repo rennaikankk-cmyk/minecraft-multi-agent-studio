@@ -27,6 +27,7 @@ Dashboard → Control API → Coordinator → AI Scheduler / Router → Spark vL
 - Coordinator 支持 1/2/5/10 Bot 的确定性角色/技能匹配、共享目标、Bot/资源租约和冲突预防。
 - U9 世界记忆使用不可变 PostgreSQL/pgvector 事实：空间记录强制携带服务器、维度和坐标，先做同服/ACL 过滤再计算向量距离；基地、仓库和玩家活动坐标禁止进入模型提示。
 - 授权后的只读侦察扫描和箱子读回结果由确定性投影器写入记忆；模型没有数据库写权限，也不能伪造扫描坐标。
+- 投影事实先进入 U9 本地受保护的原子落盘/fsync spool；PostgreSQL 或 Coordinator 恢复后按稳定操作 ID 幂等重放，backlog 未清空时新规划失败关闭，绝不为修复记忆而重放已经完成的 Minecraft 动作。
 
 ## 本地检查
 

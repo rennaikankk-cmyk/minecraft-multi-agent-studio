@@ -33,7 +33,7 @@ Status is deliberately split instead of hidden behind one number:
 | Hardware-independent implementation requested for the Spark development phase | **100%** | code, schemas, profiles, tests, dashboard, metrics, CLI, benchmark and runbooks are present |
 | Acceptance possible on the current Spark without accepting a third-party EULA | **100%** | Spark, model, API, benchmark, database/cache and offline/process/browser gates |
 | Final U9 + Spark two-host production acceptance | **BLOCKED / not yet measurable** | requires the U9 and operator-approved Minecraft acceptance |
-| Broader long-horizon anarchy/PvP M0–M6 roadmap | **not claimed complete** | advanced crystal/anchor PvP, durable memory retry/concrete embedding-reranking, non-spatial task experience and formal skill-promotion automation remain later milestones |
+| Broader long-horizon anarchy/PvP M0–M6 roadmap | **not claimed complete** | advanced crystal/anchor PvP, concrete embedding-reranking, non-spatial task experience, Runtime result journaling and formal skill-promotion automation remain later milestones |
 
 For the single percentage requested by the original audit, the full end-state is
 **88% weighted complete**. This number includes—not hides—the unavailable U9,
@@ -45,15 +45,15 @@ Minecraft and native-FP4 gates:
 | AI Provider/Router/Scheduler and safe execution path | 20% | 100% | 20.0% |
 | task persistence, APIs and Worker foundation | 10% | 95% | 9.5% |
 | deterministic L0 and practical Skill library | 15% | 85% | 12.75% |
-| multi-Bot coordination, world memory and compatibility | 15% | 95% | 14.25% |
+| multi-Bot coordination, world memory and compatibility | 15% | 97% | 14.55% |
 | Dashboard, metrics, benchmark and diagnosis | 10% | 100% | 10.0% |
 | Spark model/backend acceptance | 10% | 85% | 8.5% |
 | final U9/Minecraft production acceptance | 10% | 25% | 2.5% |
-| **Total** | **100%** | — | **87.5% → 88%** |
+| **Total** | **100%** | — | **87.8% → 88%** |
 
 The lower full-system number is not unfinished foundation code: it is mainly
-real U9/Minecraft execution plus deliberately gated high-risk combat, durable
-memory-retry/embedding and skill-promotion milestones. It must not be raised by
+real U9/Minecraft execution plus deliberately gated high-risk combat,
+embedding/non-spatial memory and skill-promotion milestones. It must not be raised by
 mock data or documentation.
 
 ## Implemented architecture
@@ -90,7 +90,7 @@ cancel or discard stale work.
 | Scheduler | priority, concurrency, bounded queue, timeout, retry, cancellation, per-Bot limit, backpressure and stale protection | U9-to-Spark network load |
 | Task execution | authenticated single-Bot and team task endpoints traverse Coordinator policy/state/authorization and Runtime SkillExecutor | production account/role integration |
 | Task infrastructure | PostgreSQL migrations/repository/outbox, Redis/BullMQ, cancellation, leases, recovery; real isolated integration passed | install/configure services on U9 |
-| World memory | Immutable PostgreSQL/pgvector facts, hard server/dimension/ACL isolation, exact cosine retrieval, fail-closed planner injection, authorized Scout scan and restricted storage-result writers | durable ingestion retry/outbox, concrete embedding/reranker adapters and non-spatial task experience |
+| World memory | Immutable PostgreSQL/pgvector facts, hard server/dimension/ACL isolation, exact cosine retrieval, fail-closed planner injection, authorized Scout/storage writers, protected local atomic/fsync ingestion spool, bounded retry and restart replay | concrete embedding/reranker adapters, non-spatial task experience and a Runtime completed-result journal for the pre-spool crash window |
 | L0 safety | deterministic fall/lava/drowning/critical health/disconnect/stuck/basic-survival responses | real scenario matrix |
 | Skills | 17 default deterministic Skills, 18 with explicit isolated PvP allow-list; includes bounded read-only Scout block scan plus read-back verification | real cross-version scenarios; advanced high-risk PvP remains gated |
 | Multi-Bot | deterministic 1–10 Bot selection, roles, shared objectives, skill eligibility, Bot/resource leases, conflict prevention, server isolation | real U9 multi-Bot load |
@@ -142,10 +142,11 @@ temporary server was stopped; port 8000 was then verified closed.
 ### Infrastructure and process evidence
 
 - Real PostgreSQL 17 + pgvector 0.8.6 + Redis 8.8.0 isolated integration:
-  **26/26 passed** (20 task cases + 6 world-memory cases) using loopback-only
+  **27/27 passed** (20 task cases + 7 world-memory cases) using loopback-only
   temporary ARM64 containers and tmpfs. The sixth memory case traversed the
-  authorized Scout-result projector, persisted two facts and replayed them
-  idempotently.
+  authorized Scout-result projector; the seventh retained its batch through a
+  forced writer outage and replayed it from a new outbox instance into real
+  PostgreSQL/pgvector.
 - Temporary test containers and the two newly pulled test images were removed.
 - Both test ports were verified closed; no Docker Volume was created or deleted,
   and the pre-existing `rennaikank_open-webui-data` volume was not touched.
@@ -180,11 +181,13 @@ NVIDIA/vLLM build advertises a native GB10 FP4 kernel.
   measured path/geometry or event-processing bottleneck behind a narrow adapter.
 - U9 production secrets, Windows services, firewall rules, NIC addresses and
   performance numbers are not invented before the machine exists.
-- If PostgreSQL fails after an authorized Minecraft Skill has already completed,
-  the Coordinator records `WORLD_MEMORY_INGESTION_FAILED` but does not relabel or
-  automatically retry the irreversible game action. A durable ingestion outbox
-  is still required before this path can survive a simultaneous database/process
-  outage without a fresh scan.
+- After the Coordinator receives an authorized completed result, it atomically
+  writes and fsyncs a protected U9-local ingestion batch before attempting
+  PostgreSQL. Database failure retains the batch for bounded background retry;
+  restart replays it idempotently, and planning fails closed until the backlog is
+  empty. This is at-least-once fact delivery, not exactly-once game execution.
+  A crash after Runtime completes an action but before Coordinator durably receives
+  the result remains a narrower gap that requires a Runtime completed-result journal.
 - No large model, Docker volume, unknown directory, CUDA component, driver or DGX
   system component was deleted or reinstalled.
 

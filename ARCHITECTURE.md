@@ -234,7 +234,7 @@ Runtime Link 固定使用 `minecraft-studio.runtime.v1` 子协议、`/v1/runtime
 
 普通检索与语义检索都必须显式给出当前服、当前维度和调用主体。仓储查询先用 `MATERIALIZED` CTE 做同服、维度、ACL、过期、supersede 和模型权限筛选，然后才执行 pgvector cosine distance；没有“先全库向量排序再过滤”的跨服泄漏路径。规划器只接收 `modelAccess=true` 的团队 hazard/landmark/portal/resource/route 摘要，不格式化精确坐标；基地、仓库、玩家活动和 restricted 记录由 Zod 与数据库双重禁止进入模型上下文。状态版本变化会取消尚未入队的记忆查询，数据库失败时 AI 请求不发送。
 
-当前已实现并真实测试持久化、ACL、同服过滤、精确 pgvector 排序、不可变、规划器读取，以及授权 `scout.scan-blocks`、`storage.account`、`container.transfer` 结果的确定性写入。模型没有数据库写权限；投影器重新校验原调用、Runtime 结果身份、权威 ServerProfile/维度/位置、扫描白名单与半径。具体 Embedding/Reranker Provider、数据库故障后的持久 ingestion outbox/replay 和非空间任务经验属于后续记忆增量，不通过下载未知模型来伪造完成。
+当前已实现并真实测试持久化、ACL、同服过滤、精确 pgvector 排序、不可变、规划器读取，以及授权 `scout.scan-blocks`、`storage.account`、`container.transfer` 结果的确定性写入。模型没有数据库写权限；投影器重新校验原调用、Runtime 结果身份、权威 ServerProfile/维度/位置、扫描白名单与半径。投影命令先进入 U9 本地受保护的原子落盘/fsync spool，再至少一次投递到 PostgreSQL；稳定 operation ID 使部分成功和重启重放可幂等收敛，backlog 未清空时规划失败关闭。具体 Embedding/Reranker Provider、非空间任务经验，以及覆盖“Runtime 已完成动作但 Coordinator 尚未持久收到结果”窗口的 Runtime 结果日志属于后续记忆增量，不通过未知模型或 exactly-once 宣称来伪造完成。
 
 ## 9. Control Link、Control API 与实时状态流
 

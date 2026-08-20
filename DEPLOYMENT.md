@@ -67,12 +67,25 @@ unavailable. The migration is forward-only and creates immutable facts; rollback
 means stopping the Coordinator and returning to the previous reviewed code,
 not deleting the database. Back up the database before future schema changes.
 
+Also set `WORLD_MEMORY_INGESTION_SPOOL_DIR` to a dedicated absolute path on the
+U9 persistent local disk. Do not use a repository root, temporary directory,
+network share or Spark path. The Coordinator creates the directory with the
+minimum supported permissions and rejects a root path, symbolic-link directory,
+unsafe file mode, malformed batch, payload fingerprint mismatch or configured
+capacity overflow. The remaining batch, polling and retry settings are bounded
+in `.env.example` and `profiles/controller-u9.env.example`.
+
 When enabled, the same runtime persists validated `scout.scan-blocks`,
 `storage.account`, and `container.transfer` completions. Monitor
-`coordinator_skill_result_observer_failed`; it means the game action completed
-but its derived memory did not persist. Do not automatically retry a
-non-idempotent Minecraft action to repair memory—schedule a fresh read-only scan
-or account operation until the durable ingestion outbox is implemented.
+`coordinator_skill_result_observed`,
+`coordinator_world_memory_outbox_reconciled`,
+`coordinator_world_memory_outbox_failed`, and
+`coordinator_skill_result_observer_failed`. A nonzero `deferredCount` means the
+action completed and its validated facts are durably queued, not that the game
+action should run again. The Coordinator retries only the idempotent PostgreSQL
+fact commands and blocks new planning until `pendingBatchCount` returns to zero.
+An observer failure before durable enqueue requires operator investigation and a
+fresh read-only scan; never replay a possibly irreversible container transfer.
 
 ## Spark validation
 

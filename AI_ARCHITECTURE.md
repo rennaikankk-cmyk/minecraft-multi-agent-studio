@@ -57,10 +57,21 @@ cancelled when Bot state/task changes and fails closed before any AI request if
 the configured database is unavailable. Embedding and reranker interfaces are
 bounded; no embedding model is silently downloaded or substituted.
 
-Memory persistence failure after a game action is logged with a stable error and
-does not turn the already completed action into a retryable failure. Durable
-ingestion outbox/replay across a simultaneous database or Coordinator outage is
-still pending.
+Before PostgreSQL delivery, projected commands are stored as a strict batch in a
+Coordinator-exclusive absolute directory on U9. The implementation writes a
+mode-0600 temporary file, fsyncs it, atomically hard-links it to a stable batch
+name, and fsyncs the directory; the directory is mode 0700 on POSIX. A bounded
+poller retries with capped exponential backoff. Partial writes are safe because
+every PostgreSQL command has a stable operation ID and fingerprint; only a fully
+delivered batch file is removed. Orphan synced temporary files are recovered on
+startup, malformed/symlinked/over-capacity input fails closed, and any pending
+backlog blocks new planning until replay succeeds.
+
+This provides at-least-once fact delivery after the Coordinator has durably
+queued the Runtime result. It does not retry the already completed Minecraft
+action and does not claim exactly-once across the earlier Runtime-action versus
+Coordinator-result receipt boundary; closing that narrower crash window requires
+a Runtime completed-result journal.
 
 ## Prefix-cache layout
 

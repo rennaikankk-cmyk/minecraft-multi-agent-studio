@@ -102,10 +102,21 @@ invalid. Every spatial lookup is bound to the authoritative ServerProfile and
 dimension. Exact base/storage locations and restricted player activity are not
 eligible for model context.
 
+Set `WORLD_MEMORY_INGESTION_SPOOL_DIR` to a dedicated absolute directory on the
+U9 local persistent disk, for example
+`C:\ProgramData\MinecraftMultiAgentStudio\world-memory-ingestion`. Grant only
+the Coordinator service identity access; do not place it on Temp, a network
+share, the repository or Spark. Keep the bounded batch/capacity/poll/retry values
+from `profiles/controller-u9.env.example` until the U9 load test supplies better
+evidence.
+
 With world memory enabled, completed authorized Scout scans and storage
 read-backs are written through the same loopback database. Alert on
-`coordinator_skill_result_observer_failed`; recovery is a fresh read-only scan,
-not replaying a possibly irreversible container transfer.
+outbox reconcile/failure events and nonzero `deferredCount` or
+`pendingBatchCount`. PostgreSQL failure retains and replays the validated fact
+batch across Coordinator restart; it never replays the Minecraft action. An
+observer failure before durable enqueue is recovered with a fresh read-only
+scan, not a possibly irreversible container transfer.
 
 ## Fail-closed defaults
 

@@ -10,8 +10,8 @@ This performs package builds, all TypeScript checks, Vitest/Node process tests,
 and production builds. Environment-gated PostgreSQL/Redis and Minecraft cases
 remain visibly skipped unless their explicit guards are present.
 
-The final 2026-08-20 Spark tree passed **480 Vitest cases plus 2 real Node child
-process cases**; 29 external-environment cases remained visibly skipped. The
+The final 2026-08-20 Spark tree passed **491 Vitest cases plus 2 real Node child
+process cases**; 30 external-environment cases remained visibly skipped. The
 production build generated `/ai` and `/api/ai/metrics` successfully.
 
 ## Process and browser acceptance
@@ -70,14 +70,17 @@ service is pinned to the official multi-architecture
 `pgvector/pgvector:0.8.6-pg17-trixie` manifest digest; no floating database tag
 is used.
 
-The final 2026-08-20 combined real-infrastructure run passed **26/26** cases: 20
-task delivery/recovery cases and 6 world-memory/pgvector cases. It used temporary
+The final 2026-08-20 combined real-infrastructure run passed **27/27** cases: 20
+task delivery/recovery cases and 7 world-memory/pgvector cases. It used temporary
 ARM64 PostgreSQL 17 + pgvector 0.8.6 and Redis 8.8.0 containers backed by tmpfs.
 The exact containers and newly pulled images were removed afterward, both test
 ports were verified closed, and no Docker Volume was created, deleted or
 modified. The sixth memory case traverses the production authorized
 `scout.scan-blocks` projector, verifies PostgreSQL writes, then replays the same
 invocation to prove idempotency.
+The seventh memory case first forces the production durable outbox writer to
+fail, verifies that the authorized two-fact batch remains on disk, constructs a
+new outbox instance, and replays it into the real PostgreSQL/pgvector repository.
 
 ## Minecraft
 

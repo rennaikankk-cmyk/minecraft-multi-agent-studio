@@ -223,6 +223,8 @@
 - 超时或取消后执行器禁止新的能力调用，能力适配器必须遵守 `AbortSignal`。当前进程内 JavaScript 处理器不是强隔离沙盒，不能将忽略取消的代码标记为已强制终止。
 - 默认注册 17 个真实技能，另有 1 个可选 PvP 技能；只读 Scout 扫描最多接收 16 个 registry 方块名、64 格半径和 64 个结果，且只读取已加载区块。睡眠、农作物和钓鱼会依据目标版本 registry 检查所需资源，但均尚未完成跨版本实机技能矩阵。进食只允许不可变安全食物白名单，背包整理只把完整堆栈移入空槽且强制校验数量守恒，脱困只执行三种有界、不可破坏方块的移动模式。
 - Skill 完成结果不等于数据库授权。世界记忆投影器必须重新解析原调用和 Runtime 结果，匹配可信身份、ServerProfile、维度、调用前位置和技能专属范围后才可写入；模型没有数据库写能力。
+- 授权事实先进入 Coordinator 独占的绝对路径 spool：POSIX 目录/文件分别收紧为 0700/0600，临时文件写入并 fsync 后以稳定批次名原子发布。根路径、符号链接目录、非普通文件、宽松权限、超长/损坏 JSON、指纹冲突和容量溢出均失败关闭；只在所有 PostgreSQL 命令成功后删除精确批次文件。
+- outbox 只保证 Coordinator 已持久接收结果后的事实至少一次投递；部分写入和重启依靠稳定 operation ID 幂等收敛，不得宣称 Minecraft 动作 exactly-once。Runtime 动作完成到 Coordinator 落盘前的崩溃窗口仍需 completed-result journal。
 - 掉落物拾取必须显式列出物品名且使用禁挖/禁放/禁跑酷的安全 Pathfinder；仓储盘点只打开白名单容器并返回调用方明确请求的物品计数。农作物技能只处理五种固定作物、只收成熟阶段、开工前预留足量种子且每格补种后读回；钓鱼一次一杆，必须持有真实鱼竿并以背包增量判定收获。
 - `combat.pve-melee` 的目标类型只能来自编译期敌对生物白名单，最多 4.5 格、6 次挥击，无寻路追杀；生命值到阈值立即后退。独立 `combat.execute` 能力不能用 `world.interact` 替代。
 - `combat.pvp-melee` 默认不注册；只有 `purpose=isolated-test` 的 ServerProfile 显式 `pvp.enabled=true` 且列出非自身用户名目标后才进入目录，Runtime 还会二次校验名单。Coordinator 将其固定为 R3，而普通 API 只签发 R1 grant，因此当前没有可信 R3 审批链时仍 fail-closed。

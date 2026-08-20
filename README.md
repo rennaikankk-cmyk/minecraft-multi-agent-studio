@@ -34,6 +34,9 @@ Dashboard -> Control API -> Coordinator -> AI Scheduler/Router -> Spark vLLM
 - Authorized read-only Scout scans and storage read-back results are projected
   deterministically into that memory; model output never receives a database
   write capability.
+- Projected facts first enter a protected atomic/fsync U9-local spool and replay
+  idempotently after PostgreSQL or Coordinator recovery; any backlog blocks new
+  planning instead of retrying an already completed Minecraft action.
 
 ## Quick validation
 
