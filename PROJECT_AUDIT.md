@@ -9,7 +9,7 @@ Conclusion: **healthy engineering foundation, not yet a complete multi-agent Min
 
 ## Executive assessment
 
-The repository is real, buildable, and unusually strong in safety boundaries, protocol validation, authenticated control links, cancellation, task persistence primitives, and honest “not connected” UI states. It is not a pile of fake tests. The Coordinator now has a tested high-level AI planning component with strict output and live state/catalog validation, and the unsafe direct Bot model path has been removed. However, most of the user-facing multi-agent/gameplay goal remains disconnected: production startup and task/control APIs do not yet invoke the planner, only seven foundational skills exist, and PvP/Fabric/memory remain design-only.
+The repository is real, buildable, and unusually strong in safety boundaries, protocol validation, authenticated control links, cancellation, task persistence primitives, and honest “not connected” UI states. It is not a pile of fake tests. The Coordinator now conditionally owns a tested high-level AI service with strict output and live state/catalog validation, and the unsafe direct Bot model path has been removed. However, most user-facing multi-agent/gameplay goals remain disconnected: task/control APIs do not invoke the service, only seven foundational skills exist, and PvP/Fabric/memory remain design-only.
 
 Estimated completion toward the full U9-controller + Spark-inference target: **45%** (44.5% weighted).
 
@@ -42,7 +42,7 @@ The foundation alone is much further along than 40%; the number is lower because
 | Source size | about 28,632 TS/TSX lines |
 | Test size | about 17,536 test lines across 67 current test files |
 | Typecheck | PASS with Node 22 |
-| Unit/integration tests | **391 passed, 23 environment-gated skipped** |
+| Unit/integration tests | **396 passed, 23 environment-gated skipped** |
 | Production build | PASS |
 | Runtime Link two-process acceptance | PASS; `minecraftConnected=false` |
 | Four-process acceptance | PASS; Dashboard → Control API → Coordinator → fixture Runtime, final offline |
@@ -68,7 +68,7 @@ Task Worker
   -> BullMQ / Redis
   -> PostgreSQL task repository + outbox
 
-Coordinator AI planner (implemented component, not startup/API-wired)
+Coordinator AI service (conditional production lifecycle, not task/API-wired)
   -> validates live Bot status/task version/compatible skill catalog
   -> AIRequestScheduler
   -> AIRouter
@@ -85,7 +85,7 @@ The required final ownership split is not implemented as deployment profiles yet
 | Module | Real implementation | Missing / limitation |
 |---|---|---|
 | `apps/bot-runtime` | Mineflayer client, strict isolated `ServerProfile`, telemetry, reconnect, authenticated Runtime Link, L0 actions, SkillExecutor, process supervisor; no model dependency or call path | real danger scenarios and multi-Bot Minecraft load not run; authenticated skill invocation transport is not implemented |
-| `apps/coordinator` | Bot registry, stale/sequence protection, Runtime Link, Control Link, stop authorization/audit, expired lease recovery, tested AI planning component with catalog/state/task validation | production startup/task API does not instantiate the planner; no proposal-to-authorization policy bridge, task assignment/resource allocation/roles/team memory; most control state is in memory |
+| `apps/coordinator` | Bot registry, stale/sequence protection, Runtime Link, Control Link, stop authorization/audit, expired lease recovery, conditional AI provider/router/scheduler/planner lifecycle with catalog/state/task validation | no task/API trigger, proposal-to-authorization policy bridge, task assignment/resource allocation/roles/team memory; most control state is in memory |
 | `apps/task-worker` | strict config and isolated handler profile; real BullMQ worker primitives | no production gameplay handler catalog or controller startup profile |
 | `apps/control-api` | authenticated HTTP/WebSocket Bot state and stop endpoints, rate/connection limits, fail-closed Coordinator mirror | no task API, AI node metrics API, audit query API, user/role system, cross-host TLS |
 | `apps/dashboard` | real environment page, Bot list/detail, live stream + polling fallback, safe stop confirmation, explicit failure states | Tasks page is a placeholder; Combat page is static design copy; no AI node, per-Bot AI metrics, benchmark UI, trends, logs, task controls, or role/team view |
@@ -171,7 +171,7 @@ Gaps:
 
 ### P0/P1 blockers
 
-1. Wire the Coordinator-owned planner into production startup and task/control APIs.
+1. Wire the Coordinator-owned AI service into task/control APIs.
 2. Connect validated AI proposals to `Schema -> Policy -> State -> Skill authorization`, never directly to Mineflayer or `SkillExecutor` without trusted authorization.
 3. Add an authenticated skill invocation/result protocol between Coordinator and Bot Runtime.
 4. Add task API and production Coordinator/Worker composition; otherwise task persistence is isolated infrastructure.
@@ -195,7 +195,7 @@ Gaps:
 
 ## Recommended next implementation sequence
 
-1. **Production AI lifecycle:** instantiate the Coordinator planner, expose a task-owned request path, and add the policy/authorization/invocation bridge.
+1. **Production AI request path:** expose a task-owned request path and add the policy/authorization/invocation bridge around the configured service.
 2. **Real Spark inference validation:** run the new health/benchmark workflow, inspect kernel fallback and unified-memory behavior, then accept a concurrency limit.
 3. **Dual-role profiles:** controller U9 and inference Spark, with a development profile that does not change core code.
 4. **Task API/Worker composition:** turn existing persistence primitives into a runnable controller loop.
@@ -208,12 +208,12 @@ Gaps:
 ```text
 Build: PASS
 Typecheck: PASS
-Offline tests: PASS (391 passed, 23 environment-gated skipped)
+Offline tests: PASS (396 passed, 23 environment-gated skipped)
 Runtime Link acceptance: PASS (no Minecraft)
 Four-process acceptance: PASS (fixture Runtime, no Minecraft)
 Dashboard E2E: PASS with system Chrome (11/11)
 Real Minecraft: NOT RUN
 Real PostgreSQL/Redis: NOT RUN locally
-AI production loop: PARTIAL; Coordinator planner exists, startup/API/authorization transport missing
+AI production loop: PARTIAL; lifecycle exists, task/API/authorization transport missing
 Overall completion: 45% (44.5% weighted)
 ```

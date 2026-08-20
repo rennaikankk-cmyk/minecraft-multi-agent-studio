@@ -61,15 +61,18 @@ entry point.
    pass after cold start and restart.
 2. Real AI benchmark report is accepted and sets `AI_MAX_CONCURRENCY`.
 3. Wired private IP/firewall/SSH/API-key plan is verified on both machines.
-4. Coordinator production startup owns the planner/provider/scheduler.
-5. Policy creates scoped expiring authorization from validated proposals.
+4. Enable the Coordinator AI service and verify provider health without reducing
+   stop/control-plane availability.
+5. Add the task/API trigger and policy that creates scoped expiring authorization
+   from validated proposals.
 6. Authenticated skill invocation/result transport passes replay, stale, cancel,
    disconnect, and emergency-stop tests.
 7. U9 PostgreSQL/Redis/task composition passes isolated recovery tests.
 8. Real Minecraft 1/2/5/10 Bot scenarios pass without cross-Bot conflicts.
 9. Dashboard reports real AI and Bot metrics and clearly marks unavailable data.
 
-Gates 4–9 are not complete. Therefore today’s deployment verdict is
+The lifecycle portion of gate 4 exists; its real endpoint validation and gates
+5–9 are not complete. Therefore today’s deployment verdict is
 `FOUNDATION_VALIDATED`, not `PRODUCTION_READY`.
 
 ## Rollback

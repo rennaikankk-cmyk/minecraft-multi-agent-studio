@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import { createStructuredLogger } from "@minecraft-studio/observability";
 
 import { BotRegistry } from "./bot-registry.js";
+import { createCoordinatorAIServiceFromEnv } from "./ai-service.js";
+import { CoordinatorAIConfigError } from "./ai-service-config.js";
 import {
   ControlLinkConfigError,
   loadControlLinkConfig,
@@ -24,6 +26,7 @@ async function main(): Promise<void> {
   const registry = new BotRegistry({
     staleAfterMs: runtimeConfig.botStaleAfterMs,
   });
+  const aiService = createCoordinatorAIServiceFromEnv(registry);
   const runtimeServer = new RuntimeLinkServer({
     host: runtimeConfig.host,
     port: runtimeConfig.port,
@@ -51,6 +54,16 @@ async function main(): Promise<void> {
   let staleTimer: ReturnType<typeof setInterval> | null = null;
 
   try {
+    if (aiService) {
+      const health = await aiService.health();
+      const log = health.available ? logger.info.bind(logger) : logger.warn.bind(logger);
+      log("coordinator_ai_provider_health", {
+        providerAvailable: health.available,
+        providerLatencyMs: health.latencyMs,
+        modelName: health.model ?? null,
+        errorCode: health.errorCode ?? null,
+      });
+    }
     const runtimeAddress = await runtimeServer.start();
     const controlAddress = await controlServer.start();
     staleTimer = setInterval(() => {
@@ -72,6 +85,7 @@ async function main(): Promise<void> {
     });
   } catch (cause) {
     if (staleTimer) clearInterval(staleTimer);
+    aiService?.close();
     await Promise.allSettled([controlServer.stop(), runtimeServer.stop()]);
     throw cause;
   }
@@ -81,6 +95,7 @@ async function main(): Promise<void> {
     if (stopping) return;
     stopping = true;
     if (staleTimer) clearInterval(staleTimer);
+    aiService?.close();
     logger.info("coordinator_stopping", { signal });
     await Promise.allSettled([controlServer.stop(), runtimeServer.stop()]);
   };
@@ -90,7 +105,9 @@ async function main(): Promise<void> {
 
 void main().catch((cause: unknown) => {
   const code =
-    cause instanceof RuntimeLinkConfigError || cause instanceof ControlLinkConfigError
+    cause instanceof RuntimeLinkConfigError ||
+    cause instanceof ControlLinkConfigError ||
+    cause instanceof CoordinatorAIConfigError
       ? cause.code
       : "COORDINATOR_START_FAILED";
   logger.error("coordinator_start_failed", { code });

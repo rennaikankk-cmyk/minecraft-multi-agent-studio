@@ -9,7 +9,7 @@ pnpm build
 ```
 
 Recorded on Spark with Node 22.23.2 on 2026-08-20: typecheck PASS, production
-build PASS, 389 Vitest cases plus 2 real child-process cases PASS, and 23
+build PASS, 394 Vitest cases plus 2 real child-process cases PASS, and 23
 environment-gated cases skipped. The skipped total is 20 PostgreSQL/Redis cases
 and 3 real isolated Minecraft cases.
 

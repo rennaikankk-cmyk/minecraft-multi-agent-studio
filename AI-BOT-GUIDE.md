@@ -39,7 +39,7 @@ mislead an operator into thinking actions were authorized or executed.
 
 ## What still blocks autonomous play
 
-- a Coordinator task/control API must invoke `CoordinatorAIPlanner`
+- a Coordinator task/control API must invoke the configured `CoordinatorAIService`
 - a policy service must turn an accepted proposal into a scoped, expiring
   `SkillExecutionAuthorization`
 - the authenticated control link needs a skill invocation message and result path

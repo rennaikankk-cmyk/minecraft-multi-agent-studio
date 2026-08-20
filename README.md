@@ -21,7 +21,7 @@ pnpm test
 pnpm build
 ```
 
-Root tests currently pass 389 cases plus 2 Node process cases, with 23 explicitly
+Root tests currently pass 394 cases plus 2 Node process cases, with 23 explicitly
 environment-gated cases. Browser, real PostgreSQL/Redis, and real Minecraft
 acceptance are separate; see `TESTING.md`.
 

@@ -70,3 +70,15 @@ export {
   type CoordinatorPlanProposal,
   type CoordinatorPlanRequest,
 } from "./ai-planner.js";
+
+export {
+  CoordinatorAIConfigError,
+  loadCoordinatorAIServiceConfig,
+  type CoordinatorAIServiceConfig,
+} from "./ai-service-config.js";
+
+export {
+  CoordinatorAIService,
+  createCoordinatorAIServiceFromEnv,
+  type CoordinatorAIServiceOptions,
+} from "./ai-service.js";

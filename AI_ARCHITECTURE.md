@@ -99,7 +99,11 @@ Implemented and tested: provider abstraction, OpenAI-compatible transport,
 fallback, health, strict structured output, scheduler, compact/prefix prompt,
 Coordinator state/task/catalog validation, and fail-closed legacy removal.
 
-Not yet implemented: production Coordinator startup ownership, task/API trigger,
-proposal policy and authorization, authenticated skill invocation/result
-protocol, durable AI metrics, and real Spark inference validation. See
+Production Coordinator startup now conditionally owns the provider, router,
+scheduler, and planner when `COORDINATOR_AI_ENABLED=true`. Provider health is
+reported without taking down the stop/control plane when Spark is unavailable.
+
+Not yet implemented: task/API trigger, proposal policy and authorization,
+authenticated skill invocation/result protocol, durable AI metrics, and real
+Spark inference validation. See
 `PROJECT_AUDIT.md` for the weighted status.
