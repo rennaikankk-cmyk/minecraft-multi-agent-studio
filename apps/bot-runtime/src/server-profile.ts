@@ -101,6 +101,28 @@ export const serverProfileSchema = z
         maxDelayMs: z.number().int().min(500).max(300_000),
       })
       .strict(),
+    pvp: z
+      .object({
+        enabled: z.literal(true),
+        allowedTargets: z
+          .array(
+            z
+              .string()
+              .min(3)
+              .max(16)
+              .regex(/^[A-Za-z0-9_]+$/u),
+          )
+          .min(1)
+          .max(64)
+          .refine(
+            (values) =>
+              new Set(values.map((value) => value.toLowerCase())).size ===
+              values.length,
+            { message: "PvP allowedTargets must be unique case-insensitively." },
+          ),
+      })
+      .strict()
+      .optional(),
   })
   .strict()
   .superRefine((profile, context) => {
@@ -116,6 +138,17 @@ export const serverProfileSchema = z
         code: "custom",
         path: ["reconnect", "baseDelayMs"],
         message: "baseDelayMs cannot exceed maxDelayMs.",
+      });
+    }
+    if (
+      profile.pvp?.allowedTargets.some(
+        (target) => target.toLowerCase() === profile.username.toLowerCase(),
+      )
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["pvp", "allowedTargets"],
+        message: "A PvP profile cannot target its own Bot username.",
       });
     }
   });

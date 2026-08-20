@@ -16,6 +16,10 @@ import {
   armorSnapshotCapabilityOutputSchema,
   collectBlockCapabilityInputSchema,
   collectBlockCapabilityOutputSchema,
+  combatPveMeleeCapabilityInputSchema,
+  combatPveMeleeCapabilityOutputSchema,
+  combatPvpMeleeCapabilityInputSchema,
+  combatPvpMeleeCapabilityOutputSchema,
   consumeFoodCapabilityInputSchema,
   consumeFoodCapabilityOutputSchema,
   containerTransferCapabilityInputSchema,
@@ -164,6 +168,25 @@ const SAFE_FOOD_NAMES = new Set([
   "sweet_berries",
 ]);
 
+const MELEE_WEAPON_SCORE: Readonly<Record<string, number>> = {
+  wooden_sword: 10,
+  golden_sword: 11,
+  stone_sword: 20,
+  wooden_axe: 21,
+  golden_axe: 22,
+  iron_sword: 30,
+  stone_axe: 31,
+  iron_axe: 40,
+  diamond_sword: 50,
+  diamond_axe: 51,
+  netherite_sword: 60,
+  netherite_axe: 61,
+  trident: 62,
+  mace: 63,
+};
+
+type CombatEntity = NonNullable<ReturnType<Bot["nearestEntity"]>>;
+
 type SafetyEntityState = Readonly<{
   isInWater?: unknown;
   isInLava?: unknown;
@@ -280,12 +303,17 @@ export class MineflayerBotClient implements BotClient {
   private versionUnsupportedReported = false;
   private inventoryListenerBound = false;
   private activePathInvocationId: string | null = null;
+  private readonly allowedPvpTargets: ReadonlySet<string>;
 
   constructor(
     private readonly bot: Bot,
     private readonly configuredVersion: ServerProfile["minecraftVersion"],
     private readonly serverProfileId: string | null = null,
+    allowedPvpTargets: readonly string[] = [],
   ) {
+    this.allowedPvpTargets = new Set(
+      allowedPvpTargets.map((target) => target.toLowerCase()),
+    );
     bot.on("spawn", () => {
       this.bindInventoryEvents();
       this.handlers?.onSpawn();
@@ -511,6 +539,18 @@ export class MineflayerBotClient implements BotClient {
       request.operation === "movement.recover-bounded"
     ) {
       return this.invokeMovementRecover(request);
+    }
+    if (
+      request.capability === "combat.execute" &&
+      request.operation === "combat.pve-melee-safe"
+    ) {
+      return this.invokePveMelee(request);
+    }
+    if (
+      request.capability === "combat.execute" &&
+      request.operation === "combat.pvp-melee-allowlisted"
+    ) {
+      return this.invokePvpMelee(request);
     }
     throw new SkillFault("SKILL_CAPABILITY_UNSUPPORTED");
   }
@@ -1346,6 +1386,191 @@ export class MineflayerBotClient implements BotClient {
     });
   }
 
+  private async invokePveMelee(
+    request: SkillCapabilityRequest,
+  ): Promise<unknown> {
+    const input = combatPveMeleeCapabilityInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    this.assertDimensionMatch(input.data.dimension);
+    const permitted = new Set<string>(input.data.targetTypes);
+    const target = this.nearestCombatEntity(
+      (entity) => typeof entity.name === "string" && permitted.has(entity.name),
+      input.data.maxDistance,
+    );
+    const output = await this.performBoundedMelee(request, target, {
+      maxDistance: input.data.maxDistance,
+      maxAttackAttempts: input.data.maxAttackAttempts,
+      retreatHealth: input.data.retreatHealth,
+    });
+    return combatPveMeleeCapabilityOutputSchema.parse(output);
+  }
+
+  private async invokePvpMelee(
+    request: SkillCapabilityRequest,
+  ): Promise<unknown> {
+    const input = combatPvpMeleeCapabilityInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    this.assertDimensionMatch(input.data.dimension);
+    const targetName = input.data.targetUsername.toLowerCase();
+    if (!this.allowedPvpTargets.has(targetName)) {
+      throw new SkillFault("PVP_TARGET_NOT_ALLOWLISTED");
+    }
+    const target = this.nearestCombatEntity(
+      (entity) =>
+        entity.type === "player" &&
+        typeof entity.username === "string" &&
+        entity.username.toLowerCase() === targetName &&
+        entity.username.toLowerCase() !== this.bot.username.toLowerCase(),
+      input.data.maxDistance,
+    );
+    const output = await this.performBoundedMelee(request, target, {
+      maxDistance: input.data.maxDistance,
+      maxAttackAttempts: input.data.maxAttackAttempts,
+      retreatHealth: input.data.retreatHealth,
+    });
+    return combatPvpMeleeCapabilityOutputSchema.parse(output);
+  }
+
+  private nearestCombatEntity(
+    predicate: (entity: CombatEntity) => boolean,
+    maxDistance: number,
+  ): CombatEntity | null {
+    return Object.values(this.bot.entities)
+      .filter((entity): entity is CombatEntity => {
+        if (!entity || entity.id === this.bot.entity.id || !predicate(entity)) {
+          return false;
+        }
+        const distance = entity.position.distanceTo(this.bot.entity.position);
+        return Number.isFinite(distance) && distance <= maxDistance;
+      })
+      .sort((left, right) =>
+        left.position.distanceTo(this.bot.entity.position) -
+          right.position.distanceTo(this.bot.entity.position) ||
+        left.id - right.id
+      )[0] ?? null;
+  }
+
+  private bestMeleeWeapon() {
+    return this.bot.inventory
+      .items()
+      .filter((item) => MELEE_WEAPON_SCORE[item.name] !== undefined)
+      .sort((left, right) =>
+        (MELEE_WEAPON_SCORE[right.name] ?? 0) -
+          (MELEE_WEAPON_SCORE[left.name] ?? 0) ||
+        left.name.localeCompare(right.name)
+      )[0] ?? null;
+  }
+
+  private async performBoundedMelee(
+    request: SkillCapabilityRequest,
+    target: CombatEntity | null,
+    limits: Readonly<{
+      maxDistance: number;
+      maxAttackAttempts: number;
+      retreatHealth: number;
+    }>,
+  ): Promise<unknown> {
+    if (!target) {
+      return {
+        targetFound: false,
+        targetName: null,
+        targetEntityId: null,
+        weaponName: null,
+        attackAttempts: 0,
+        targetStillTracked: false,
+        retreated: false,
+        finalDistance: null,
+      };
+    }
+    if (this.activePathInvocationId !== null) {
+      throw new SkillFault("BOT_MOVEMENT_BUSY");
+    }
+    if (!Number.isFinite(this.bot.health)) {
+      throw new SkillFault("COMBAT_HEALTH_UNAVAILABLE");
+    }
+
+    const targetName = target.type === "player"
+      ? target.username ?? "player"
+      : target.name ?? "unknown";
+    const weapon = this.bestMeleeWeapon();
+    let attackAttempts = 0;
+    let retreated = false;
+    this.activePathInvocationId = request.invocationId;
+    this.stopPathfinder();
+    try {
+      if (this.bot.health <= limits.retreatHealth) {
+        await this.applyBoundedSkillControls(
+          650,
+          ["back", "sprint"],
+          request.signal,
+        );
+        retreated = true;
+      } else {
+        if (weapon) {
+          try {
+            await this.bot.equip(weapon, "hand");
+          } catch {
+            if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+            throw new SkillFault("COMBAT_WEAPON_EQUIP_FAILED");
+          }
+        }
+
+        for (let attempt = 0; attempt < limits.maxAttackAttempts; attempt += 1) {
+          if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+          if (this.bot.health <= limits.retreatHealth) {
+            await this.applyBoundedSkillControls(
+              650,
+              ["back", "sprint"],
+              request.signal,
+            );
+            retreated = true;
+            break;
+          }
+          const current = this.bot.entities[target.id];
+          if (!current || current.isValid === false) break;
+          const distance = current.position.distanceTo(this.bot.entity.position);
+          if (!Number.isFinite(distance) || distance > limits.maxDistance) break;
+          const lookHeight =
+            typeof current.height === "number" && Number.isFinite(current.height)
+              ? Math.max(0.5, current.height * 0.75)
+              : 1;
+          try {
+            await this.bot.lookAt(current.position.offset(0, lookHeight, 0), true);
+            this.bot.attack(current);
+            attackAttempts += 1;
+          } catch {
+            if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+            throw new SkillFault("COMBAT_ATTACK_FAILED");
+          }
+          await this.waitWithSignal(650, request.signal);
+        }
+      }
+    } finally {
+      this.bot.clearControlStates();
+      if (this.activePathInvocationId === request.invocationId) {
+        this.activePathInvocationId = null;
+      }
+    }
+
+    const finalTarget = this.bot.entities[target.id];
+    const targetStillTracked = Boolean(finalTarget && finalTarget.isValid !== false);
+    const finalDistance = targetStillTracked && finalTarget
+      ? finalTarget.position.distanceTo(this.bot.entity.position)
+      : null;
+    return {
+      targetFound: true,
+      targetName,
+      targetEntityId: target.id,
+      weaponName: weapon?.name ?? null,
+      attackAttempts,
+      targetStillTracked,
+      retreated,
+      finalDistance,
+    };
+  }
+
   versionCompatibility() {
     const protocolVersion = Number(this.bot.protocolVersion);
     return resolvedVersionCompatibility(
@@ -1399,7 +1624,10 @@ export class MineflayerBotClient implements BotClient {
       // Server-side plugins and rules can disable mechanics that exist in the
       // negotiated protocol. Those facts stay unknown until an explicit,
       // approved probe records them; version alone must not fabricate support.
-      serverCapability: (): undefined => undefined,
+      serverCapability: (name: string): boolean | undefined =>
+        name === "combat.pvp-enabled"
+          ? this.allowedPvpTargets.size > 0
+          : undefined,
     });
   }
 
@@ -1497,6 +1725,23 @@ export class MineflayerBotClient implements BotClient {
     this.bot.clearControlStates();
   }
 
+  private async waitWithSignal(
+    durationMs: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(finish, durationMs);
+      const onAbort = () => finish(new SkillFault("SKILL_CANCELLED"));
+      function finish(error?: Error) {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        error ? reject(error) : resolve();
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
   private stopPathfinder(): void {
     try {
       this.bot.pathfinder?.stop();
@@ -1515,6 +1760,7 @@ export function createMineflayerClient(profile: ServerProfile): BotClient {
     bot,
     profile.minecraftVersion,
     profile.id,
+    profile.pvp?.allowedTargets ?? [],
   );
 }
 

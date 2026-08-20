@@ -134,7 +134,9 @@ const baseInputs = {
   "survival.sleep": { bed: { x: 1, y: 64, z: 0 }, dimension, serverProfileId: server },
   "inventory.compact": { maxMoves: 36, serverProfileId: server },
   "movement.recover": { maxAttempts: 3, dimension, serverProfileId: server },
-} as const;
+  "combat.pve-melee": { targetTypes: ["zombie", "skeleton"], maxDistance: 4, maxAttackAttempts: 3, retreatHealth: 10, dimension, serverProfileId: server },
+  "combat.pvp-melee": { targetUsername: "ArenaBot", maxDistance: 4, maxAttackAttempts: 3, retreatHealth: 10, dimension, serverProfileId: server },
+};
 
 export const builtinSkillVerificationManifestsV1: readonly SkillVerificationManifestV1[] =
   Object.entries(baseInputs).map(([skillId, input]) =>

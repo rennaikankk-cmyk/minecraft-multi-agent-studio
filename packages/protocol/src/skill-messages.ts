@@ -30,6 +30,7 @@ export const skillCapabilitySchema = z.enum([
   "craft.execute",
   "container.read",
   "container.write",
+  "combat.execute",
 ]);
 
 export const skillOperationSchema = z

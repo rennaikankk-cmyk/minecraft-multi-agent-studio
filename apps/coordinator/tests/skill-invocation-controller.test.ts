@@ -33,7 +33,13 @@ function uuidSequence(start = 100): () => string {
   return () => uuid(value++);
 }
 
-function readyRegistry(statusSequence = 1): BotRegistry {
+function readyRegistry(
+  statusSequence = 1,
+  catalogSkill: Readonly<{
+    skillId: string;
+    selectedVariantId: string;
+  }> = { skillId: "movement.goto", selectedVariantId: "portable" },
+): BotRegistry {
   const registry = new BotRegistry({ staleAfterMs: 30_000, now: () => NOW });
   registry.ingest({
     schemaVersion: "1.0",
@@ -73,11 +79,11 @@ function readyRegistry(statusSequence = 1): BotRegistry {
       minecraftVersion: "1.21.11",
       protocolVersion: 774,
       skills: [{
-        skillId: "movement.goto",
+        skillId: catalogSkill.skillId,
         skillVersion: "1.0.0",
         availability: "available",
         verification: "unverified",
-        selectedVariantId: "portable",
+        selectedVariantId: catalogSkill.selectedVariantId,
         unavailableReasons: [],
       }],
     },
@@ -201,6 +207,23 @@ describe("SkillInvocationController", () => {
         grant({ maxRisk: "R0" }),
       ),
     ).rejects.toMatchObject({ code: "POLICY_DENIED" });
+    expect(sendSkillInvocation).not.toHaveBeenCalled();
+  });
+
+  it("keeps optional PvP at R3 and rejects the ordinary R1 task grant", async () => {
+    const sendSkillInvocation = vi.fn();
+    const registry = readyRegistry(1, {
+      skillId: "combat.pvp-melee",
+      selectedVariantId: "isolated-pvp-allowlist",
+    });
+    const { value } = controller(registry, { sendSkillInvocation });
+
+    await expect(value.executeProposal(proposal({
+      requestId: uuid(23),
+      skillId: "combat.pvp-melee",
+      selectedVariantId: "isolated-pvp-allowlist",
+      arguments: { targetUsername: "ArenaBot" },
+    }), grant())).rejects.toMatchObject({ code: "POLICY_DENIED" });
     expect(sendSkillInvocation).not.toHaveBeenCalled();
   });
 

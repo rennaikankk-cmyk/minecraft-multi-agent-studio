@@ -38,6 +38,8 @@ import {
 } from "@minecraft-studio/safety";
 import {
   collectBlockSkill,
+  combatPveMeleeSkill,
+  combatPvpMeleeSkill,
   consumeFoodSkill,
   containerTransferSkill,
   craftItemSkill,
@@ -140,6 +142,7 @@ function skillResultTelemetryDigest(
     "totalItemsAfter",
     "attempts",
     "distanceMoved",
+    "attackAttempts",
   ] as const;
   const digest: Record<string, number> = {};
   for (const key of summaryKeys) {
@@ -266,6 +269,10 @@ export class SingleBotRuntime {
       skillRegistry.register(sleepSkill);
       skillRegistry.register(inventoryCompactSkill);
       skillRegistry.register(movementRecoverSkill);
+      skillRegistry.register(combatPveMeleeSkill);
+      if (this.profile.pvp?.enabled === true) {
+        skillRegistry.register(combatPvpMeleeSkill);
+      }
     }
     this.skillRegistry = skillRegistry;
     this.skillExecutor = new SkillExecutor(skillRegistry, {

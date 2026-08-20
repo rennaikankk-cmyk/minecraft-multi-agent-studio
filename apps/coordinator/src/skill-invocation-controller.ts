@@ -24,6 +24,8 @@ const DEFAULT_SKILL_RISKS = new Map<string, SkillRiskLevel>([
   ["survival.sleep", "R1"],
   ["inventory.compact", "R1"],
   ["movement.recover", "R1"],
+  ["combat.pve-melee", "R1"],
+  ["combat.pvp-melee", "R3"],
 ]);
 
 export type SkillRiskLevel = (typeof RISK_ORDER)[number];

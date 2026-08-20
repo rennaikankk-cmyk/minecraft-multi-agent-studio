@@ -4,6 +4,7 @@ import type { Bot } from "mineflayer";
 import type { Movements } from "mineflayer-pathfinder";
 import type { SkillCapabilityRequest } from "@minecraft-studio/skills";
 import { describe, expect, it, vi } from "vitest";
+import { Vec3 } from "vec3";
 
 import type { BotClientHandlers } from "../src/client.js";
 import {
@@ -191,6 +192,112 @@ describe("MineflayerBotClient lifecycle", () => {
       totalItemsAfter: 67,
       preserved: true,
     });
+  });
+
+  it("attacks only a nearby hostile type with bounded attempts and honest tracking", async () => {
+    vi.useFakeTimers();
+    try {
+      const emitter = new EventEmitter();
+      const self = { id: 1, position: new Vec3(0, 64, 0) };
+      const zombie = {
+        id: 2,
+        type: "mob",
+        name: "zombie",
+        position: new Vec3(2, 64, 0),
+        height: 1.95,
+        isValid: true,
+      };
+      const entities: Record<number, unknown> = { 1: self, 2: zombie };
+      const sword = { name: "iron_sword", count: 1, slot: 36 };
+      const bot = Object.assign(emitter, {
+        username: "StudioBot",
+        health: 20,
+        entity: self,
+        entities,
+        game: { dimension: "overworld" },
+        inventory: { items: () => [sword] },
+        pathfinder: { stop: vi.fn() },
+        clearControlStates: vi.fn(),
+        setControlState: vi.fn(),
+        equip: vi.fn(async () => undefined),
+        lookAt: vi.fn(async () => undefined),
+        attack: vi.fn(() => {
+          delete entities[2];
+        }),
+      }) as unknown as Bot;
+      const client = new MineflayerBotClient(bot, "auto", "isolated-local");
+      const resultPromise = client.invokeSkillCapability(capabilityRequest({
+        capability: "combat.execute",
+        operation: "combat.pve-melee-safe",
+        input: {
+          serverProfileId: "isolated-local",
+          dimension: "minecraft:overworld",
+          targetTypes: ["zombie"],
+          maxDistance: 4,
+          maxAttackAttempts: 3,
+          retreatHealth: 10,
+        },
+      }));
+      await vi.advanceTimersByTimeAsync(650);
+
+      await expect(resultPromise).resolves.toMatchObject({
+        targetFound: true,
+        targetName: "zombie",
+        weaponName: "iron_sword",
+        attackAttempts: 1,
+        targetStillTracked: false,
+        retreated: false,
+      });
+      expect(bot.attack).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refuses PvP targets outside the explicit ServerProfile allow-list", async () => {
+    const emitter = new EventEmitter();
+    const self = { id: 1, position: new Vec3(0, 64, 0) };
+    const target = {
+      id: 2,
+      type: "player",
+      username: "ArenaBot",
+      position: new Vec3(2, 64, 0),
+      height: 1.8,
+      isValid: true,
+    };
+    const bot = Object.assign(emitter, {
+      username: "StudioBot",
+      version: "1.21.8",
+      protocolVersion: 772,
+      majorVersion: "1.21",
+      health: 20,
+      entity: self,
+      entities: { 1: self, 2: target },
+      game: { dimension: "overworld" },
+      registry: {},
+    }) as unknown as Bot;
+    const client = new MineflayerBotClient(
+      bot,
+      "auto",
+      "isolated-local",
+      ["SparringBot"],
+    );
+
+    await expect(client.invokeSkillCapability(capabilityRequest({
+      capability: "combat.execute",
+      operation: "combat.pvp-melee-allowlisted",
+      input: {
+        serverProfileId: "isolated-local",
+        dimension: "minecraft:overworld",
+        targetUsername: "ArenaBot",
+        maxDistance: 4,
+        maxAttackAttempts: 1,
+        retreatHealth: 10,
+      },
+    }))).rejects.toMatchObject({ code: "PVP_TARGET_NOT_ALLOWLISTED" });
+    expect(client.skillCompatibilityEnvironment().serverCapability(
+      "combat.pvp-enabled",
+    )).toBe(true);
   });
 });
 

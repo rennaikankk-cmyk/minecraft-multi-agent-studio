@@ -123,6 +123,25 @@ export {
   movementRecoverSkill,
   movementRecoverStateSchema,
 } from "./builtin/movement-recover.js";
+export {
+  COMBAT_MELEE_MAX_ATTACKS,
+  COMBAT_MELEE_MAX_DISTANCE,
+  COMBAT_MELEE_TIMEOUT_MS,
+  HOSTILE_MOB_NAMES,
+  combatMeleeOutputSchema,
+  combatPveMeleeCapabilityInputSchema,
+  combatPveMeleeCapabilityOutputSchema,
+  combatPveMeleeInputSchema,
+  combatPveMeleeSkill,
+  combatPveMeleeStateSchema,
+} from "./builtin/combat-pve-melee.js";
+export {
+  combatPvpMeleeCapabilityInputSchema,
+  combatPvpMeleeCapabilityOutputSchema,
+  combatPvpMeleeInputSchema,
+  combatPvpMeleeSkill,
+  combatPvpMeleeStateSchema,
+} from "./builtin/combat-pvp-melee.js";
 export { SkillExecutor } from "./executor.js";
 export { SkillRegistry } from "./registry.js";
 export { resolveSkillCompatibility } from "./compatibility.js";

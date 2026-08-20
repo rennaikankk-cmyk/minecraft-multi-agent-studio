@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "1.0",
+  "id": "local-isolated-pvp",
+  "botId": "studio-pvp-bot-01",
+  "purpose": "isolated-test",
+  "networkScope": "loopback",
+  "host": "127.0.0.1",
+  "port": 25565,
+  "minecraftVersion": "auto",
+  "username": "StudioPvpBot",
+  "auth": "offline",
+  "statusIntervalMs": 1000,
+  "heartbeatIntervalMs": 5000,
+  "stopGracePeriodMs": 5000,
+  "reconnect": {
+    "enabled": false,
+    "maxAttempts": 0,
+    "baseDelayMs": 2000,
+    "maxDelayMs": 30000
+  },
+  "pvp": {
+    "enabled": true,
+    "allowedTargets": ["ArenaBot"]
+  }
+}

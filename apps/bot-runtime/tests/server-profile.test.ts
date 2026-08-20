@@ -48,6 +48,25 @@ describe("ServerProfile", () => {
     ).toBe(false);
   });
 
+  it("requires explicit, unique PvP target allow-listing and rejects self-targeting", () => {
+    expect(serverProfileSchema.safeParse({
+      ...validProfile,
+      pvp: { enabled: true, allowedTargets: ["ArenaBot", "SparringBot"] },
+    }).success).toBe(true);
+    expect(serverProfileSchema.safeParse({
+      ...validProfile,
+      pvp: { enabled: true, allowedTargets: ["ArenaBot", "arenabot"] },
+    }).success).toBe(false);
+    expect(serverProfileSchema.safeParse({
+      ...validProfile,
+      pvp: { enabled: true, allowedTargets: ["studiobot"] },
+    }).success).toBe(false);
+    expect(serverProfileSchema.safeParse({
+      ...validProfile,
+      pvp: { enabled: false, allowedTargets: ["ArenaBot"] },
+    }).success).toBe(false);
+  });
+
   it("accepts RFC1918 hosts only when private-lan is explicit", () => {
     expect(
       serverProfileSchema.safeParse({

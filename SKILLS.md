@@ -6,7 +6,7 @@
 
 - Skill ID 后的 SemVer 表示技能输入、输出和行为契约，不表示 Minecraft 服务器版本。
 - 每个 Skill 另有有序 `compatibility.variants`。Runtime 只使用连接后真实协商出的版本/协议，以及当前 registry 的 feature、物品、方块、实体和显式服务端能力探针解析变体；不以 `minVersion/maxVersion` 一刀切。
-- 当前目录包含 11 个 Skill。除 `survival.sleep` 依据真实 registry 检查床资源外，其余声明无额外资源要求的 `portable` 变体。跨版本真实场景矩阵尚未执行，所以目录仍上报 `verification=unverified`，不冒充实机已验证。
+- 默认目录包含 12 个 Skill；隔离 PvP 白名单启用后为 13 个。除 `survival.sleep` 依据真实 registry 检查床资源、`combat.pvp-melee` 依据显式服务端能力外，其余声明 `portable` 变体。跨版本真实场景矩阵尚未执行，所以目录仍上报 `verification=unverified`，不冒充实机已验证。
 - 新版本特色 Skill 必须声明它实际依赖的 feature/资源；如果还依赖服务器插件、数据包或规则，则必须等待显式探针。能力为 `unknown` 时 fail-closed，不从版本号猜测。
 - `collect.block`、`craft.item`、`world.place-block` 和 `container.transfer` 当前仍接收目标版本 registry 的原生资源名。兼容变体可以表达旧/新 ID 的替代顺序，但规划器使用的语义资源别名尚未接入。
 
@@ -239,3 +239,22 @@
 - 最多依次尝试 `后退+跳`、`前进+跳`、`左移+跳` 三种 550ms 模式；不挖掘、不放块、不开门、不传送。
 - 每次从真实坐标读回位移，至少移动 0.35 格才报告 `recovered=true`；失败时返回实际尝试数和位移供上层升级处理。
 - L0 检测到持续卡住时仍会先抢占并执行自身紧急脱困；L1 技能适合路径失败后、尚未进入 L0 风险态的主动恢复。
+
+## `combat.pve-melee@1.0.0`
+
+- 权限：独立的 `combat.execute`
+- 风险：R1（只针对编译期敌对生物白名单）
+- 适配器操作：`combat.pve-melee-safe`
+- 只在 2～4.5 格内按距离、实体 ID 稳定选择最近目标；最多 6 次挥击，不启用寻路追杀。
+- Runtime 从实际背包选择固定评分最高的近战武器；每次攻击前重查实体、距离、生命值和取消信号。
+- 生命值达到调用阈值时停止攻击并执行一次 650ms 后退；L0 风险仍可随时抢占。
+- 输出只报告 `attackAttempts` 与目标是否仍在客户端跟踪范围，不把实体消失冒充为“已击杀”。
+
+## `combat.pvp-melee@1.0.0`（默认关闭）
+
+- 权限：独立的 `combat.execute`
+- 风险：R3；普通 R1 任务入口固定拒绝。
+- 适配器操作：`combat.pvp-melee-allowlisted`
+- 只有隔离 ServerProfile 显式 `pvp.enabled=true` 且提供非自身 `allowedTargets` 后才注册；技能兼容变体还要求 Runtime 报告 `combat.pvp-enabled=true`。
+- 输入用户名必须同时通过 Schema、ServerProfile allow-list 与 Runtime 实体用户名三层匹配；没有“附近任意玩家”模式。
+- 当前只是有限近战基础层，不声称已实现水晶、重生锚、弓弩、药水、团队战斗或抗作弊规避。这些高危/强时序模块要等事件循环 p99 与隔离实机门禁通过后再开放。
