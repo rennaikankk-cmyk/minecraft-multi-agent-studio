@@ -28,6 +28,7 @@ import {
   SkillInvocationController,
   type SkillInvocationAuditSink,
   type SkillInvocationGrant,
+  type SkillInvocationResultObserver,
   type SkillInvocationTransport,
 } from "./skill-invocation-controller.js";
 
@@ -38,6 +39,7 @@ export type CoordinatorAIExecutionOptions = Readonly<{
   logger: AppLogger;
   teamStateProvider?: (botId: string) => readonly string[];
   relevantMemoryProvider?: CoordinatorRelevantMemoryProvider;
+  skillResultObserver?: SkillInvocationResultObserver;
   onPlanningObservation?: (observation: BotAiPerformanceV1) => void;
 }>;
 
@@ -89,6 +91,9 @@ export class CoordinatorAIService {
           transport: options.execution.transport,
           auditSink: options.execution.auditSink,
           logger: options.execution.logger,
+          ...(options.execution.skillResultObserver === undefined
+            ? {}
+            : { resultObserver: options.execution.skillResultObserver }),
         })
       : null;
   }

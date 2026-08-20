@@ -54,6 +54,9 @@ export {
   type SkillInvocationGrant,
   type SkillInvocationPolicy,
   type SkillInvocationPolicyInput,
+  type SkillInvocationResultObservation,
+  type SkillInvocationResultObservationOutcome,
+  type SkillInvocationResultObserver,
   type SkillInvocationTransport,
   type SkillRiskLevel,
 } from "./skill-invocation-controller.js";

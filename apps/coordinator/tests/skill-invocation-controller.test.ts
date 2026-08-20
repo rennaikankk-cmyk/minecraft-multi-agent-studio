@@ -11,6 +11,7 @@ import {
   SkillInvocationController,
   type CoordinatorPlanProposal,
   type SkillInvocationGrant,
+  type SkillInvocationResultObserver,
   type SkillInvocationTransport,
 } from "../src/index.js";
 
@@ -149,6 +150,7 @@ function completed(command: SkillInvocationV1) {
 function controller(
   registry: BotRegistry,
   transport: SkillInvocationTransport,
+  resultObserver?: SkillInvocationResultObserver,
 ) {
   const auditSink = new InMemorySkillInvocationAuditSink();
   return {
@@ -158,6 +160,7 @@ function controller(
       transport,
       auditSink,
       logger,
+      ...(resultObserver === undefined ? {} : { resultObserver }),
       now: () => NOW,
       randomId: uuidSequence(),
     }),
@@ -192,6 +195,72 @@ describe("SkillInvocationController", () => {
       "authorized",
       "completed",
     ]);
+  });
+
+  it("observes a completed authorized result with its authoritative world", async () => {
+    const observer = vi.fn<SkillInvocationResultObserver>(async () => ({
+      projectedCount: 1,
+      createdCount: 1,
+      replayedCount: 0,
+    }));
+    const sendSkillInvocation = vi.fn(
+      async (command: SkillInvocationV1) => completed(command),
+    );
+    const { value } = controller(
+      readyRegistry(),
+      { sendSkillInvocation },
+      observer,
+    );
+
+    await expect(value.executeProposal(proposal(), grant())).resolves.toMatchObject({
+      payload: { outcome: "completed" },
+    });
+    expect(observer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: expect.objectContaining({ botId: BOT_ID }),
+        result: expect.objectContaining({
+          payload: expect.objectContaining({ outcome: "completed" }),
+        }),
+        authoritativeServerProfileId: "isolated-test",
+        authoritativePosition: {
+          x: 1,
+          y: 64,
+          z: 2,
+          dimension: "minecraft:overworld",
+        },
+      }),
+    );
+  });
+
+  it("does not relabel a completed Minecraft action when memory ingestion fails", async () => {
+    vi.mocked(logger.error).mockClear();
+    const observer = vi.fn<SkillInvocationResultObserver>(async () => {
+      throw Object.assign(new Error("database unavailable"), {
+        code: "WORLD_MEMORY_INGESTION_FAILED",
+      });
+    });
+    const sendSkillInvocation = vi.fn(
+      async (command: SkillInvocationV1) => completed(command),
+    );
+    const { value, auditSink } = controller(
+      readyRegistry(),
+      { sendSkillInvocation },
+      observer,
+    );
+
+    await expect(value.executeProposal(proposal(), grant())).resolves.toMatchObject({
+      payload: { outcome: "completed" },
+    });
+    expect(auditSink.entries().at(-1)).toMatchObject({
+      status: "completed",
+      outcome: "completed",
+    });
+    expect(logger.error).toHaveBeenCalledWith(
+      "coordinator_skill_result_observer_failed",
+      expect.objectContaining({
+        errorCode: "WORLD_MEMORY_INGESTION_FAILED",
+      }),
+    );
   });
 
   it("denies stale state and risk above the grant before transport", async () => {

@@ -98,6 +98,52 @@ describe("MineflayerBotClient lifecycle", () => {
     expect(facts.serverCapability("combat.mace-enabled")).toBeUndefined();
   });
 
+  it("scans only registry-confirmed blocks from loaded chunks without mutation", async () => {
+    const emitter = new EventEmitter();
+    const positions = [new Vec3(4, 62, 1), new Vec3(-2, 63, 0)];
+    const bot = Object.assign(emitter, {
+      game: { dimension: "overworld" },
+      entity: { position: new Vec3(0.7, 64.2, 0.4) },
+      registry: {
+        blocksByName: {
+          iron_ore: { id: 15 },
+          lava: { id: 10 },
+        },
+      },
+      findBlocks: vi.fn(() => positions),
+      blockAt: vi.fn((position: Vec3) => ({
+        name: position.x > 0 ? "iron_ore" : "lava",
+        position,
+      })),
+    }) as unknown as Bot;
+    const client = new MineflayerBotClient(bot, "auto", "isolated-local");
+
+    await expect(
+      client.invokeSkillCapability(capabilityRequest({
+        capability: "world.read",
+        operation: "scout.scan-blocks-safe",
+        input: {
+          serverProfileId: "isolated-local",
+          dimension: "minecraft:overworld",
+          blockNames: ["iron_ore", "lava"],
+          maxDistance: 16,
+          maxResults: 8,
+        },
+      })),
+    ).resolves.toEqual({
+      origin: { x: 0, y: 64, z: 0 },
+      observations: [
+        { blockName: "lava", position: { x: -2, y: 63, z: 0 } },
+        { blockName: "iron_ore", position: { x: 4, y: 62, z: 1 } },
+      ],
+    });
+    expect(bot.findBlocks).toHaveBeenCalledWith({
+      matching: [15, 10],
+      maxDistance: 16,
+      count: 8,
+    });
+  });
+
   it("consumes only a registry-confirmed safe food and reports read-back", async () => {
     const emitter = new EventEmitter();
     const bread = { name: "bread", count: 2, slot: 36 };

@@ -7,8 +7,8 @@ import {
 } from "../src/index.js";
 
 describe("versioned Minecraft skill verification manifests", () => {
-  it("strictly validates all seventeen built-in and optional skill matrices", () => {
-    expect(builtinSkillVerificationManifestsV1).toHaveLength(17);
+  it("strictly validates all eighteen built-in and optional skill matrices", () => {
+    expect(builtinSkillVerificationManifestsV1).toHaveLength(18);
     for (const manifest of builtinSkillVerificationManifestsV1) {
       expect(skillVerificationManifestV1Schema.parse(manifest)).toEqual(manifest);
       expect(new Set(manifest.scenarios.map(({ category }) => category))).toEqual(

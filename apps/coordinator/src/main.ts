@@ -54,7 +54,10 @@ async function main(): Promise<void> {
       teamStateProvider: (botId) => teamCoordinator.teamStateForBot(botId),
       ...(worldMemory === null
         ? {}
-        : { relevantMemoryProvider: worldMemory.relevantMemoryProvider }),
+        : {
+            relevantMemoryProvider: worldMemory.relevantMemoryProvider,
+            skillResultObserver: worldMemory.skillResultObserver,
+          }),
       onPlanningObservation: (observation) => aiPerformance.record(observation),
     });
   } catch (error) {

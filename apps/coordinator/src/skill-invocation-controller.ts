@@ -28,6 +28,7 @@ const DEFAULT_SKILL_RISKS = new Map<string, SkillRiskLevel>([
   ["combat.pvp-melee", "R3"],
   ["storage.account", "R0"],
   ["collect.drops", "R1"],
+  ["scout.scan-blocks", "R0"],
   ["farm.crop", "R1"],
   ["gather.fish-once", "R1"],
 ]);
@@ -50,6 +51,28 @@ export type SkillInvocationTransport = Readonly<{
     signal: AbortSignal,
   ): Promise<SkillExecutionResultV1>;
 }>;
+
+export type SkillInvocationResultObservation = Readonly<{
+  command: SkillInvocationV1;
+  result: SkillExecutionResultV1;
+  authoritativeServerProfileId: string;
+  authoritativePosition: Readonly<{
+    x: number;
+    y: number;
+    z: number;
+    dimension: string;
+  }>;
+}>;
+
+export type SkillInvocationResultObservationOutcome = Readonly<{
+  projectedCount: number;
+  createdCount: number;
+  replayedCount: number;
+}>;
+
+export type SkillInvocationResultObserver = (
+  observation: SkillInvocationResultObservation,
+) => Promise<SkillInvocationResultObservationOutcome>;
 
 export type SkillInvocationPolicyInput = Readonly<{
   actorId: string;
@@ -135,6 +158,7 @@ export type SkillInvocationControllerOptions = Readonly<{
   transport: SkillInvocationTransport;
   auditSink: SkillInvocationAuditSink;
   logger: AppLogger;
+  resultObserver?: SkillInvocationResultObserver;
   policy?: SkillInvocationPolicy;
   skillRisks?: ReadonlyMap<string, SkillRiskLevel>;
   invocationTimeoutMs?: number;
@@ -388,7 +412,7 @@ export class SkillInvocationController {
         },
         controller.signal,
       );
-      const errorCode = "errorCode" in result.payload
+      const resultErrorCode = "errorCode" in result.payload
         ? result.payload.errorCode
         : null;
       await this.audit({
@@ -396,8 +420,47 @@ export class SkillInvocationController {
         timestamp: validNow(this.now()).toISOString(),
         status: result.payload.outcome === "completed" ? "completed" : "rejected",
         outcome: result.payload.outcome,
-        errorCode,
+        errorCode: resultErrorCode,
       });
+      if (
+        result.payload.outcome === "completed" &&
+        this.options.resultObserver !== undefined
+      ) {
+        try {
+          const observation = await this.options.resultObserver({
+            command,
+            result,
+            authoritativeServerProfileId: record.serverProfileId,
+            authoritativePosition: {
+              x: record.currentStatus.position.x,
+              y: record.currentStatus.position.y,
+              z: record.currentStatus.position.z,
+              dimension: record.currentStatus.position.dimension,
+            },
+          });
+          this.options.logger.info("coordinator_skill_result_observed", {
+            traceId: command.traceId,
+            taskId,
+            botId: proposal.botId,
+            skillId: proposal.skillId,
+            modelName: proposal.model,
+            invocationId,
+            projectedCount: observation.projectedCount,
+            createdCount: observation.createdCount,
+            replayedCount: observation.replayedCount,
+          });
+        } catch (cause) {
+          this.options.logger.error("coordinator_skill_result_observer_failed", {
+            traceId: command.traceId,
+            taskId,
+            botId: proposal.botId,
+            skillId: proposal.skillId,
+            modelName: proposal.model,
+            invocationId,
+            errorCode: errorCode(cause),
+          });
+        }
+      }
       return result;
     } catch (cause) {
       await this.audit({

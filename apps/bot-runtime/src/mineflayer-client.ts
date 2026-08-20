@@ -38,6 +38,8 @@ import {
   movementRecoverCapabilityOutputSchema,
   placeBlockCapabilityInputSchema,
   placeBlockCapabilityOutputSchema,
+  scoutScanBlocksCapabilityInputSchema,
+  scoutScanBlocksCapabilityOutputSchema,
   sleepCapabilityInputSchema,
   sleepCapabilityOutputSchema,
   smeltItemCapabilityInputSchema,
@@ -508,6 +510,12 @@ export class MineflayerBotClient implements BotClient {
       return this.invokeArmorEquip(request);
     }
     if (
+      request.capability === "world.read" &&
+      request.operation === "scout.scan-blocks-safe"
+    ) {
+      return this.invokeScoutScanBlocks(request);
+    }
+    if (
       request.capability === "world.interact" &&
       request.operation === "collect.blocks-safe"
     ) {
@@ -823,6 +831,80 @@ export class MineflayerBotClient implements BotClient {
     if (requestedDimension !== current) {
       throw new SkillFault("TARGET_DIMENSION_MISMATCH");
     }
+  }
+
+  /**
+   * Read-only scout scan over blocks already present in the client's loaded
+   * chunks. The caller chooses a bounded resource-name allow-list; Runtime
+   * resolves those names against the negotiated registry and reports only
+   * actual blockAt read-back positions.
+   */
+  private invokeScoutScanBlocks(
+    request: SkillCapabilityRequest,
+  ): unknown {
+    const input = scoutScanBlocksCapabilityInputSchema.safeParse(request.input);
+    if (!input.success) {
+      throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    }
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    this.assertDimensionMatch(input.data.dimension);
+
+    const registry = this.bot.registry as unknown as {
+      blocksByName?: Record<string, { id: number } | undefined>;
+    };
+    const blockIds = input.data.blockNames.map((blockName) => {
+      const block = registry.blocksByName?.[blockName];
+      if (!block || !Number.isSafeInteger(block.id)) {
+        throw new SkillFault("BLOCK_NAME_UNKNOWN");
+      }
+      return block.id;
+    });
+    const allowedNames = new Set(input.data.blockNames);
+    const origin = {
+      x: Math.floor(this.bot.entity.position.x),
+      y: Math.floor(this.bot.entity.position.y),
+      z: Math.floor(this.bot.entity.position.z),
+    };
+    const observations = this.bot
+      .findBlocks({
+        matching: blockIds,
+        maxDistance: input.data.maxDistance,
+        count: input.data.maxResults,
+      })
+      .map((position) => this.bot.blockAt(position))
+      .filter(
+        (block): block is NonNullable<typeof block> =>
+          block !== null && allowedNames.has(block.name),
+      )
+      .map((block) => ({
+        blockName: block.name,
+        position: {
+          x: Math.floor(block.position.x),
+          y: Math.floor(block.position.y),
+          z: Math.floor(block.position.z),
+        },
+      }))
+      .sort(
+        (left, right) =>
+          Math.hypot(
+            left.position.x - origin.x,
+            left.position.y - origin.y,
+            left.position.z - origin.z,
+          ) -
+            Math.hypot(
+              right.position.x - origin.x,
+              right.position.y - origin.y,
+              right.position.z - origin.z,
+            ) ||
+          left.blockName.localeCompare(right.blockName) ||
+          left.position.x - right.position.x ||
+          left.position.y - right.position.y ||
+          left.position.z - right.position.z,
+      );
+    return scoutScanBlocksCapabilityOutputSchema.parse({
+      origin,
+      observations,
+    });
   }
 
   /**

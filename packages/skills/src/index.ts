@@ -165,6 +165,19 @@ export {
   collectDropsStateSchema,
 } from "./builtin/collect-drops.js";
 export {
+  SCOUT_SCAN_BLOCKS_TIMEOUT_MS,
+  SCOUT_SCAN_MAX_BLOCK_NAMES,
+  SCOUT_SCAN_MAX_DISTANCE,
+  SCOUT_SCAN_MAX_RESULTS,
+  scoutBlockObservationSchema,
+  scoutScanBlocksCapabilityInputSchema,
+  scoutScanBlocksCapabilityOutputSchema,
+  scoutScanBlocksInputSchema,
+  scoutScanBlocksOutputSchema,
+  scoutScanBlocksSkill,
+  scoutScanBlocksStateSchema,
+} from "./builtin/scout-scan-blocks.js";
+export {
   FARM_CROP_MAX_COUNT,
   FARM_CROP_MAX_DISTANCE,
   FARM_CROP_NAMES,

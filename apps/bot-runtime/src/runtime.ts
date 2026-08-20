@@ -51,6 +51,7 @@ import {
   movementGotoSkill,
   movementRecoverSkill,
   placeBlockSkill,
+  scoutScanBlocksSkill,
   sleepSkill,
   smeltItemSkill,
   storageAccountSkill,
@@ -160,6 +161,12 @@ function skillResultTelemetryDigest(
     if (typeof value === "number" && Number.isFinite(value)) {
       digest[key] = value;
     }
+  }
+  if (
+    Array.isArray(record.observations) &&
+    record.observations.length <= 64
+  ) {
+    digest.observationsFound = record.observations.length;
   }
   return Object.keys(digest).length > 0 ? digest : null;
 }
@@ -282,6 +289,7 @@ export class SingleBotRuntime {
       skillRegistry.register(combatPveMeleeSkill);
       skillRegistry.register(storageAccountSkill);
       skillRegistry.register(collectDropsSkill);
+      skillRegistry.register(scoutScanBlocksSkill);
       skillRegistry.register(farmCropSkill);
       skillRegistry.register(fishOnceSkill);
       if (this.profile.pvp?.enabled === true) {

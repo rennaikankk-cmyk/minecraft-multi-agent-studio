@@ -6,9 +6,14 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { PgTaskPoolAdapter } from "@minecraft-studio/task-system";
+import type {
+  SkillExecutionResultV1,
+  SkillInvocationV1,
+} from "@minecraft-studio/protocol";
 
 import {
   PostgresWorldMemoryRepository,
+  WorldMemorySkillResultIngestor,
   type WorldMemoryWriteCommand,
 } from "../src/index.js";
 
@@ -227,5 +232,108 @@ describeReal.sequential("real PostgreSQL/pgvector world memory", () => {
         [input.memoryId],
       ),
     ).rejects.toThrow(/immutable/u);
+  });
+
+  it("persists authorized scout results idempotently through the production projector", async () => {
+    const invocationId = randomUUID();
+    const command: SkillInvocationV1 = {
+      schemaVersion: "1.0",
+      messageId: randomUUID(),
+      traceId: "trace-real-scout-ingestion",
+      timestamp: "2026-08-20T08:10:00.000Z",
+      source: { service: "coordinator", instanceId: "coordinator-real-test" },
+      botId: "scout-real-01",
+      taskId: "task-real-scout",
+      type: "skill.invoke.v1",
+      payload: {
+        invocationId,
+        skillId: "scout.scan-blocks",
+        skillVersion: "1.0.0",
+        expectedRuntimeInstanceId: "runtime-real-scout",
+        expectedStateSequence: 8,
+        taskVersion: 3,
+        expiresAt: "2026-08-20T08:11:00.000Z",
+        input: {
+          serverProfileId: "server-alpha",
+          dimension: "minecraft:overworld",
+          blockNames: ["diamond_ore", "lava"],
+          maxDistance: 16,
+          maxResults: 8,
+        },
+        authorization: {
+          decisionId: randomUUID(),
+          actorId: "task-policy",
+          issuedAt: "2026-08-20T08:09:59.000Z",
+          expiresAt: "2026-08-20T08:11:00.000Z",
+        },
+      },
+    };
+    const result: SkillExecutionResultV1 = {
+      schemaVersion: "1.0",
+      messageId: randomUUID(),
+      traceId: command.traceId,
+      timestamp: "2026-08-20T08:10:01.000Z",
+      source: { service: "bot-runtime", instanceId: "runtime-real-scout" },
+      botId: command.botId,
+      taskId: command.taskId,
+      type: "skill.result.v1",
+      payload: {
+        invocationId,
+        skillId: command.payload.skillId,
+        skillVersion: command.payload.skillVersion,
+        outcome: "completed",
+        attempts: 1,
+        completedAt: "2026-08-20T08:10:01.000Z",
+        output: {
+          origin: { x: 0, y: 64, z: 0 },
+          observations: [
+            { blockName: "diamond_ore", position: { x: 3, y: 61, z: 1 } },
+            { blockName: "lava", position: { x: -2, y: 62, z: 0 } },
+          ],
+        },
+      },
+    };
+    const ingestor = new WorldMemorySkillResultIngestor(repository);
+    const ingestion = {
+      command,
+      result,
+      authoritativeServerProfileId: "server-alpha",
+      authoritativePosition: {
+        x: 0,
+        y: 64,
+        z: 0,
+        dimension: "minecraft:overworld",
+      },
+    } as const;
+
+    await expect(ingestor.ingest(ingestion)).resolves.toEqual({
+      projectedCount: 2,
+      createdCount: 2,
+      replayedCount: 0,
+    });
+    await expect(ingestor.ingest(ingestion)).resolves.toEqual({
+      projectedCount: 2,
+      createdCount: 0,
+      replayedCount: 2,
+    });
+    const stored = await repository.search({
+      serverProfileId: "server-alpha",
+      dimension: "minecraft:overworld",
+      subjectId: "worker-02",
+      kinds: ["resource", "hazard"],
+      tags: [],
+      minimumConfidence: 1,
+      observedAfter: "2026-08-20T08:09:00.000Z",
+      center: { x: 0, y: 64, z: 0, radius: 32 },
+      semantic: null,
+      modelAccessOnly: true,
+      limit: 20,
+    });
+    expect(stored.map(({ memory }) => memory.summary)).toEqual(
+      expect.arrayContaining([
+        "Authorized scout scan observed diamond_ore.",
+        "Authorized scout scan observed lava.",
+      ]),
+    );
   });
 });

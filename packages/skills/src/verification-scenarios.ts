@@ -138,6 +138,7 @@ const baseInputs = {
   "combat.pvp-melee": { targetUsername: "ArenaBot", maxDistance: 4, maxAttackAttempts: 3, retreatHealth: 10, dimension, serverProfileId: server },
   "storage.account": { container: { x: 3, y: 64, z: 0 }, itemNames: ["cobblestone", "bread"], dimension, serverProfileId: server },
   "collect.drops": { itemNames: ["oak_log"], maxCount: 4, maxDistance: 16, dimension, serverProfileId: server },
+  "scout.scan-blocks": { blockNames: ["iron_ore", "lava"], maxDistance: 32, maxResults: 8, dimension, serverProfileId: server },
   "farm.crop": { cropName: "wheat", maxCount: 4, maxDistance: 16, dimension, serverProfileId: server },
   "gather.fish-once": { dimension, serverProfileId: server },
 };

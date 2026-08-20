@@ -4,9 +4,11 @@ import { PgTaskPoolAdapter } from "@minecraft-studio/task-system";
 import {
   PostgresWorldMemoryRepository,
   WorldMemoryPlannerContextService,
+  WorldMemorySkillResultIngestor,
 } from "@minecraft-studio/world-memory";
 
 import type { CoordinatorRelevantMemoryProvider } from "./ai-planner.js";
+import type { SkillInvocationResultObserver } from "./skill-invocation-controller.js";
 
 export type CoordinatorWorldMemoryConfig =
   | Readonly<{ enabled: false }>
@@ -39,6 +41,7 @@ export class CoordinatorWorldMemoryError extends Error {
 
 export type CoordinatorWorldMemoryRuntime = Readonly<{
   relevantMemoryProvider: CoordinatorRelevantMemoryProvider;
+  skillResultObserver: SkillInvocationResultObserver;
   close(): Promise<void>;
 }>;
 
@@ -182,6 +185,7 @@ export async function createCoordinatorWorldMemoryRuntimeFromEnv(
       radius: config.radius,
       minimumConfidence: config.minimumConfidence,
     });
+    const ingestor = new WorldMemorySkillResultIngestor(repository);
     let closed = false;
     return Object.freeze({
       relevantMemoryProvider: async (request) =>
@@ -192,6 +196,14 @@ export async function createCoordinatorWorldMemoryRuntimeFromEnv(
           subjectId: request.botId,
           task: request.task,
           signal: request.signal,
+        }),
+      skillResultObserver: async (observation) =>
+        await ingestor.ingest({
+          command: observation.command,
+          result: observation.result,
+          authoritativeServerProfileId:
+            observation.authoritativeServerProfileId,
+          authoritativePosition: observation.authoritativePosition,
         }),
       close: async () => {
         if (closed) return;

@@ -59,6 +59,10 @@ export interface WorldMemoryRepositoryLike {
   search(query: WorldMemoryQuery): Promise<readonly WorldMemorySearchResult[]>;
 }
 
+export interface WorldMemoryWriterLike {
+  record(input: WorldMemoryWriteCommand): Promise<RecordWorldMemoryResult>;
+}
+
 type NormalizedWriteCommand = WorldMemoryWriteCommand;
 
 function normalizeWriteCommand(
@@ -205,7 +209,7 @@ async function rollback(client: PostgresClientLike): Promise<void> {
 }
 
 export class PostgresWorldMemoryRepository
-  implements WorldMemoryRepositoryLike
+  implements WorldMemoryRepositoryLike, WorldMemoryWriterLike
 {
   constructor(
     private readonly pool: PostgresPoolLike,

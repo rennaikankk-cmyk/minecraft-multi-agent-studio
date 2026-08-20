@@ -279,6 +279,11 @@ describe("SingleBotRuntime", () => {
               verification: "unverified",
               selectedVariantId: "portable",
             }),
+            expect.objectContaining({
+              skillId: "scout.scan-blocks",
+              availability: "available",
+              selectedVariantId: "portable",
+            }),
           ]),
         }),
       }),

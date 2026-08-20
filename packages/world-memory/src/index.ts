@@ -28,7 +28,14 @@ export {
   worldMemoryOperationFingerprint,
   type RecordWorldMemoryResult,
   type WorldMemoryRepositoryLike,
+  type WorldMemoryWriterLike,
 } from "./repository.js";
+export {
+  WorldMemorySkillResultIngestor,
+  projectWorldMemoryFromSkillResult,
+  type WorldMemoryIngestionResult,
+  type WorldMemorySkillResultEvent,
+} from "./skill-result-ingestion.js";
 export {
   WorldMemoryPlannerContextService,
   type WorldMemoryEmbeddingProvider,

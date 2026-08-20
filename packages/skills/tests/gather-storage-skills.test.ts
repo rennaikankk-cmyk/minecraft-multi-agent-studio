@@ -5,6 +5,7 @@ import {
   collectDropsSkill,
   farmCropSkill,
   fishOnceSkill,
+  scoutScanBlocksSkill,
   SkillExecutor,
   SkillRegistry,
   storageAccountSkill,
@@ -78,6 +79,7 @@ function executor(adapter: (request: SkillCapabilityRequest) => Promise<unknown>
   registry.register(collectDropsSkill);
   registry.register(farmCropSkill);
   registry.register(fishOnceSkill);
+  registry.register(scoutScanBlocksSkill);
   return new SkillExecutor(registry, {
     runtimeInstanceId: RUNTIME,
     capabilityAdapter: { invoke: adapter },
@@ -98,6 +100,70 @@ const compatibility = {
 };
 
 describe("gathering and storage built-ins", () => {
+  it("scans only requested blocks through the read-only world capability", async () => {
+    const adapter = vi.fn(async () => ({
+      origin: { x: 0, y: 64, z: 0 },
+      observations: [
+        { blockName: "iron_ore", position: { x: 3, y: 62, z: 1 } },
+        { blockName: "lava", position: { x: -2, y: 61, z: 0 } },
+      ],
+    }));
+    const invocation = command("scout.scan-blocks", {
+      serverProfileId: SERVER,
+      dimension: DIMENSION,
+      blockNames: ["iron_ore", "lava"],
+      maxDistance: 16,
+      maxResults: 8,
+    });
+
+    await expect(
+      executor(adapter).execute(
+        invocation,
+        authorization(invocation, ["world.read"]),
+        state,
+        undefined,
+        compatibility,
+      ),
+    ).resolves.toMatchObject({
+      payload: {
+        outcome: "completed",
+        output: { observations: [{ blockName: "iron_ore" }, { blockName: "lava" }] },
+      },
+    });
+    expect(adapter).toHaveBeenCalledWith(
+      expect.objectContaining({
+        capability: "world.read",
+        operation: "scout.scan-blocks-safe",
+      }),
+    );
+  });
+
+  it("rejects an adapter observation outside the requested scan boundary", async () => {
+    const invocation = command("scout.scan-blocks", {
+      serverProfileId: SERVER,
+      dimension: DIMENSION,
+      blockNames: ["iron_ore"],
+      maxDistance: 8,
+      maxResults: 4,
+    });
+    const result = await executor(async () => ({
+      origin: { x: 0, y: 64, z: 0 },
+      observations: [
+        { blockName: "diamond_ore", position: { x: 2, y: 62, z: 1 } },
+      ],
+    })).execute(
+      invocation,
+      authorization(invocation, ["world.read"]),
+      state,
+      undefined,
+      compatibility,
+    );
+    expect(result.payload).toMatchObject({
+      outcome: "failed",
+      errorCode: "SCOUT_SCAN_OUTPUT_MISMATCH",
+    });
+  });
+
   it("accounts only requested resources with read-only capabilities", async () => {
     const adapter = vi.fn(async () => ({
       containerName: "chest",
