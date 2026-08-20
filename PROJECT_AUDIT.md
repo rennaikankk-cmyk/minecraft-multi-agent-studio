@@ -33,27 +33,28 @@ Status is deliberately split instead of hidden behind one number:
 | Hardware-independent implementation requested for the Spark development phase | **100%** | code, schemas, profiles, tests, dashboard, metrics, CLI, benchmark and runbooks are present |
 | Acceptance possible on the current Spark without accepting a third-party EULA | **100%** | Spark, model, API, benchmark, database/cache and offline/process/browser gates |
 | Final U9 + Spark two-host production acceptance | **BLOCKED / not yet measurable** | requires the U9 and operator-approved Minecraft acceptance |
-| Broader long-horizon anarchy/PvP M0–M6 roadmap | **not claimed complete** | advanced crystal/anchor PvP, production memory and formal skill-promotion automation remain later milestones |
+| Broader long-horizon anarchy/PvP M0–M6 roadmap | **not claimed complete** | advanced crystal/anchor PvP, production memory ingestion/concrete embedding-reranking, non-spatial task experience and formal skill-promotion automation remain later milestones |
 
 For the single percentage requested by the original audit, the full end-state is
-**86% weighted complete**. This number includes—not hides—the unavailable U9,
+**87% weighted complete**. This number includes—not hides—the unavailable U9,
 Minecraft and native-FP4 gates:
 
 | Area | Weight | Completion | Contribution |
 |---|---:|---:|---:|
 | Spark system, storage and Git preservation | 10% | 100% | 10.0% |
 | AI Provider/Router/Scheduler and safe execution path | 20% | 100% | 20.0% |
-| task persistence, APIs and Worker foundation | 10% | 90% | 9.0% |
+| task persistence, APIs and Worker foundation | 10% | 95% | 9.5% |
 | deterministic L0 and practical Skill library | 15% | 85% | 12.75% |
-| multi-Bot coordination and compatibility | 15% | 85% | 12.75% |
+| multi-Bot coordination, world memory and compatibility | 15% | 90% | 13.5% |
 | Dashboard, metrics, benchmark and diagnosis | 10% | 100% | 10.0% |
 | Spark model/backend acceptance | 10% | 85% | 8.5% |
 | final U9/Minecraft production acceptance | 10% | 25% | 2.5% |
-| **Total** | **100%** | — | **85.5% → 86%** |
+| **Total** | **100%** | — | **86.75% → 87%** |
 
 The lower full-system number is not unfinished foundation code: it is mainly
-real U9/Minecraft execution plus deliberately gated high-risk combat/memory and
-skill-promotion milestones. It must not be raised by mock data or documentation.
+real U9/Minecraft execution plus deliberately gated high-risk combat, production
+memory-ingestion and skill-promotion milestones. It must not be raised by mock
+data or documentation.
 
 ## Implemented architecture
 
@@ -70,6 +71,9 @@ Browser
   -> SkillExecutor -> bounded Mineflayer capability adapter
 
 Task Worker -> BullMQ/Redis -> PostgreSQL task repository + outbox
+
+Memory Agent -> immutable PostgreSQL/pgvector world facts
+             -> server/dimension/ACL filtering -> safe planner context
 ```
 
 No Bot Runtime can call a model directly. No model response can execute JavaScript,
@@ -86,6 +90,7 @@ cancel or discard stale work.
 | Scheduler | priority, concurrency, bounded queue, timeout, retry, cancellation, per-Bot limit, backpressure and stale protection | U9-to-Spark network load |
 | Task execution | authenticated single-Bot and team task endpoints traverse Coordinator policy/state/authorization and Runtime SkillExecutor | production account/role integration |
 | Task infrastructure | PostgreSQL migrations/repository/outbox, Redis/BullMQ, cancellation, leases, recovery; real isolated integration passed | install/configure services on U9 |
+| World memory | Immutable PostgreSQL/pgvector spatial facts, idempotent writes, hard server/dimension/ACL isolation, exact cosine retrieval and fail-closed planner injection | production scout/storage writers, concrete embedding/reranker adapters and non-spatial task experience |
 | L0 safety | deterministic fall/lava/drowning/critical health/disconnect/stuck/basic-survival responses | real scenario matrix |
 | Skills | 16 default deterministic Skills, 17 with explicit isolated PvP allow-list; bounded adapters and read-back verification | real cross-version scenarios; advanced high-risk PvP remains gated |
 | Multi-Bot | deterministic 1–10 Bot selection, roles, shared objectives, skill eligibility, Bot/resource leases, conflict prevention, server isolation | real U9 multi-Bot load |
@@ -136,11 +141,14 @@ temporary server was stopped; port 8000 was then verified closed.
 
 ### Infrastructure and process evidence
 
-- Real PostgreSQL 17 + Redis 7.4 isolated integration: **20/20 passed** using
-  loopback-only temporary containers and tmpfs; no Docker volume was created or
-  deleted.
+- Real PostgreSQL 17 + pgvector 0.8.6 + Redis 7.4 isolated integration:
+  **25/25 passed** (20 task cases + 5 world-memory cases) using loopback-only
+  temporary ARM64 containers and tmpfs. The first world-memory run exposed an
+  idempotent-replay projection omission; the fix passed the complete rerun. The
+  final migration hash then passed a separate 5/5 custom-schema pgvector rerun.
 - Temporary test containers and the two newly pulled test images were removed.
-- The pre-existing `rennaikank_open-webui-data` volume was not touched.
+- Both test ports were verified closed; no Docker Volume was created or deleted,
+  and the pre-existing `rennaikank_open-webui-data` volume was not touched.
 - Runtime Link, four-process chain, browser E2E and the root regression are listed
   in `TESTING.md`; final counts are refreshed with each release candidate.
 

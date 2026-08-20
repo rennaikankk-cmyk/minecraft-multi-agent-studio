@@ -228,6 +228,14 @@ Runtime Link 固定使用 `minecraft-studio.runtime.v1` 子协议、`/v1/runtime
 
 当前注册表、命令幂等缓存和审计记录仍为进程内存。Runtime ↔ Coordinator 已跨进程接通；下游 Control Link 将这份权威内存状态投影给 Control API。四进程服务链路已通过真实回环验收，但状态和审计仍不持久化，因此不能称为生产级端到端产品。
 
+## 8.1 服务器隔离世界记忆
+
+`@minecraft-studio/world-memory` 在 U9 PostgreSQL/pgvector 中保存不可变的空间事实。每次写入必须同时提供 `serverProfileId`、维度和完整坐标；记录携带幂等操作 UUID、来源 Bot/任务/trace、置信度、过期时间、可见性 ACL、可选 embedding 和同服同维度 supersede 引用。SQL 的复合外键阻止用 B 服记录纠正 A 服事实，UPDATE/DELETE 触发器阻止原地篡改。
+
+普通检索与语义检索都必须显式给出当前服、当前维度和调用主体。仓储查询先用 `MATERIALIZED` CTE 做同服、维度、ACL、过期、supersede 和模型权限筛选，然后才执行 pgvector cosine distance；没有“先全库向量排序再过滤”的跨服泄漏路径。规划器只接收 `modelAccess=true` 的团队 hazard/landmark/portal/resource/route 摘要，不格式化精确坐标；基地、仓库、玩家活动和 restricted 记录由 Zod 与数据库双重禁止进入模型上下文。状态版本变化会取消尚未入队的记忆查询，数据库失败时 AI 请求不发送。
+
+当前已实现并真实测试持久化、ACL、同服过滤、精确 pgvector 排序、不可变与规划器读取。生产事实写入器、具体 Embedding/Reranker Provider 和非空间任务经验属于下一条记忆增量，不通过下载未知模型来伪造完成。
+
 ## 9. Control Link、Control API 与实时状态流
 
 ```text

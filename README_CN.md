@@ -25,6 +25,7 @@ Dashboard → Control API → Coordinator → AI Scheduler / Router → Spark vL
 - 模型只能选择已注册 Skill 和受限参数，不能执行 Shell、任意 JS 或原始 Mineflayer 调用。
 - 单 Bot 与团队任务都经过认证、授权和状态校验。
 - Coordinator 支持 1/2/5/10 Bot 的确定性角色/技能匹配、共享目标、Bot/资源租约和冲突预防。
+- U9 世界记忆使用不可变 PostgreSQL/pgvector 事实：空间记录强制携带服务器、维度和坐标，先做同服/ACL 过滤再计算向量距离；基地、仓库和玩家活动坐标禁止进入模型提示。
 
 ## 本地检查
 
@@ -40,7 +41,7 @@ PLAYWRIGHT_BROWSER_CHANNEL=chrome pnpm test:e2e
 pnpm check:minecraft-workflow
 ```
 
-真实 PostgreSQL/Redis 测试只接受显式隔离配置。Minecraft 验收脚本不会自动下载文件，也绝不会自动写入 `eula=true`。
+真实 PostgreSQL/pgvector/Redis 测试只接受显式隔离配置。Minecraft 验收脚本不会自动下载文件，也绝不会自动写入 `eula=true`。
 
 ## Spark AI 验证
 

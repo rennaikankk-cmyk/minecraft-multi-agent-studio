@@ -76,6 +76,32 @@ showed large provider queues with no material throughput gain.
 
 Spark owns none of those. U9 does not run a second production model by default.
 
+## PostgreSQL, pgvector and durable world memory
+
+Install PostgreSQL 17 with pgvector 0.8 or newer in the `public` schema on the
+U9, create a dedicated database/principal with least privilege, and apply the
+checked migrations in order. The world-memory migration is
+`packages/world-memory/migrations/0001_world_memory.sql`; migrations are never
+applied automatically and never delete an existing schema.
+
+Keep the password-bearing PostgreSQL URL in the U9 service secret store rather
+than a command line, checked file or log. Configure the task and memory services
+from `profiles/controller-u9.env.example`, then validate with dedicated,
+loopback-only test resources and a fresh disposable namespace:
+
+```powershell
+$env:TASK_POSTGRES_URL = '<secret from the service store>'
+$env:TASK_REDIS_URL = 'redis://127.0.0.1:6379/15'
+$env:TASK_INFRA_TEST_NAMESPACE = 'studio_test_u9_unique_identifier'
+pnpm test:task-infra
+```
+
+Production `WORLD_MEMORY_POSTGRES_URL` must name a database host on loopback;
+startup verifies the schema and pgvector version and fails closed if either is
+invalid. Every spatial lookup is bound to the authoritative ServerProfile and
+dimension. Exact base/storage locations and restricted player activity are not
+eligible for model context.
+
 ## Fail-closed defaults
 
 - No public port forwarding or broad firewall allow rule.

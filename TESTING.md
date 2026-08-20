@@ -10,8 +10,8 @@ This performs package builds, all TypeScript checks, Vitest/Node process tests,
 and production builds. Environment-gated PostgreSQL/Redis and Minecraft cases
 remain visibly skipped unless their explicit guards are present.
 
-The final 2026-08-20 Spark tree passed **449 Vitest cases plus 2 real Node child
-process cases**; 23 external-environment cases remained visibly skipped. The
+The final 2026-08-20 Spark tree passed **471 Vitest cases plus 2 real Node child
+process cases**; 28 external-environment cases remained visibly skipped. The
 production build generated `/ai` and `/api/ai/metrics` successfully.
 
 ## Process and browser acceptance
@@ -49,7 +49,7 @@ pnpm ai:benchmark:concurrency -- --mock --requests 10 \
   --output-dir /tmp/minecraft-studio-ai-benchmark-validation
 ```
 
-## PostgreSQL and Redis
+## PostgreSQL, pgvector, and Redis
 
 Use only dedicated, loopback, disposable test resources and a unique
 `studio_test_...` namespace:
@@ -61,9 +61,22 @@ export TASK_INFRA_TEST_NAMESPACE='studio_test_unique_identifier'
 pnpm test:task-infra
 ```
 
-On 2026-08-20, 20/20 real infrastructure cases passed against temporary ARM64
-PostgreSQL 17 and Redis 7.4 containers backed by tmpfs. The containers/images
-were removed and no Docker Volume was created.
+The PostgreSQL image/service must provide pgvector 0.8 or newer. The same
+command runs task delivery/recovery first, then a separate disposable schema
+covering immutable memory writes, idempotent replay, ACLs, hard server/dimension
+isolation, cross-server supersede rejection and exact cosine ranking. The CI
+service is pinned to the official multi-architecture
+`pgvector/pgvector:0.8.6-pg17-trixie` manifest digest; no floating database tag
+is used.
+
+The 2026-08-20 combined real-infrastructure run passed **25/25** cases: 20 task
+delivery/recovery cases and 5 world-memory/pgvector cases. It used temporary
+ARM64 PostgreSQL 17 + pgvector 0.8.6 and Redis 7.4 containers backed by tmpfs.
+The exact containers and newly pulled images were removed afterward, both test
+ports were verified closed, and no Docker Volume was created, deleted or
+modified. After hardening custom-schema pgvector resolution, the final migration
+hash and all 5 world-memory cases were rerun successfully in a fresh container;
+that container and image were also removed.
 
 ## Minecraft
 

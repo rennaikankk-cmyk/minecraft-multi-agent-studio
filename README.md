@@ -28,6 +28,9 @@ Dashboard -> Control API -> Coordinator -> AI Scheduler/Router -> Spark vLLM
 - Single-Bot and team tasks use authenticated, authorized control links.
 - Team allocation is deterministic, server-isolated, role/skill-aware, and uses
   Bot/resource leases for 1–10 Bots.
+- U9 world memory uses immutable PostgreSQL/pgvector facts with mandatory
+  server/dimension/coordinates, ACL filtering before cosine search, and a
+  model-safe planner context that excludes base/storage/player coordinates.
 
 ## Quick validation
 
@@ -43,7 +46,7 @@ PLAYWRIGHT_BROWSER_CHANNEL=chrome pnpm test:e2e
 pnpm check:minecraft-workflow
 ```
 
-External infrastructure tests use explicitly isolated PostgreSQL/Redis URLs. The
+External infrastructure tests use explicitly isolated PostgreSQL/pgvector/Redis URLs. The
 Minecraft runner never downloads files or accepts the EULA automatically.
 
 ## Spark AI commands

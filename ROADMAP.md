@@ -302,8 +302,11 @@ Entity Snapshot 协议。旧 `pnpm bot:start` 保持回滚可用，affinity 和 
 
 ### P2.1 长期记忆
 
-- 世界事实、箱子摘要、任务轨迹、失败经验、pgvector、Embedding 和 Reranker。
-- **服务器硬隔离**：每个服务器是独立世界。位置类记忆必含 `serverProfileId` + 维度 + 坐标（NOT NULL，缺一拒绝写入）；查询在仓储层强制按当前 ServerProfile 过滤；pgvector 相似度检索先按服过滤再算相似度；跨服对比仅限战略层显式分析查询，结果不得直接下发为坐标类任务。
+- [x] 空间世界事实使用不可变、幂等 PostgreSQL 记录；位置必含 `serverProfileId` + 维度 + 坐标，SQL 与 Zod 双重拒绝缺项。
+- [x] 仓储层强制同服/同维度/主体 ACL，先物化过滤候选再做 pgvector cosine 排序；复合外键拒绝跨服 supersede。
+- [x] 规划器异步读取受限上下文，Bot 状态/任务变化会取消；基地、仓库、玩家活动和 restricted 事实禁止进入模型提示。
+- [x] 提供有界 Embedding/Reranker 接口和真实 pgvector 门禁，不自动下载或偷换 embedding 模型。
+- [ ] 接入生产侦察/箱子摘要写入器、选定并实测具体 Embedding/Reranker Provider；任务轨迹与失败经验使用非空间记忆表单独实现。
 
 ### P2.2 本地规划
 

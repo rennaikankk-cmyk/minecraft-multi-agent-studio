@@ -30,6 +30,25 @@ Coordinator rechecks runtime identity, online state, state sequence, task
 version, compatible skill/version/variant, policy and authorization expiry. A
 late response cannot execute against newer state.
 
+## World-memory context
+
+Before enqueueing a plan, the Coordinator can query U9 PostgreSQL through
+`@minecraft-studio/world-memory`. Every spatial fact requires a
+`serverProfileId`, dimension and complete bounded coordinate triple. The
+repository always filters by the current server, dimension and caller ACL; a
+`MATERIALIZED` same-world candidate set is built before pgvector cosine
+distance is evaluated. Facts are immutable and corrected only by a new
+same-world `supersedesMemoryId` record. Operation UUIDs provide idempotent
+writes.
+
+Only explicitly team-visible, `modelAccess=true` hazard/landmark/portal/resource
+and route summaries can enter the compact planner context. Base, storage,
+player-activity and restricted facts are rejected by both Zod and SQL checks;
+exact coordinates are not formatted into the model context. Memory lookup is
+cancelled when Bot state/task changes and fails closed before any AI request if
+the configured database is unavailable. Embedding and reranker interfaces are
+bounded; no embedding model is silently downloaded or substituted.
+
 ## Prefix-cache layout
 
 Stable content is first: system policy, Minecraft rules, compatible skill
@@ -70,7 +89,9 @@ generation latency/rate and total latency.
 `AI_MAX_CONCURRENCY` has no code default and is selected by benchmark. Current
 accepted Spark fallback-path result is 4. Queue defaults to 64, per-Bot
 concurrency to 1, stale window to 30 seconds, and retries to one bounded attempt.
-See `.env.example` and `AI_BENCHMARK.md`.
+World memory is disabled by default and requires a migrated loopback PostgreSQL
+database with pgvector 0.8 or newer. See `.env.example`, `DEPLOYMENT.md`, and
+`AI_BENCHMARK.md`.
 
 ## Current inference limitation
 

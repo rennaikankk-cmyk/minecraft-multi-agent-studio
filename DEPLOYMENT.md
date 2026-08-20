@@ -50,6 +50,23 @@ Use dedicated isolated PostgreSQL/Redis resources for `pnpm test:task-infra`.
 Use the guarded Minecraft workflow only after explicit EULA acceptance. See
 `TESTING.md`.
 
+## U9 world-memory database
+
+Install PostgreSQL 17 plus pgvector on U9, bind it to loopback, create a
+credential-bearing connection outside Git, then apply the checked-in migration
+with `ON_ERROR_STOP` before setting `WORLD_MEMORY_ENABLED=true`:
+
+```text
+packages/world-memory/migrations/0001_world_memory.sql
+```
+
+Use a protected `.pgpass`, OS credential store, or service EnvironmentFile;
+do not place a password-bearing URL on a command line. Coordinator startup
+verifies pgvector 0.8+ and the memory table and fails closed when enabled but
+unavailable. The migration is forward-only and creates immutable facts; rollback
+means stopping the Coordinator and returning to the previous reviewed code,
+not deleting the database. Back up the database before future schema changes.
+
 ## Spark validation
 
 Follow `SPARK_SETUP.md`, then:
@@ -73,7 +90,8 @@ Only hardware/network-dependent gates remain:
 2. Verify wired private IPs, MTU/link speed, routing, SSH, API key, and firewall
    allow-list from U9 to Spark TCP 8000 only.
 3. Run the full code/test/browser suite on U9 x64/Windows.
-4. Run PostgreSQL/Redis on U9 and repeat task recovery acceptance.
+4. Run PostgreSQL/pgvector/Redis on U9 and repeat task recovery plus world-memory
+   isolation/semantic acceptance.
 5. Run real Minecraft 1/2/5/10 Bot scenarios on the isolated server.
 6. Repeat the AI matrix across Ethernet and accept the network RTT/concurrency.
 7. Decide whether Marlin fallback is acceptable or test a documented native
