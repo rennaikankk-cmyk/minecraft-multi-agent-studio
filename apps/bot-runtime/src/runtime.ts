@@ -40,16 +40,20 @@ import {
   collectBlockSkill,
   combatPveMeleeSkill,
   combatPvpMeleeSkill,
+  collectDropsSkill,
   consumeFoodSkill,
   containerTransferSkill,
   craftItemSkill,
   equipArmorSkill,
+  farmCropSkill,
+  fishOnceSkill,
   inventoryCompactSkill,
   movementGotoSkill,
   movementRecoverSkill,
   placeBlockSkill,
   sleepSkill,
   smeltItemSkill,
+  storageAccountSkill,
   SkillExecutor,
   SkillFault,
   SkillRegistry,
@@ -143,6 +147,12 @@ function skillResultTelemetryDigest(
     "attempts",
     "distanceMoved",
     "attackAttempts",
+    "containerUsedSlots",
+    "containerTotalSlots",
+    "matureTargetsFound",
+    "harvested",
+    "replanted",
+    "itemsGained",
   ] as const;
   const digest: Record<string, number> = {};
   for (const key of summaryKeys) {
@@ -270,6 +280,10 @@ export class SingleBotRuntime {
       skillRegistry.register(inventoryCompactSkill);
       skillRegistry.register(movementRecoverSkill);
       skillRegistry.register(combatPveMeleeSkill);
+      skillRegistry.register(storageAccountSkill);
+      skillRegistry.register(collectDropsSkill);
+      skillRegistry.register(farmCropSkill);
+      skillRegistry.register(fishOnceSkill);
       if (this.profile.pvp?.enabled === true) {
         skillRegistry.register(combatPvpMeleeSkill);
       }

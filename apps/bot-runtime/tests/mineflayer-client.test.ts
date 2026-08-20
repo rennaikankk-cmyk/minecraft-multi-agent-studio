@@ -299,6 +299,123 @@ describe("MineflayerBotClient lifecycle", () => {
       "combat.pvp-enabled",
     )).toBe(true);
   });
+
+  it("reads requested inventory and container counts without transferring items", async () => {
+    const emitter = new EventEmitter();
+    const close = vi.fn();
+    const bot = Object.assign(emitter, {
+      game: { dimension: "overworld" },
+      blockAt: vi.fn(() => ({ name: "chest" })),
+      inventory: {
+        items: () => [{ name: "cobblestone", count: 8 }],
+      },
+      openContainer: vi.fn(async () => ({
+        inventoryStart: 27,
+        containerItems: () => [
+          { name: "cobblestone", count: 64 },
+          { name: "bread", count: 4 },
+        ],
+        close,
+      })),
+    }) as unknown as Bot;
+    const client = new MineflayerBotClient(bot, "auto", "isolated-local");
+
+    await expect(client.invokeSkillCapability(capabilityRequest({
+      capability: "container.read",
+      operation: "container.account-safe",
+      input: {
+        serverProfileId: "isolated-local",
+        dimension: "minecraft:overworld",
+        container: { x: 1, y: 64, z: 0 },
+        itemNames: ["cobblestone", "bread"],
+      },
+    }))).resolves.toMatchObject({
+      containerName: "chest",
+      containerUsedSlots: 2,
+      containerTotalSlots: 27,
+      items: [
+        { itemName: "cobblestone", inventoryCount: 8, containerCount: 64, totalCount: 72 },
+        { itemName: "bread", inventoryCount: 0, containerCount: 4, totalCount: 4 },
+      ],
+    });
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("casts one fishing action and derives the catch from inventory read-back", async () => {
+    vi.useFakeTimers();
+    try {
+      const emitter = new EventEmitter();
+      const items = [{ name: "fishing_rod", count: 1, slot: 36 }];
+      const bot = Object.assign(emitter, {
+        game: { dimension: "overworld" },
+        inventory: { items: () => items },
+        equip: vi.fn(async () => undefined),
+        fish: vi.fn(async () => {
+          items.push({ name: "cod", count: 1, slot: 37 });
+        }),
+        activateItem: vi.fn(),
+      }) as unknown as Bot;
+      const client = new MineflayerBotClient(bot, "auto", "isolated-local");
+      const resultPromise = client.invokeSkillCapability(capabilityRequest({
+        capability: "world.interact",
+        operation: "fishing.cast-once-safe",
+        input: {
+          serverProfileId: "isolated-local",
+          dimension: "minecraft:overworld",
+        },
+      }));
+      await vi.advanceTimersByTimeAsync(500);
+      await expect(resultPromise).resolves.toEqual({
+        caught: true,
+        itemsGained: 1,
+        itemName: "cod",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports honest no-op results when no requested drops or mature crops exist", async () => {
+    const emitter = new EventEmitter();
+    const bot = Object.assign(emitter, {
+      game: { dimension: "overworld" },
+      pathfinder: {},
+      entities: {},
+      registry: { blocksByName: { wheat: { id: 42 } } },
+      findBlocks: vi.fn(() => []),
+    }) as unknown as Bot;
+    const client = new MineflayerBotClient(bot, "auto", "isolated-local");
+
+    await expect(client.invokeSkillCapability(capabilityRequest({
+      capability: "bot.move",
+      operation: "collect.drops-safe",
+      input: {
+        serverProfileId: "isolated-local",
+        dimension: "minecraft:overworld",
+        itemNames: ["oak_log"],
+        maxCount: 4,
+        maxDistance: 16,
+      },
+    }))).resolves.toEqual({ targetsFound: 0, itemsCollected: 0, items: [] });
+
+    await expect(client.invokeSkillCapability(capabilityRequest({
+      capability: "world.interact",
+      operation: "farm.crop-replant-safe",
+      input: {
+        serverProfileId: "isolated-local",
+        dimension: "minecraft:overworld",
+        cropName: "wheat",
+        maxCount: 4,
+        maxDistance: 16,
+      },
+    }))).resolves.toEqual({
+      cropName: "wheat",
+      seedItemName: "wheat_seeds",
+      matureTargetsFound: 0,
+      harvested: 0,
+      replanted: 0,
+    });
+  });
 });
 
 function handlers(

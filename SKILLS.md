@@ -6,7 +6,7 @@
 
 - Skill ID 后的 SemVer 表示技能输入、输出和行为契约，不表示 Minecraft 服务器版本。
 - 每个 Skill 另有有序 `compatibility.variants`。Runtime 只使用连接后真实协商出的版本/协议，以及当前 registry 的 feature、物品、方块、实体和显式服务端能力探针解析变体；不以 `minVersion/maxVersion` 一刀切。
-- 默认目录包含 12 个 Skill；隔离 PvP 白名单启用后为 13 个。除 `survival.sleep` 依据真实 registry 检查床资源、`combat.pvp-melee` 依据显式服务端能力外，其余声明 `portable` 变体。跨版本真实场景矩阵尚未执行，所以目录仍上报 `verification=unverified`，不冒充实机已验证。
+- 默认目录包含 16 个 Skill；隔离 PvP 白名单启用后为 17 个。睡眠、农作物、钓鱼依据真实 registry 检查资源，PvP 依据显式服务端能力，其余声明 `portable` 变体。跨版本真实场景矩阵尚未执行，所以目录仍上报 `verification=unverified`，不冒充实机已验证。
 - 新版本特色 Skill 必须声明它实际依赖的 feature/资源；如果还依赖服务器插件、数据包或规则，则必须等待显式探针。能力为 `unknown` 时 fail-closed，不从版本号猜测。
 - `collect.block`、`craft.item`、`world.place-block` 和 `container.transfer` 当前仍接收目标版本 registry 的原生资源名。兼容变体可以表达旧/新 ID 的替代顺序，但规划器使用的语义资源别名尚未接入。
 
@@ -258,3 +258,27 @@
 - 只有隔离 ServerProfile 显式 `pvp.enabled=true` 且提供非自身 `allowedTargets` 后才注册；技能兼容变体还要求 Runtime 报告 `combat.pvp-enabled=true`。
 - 输入用户名必须同时通过 Schema、ServerProfile allow-list 与 Runtime 实体用户名三层匹配；没有“附近任意玩家”模式。
 - 当前只是有限近战基础层，不声称已实现水晶、重生锚、弓弩、药水、团队战斗或抗作弊规避。这些高危/强时序模块要等事件循环 p99 与隔离实机门禁通过后再开放。
+
+## `storage.account@1.0.0`
+
+- 权限：`container.read` + `inventory.read`；风险 R0。
+- 只打开箱子/木桶/潜影盒白名单，调用方最多明确请求 32 种物品。
+- 返回背包数、容器数、合计数和容器槽位占用；不执行存取，不返回未请求物品。
+
+## `collect.drops@1.0.0`
+
+- 权限：`bot.move` + `inventory.write`；风险 R1。
+- 最多 32 个、32 格，只跟踪输入白名单里的掉落物实体；使用与安全寻路相同的禁挖、禁放、禁搭塔、禁跑酷配置。
+- 输出来自背包实际增量；目标消失或部分拾取不会被伪造成请求数量全部完成。
+
+## `farm.crop@1.0.0`
+
+- 权限：`bot.move` + `world.interact` + `inventory.write`；风险 R1。
+- 固定支持小麦、胡萝卜、马铃薯、甜菜和下界疣；按真实 metadata 只收成熟作物。
+- 最多 16 格、24 格范围；开始前要求背包已有足够种子，逐格收割、补种并读回相同作物，土壤类型不符立即失败。
+
+## `gather.fish-once@1.0.0`
+
+- 权限：`world.interact` + `inventory.write`；风险 R1。
+- registry 必须存在鱼竿，背包必须真实持有鱼竿；每次调用只抛一杆。
+- 取消会尝试收杆；结果只按钓鱼前后背包总量差报告，不把动画或插件 Promise 当成收获证明。

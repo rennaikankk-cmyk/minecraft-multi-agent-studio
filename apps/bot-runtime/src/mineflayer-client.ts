@@ -16,6 +16,8 @@ import {
   armorSnapshotCapabilityOutputSchema,
   collectBlockCapabilityInputSchema,
   collectBlockCapabilityOutputSchema,
+  collectDropsCapabilityInputSchema,
+  collectDropsCapabilityOutputSchema,
   combatPveMeleeCapabilityInputSchema,
   combatPveMeleeCapabilityOutputSchema,
   combatPvpMeleeCapabilityInputSchema,
@@ -26,6 +28,10 @@ import {
   containerTransferCapabilityOutputSchema,
   craftItemCapabilityInputSchema,
   craftItemCapabilityOutputSchema,
+  farmCropCapabilityInputSchema,
+  farmCropCapabilityOutputSchema,
+  fishOnceCapabilityInputSchema,
+  fishOnceCapabilityOutputSchema,
   inventoryCompactCapabilityInputSchema,
   inventoryCompactCapabilityOutputSchema,
   movementRecoverCapabilityInputSchema,
@@ -36,6 +42,8 @@ import {
   sleepCapabilityOutputSchema,
   smeltItemCapabilityInputSchema,
   smeltItemCapabilityOutputSchema,
+  storageAccountCapabilityInputSchema,
+  storageAccountCapabilityOutputSchema,
   SAFE_PATH_MAX_DISTANCE,
   SkillFault,
   safeMovementGotoCapabilityInputSchema,
@@ -183,6 +191,19 @@ const MELEE_WEAPON_SCORE: Readonly<Record<string, number>> = {
   netherite_axe: 61,
   trident: 62,
   mace: 63,
+};
+
+const CROP_RULES: Readonly<
+  Record<
+    "wheat" | "carrots" | "potatoes" | "beetroots" | "nether_wart",
+    Readonly<{ matureMetadata: number; seedItemName: string; soilName: string }>
+  >
+> = {
+  wheat: { matureMetadata: 7, seedItemName: "wheat_seeds", soilName: "farmland" },
+  carrots: { matureMetadata: 7, seedItemName: "carrot", soilName: "farmland" },
+  potatoes: { matureMetadata: 7, seedItemName: "potato", soilName: "farmland" },
+  beetroots: { matureMetadata: 3, seedItemName: "beetroot_seeds", soilName: "farmland" },
+  nether_wart: { matureMetadata: 3, seedItemName: "nether_wart", soilName: "soul_sand" },
 };
 
 type CombatEntity = NonNullable<ReturnType<Bot["nearestEntity"]>>;
@@ -551,6 +572,30 @@ export class MineflayerBotClient implements BotClient {
       request.operation === "combat.pvp-melee-allowlisted"
     ) {
       return this.invokePvpMelee(request);
+    }
+    if (
+      request.capability === "container.read" &&
+      request.operation === "container.account-safe"
+    ) {
+      return this.invokeStorageAccount(request);
+    }
+    if (
+      request.capability === "bot.move" &&
+      request.operation === "collect.drops-safe"
+    ) {
+      return this.invokeCollectDrops(request);
+    }
+    if (
+      request.capability === "world.interact" &&
+      request.operation === "farm.crop-replant-safe"
+    ) {
+      return this.invokeFarmCrop(request);
+    }
+    if (
+      request.capability === "world.interact" &&
+      request.operation === "fishing.cast-once-safe"
+    ) {
+      return this.invokeFishOnce(request);
     }
     throw new SkillFault("SKILL_CAPABILITY_UNSUPPORTED");
   }
@@ -1569,6 +1614,288 @@ export class MineflayerBotClient implements BotClient {
       retreated,
       finalDistance,
     };
+  }
+
+  private async invokeStorageAccount(
+    request: SkillCapabilityRequest,
+  ): Promise<unknown> {
+    const input = storageAccountCapabilityInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    this.assertDimensionMatch(input.data.dimension);
+
+    const { container } = input.data;
+    const block = this.bot.blockAt(new Vec3(container.x, container.y, container.z));
+    if (!block || !CONTAINER_BLOCK_NAMES.has(block.name)) {
+      throw new SkillFault("CONTAINER_NOT_FOUND");
+    }
+    let window: Awaited<ReturnType<Bot["openContainer"]>> | null = null;
+    try {
+      if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      window = await this.bot.openContainer(block);
+      const containerItems = window.containerItems();
+      const requested = new Set(input.data.itemNames);
+      const inventoryCounts = new Map<string, number>();
+      const containerCounts = new Map<string, number>();
+      for (const item of this.bot.inventory.items()) {
+        if (requested.has(item.name)) {
+          inventoryCounts.set(
+            item.name,
+            (inventoryCounts.get(item.name) ?? 0) + item.count,
+          );
+        }
+      }
+      for (const item of containerItems) {
+        if (requested.has(item.name)) {
+          containerCounts.set(
+            item.name,
+            (containerCounts.get(item.name) ?? 0) + item.count,
+          );
+        }
+      }
+      const items = input.data.itemNames.map((itemName) => {
+        const inventoryCount = inventoryCounts.get(itemName) ?? 0;
+        const containerCount = containerCounts.get(itemName) ?? 0;
+        return {
+          itemName,
+          inventoryCount,
+          containerCount,
+          totalCount: inventoryCount + containerCount,
+        };
+      });
+      return storageAccountCapabilityOutputSchema.parse({
+        containerName: block.name,
+        containerUsedSlots: containerItems.length,
+        containerTotalSlots: window.inventoryStart,
+        items,
+      });
+    } catch (error) {
+      if (error instanceof SkillFault) throw error;
+      if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      throw new SkillFault("CONTAINER_ACCOUNT_FAILED");
+    } finally {
+      try { window?.close(); } catch { /* read result remains independently validated */ }
+    }
+  }
+
+  private async invokeCollectDrops(
+    request: SkillCapabilityRequest,
+  ): Promise<unknown> {
+    const input = collectDropsCapabilityInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    this.assertDimensionMatch(input.data.dimension);
+    if (!this.bot.pathfinder) throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE");
+    if (this.activePathInvocationId !== null) throw new SkillFault("BOT_MOVEMENT_BUSY");
+
+    const permitted = new Set(input.data.itemNames);
+    const targets = Object.values(this.bot.entities)
+      .map((entity) => {
+        try {
+          const item = entity.getDroppedItem();
+          return item && permitted.has(item.name) ? { entity, itemName: item.name } : null;
+        } catch {
+          return null;
+        }
+      })
+      .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+      .filter(({ entity }) => entity.position.distanceTo(this.bot.entity.position) <= input.data.maxDistance)
+      .sort((left, right) =>
+        left.entity.position.distanceTo(this.bot.entity.position) -
+          right.entity.position.distanceTo(this.bot.entity.position) ||
+        left.entity.id - right.entity.id
+      )
+      .slice(0, input.data.maxCount);
+    if (targets.length === 0) {
+      return collectDropsCapabilityOutputSchema.parse({ targetsFound: 0, itemsCollected: 0, items: [] });
+    }
+
+    const before = new Map(
+      input.data.itemNames.map((name) => [name, this.countInventoryItem(name)]),
+    );
+    const movements = configureSafePathfinderMovements(new Movements(this.bot));
+    this.bot.pathfinder.setMovements(movements);
+    this.activePathInvocationId = request.invocationId;
+    const onAbort = () => this.stopPathfinder();
+    request.signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      for (const target of targets) {
+        if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+        const current = this.bot.entities[target.entity.id];
+        if (!current || current.isValid === false) continue;
+        try {
+          await this.bot.pathfinder.goto(
+            new goals.GoalNear(
+              current.position.x,
+              current.position.y,
+              current.position.z,
+              1,
+            ),
+          );
+          await this.waitWithSignal(300, request.signal);
+        } catch {
+          if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+          const collectedSoFar = input.data.itemNames.reduce(
+            (sum, name) => sum + Math.max(0, this.countInventoryItem(name) - (before.get(name) ?? 0)),
+            0,
+          );
+          if (collectedSoFar === 0) throw new SkillFault("COLLECT_DROPS_FAILED");
+          break;
+        }
+      }
+    } finally {
+      request.signal.removeEventListener("abort", onAbort);
+      this.stopPathfinder();
+      if (this.activePathInvocationId === request.invocationId) {
+        this.activePathInvocationId = null;
+      }
+    }
+
+    const items = input.data.itemNames
+      .map((itemName) => ({
+        itemName,
+        count: Math.max(0, this.countInventoryItem(itemName) - (before.get(itemName) ?? 0)),
+      }))
+      .filter(({ count }) => count > 0);
+    return collectDropsCapabilityOutputSchema.parse({
+      targetsFound: targets.length,
+      itemsCollected: items.reduce((sum, item) => sum + item.count, 0),
+      items,
+    });
+  }
+
+  private async invokeFarmCrop(
+    request: SkillCapabilityRequest,
+  ): Promise<unknown> {
+    const input = farmCropCapabilityInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    this.assertDimensionMatch(input.data.dimension);
+    if (!this.bot.pathfinder) throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE");
+    if (this.activePathInvocationId !== null) throw new SkillFault("BOT_MOVEMENT_BUSY");
+
+    const rule = CROP_RULES[input.data.cropName];
+    const registry = this.bot.registry as unknown as {
+      blocksByName?: Record<string, { id: number } | undefined>;
+    };
+    const cropType = registry.blocksByName?.[input.data.cropName];
+    if (!cropType) throw new SkillFault("BLOCK_NAME_UNKNOWN");
+    const targets = this.bot.findBlocks({
+      matching: cropType.id,
+      maxDistance: input.data.maxDistance,
+      count: input.data.maxCount,
+    }).map((position) => this.bot.blockAt(position))
+      .filter((block): block is NonNullable<typeof block> =>
+        block !== null &&
+        block.name === input.data.cropName &&
+        block.metadata >= rule.matureMetadata
+      );
+    if (targets.length === 0) {
+      return farmCropCapabilityOutputSchema.parse({
+        cropName: input.data.cropName,
+        seedItemName: rule.seedItemName,
+        matureTargetsFound: 0,
+        harvested: 0,
+        replanted: 0,
+      });
+    }
+    if (this.countInventoryItem(rule.seedItemName) < targets.length) {
+      throw new SkillFault("FARM_SEEDS_INSUFFICIENT");
+    }
+
+    const movements = configureSafePathfinderMovements(new Movements(this.bot));
+    this.bot.pathfinder.setMovements(movements);
+    let harvested = 0;
+    let replanted = 0;
+    this.activePathInvocationId = request.invocationId;
+    const onAbort = () => this.stopPathfinder();
+    request.signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      for (const original of targets) {
+        if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+        await this.bot.pathfinder.goto(
+          new goals.GoalNear(original.position.x, original.position.y, original.position.z, 3),
+        );
+        const crop = this.bot.blockAt(original.position);
+        if (!crop || crop.name !== input.data.cropName || crop.metadata < rule.matureMetadata) continue;
+        const soil = this.bot.blockAt(original.position.offset(0, -1, 0));
+        if (!soil || soil.name !== rule.soilName) throw new SkillFault("FARM_SOIL_MISMATCH");
+        await this.bot.dig(crop, true);
+        harvested += 1;
+        const seed = this.bot.inventory.items().find((item) => item.name === rule.seedItemName);
+        if (!seed) throw new SkillFault("FARM_SEEDS_INSUFFICIENT");
+        await this.bot.equip(seed, "hand");
+        await this.bot.placeBlock(soil, new Vec3(0, 1, 0));
+        const planted = this.bot.blockAt(original.position);
+        if (!planted || planted.name !== input.data.cropName) {
+          throw new SkillFault("FARM_REPLANT_NOT_CONFIRMED");
+        }
+        replanted += 1;
+      }
+    } catch (error) {
+      if (error instanceof SkillFault) throw error;
+      if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      throw new SkillFault("FARM_CROP_FAILED");
+    } finally {
+      request.signal.removeEventListener("abort", onAbort);
+      this.stopPathfinder();
+      if (this.activePathInvocationId === request.invocationId) this.activePathInvocationId = null;
+    }
+    return farmCropCapabilityOutputSchema.parse({
+      cropName: input.data.cropName,
+      seedItemName: rule.seedItemName,
+      matureTargetsFound: targets.length,
+      harvested,
+      replanted,
+    });
+  }
+
+  private async invokeFishOnce(
+    request: SkillCapabilityRequest,
+  ): Promise<unknown> {
+    const input = fishOnceCapabilityInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    this.assertDimensionMatch(input.data.dimension);
+    const rod = this.bot.inventory.items().find((item) => item.name === "fishing_rod");
+    if (!rod) throw new SkillFault("FISHING_ROD_NOT_IN_INVENTORY");
+    const before = new Map<string, number>();
+    for (const item of this.bot.inventory.items()) {
+      before.set(item.name, (before.get(item.name) ?? 0) + item.count);
+    }
+    const onAbort = () => {
+      try { this.bot.activateItem(); } catch { /* best-effort reel-in */ }
+    };
+    request.signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      await this.bot.equip(rod, "hand");
+      if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      await this.bot.fish();
+      await this.waitWithSignal(500, request.signal);
+    } catch (error) {
+      if (error instanceof SkillFault) throw error;
+      if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      throw new SkillFault("FISHING_FAILED");
+    } finally {
+      request.signal.removeEventListener("abort", onAbort);
+    }
+    const after = new Map<string, number>();
+    for (const item of this.bot.inventory.items()) {
+      after.set(item.name, (after.get(item.name) ?? 0) + item.count);
+    }
+    const gains = [...after]
+      .map(([itemName, count]) => ({
+        itemName,
+        count: Math.max(0, count - (before.get(itemName) ?? 0)),
+      }))
+      .filter(({ count }) => count > 0)
+      .sort((left, right) => right.count - left.count || left.itemName.localeCompare(right.itemName));
+    const itemsGained = gains.reduce((sum, item) => sum + item.count, 0);
+    return fishOnceCapabilityOutputSchema.parse({
+      caught: itemsGained > 0,
+      itemsGained,
+      itemName: gains[0]?.itemName ?? null,
+    });
   }
 
   versionCompatibility() {

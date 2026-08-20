@@ -136,6 +136,10 @@ const baseInputs = {
   "movement.recover": { maxAttempts: 3, dimension, serverProfileId: server },
   "combat.pve-melee": { targetTypes: ["zombie", "skeleton"], maxDistance: 4, maxAttackAttempts: 3, retreatHealth: 10, dimension, serverProfileId: server },
   "combat.pvp-melee": { targetUsername: "ArenaBot", maxDistance: 4, maxAttackAttempts: 3, retreatHealth: 10, dimension, serverProfileId: server },
+  "storage.account": { container: { x: 3, y: 64, z: 0 }, itemNames: ["cobblestone", "bread"], dimension, serverProfileId: server },
+  "collect.drops": { itemNames: ["oak_log"], maxCount: 4, maxDistance: 16, dimension, serverProfileId: server },
+  "farm.crop": { cropName: "wheat", maxCount: 4, maxDistance: 16, dimension, serverProfileId: server },
+  "gather.fish-once": { dimension, serverProfileId: server },
 };
 
 export const builtinSkillVerificationManifestsV1: readonly SkillVerificationManifestV1[] =

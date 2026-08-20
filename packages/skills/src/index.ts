@@ -142,6 +142,49 @@ export {
   combatPvpMeleeSkill,
   combatPvpMeleeStateSchema,
 } from "./builtin/combat-pvp-melee.js";
+export {
+  STORAGE_ACCOUNT_MAX_DISTANCE,
+  STORAGE_ACCOUNT_MAX_ITEMS,
+  STORAGE_ACCOUNT_TIMEOUT_MS,
+  storageAccountCapabilityInputSchema,
+  storageAccountCapabilityOutputSchema,
+  storageAccountInputSchema,
+  storageAccountOutputSchema,
+  storageAccountSkill,
+  storageAccountStateSchema,
+} from "./builtin/storage-account.js";
+export {
+  COLLECT_DROPS_MAX_COUNT,
+  COLLECT_DROPS_MAX_DISTANCE,
+  COLLECT_DROPS_TIMEOUT_MS,
+  collectDropsCapabilityInputSchema,
+  collectDropsCapabilityOutputSchema,
+  collectDropsInputSchema,
+  collectDropsOutputSchema,
+  collectDropsSkill,
+  collectDropsStateSchema,
+} from "./builtin/collect-drops.js";
+export {
+  FARM_CROP_MAX_COUNT,
+  FARM_CROP_MAX_DISTANCE,
+  FARM_CROP_NAMES,
+  FARM_CROP_TIMEOUT_MS,
+  farmCropCapabilityInputSchema,
+  farmCropCapabilityOutputSchema,
+  farmCropInputSchema,
+  farmCropOutputSchema,
+  farmCropSkill,
+  farmCropStateSchema,
+} from "./builtin/farm-crop.js";
+export {
+  FISH_ONCE_TIMEOUT_MS,
+  fishOnceCapabilityInputSchema,
+  fishOnceCapabilityOutputSchema,
+  fishOnceInputSchema,
+  fishOnceOutputSchema,
+  fishOnceSkill,
+  fishOnceStateSchema,
+} from "./builtin/fish-once.js";
 export { SkillExecutor } from "./executor.js";
 export { SkillRegistry } from "./registry.js";
 export { resolveSkillCompatibility } from "./compatibility.js";

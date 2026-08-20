@@ -26,6 +26,10 @@ const DEFAULT_SKILL_RISKS = new Map<string, SkillRiskLevel>([
   ["movement.recover", "R1"],
   ["combat.pve-melee", "R1"],
   ["combat.pvp-melee", "R3"],
+  ["storage.account", "R0"],
+  ["collect.drops", "R1"],
+  ["farm.crop", "R1"],
+  ["gather.fish-once", "R1"],
 ]);
 
 export type SkillRiskLevel = (typeof RISK_ORDER)[number];
