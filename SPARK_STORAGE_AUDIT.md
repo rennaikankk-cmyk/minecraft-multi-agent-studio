@@ -10,7 +10,18 @@ Method: read-only `df`, `du`, `find`, Docker inventory, Git LFS inventory, Ollam
 
 The earlier multi-terabyte-looking usage is not evidence of DGX OS corruption. The largest single cause is a **604,620,308,480-byte (564 GiB) PassMark BurnInTest temporary file** at `/~bittest00004.txt`. Its first bytes identify it as `BurnInTest ... temp file, this file can be deleted`; it is not open by a process and is not an NVIDIA/DGX component.
 
-Deleting that file requires user confirmation because it exceeds 20 GB. No model, Docker volume, Docker image, user repository, driver, CUDA component, partition, or unknown directory was deleted during this audit.
+The user explicitly confirmed deletion on 2026-08-20. The exact path, size, header, and lack of an open process were rechecked immediately before removal. The file was then deleted through local administrator authentication and verified absent. No model, Docker volume, Docker image, user repository, driver, CUDA component, partition, or unknown directory was deleted.
+
+Measured immediately around the approved deletion:
+
+| Measurement | Before deletion | After deletion |
+|---|---:|---:|
+| Used | 994,778,640,384 B | 390,158,495,744 B |
+| Available | 2,831,193,415,680 B | 3,435,813,560,320 B |
+| Use percentage | 27% | 11% |
+| Released | — | **604,620,144,640 B (about 564 GiB)** |
+
+The small difference between file length and released filesystem blocks is normal allocation metadata/block rounding. The deletion is not recoverable through this workflow.
 
 ## Filesystem summary
 
@@ -28,7 +39,7 @@ The disk is a 4 TB Samsung `MZALC4T0HBL1-00B07`; root is ext4 on `/dev/nvme0n1p2
 
 | Owner | Size | Classification | Action |
 |---|---:|---|---|
-| `/~bittest00004.txt` | 564 GiB | confirmed BurnInTest temporary file | confirmation required; recommended delete |
+| `/~bittest00004.txt` | 564 GiB | confirmed BurnInTest temporary file | **deleted after explicit confirmation** |
 | `/home/rennaikank/models` | 123 GiB | user model data | do not auto-delete |
 | `/home/rennaikank/models/Huihui-Qwen3.8-27B-abliterated` | 104 GiB | BF16 model plus duplicated Git LFS objects | confirmation required |
 | `/var/snap/ollama/common/models` | 52 GiB | Ollama model store | confirmation required |
@@ -113,7 +124,7 @@ The table intentionally includes parents and children so the ownership chain is 
 | 19 | 4,502,581,248 | `/home/rennaikank/.config/google-chrome` |
 | 20 | 4,378,406,912 | `/usr/share` |
 
-## Top 20 largest files
+## Top 20 largest files (pre-deletion audit snapshot)
 
 | Rank | Bytes | Path / meaning |
 |---:|---:|---|
@@ -161,7 +172,7 @@ Recommended policy:
 
 | Candidate | Expected release | Risk | Recoverability | Recommendation |
 |---|---:|---|---|---|
-| `/~bittest00004.txt` | 564 GiB | low; confirmed benchmark temp | not practically recoverable after delete | delete after explicit approval |
+| `/~bittest00004.txt` | 564 GiB | low; confirmed benchmark temp | deleted; not recoverable through this workflow | **completed after explicit approval** |
 | BF16 repo worktree + LFS duplication | up to 104 GiB | medium; conversion/source fallback lost locally | re-download from HF, about 52 GiB | keep until NVFP4 API passes, then approve cleanup |
 | Ollama model store | 52 GiB | medium; Ollama aliases stop working | re-pull about 52 GiB | remove after vLLM is selected and validated |
 | Docker reclaimable images | about 42 GiB | medium; old experiments cannot restart locally | re-pull images | decide image-by-image after backend selection |
