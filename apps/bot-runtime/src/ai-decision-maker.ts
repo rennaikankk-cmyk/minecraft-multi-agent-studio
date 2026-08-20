@@ -1,7 +1,12 @@
+import { randomUUID } from "node:crypto";
+
 import { AIRouter } from '@minecraft-studio/ai-router';
 import type { BotClientSnapshot } from './client.js';
 
 export interface DecisionContext {
+  botId: string;
+  stateVersion: number;
+  taskVersion: number;
   snapshot: BotClientSnapshot;
   nearbyEntities: string[];
   inventory: string[];
@@ -25,7 +30,14 @@ export class AIDecisionMaker {
     const prompt = this.buildPrompt(context);
     
     try {
-      const result = await this.router.generate({
+      const result = await this.router.route({
+        requestId: randomUUID(),
+        botId: context.botId,
+        taskType: "planner",
+        priority: 30,
+        timestamp: new Date().toISOString(),
+        stateVersion: context.stateVersion,
+        taskVersion: context.taskVersion,
         prompt,
         systemPrompt: this.getSystemPrompt(),
         maxTokens: 300,
