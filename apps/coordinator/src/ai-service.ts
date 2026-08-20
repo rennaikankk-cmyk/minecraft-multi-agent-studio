@@ -32,6 +32,7 @@ export type CoordinatorAIExecutionOptions = Readonly<{
   transport: SkillInvocationTransport;
   auditSink: SkillInvocationAuditSink;
   logger: AppLogger;
+  teamStateProvider?: (botId: string) => readonly string[];
 }>;
 
 export type CoordinatorAIServiceOptions = Readonly<{
@@ -80,7 +81,7 @@ export class CoordinatorAIService {
   }
 
   requestPlan(input: CoordinatorPlanRequest): CoordinatorPlanHandle {
-    return this.planner.requestPlan(input);
+    return this.planner.requestPlan(this.withTeamState(input));
   }
 
   requestAndExecute(
@@ -90,7 +91,7 @@ export class CoordinatorAIService {
     if (!this.invocationController) {
       throw new Error("Coordinator AI skill execution is not configured.");
     }
-    const planning = this.planner.requestPlan(input);
+    const planning = this.planner.requestPlan(this.withTeamState(input));
     const controller = new AbortController();
     let settled = false;
     const cancel = (reason = "coordinator_ai_execution_cancelled") => {
@@ -127,6 +128,16 @@ export class CoordinatorAIService {
   close(): void {
     this.planner.close();
     this.scheduler.close("coordinator_shutdown");
+  }
+
+  private withTeamState(input: CoordinatorPlanRequest): CoordinatorPlanRequest {
+    if (input.teamState !== undefined || !this.options.execution?.teamStateProvider) {
+      return input;
+    }
+    return Object.freeze({
+      ...input,
+      teamState: this.options.execution.teamStateProvider(input.botId),
+    });
   }
 }
 

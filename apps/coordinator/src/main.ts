@@ -17,6 +17,7 @@ import {
 import { RuntimeLinkServer } from "./runtime-link-server.js";
 import { InMemorySkillInvocationAuditSink } from "./skill-invocation-controller.js";
 import { InMemoryStopAuditSink, StopController } from "./stop-controller.js";
+import { TeamCoordinator } from "./team-coordinator.js";
 
 const instanceId = `coordinator-${randomUUID()}`;
 const logger = createStructuredLogger({ service: "coordinator", instanceId });
@@ -35,11 +36,13 @@ async function main(): Promise<void> {
     registry,
     logger,
   });
+  const teamCoordinator = new TeamCoordinator({ registry });
   const aiService = createCoordinatorAIServiceFromEnv(registry, {
     instanceId,
     transport: runtimeServer,
     auditSink: new InMemorySkillInvocationAuditSink(),
     logger,
+    teamStateProvider: (botId) => teamCoordinator.teamStateForBot(botId),
   });
   const stopController = new StopController({
     instanceId,

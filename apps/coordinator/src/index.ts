@@ -103,3 +103,18 @@ export {
   type CoordinatorAIExecutionResult,
   type CoordinatorAIServiceOptions,
 } from "./ai-service.js";
+
+export {
+  TEAM_ROLES,
+  TeamCoordinator,
+  TeamCoordinatorError,
+  type TeamCoordinatorErrorCode,
+  type TeamCoordinatorOptions,
+  type TeamCoordinatorSnapshot,
+  type TeamObjective,
+  type TeamObjectiveInput,
+  type TeamResourceClaim,
+  type TeamRole,
+  type TeamTaskAssignment,
+  type TeamTaskAssignmentInput,
+} from "./team-coordinator.js";
