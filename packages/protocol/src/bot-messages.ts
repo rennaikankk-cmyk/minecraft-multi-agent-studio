@@ -471,7 +471,18 @@ function validateSkillInputSchema(value: unknown): SkillInputSchemaIssue[] {
 const skillInputSchemaValueSchema = z.custom<SkillInputJsonValue>(() => true);
 
 export const skillInputSchemaSchema = skillInputSchemaValueSchema.superRefine((value, context) => {
-  for (const issue of validateSkillInputSchema(value)) {
+  let issues: SkillInputSchemaIssue[];
+  try {
+    issues = validateSkillInputSchema(value);
+  } catch {
+    context.addIssue({
+      code: "custom",
+      path: [],
+      message: "Skill inputSchema could not be safely inspected as JSON.",
+    });
+    return;
+  }
+  for (const issue of issues) {
     context.addIssue({ code: "custom", path: issue.path, message: issue.message });
   }
 });
