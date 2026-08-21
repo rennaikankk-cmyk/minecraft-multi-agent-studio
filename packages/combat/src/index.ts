@@ -20,6 +20,15 @@ export {
   type CombatWhitelistSource,
 } from "./identity.js";
 export {
+  DEFAULT_RETREAT_POLICY,
+  RetreatController,
+  type CombatRetreatAction,
+  type CombatRetreatDecision,
+  type CombatRetreatPolicy,
+  type CombatRetreatReason,
+  type CombatRetreatUrgency,
+} from "./retreat-controller.js";
+export {
   CombatPolicyError,
   DEFAULT_ENGAGEMENT_POLICY,
   TargetSelector,
