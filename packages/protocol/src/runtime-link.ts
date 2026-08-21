@@ -7,6 +7,7 @@ import {
   stopBotCommandV1Schema,
 } from "./bot-messages.js";
 import {
+  skillCancellationV1Schema,
   skillExecutionResultV1Schema,
   skillInvocationV1Schema,
 } from "./skill-messages.js";
@@ -121,6 +122,7 @@ export const runtimeLinkServerMessageV1Schema = z.union([
   runtimeLinkAcceptedV1Schema,
   runtimeLinkTelemetryAckV1Schema,
   stopBotCommandV1Schema,
+  skillCancellationV1Schema,
   skillInvocationV1Schema,
 ]);
 

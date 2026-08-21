@@ -262,6 +262,8 @@ function runtimeLinkClient(
     handleSkillInvocation:
       overrides.handleSkillInvocation ??
       (async (invocation) => skillResult(invocation)),
+    handleSkillCancellation:
+      overrides.handleSkillCancellation ?? (() => false),
     publishCurrentState: overrides.publishCurrentState ?? (() => undefined),
     failClosed: overrides.failClosed ?? (() => undefined),
   });

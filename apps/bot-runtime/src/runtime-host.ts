@@ -48,6 +48,11 @@ export class BotRuntimeHost {
           invocation,
           coordinatorInstanceId,
         ),
+      handleSkillCancellation: (cancellation, coordinatorInstanceId) =>
+        this.runtime.handleCoordinatorSkillCancellation(
+          cancellation,
+          coordinatorInstanceId,
+        ),
       publishCurrentState: () => this.runtime.publishCurrentState(),
       failClosed: async (error) => {
         options.logger.error("bot_runtime_control_link_lost", {

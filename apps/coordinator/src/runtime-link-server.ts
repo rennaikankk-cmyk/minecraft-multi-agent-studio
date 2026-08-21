@@ -22,6 +22,7 @@ import {
   runtimeLinkClientProofInput,
   runtimeLinkServerProofInput,
   runtimeLinkTelemetryAckV1Schema,
+  skillCancellationV1Schema,
   type BotStopResultV1,
   type ControlAuthorizationContext,
   type RuntimeLinkAuthenticateV1,
@@ -255,6 +256,7 @@ export class RuntimeLinkServer implements StopCommandTransport {
       this.rejectPending(pending, error);
     }
     for (const pending of [...this.pendingSkills.values()]) {
+      this.sendSkillCancellation(pending, "coordinator_shutdown");
       this.rejectPendingSkill(pending, error);
     }
     const sessionClosures = [...this.sessions].map((session) => {
@@ -408,7 +410,10 @@ export class RuntimeLinkServer implements StopCommandTransport {
     return new Promise<SkillExecutionResultV1>((resolve, reject) => {
       const abort = () => {
         const pending = this.pendingSkills.get(invocation.payload.invocationId);
-        if (pending) this.rejectPendingSkill(pending, abortedError("skill result"));
+        if (pending) {
+          this.sendSkillCancellation(pending, "caller_cancelled");
+          this.rejectPendingSkill(pending, abortedError("skill result"));
+        }
       };
       signal.addEventListener("abort", abort, { once: true });
       const pending: PendingSkill = {
@@ -826,6 +831,29 @@ export class RuntimeLinkServer implements StopCommandTransport {
     this.pendingSkills.delete(invocationId);
     pending.removeAbortListener();
     pending.reject(error);
+  }
+
+  private sendSkillCancellation(
+    pending: PendingSkill,
+    reason: "caller_cancelled" | "coordinator_shutdown",
+  ): void {
+    const timestamp = validNow(this.now());
+    const cancellation = skillCancellationV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: this.randomId(),
+      traceId: pending.invocation.traceId,
+      timestamp: timestamp.toISOString(),
+      source: { service: "coordinator", instanceId: this.options.instanceId },
+      botId: pending.invocation.botId,
+      taskId: pending.invocation.taskId,
+      type: "skill.cancel.v1",
+      payload: {
+        invocationId: pending.invocation.payload.invocationId,
+        reason,
+        expiresAt: new Date(timestamp.getTime() + 30_000).toISOString(),
+      },
+    });
+    this.sendFrame(pending.session.socket, cancellation, () => undefined);
   }
 
   private sendFrame(

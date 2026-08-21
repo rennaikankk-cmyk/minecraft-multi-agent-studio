@@ -173,6 +173,36 @@ describe("Coordinator Runtime Link server", () => {
     });
   });
 
+  it("propagates caller cancellation to an active Runtime skill", async () => {
+    const { server, url } = await startServer();
+    const socket = await authenticateAndActivate(url);
+    const invocation = skillInvocation(testUuid(760));
+    const abortController = new AbortController();
+    const received = nextServerMessage(socket);
+    const pending = server.sendSkillInvocation(
+      invocation,
+      RUNTIME_ID,
+      abortController.signal,
+    );
+    await received;
+    const cancellationReceived = nextServerMessage(socket);
+    const pendingRejected = expect(pending).rejects.toMatchObject({
+      code: "RUNTIME_LINK_ABORTED",
+    });
+    abortController.abort();
+
+    await expect(cancellationReceived).resolves.toMatchObject({
+      type: "skill.cancel.v1",
+      botId: BOT_ID,
+      taskId: invocation.taskId,
+      payload: {
+        invocationId: invocation.payload.invocationId,
+        reason: "caller_cancelled",
+      },
+    });
+    await pendingRejected;
+  });
+
   it("rejects an invalid client proof before registry mutation", async () => {
     const { registry, url } = await startServer();
     const socket = new WebSocket(url, RUNTIME_LINK_SUBPROTOCOL);

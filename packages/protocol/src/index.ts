@@ -168,8 +168,11 @@ export {
 
 export {
   parseSkillExecutionResult,
+  parseSkillCancellation,
   parseSkillInvocation,
   skillCapabilitySchema,
+  skillCancellationReasonSchema,
+  skillCancellationV1Schema,
   skillErrorCodeSchema,
   skillExecutionResultV1Schema,
   skillIdentifierSchema,
@@ -178,6 +181,8 @@ export {
   skillOperationSchema,
   skillVersionSchema,
   type SkillCapability,
+  type SkillCancellationReason,
+  type SkillCancellationV1,
   type SkillExecutionResultV1,
   type SkillInvocationV1,
   type SkillJsonValue,

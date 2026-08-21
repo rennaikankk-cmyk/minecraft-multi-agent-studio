@@ -21,9 +21,9 @@ Mineflayer capability adapters
 ## Safety boundary
 
 - The model can propose only structured, versioned skill invocations.
-- Coordinator validates identity, task, bot, expiry, available skill catalog and input shape before dispatch.
+- Coordinator validates identity, task, bot, expiry, and available skill catalog before dispatch.
 - Runtime Link accepts the strict `skill.invoke.v1` schema after mutual authentication.
-- Bot Runtime derives the capability allow-list from its local registered skill. The model cannot grant capabilities to itself.
+- Bot Runtime validates the selected Skill's exact input schema and derives its capability allow-list from the local registered definition. The model cannot grant capabilities to itself.
 - L0 safety can pause normal work and cancel an active skill at any time.
 - Movement, combat timing, target identity, reconnect and other tick-level behavior stay deterministic and local.
 

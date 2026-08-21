@@ -9,12 +9,14 @@ import {
   botStatusV1Schema,
   parseBotProtocolMessage,
   parseBotTelemetryMessage,
+  parseSkillCancellation,
   parseSkillInvocation,
   type BotDisconnectedV1,
   type BotHeartbeatV1,
   type BotSkillCatalogEntryV1,
   type BotSkillCatalogV1,
   type SkillExecutionResultV1,
+  type SkillCancellationV1,
   type SkillInvocationV1,
   type BotStopResultV1,
   type BotStatusV1,
@@ -223,7 +225,7 @@ export class SingleBotRuntime {
     string,
     { fingerprint: string; result: Promise<BotStopResultV1> }
   >();
-  private readonly activeSkillControllers = new Set<AbortController>();
+  private readonly activeSkillControllers = new Map<string, AbortController>();
   private readonly skillExecutions = new Map<
     string,
     { fingerprint: string; result: Promise<SkillExecutionResultV1> }
@@ -364,16 +366,17 @@ export class SingleBotRuntime {
     authorization: SkillExecutionAuthorization,
     externalSignal?: AbortSignal,
   ): Promise<SkillExecutionResultV1> {
+    const invocation = parseSkillInvocation(input);
     const controller = new AbortController();
     const cancelFromCaller = () => controller.abort();
     externalSignal?.addEventListener("abort", cancelFromCaller, { once: true });
     if (externalSignal?.aborted) cancelFromCaller();
-    this.activeSkillControllers.add(controller);
+    this.activeSkillControllers.set(invocation.payload.invocationId, controller);
 
     try {
       const startedAtMs = this.now().getTime();
       const result = await this.skillExecutor.execute(
-        input,
+        invocation,
         authorization,
         this.skillState(),
         controller.signal,
@@ -412,9 +415,34 @@ export class SingleBotRuntime {
       );
       return result;
     } finally {
-      this.activeSkillControllers.delete(controller);
+      if (this.activeSkillControllers.get(invocation.payload.invocationId) === controller) {
+        this.activeSkillControllers.delete(invocation.payload.invocationId);
+      }
       externalSignal?.removeEventListener("abort", cancelFromCaller);
     }
+  }
+
+  handleCoordinatorSkillCancellation(
+    input: unknown,
+    coordinatorInstanceId: string,
+  ): boolean {
+    const cancellation = parseSkillCancellation(input);
+    if (
+      cancellation.source.instanceId !== coordinatorInstanceId ||
+      cancellation.botId !== this.profile.botId
+    ) {
+      throw new RuntimeControlError(
+        "CONTROL_IDENTITY_MISMATCH",
+        "Skill cancellation does not match the authenticated Runtime Link identity.",
+      );
+    }
+    if (this.now().getTime() > Date.parse(cancellation.payload.expiresAt)) return false;
+    const controller = this.activeSkillControllers.get(
+      cancellation.payload.invocationId,
+    );
+    if (!controller) return false;
+    controller.abort();
+    return true;
   }
 
   handleCoordinatorSkillInvocation(
@@ -1190,7 +1218,7 @@ export class SingleBotRuntime {
   }
 
   private cancelActiveSkills(): void {
-    for (const controller of this.activeSkillControllers) {
+    for (const controller of this.activeSkillControllers.values()) {
       controller.abort();
     }
   }

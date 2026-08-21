@@ -19,10 +19,12 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@minecraft-studio/ai-router": "workspace:*",
     "@minecraft-studio/observability": "workspace:*",
     "@minecraft-studio/protocol": "workspace:*",
     "@minecraft-studio/task-system": "workspace:*",
-    "ws": "8.21.1"
+    "ws": "8.21.1",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/ws": "8.18.1"

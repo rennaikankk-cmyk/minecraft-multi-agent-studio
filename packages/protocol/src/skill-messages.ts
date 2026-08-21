@@ -121,6 +121,49 @@ export const skillInvocationV1Schema = z
     }
   });
 
+export const skillCancellationReasonSchema = z.enum([
+  "caller_cancelled",
+  "request_superseded",
+  "task_cancelled",
+  "coordinator_shutdown",
+]);
+
+export const skillCancellationV1Schema = z
+  .object({
+    schemaVersion: z.literal("1.0"),
+    messageId: z.string().uuid(),
+    traceId: identifierSchema,
+    timestamp: timestampSchema,
+    source: z
+      .object({
+        service: z.literal("coordinator"),
+        instanceId: identifierSchema,
+      })
+      .strict(),
+    botId: identifierSchema,
+    taskId: identifierSchema,
+    type: z.literal("skill.cancel.v1"),
+    payload: z
+      .object({
+        invocationId: z.string().uuid(),
+        reason: skillCancellationReasonSchema,
+        expiresAt: timestampSchema,
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((message, context) => {
+    const requestedAt = Date.parse(message.timestamp);
+    const expiresAt = Date.parse(message.payload.expiresAt);
+    if (expiresAt <= requestedAt || expiresAt - requestedAt > 60_000) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "expiresAt"],
+        message: "Skill cancellation must expire within one minute.",
+      });
+    }
+  });
+
 const skillResultBaseShape = {
   invocationId: z.string().uuid(),
   skillId: skillIdentifierSchema,
@@ -173,6 +216,8 @@ export const skillExecutionResultV1Schema = z
   .strict();
 
 export type SkillCapability = z.infer<typeof skillCapabilitySchema>;
+export type SkillCancellationReason = z.infer<typeof skillCancellationReasonSchema>;
+export type SkillCancellationV1 = z.infer<typeof skillCancellationV1Schema>;
 export type SkillInvocationV1 = z.infer<typeof skillInvocationV1Schema>;
 export type SkillExecutionResultV1 = z.infer<
   typeof skillExecutionResultV1Schema
@@ -181,6 +226,10 @@ export type SkillJsonValue = z.infer<typeof skillJsonValueSchema>;
 
 export function parseSkillInvocation(input: unknown): SkillInvocationV1 {
   return skillInvocationV1Schema.parse(input);
+}
+
+export function parseSkillCancellation(input: unknown): SkillCancellationV1 {
+  return skillCancellationV1Schema.parse(input);
 }
 
 export function parseSkillExecutionResult(

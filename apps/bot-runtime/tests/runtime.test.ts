@@ -591,6 +591,60 @@ describe("SingleBotRuntime", () => {
     await runtime.stop("test_cleanup");
   });
 
+  it("cancels an active skill through an authenticated Coordinator command", async () => {
+    const client = new FakeBotClient();
+    vi.spyOn(client, "invokeSkillCapability").mockImplementation(
+      async (request) =>
+        new Promise((_resolve, reject) => {
+          request.signal.addEventListener(
+            "abort",
+            () => reject(new Error("cancelled by Coordinator")),
+            { once: true },
+          );
+        }),
+    );
+    const runtime = new SingleBotRuntime(profile, {
+      createClient: () => client,
+      messageSink: () => undefined,
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+    runtime.start();
+    client.spawn();
+    const invocation = movementInvocation();
+    const pending = runtime.handleCoordinatorSkillInvocation(
+      invocation,
+      invocation.source.instanceId,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(
+      runtime.handleCoordinatorSkillCancellation(
+        {
+          schemaVersion: "1.0",
+          messageId: "55555555-5555-4555-8555-555555555555",
+          traceId: invocation.traceId,
+          timestamp: "2026-07-19T10:00:01.000Z",
+          source: invocation.source,
+          botId: invocation.botId,
+          taskId: invocation.taskId,
+          type: "skill.cancel.v1",
+          payload: {
+            invocationId: invocation.payload.invocationId,
+            reason: "task_cancelled",
+            expiresAt: "2026-07-19T10:00:30.000Z",
+          },
+        },
+        invocation.source.instanceId,
+      ),
+    ).toBe(true);
+    await expect(pending).resolves.toMatchObject({
+      payload: { outcome: "cancelled", errorCode: "SKILL_CANCELLED" },
+    });
+    await runtime.stop("test_cleanup");
+  });
+
   it("owns the critical-health emergency stop at the runtime boundary", async () => {
     const client = new FakeBotClient({
       ...snapshot,

@@ -21,6 +21,7 @@ import {
   type ControlAuthorizationContext,
   type RuntimeLinkAuthenticateV1,
   type RuntimeLinkChallengeV1,
+  type SkillCancellationV1,
   type SkillExecutionResultV1,
   type SkillInvocationV1,
   type StopBotCommandV1,
@@ -78,6 +79,10 @@ export type RuntimeLinkClientOptions = Readonly<{
     invocation: SkillInvocationV1,
     coordinatorInstanceId: string,
   ) => Promise<SkillExecutionResultV1>;
+  handleSkillCancellation: (
+    cancellation: SkillCancellationV1,
+    coordinatorInstanceId: string,
+  ) => boolean;
   publishCurrentState: () => void;
   failClosed: (error: RuntimeLinkClientError) => Promise<void> | void;
   now?: () => Date;
@@ -298,6 +303,10 @@ export class RuntimeLinkClient {
       }
       if (message.type === "skill.invoke.v1") {
         void this.handleSkillInvocation(socket, message);
+        return;
+      }
+      if (message.type === "skill.cancel.v1") {
+        this.handleSkillCancellation(socket, message);
         return;
       }
       void this.handleStopCommand(socket, message);
@@ -558,6 +567,28 @@ export class RuntimeLinkClient {
         code: "RUNTIME_LINK_SKILL_REJECTED",
       });
       this.rejectSocket(socket, "skill_rejected");
+    }
+  }
+
+  private handleSkillCancellation(
+    socket: WebSocket,
+    cancellation: SkillCancellationV1,
+  ): void {
+    if (
+      cancellation.source.instanceId !== this.coordinatorInstanceId ||
+      cancellation.botId !== this.options.botId ||
+      !this.coordinatorInstanceId
+    ) {
+      this.rejectSocket(socket, "skill_cancel_identity_mismatch");
+      return;
+    }
+    try {
+      this.options.handleSkillCancellation(
+        cancellation,
+        this.coordinatorInstanceId,
+      );
+    } catch {
+      this.rejectSocket(socket, "skill_cancel_rejected");
     }
   }
 
