@@ -11,10 +11,31 @@ export type SkillRetryPolicy = Readonly<{
   retryableErrorCodes: readonly string[];
 }>;
 
+/**
+ * 技能在前置条件里能看到的策略视图——**只读裁决，不能记账、不能改策略**。
+ *
+ * 故意做成结构化窄接口而不是直接引用 `ServerPolicyGate`：
+ *   - 前置条件必须是纯判断。给到完整闸门就等于把 `recordAction` 交到
+ *     前置条件手里，被拒绝的尝试也会占用频率配额。
+ *   - 框架层不依赖 policy 模块的具体实现，`ServerPolicyGate` 结构上满足即可。
+ */
+export interface SkillPolicyView {
+  readonly serverProfileId: string;
+  checkBlockReach(distance: number): Readonly<{ allowed: boolean }>;
+  checkAttackReach(distance: number): Readonly<{ allowed: boolean }>;
+}
+
+/**
+ * 前置条件。`policy` 是当前生效的服务器策略视图：reach 之类的边界从这里读，
+ * 不再由各技能写死常量——否则策略档位换了技能行为不变（AGENTS.md §2）。
+ *
+ * 参数可选是为了不逼着"在线""维度一致"这类与策略无关的检查签收一个用不到的
+ * 形参；TypeScript 允许实现少写形参，所以两类前置条件可以并存。
+ */
 export type SkillPrecondition<TInput, TState> = Readonly<{
   id: string;
   failureCode: string;
-  check(input: TInput, state: TState): boolean;
+  check(input: TInput, state: TState, policy: SkillPolicyView): boolean;
 }>;
 
 export type SkillResourceKind = "item" | "block" | "entity";
@@ -172,6 +193,13 @@ export type SkillExecutorOptions = Readonly<{
   now?: () => Date;
   random?: () => number;
   messageId?: () => string;
+  /**
+   * 当前生效的服务器策略视图，按 bot 所连的 serverProfileId 解析。
+   *
+   * 不传时执行器用 STRICT 基线（`DEFAULT_UNKNOWN_SERVER_PROFILE`）——服务器策略
+   * 未知就按最保守档走，不退回原版 4.5 格。这是 fail-closed，不是默认放宽。
+   */
+  policyView?: (serverProfileId: string) => SkillPolicyView;
 }>;
 
 export function defineSkill<TInput, TOutput, TState>(

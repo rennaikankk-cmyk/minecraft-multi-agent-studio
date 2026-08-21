@@ -1,6 +1,7 @@
 import { identifierSchema } from "@minecraft-studio/protocol";
 import { z } from "zod";
 
+import { blockWithinPolicyReach } from "./reach.js";
 import { defineSkill } from "../types.js";
 
 // ---------------------------------------------------------------------------
@@ -11,7 +12,6 @@ import { defineSkill } from "../types.js";
 // ---------------------------------------------------------------------------
 
 export const CONTAINER_TRANSFER_TIMEOUT_MS = 15_000;
-export const CONTAINER_MAX_DISTANCE = 4.5;
 export const TRANSFER_MAX_COUNT = 27 * 64;
 
 const dimensionSchema = z
@@ -81,19 +81,6 @@ export const containerTransferCapabilityInputSchema =
 export const containerTransferCapabilityOutputSchema =
   containerTransferOutputSchema;
 
-function containerWithinReach(
-  container: { x: number; y: number; z: number },
-  position: { x: number; y: number; z: number },
-): boolean {
-  return (
-    Math.hypot(
-      container.x + 0.5 - position.x,
-      container.y + 0.5 - position.y,
-      container.z + 0.5 - position.z,
-    ) <= CONTAINER_MAX_DISTANCE
-  );
-}
-
 export const containerTransferSkill = defineSkill({
   id: "container.transfer",
   version: "1.0.0",
@@ -142,9 +129,10 @@ export const containerTransferSkill = defineSkill({
     {
       id: "container.within-reach",
       failureCode: "CONTAINER_OUT_OF_REACH",
-      check: (input, state) =>
+      // 上限来自当前 ServerPolicy，不是技能里的常量。
+      check: (input, state, policy) =>
         state.position !== null &&
-        containerWithinReach(input.container, state.position),
+        blockWithinPolicyReach(input.container, state.position, policy),
     },
   ],
   execute: async (context, input) => {

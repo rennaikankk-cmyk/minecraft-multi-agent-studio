@@ -1,14 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  baselineLimits,
+  baselineServerPolicy,
+  blockCenterDistance,
   collectBlockSkill,
   containerTransferSkill,
   craftItemSkill,
   placeBlockSkill,
   smeltItemSkill,
+  ServerPolicyGate,
   SkillExecutor,
   SkillRegistry,
   type SkillExecutionAuthorization,
+  type SkillPolicyView,
 } from "../src/index.js";
 import type { SkillCapability } from "@minecraft-studio/protocol";
 
@@ -90,7 +95,10 @@ function makeAuthorization(
   };
 }
 
-function makeExecutor(invoke = vi.fn()) {
+function makeExecutor(
+  invoke = vi.fn(),
+  policyView?: (serverProfileId: string) => SkillPolicyView,
+) {
   const registry = new SkillRegistry();
   registry.register(collectBlockSkill);
   registry.register(craftItemSkill);
@@ -105,6 +113,7 @@ function makeExecutor(invoke = vi.fn()) {
       now: () => new Date(NOW),
       random: () => 0,
       messageId: () => "44444444-4444-4444-8444-444444444444",
+      ...(policyView ? { policyView } : {}),
     }),
   };
 }
@@ -445,6 +454,95 @@ describe("smelt.item@1.0.0", () => {
     );
     expect(result.payload.errorCode).toBe("FURNACE_OUT_OF_REACH");
     expect(run.invoke).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// reach 是否真的从 ServerPolicy 读——不是把 4.5 换个地方写死。
+//
+// 判据：找一个落在两档之间的距离。方块 (3,64,1)、bot (0,64,0)，按方块中心
+// 算出 ≈3.841 格：STRICT（3.8）该拒，VANILLA_COMPATIBLE（4.5）该放。同一份
+// 输入两种档位得出相反结果，才说明策略层接上了（AGENTS.md §2）。
+// ---------------------------------------------------------------------------
+describe("skill reach reads the active ServerPolicy", () => {
+  const BETWEEN_PROFILES = { x: 3, y: 64, z: 1 };
+
+  it("puts the probe distance strictly between the STRICT and VANILLA_COMPATIBLE ceilings", () => {
+    const distance = blockCenterDistance(BETWEEN_PROFILES, state.position);
+    expect(distance).toBeGreaterThan(
+      baselineLimits("STRICT").blockInteractionReach,
+    );
+    expect(distance).toBeLessThanOrEqual(
+      baselineLimits("VANILLA_COMPATIBLE").blockInteractionReach,
+    );
+  });
+
+  it("rejects it under the STRICT baseline the executor falls back to", async () => {
+    const run = makeExecutor();
+    const invocation = makeInvocation("world.place-block", {
+      itemName: "torch",
+      referenceBlock: BETWEEN_PROFILES,
+      face: { x: 0, y: 1, z: 0 },
+      dimension: DIMENSION,
+      serverProfileId: SERVER,
+    });
+    const result = await run.executor.execute(
+      invocation,
+      makeAuthorization(invocation, ["world.interact"]),
+      state,
+    );
+    expect(result.payload.errorCode).toBe("TARGET_OUT_OF_REACH");
+    expect(run.invoke).not.toHaveBeenCalled();
+  });
+
+  it("accepts the same input once the server profile resolves to VANILLA_COMPATIBLE", async () => {
+    const adapter = vi.fn(async () => ({
+      placed: true,
+      placedBlockName: "torch",
+      position: { x: 3, y: 65, z: 1 },
+    }));
+    const run = makeExecutor(adapter, (serverProfileId) =>
+      new ServerPolicyGate(
+        baselineServerPolicy(serverProfileId, "VANILLA_COMPATIBLE"),
+      ),
+    );
+    const invocation = makeInvocation("world.place-block", {
+      itemName: "torch",
+      referenceBlock: BETWEEN_PROFILES,
+      face: { x: 0, y: 1, z: 0 },
+      dimension: DIMENSION,
+      serverProfileId: SERVER,
+    });
+    const result = await run.executor.execute(
+      invocation,
+      makeAuthorization(invocation, ["world.interact"]),
+      state,
+    );
+    expect(result.payload.outcome).toBe("completed");
+    expect(adapter).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves the view by the server the bot is actually on, not the one input claims", async () => {
+    const seen: string[] = [];
+    const run = makeExecutor(vi.fn(), (serverProfileId) => {
+      seen.push(serverProfileId);
+      return new ServerPolicyGate(baselineServerPolicy(serverProfileId));
+    });
+    const invocation = makeInvocation("world.place-block", {
+      itemName: "torch",
+      referenceBlock: BETWEEN_PROFILES,
+      face: { x: 0, y: 1, z: 0 },
+      dimension: DIMENSION,
+      serverProfileId: "some-other-server",
+    });
+    const result = await run.executor.execute(
+      invocation,
+      makeAuthorization(invocation, ["world.interact"]),
+      state,
+    );
+    // 声称的服与实际连的服不一致，前置条件先拒；策略视图按 state 解析。
+    expect(result.payload.errorCode).toBe("TARGET_SERVER_PROFILE_MISMATCH");
+    expect(seen).toEqual([SERVER]);
   });
 });
 

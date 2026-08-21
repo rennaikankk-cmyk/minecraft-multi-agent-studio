@@ -1,6 +1,7 @@
 import { identifierSchema } from "@minecraft-studio/protocol";
 import { z } from "zod";
 
+import { blockWithinPolicyReach } from "./reach.js";
 import { defineSkill } from "../types.js";
 
 // ---------------------------------------------------------------------------
@@ -10,8 +11,6 @@ import { defineSkill } from "../types.js";
 // ---------------------------------------------------------------------------
 
 export const PLACE_BLOCK_TIMEOUT_MS = 10_000;
-/** 放置目标必须在伸手范围内；寻路靠 movement.goto，职责分离。 */
-export const PLACE_MAX_DISTANCE = 4.5;
 
 const dimensionSchema = z
   .string()
@@ -87,19 +86,6 @@ export const placeBlockOutputSchema = z
 export const placeBlockCapabilityInputSchema = placeBlockInputSchema;
 export const placeBlockCapabilityOutputSchema = placeBlockOutputSchema;
 
-function referenceWithinReach(
-  reference: { x: number; y: number; z: number },
-  position: { x: number; y: number; z: number },
-): boolean {
-  return (
-    Math.hypot(
-      reference.x + 0.5 - position.x,
-      reference.y + 0.5 - position.y,
-      reference.z + 0.5 - position.z,
-    ) <= PLACE_MAX_DISTANCE
-  );
-}
-
 export const placeBlockSkill = defineSkill({
   id: "world.place-block",
   version: "1.0.0",
@@ -146,9 +132,10 @@ export const placeBlockSkill = defineSkill({
     {
       id: "target.within-reach",
       failureCode: "TARGET_OUT_OF_REACH",
-      check: (input, state) =>
+      // 上限来自当前 ServerPolicy，不是技能里的常量。
+      check: (input, state, policy) =>
         state.position !== null &&
-        referenceWithinReach(input.referenceBlock, state.position),
+        blockWithinPolicyReach(input.referenceBlock, state.position, policy),
     },
   ],
   execute: async (context, input) =>

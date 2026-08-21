@@ -15,12 +15,18 @@ import {
 } from "@minecraft-studio/protocol";
 
 import { SkillAbortError, SkillFault, SkillFrameworkError } from "./errors.js";
+import { ServerPolicyGate } from "./policy/policy-gate.js";
+import {
+  baselineServerPolicy,
+  DEFAULT_UNKNOWN_SERVER_PROFILE,
+} from "./policy/server-policy.js";
 import { SkillRegistry } from "./registry.js";
 import type {
   SkillCompatibilityEnvironment,
   SkillExecutionAuthorization,
   SkillExecutionContext,
   SkillExecutorOptions,
+  SkillPolicyView,
 } from "./types.js";
 
 const JITTER_RATIO = 0.2;
@@ -146,9 +152,10 @@ export class SkillExecutor {
       );
     }
 
+    const policy = this.policyFor(parsedState.data);
     for (const precondition of definition.preconditions) {
       try {
-        const met = precondition.check(parsedInput.data, parsedState.data);
+        const met = precondition.check(parsedInput.data, parsedState.data, policy);
         if (typeof met !== "boolean") {
           return this.result(
             invocation,
@@ -359,6 +366,28 @@ export class SkillExecutor {
       clearTimeout(timeout);
       externalSignal?.removeEventListener("abort", onExternalAbort);
     }
+  }
+
+  /**
+   * 解析本次执行要用的策略视图。
+   *
+   * `serverProfileId` 从**已校验的 state** 里读——那是 bot 真实连着的服，
+   * 不是调用方在 input 里声称的（两者不一致由 `target.server-profile-matches`
+   * 前置条件拒绝）。拿不到就走 STRICT 基线：未知服按最保守档，不退回原版 4.5。
+   */
+  private policyFor(state: unknown): SkillPolicyView {
+    const serverProfileId =
+      typeof state === "object" &&
+      state !== null &&
+      "serverProfileId" in state &&
+      typeof (state as { serverProfileId: unknown }).serverProfileId === "string"
+        ? (state as { serverProfileId: string }).serverProfileId
+        : "unknown-server";
+    const resolve = this.options.policyView;
+    if (resolve) return resolve(serverProfileId);
+    return new ServerPolicyGate(
+      baselineServerPolicy(serverProfileId, DEFAULT_UNKNOWN_SERVER_PROFILE),
+    );
   }
 
   private validateAuthorization(

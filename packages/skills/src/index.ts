@@ -42,9 +42,14 @@ export {
   collectBlockStateSchema,
 } from "./builtin/collect-block.js";
 export {
+  blockCenterDistance,
+  blockWithinPolicyReach,
+  type BlockCoordinate,
+  type ObservedCoordinate,
+} from "./builtin/reach.js";
+export {
   CRAFT_ITEM_TIMEOUT_MS,
   CRAFT_MAX_COUNT,
-  CRAFTING_TABLE_MAX_DISTANCE,
   craftItemCapabilityInputSchema,
   craftItemCapabilityOutputSchema,
   craftItemInputSchema,
@@ -54,7 +59,6 @@ export {
 } from "./builtin/craft-item.js";
 export {
   PLACE_BLOCK_TIMEOUT_MS,
-  PLACE_MAX_DISTANCE,
   placeBlockCapabilityInputSchema,
   placeBlockCapabilityOutputSchema,
   placeBlockInputSchema,
@@ -63,7 +67,6 @@ export {
   placeBlockStateSchema,
 } from "./builtin/place-block.js";
 export {
-  CONTAINER_MAX_DISTANCE,
   CONTAINER_TRANSFER_TIMEOUT_MS,
   containerTransferCapabilityInputSchema,
   containerTransferCapabilityOutputSchema,
@@ -74,7 +77,6 @@ export {
   TRANSFER_MAX_COUNT,
 } from "./builtin/container-transfer.js";
 export {
-  FURNACE_MAX_DISTANCE,
   SMELT_ITEM_TIMEOUT_MS,
   SMELT_MAX_COUNT,
   smeltItemCapabilityInputSchema,
@@ -244,6 +246,7 @@ export {
   type SkillExecutionContext,
   type SkillExecutorOptions,
   type SkillMetadata,
+  type SkillPolicyView,
   type SkillPrecondition,
   type SkillResourceKind,
   type SkillRetryPolicy,

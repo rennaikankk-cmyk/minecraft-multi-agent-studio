@@ -1,11 +1,11 @@
 import { identifierSchema } from "@minecraft-studio/protocol";
 import { z } from "zod";
 
+import { blockWithinPolicyReach } from "./reach.js";
 import { defineSkill } from "../types.js";
 
 export const SMELT_ITEM_TIMEOUT_MS = 60_000;
 export const SMELT_MAX_COUNT = 5;
-export const FURNACE_MAX_DISTANCE = 4.5;
 
 const dimensionSchema = z.string().min(3).max(128).regex(/^[a-z0-9_.-]+:[a-z0-9_./-]+$/u);
 const itemNameSchema = z.string().min(1).max(64).regex(/^[a-z0-9_]+$/u);
@@ -44,10 +44,6 @@ export const smeltItemOutputSchema = z.object({
 export const smeltItemCapabilityInputSchema = smeltItemInputSchema;
 export const smeltItemCapabilityOutputSchema = smeltItemOutputSchema;
 
-function withinReach(target: { x: number; y: number; z: number }, position: { x: number; y: number; z: number }): boolean {
-  return Math.hypot(target.x + 0.5 - position.x, target.y + 0.5 - position.y, target.z + 0.5 - position.z) <= FURNACE_MAX_DISTANCE;
-}
-
 export const smeltItemSkill = defineSkill({
   id: "smelt.item", version: "1.0.0", inputSchema: smeltItemInputSchema,
   outputSchema: smeltItemOutputSchema, stateSchema: smeltItemStateSchema,
@@ -64,7 +60,8 @@ export const smeltItemSkill = defineSkill({
     { id: "l0.normal-actions-allowed", failureCode: "NORMAL_ACTIONS_PAUSED", check: (_input, state) => state.normalActionsAllowed },
     { id: "target.server-profile-matches", failureCode: "TARGET_SERVER_PROFILE_MISMATCH", check: (input, state) => input.serverProfileId === state.serverProfileId },
     { id: "target.dimension-matches", failureCode: "TARGET_DIMENSION_MISMATCH", check: (input, state) => state.position !== null && input.dimension === state.position.dimension },
-    { id: "furnace.within-reach", failureCode: "FURNACE_OUT_OF_REACH", check: (input, state) => state.position !== null && withinReach(input.furnace, state.position) },
+    // 上限来自当前 ServerPolicy，不是技能里的常量。
+    { id: "furnace.within-reach", failureCode: "FURNACE_OUT_OF_REACH", check: (input, state, policy) => state.position !== null && blockWithinPolicyReach(input.furnace, state.position, policy) },
   ],
   execute: async (context, input) => smeltItemCapabilityOutputSchema.parse(await context.callCapability(
     "craft.execute", "smelt.item-safe", smeltItemCapabilityInputSchema.parse(input),

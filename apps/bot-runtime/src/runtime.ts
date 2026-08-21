@@ -35,6 +35,8 @@ import {
 } from "@minecraft-studio/safety";
 import {
   builtinSkills,
+  ServerPolicyGate,
+  ServerPolicyStore,
   SkillExecutor,
   SkillFault,
   SkillRegistry,
@@ -68,6 +70,11 @@ export type RuntimeDependencies = {
   metrics?: MetricRecorder;
   safetyController?: L0SafetyController;
   skillRegistry?: SkillRegistry;
+  /**
+   * 服务器策略来源。不注入时用空 store：所有服都解析为 STRICT baseline，
+   * 直到 ServerPolicyDetector 实测出更宽的档位并 upsert 进来。
+   */
+  serverPolicyStore?: ServerPolicyStore;
   now?: () => Date;
   randomId?: () => string;
   aiLoopConfig?: AILoopConfig;
@@ -217,6 +224,7 @@ export class SingleBotRuntime {
     { fingerprint: string; result: Promise<BotStopResultV1> }
   >();
   private readonly activeSkillControllers = new Set<AbortController>();
+  private readonly serverPolicyStore: ServerPolicyStore;
   private aiLoop: AIRuntimeLoop | null = null;
 
   constructor(
@@ -235,6 +243,8 @@ export class SingleBotRuntime {
       for (const skill of builtinSkills) skillRegistry.register(skill);
     }
     this.skillRegistry = skillRegistry;
+    this.serverPolicyStore =
+      dependencies.serverPolicyStore ?? new ServerPolicyStore();
     this.skillExecutor = new SkillExecutor(skillRegistry, {
       runtimeInstanceId: this.runtimeInstanceId,
       capabilityAdapter: {
@@ -242,6 +252,10 @@ export class SingleBotRuntime {
       },
       now: this.now,
       messageId: this.randomId,
+      // 每次调用现取一份闸门：策略可能在 bot 存活期间被 detector 改写，
+      // 缓存住就会拿旧档位裁决。闸门本身有频率窗口状态，所以不跨调用复用。
+      policyView: (serverProfileId) =>
+        new ServerPolicyGate(this.serverPolicyStore.resolve(serverProfileId)),
     });
 
     // 初始化 AI 决策循环

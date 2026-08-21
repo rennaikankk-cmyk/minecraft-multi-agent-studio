@@ -1,6 +1,7 @@
 import { identifierSchema } from "@minecraft-studio/protocol";
 import { z } from "zod";
 
+import { blockWithinPolicyReach } from "./reach.js";
 import { defineSkill } from "../types.js";
 
 // ---------------------------------------------------------------------------
@@ -12,8 +13,6 @@ import { defineSkill } from "../types.js";
 
 export const CRAFT_ITEM_TIMEOUT_MS = 20_000;
 export const CRAFT_MAX_COUNT = 64;
-/** 工作台必须在伸手可及范围内（与原版交互距离一致，留 0.5 余量）。 */
-export const CRAFTING_TABLE_MAX_DISTANCE = 4.5;
 
 const dimensionSchema = z
   .string()
@@ -78,19 +77,6 @@ export const craftItemOutputSchema = z
 export const craftItemCapabilityInputSchema = craftItemInputSchema;
 export const craftItemCapabilityOutputSchema = craftItemOutputSchema;
 
-function tableWithinReach(
-  table: { x: number; y: number; z: number },
-  position: { x: number; y: number; z: number },
-): boolean {
-  return (
-    Math.hypot(
-      table.x + 0.5 - position.x,
-      table.y + 0.5 - position.y,
-      table.z + 0.5 - position.z,
-    ) <= CRAFTING_TABLE_MAX_DISTANCE
-  );
-}
-
 export const craftItemSkill = defineSkill({
   id: "craft.item",
   version: "1.0.0",
@@ -137,10 +123,11 @@ export const craftItemSkill = defineSkill({
     {
       id: "crafting-table.within-reach",
       failureCode: "CRAFTING_TABLE_OUT_OF_REACH",
-      check: (input, state) =>
+      // 距离上限由当前 ServerPolicy 给出，不写死 4.5：STRICT 档只有 3.8 格。
+      check: (input, state, policy) =>
         input.craftingTable === null ||
         (state.position !== null &&
-          tableWithinReach(input.craftingTable, state.position)),
+          blockWithinPolicyReach(input.craftingTable, state.position, policy)),
     },
   ],
   execute: async (context, input) =>
