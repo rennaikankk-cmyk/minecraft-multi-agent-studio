@@ -20,6 +20,14 @@ export {
   type CombatWhitelistSource,
 } from "./identity.js";
 export {
+  DEFAULT_PREDICTION_POLICY,
+  PredictionEngine,
+  type CombatMotionSample,
+  type CombatPrediction,
+  type CombatPredictionConfidence,
+  type CombatPredictionPolicy,
+} from "./prediction-engine.js";
+export {
   DEFAULT_WEAPON_POLICY,
   WeaponManager,
   type CombatSwingDecision,
