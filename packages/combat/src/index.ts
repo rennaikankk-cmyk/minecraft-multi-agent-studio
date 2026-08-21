@@ -20,6 +20,15 @@ export {
   type CombatWhitelistSource,
 } from "./identity.js";
 export {
+  CombatPolicyError,
+  DEFAULT_ENGAGEMENT_POLICY,
+  TargetSelector,
+  validateEngagementPolicy,
+  type CombatEngagementPolicy,
+  type CombatTargetDecision,
+  type CombatTargetRefusalCode,
+} from "./target-selector.js";
+export {
   ThreatAnalyzer,
   type CombatEntityObservation,
   type CombatThreat,
