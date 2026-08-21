@@ -135,6 +135,39 @@ export {
   type PolicyDecision,
   type PolicyDenialCode,
 } from "./policy/policy-gate.js";
+export {
+  acquisitionKinds,
+  pickaxeForTier,
+  resourceInputSchema,
+  resourceRecipeSchema,
+  ResourceGraph,
+  resourceStations,
+  tierRank,
+  tierSatisfies,
+  toolTierByItem,
+  toolTiers,
+  vanillaResourceRecipes,
+  type AcquisitionKind,
+  type ResourceGraphIssue,
+  type ResourceInput,
+  type ResourceRecipe,
+  type ResourceStation,
+  type ToolTier,
+} from "./planning/resource-graph.js";
+export {
+  GoalPlanner,
+  MAX_GOAL_COUNT,
+  MAX_PLAN_DEPTH,
+  MAX_PLAN_STEPS,
+  planStepKinds,
+  skillIdForStepKind,
+  type GoalRequest,
+  type PlanFailureCode,
+  type PlannerInventory,
+  type PlanResult,
+  type PlanStep,
+  type PlanStepKind,
+} from "./planning/goal-planner.js";
 export { SkillExecutor } from "./executor.js";
 export { SkillRegistry } from "./registry.js";
 export { resolveSkillCompatibility } from "./compatibility.js";
