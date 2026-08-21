@@ -108,6 +108,26 @@ export {
   type ServerPolicyWriteResult,
 } from "./policy/policy-store.js";
 export {
+  candidateLadder,
+  MAX_PROBE_STEPS,
+  PROBE_STEPS_PER_DIMENSION,
+  probeAuthorizationSchema,
+  probeDimensions,
+  probeEvidenceSchema,
+  probeObservationKinds,
+  ServerPolicyDetector,
+  ServerPolicyProbeSession,
+  type ProbeAuthorization,
+  type ProbeDimension,
+  type ProbeEvidence,
+  type ProbeHaltReason,
+  type ProbeObservationKind,
+  type ProbeSessionState,
+  type ProbeStartResult,
+  type ProbeStep,
+  type ProbeSubmitResult,
+} from "./policy/boundary-probe.js";
+export {
   policyActionKinds,
   ServerPolicyGate,
   type ClampedRotation,
