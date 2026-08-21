@@ -119,7 +119,7 @@ describe("Dashboard Control API client", () => {
         requestId: UUID,
         botId: "worker-01",
         operatorGoal: "采集附近的木材",
-        timeoutMs: 60_000,
+        timeoutMs: 120_000,
       });
       return jsonResponse({
         schemaVersion: "1.0",
@@ -147,7 +147,7 @@ describe("Dashboard Control API client", () => {
       action: "noop",
       taskId: UUID,
     });
-    expect(timeoutSpy).toHaveBeenCalledWith(65_000);
+    expect(timeoutSpy).toHaveBeenCalledWith(125_000);
   });
 
   it.each([

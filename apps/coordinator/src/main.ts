@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   AIRouter,
   AIRequestScheduler,
+  OllamaAdapter,
   ScheduledAIRouter,
   VLLMAdapter,
 } from "@minecraft-studio/ai-router";
@@ -53,7 +54,11 @@ async function main(): Promise<void> {
   let localPlanner: CoordinatorLocalPlanner | undefined;
   if (localAIConfig.enabled && localAIConfig.baseUrl && localAIConfig.model) {
     aiRouter = new AIRouter();
-    aiRouter.register(new VLLMAdapter(localAIConfig.baseUrl, localAIConfig.model));
+    aiRouter.register(
+      localAIConfig.provider === "ollama"
+        ? new OllamaAdapter(localAIConfig.baseUrl, localAIConfig.model)
+        : new VLLMAdapter(localAIConfig.baseUrl, localAIConfig.model),
+    );
     aiScheduler = new AIRequestScheduler({
       maxConcurrency: localAIConfig.maxConcurrency,
       maxQueue: localAIConfig.maxQueue,

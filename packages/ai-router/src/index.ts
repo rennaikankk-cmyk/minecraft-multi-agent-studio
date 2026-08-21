@@ -1,4 +1,5 @@
 export { AIRouter } from './router.js';
+export { OllamaAdapter } from './adapters/ollama-adapter.js';
 export { VLLMAdapter } from './adapters/vllm-adapter.js';
 export { ScheduledAIRouter } from './scheduled-router.js';
 export {

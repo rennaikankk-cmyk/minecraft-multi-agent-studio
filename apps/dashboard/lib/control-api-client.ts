@@ -16,6 +16,8 @@ import {
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "[::1]"]);
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const BOT_LIMIT = 100;
+const DASHBOARD_GOAL_TIMEOUT_MS = 120_000;
+const DASHBOARD_GOAL_HTTP_TIMEOUT_MS = DASHBOARD_GOAL_TIMEOUT_MS + 5_000;
 
 export type DashboardControlConfig = Readonly<{
   baseUrl: string;
@@ -187,11 +189,11 @@ export async function requestDashboardGoal(
         requestId: request.requestId,
         botId: request.botId,
         operatorGoal: request.operatorGoal,
-        timeoutMs: 60_000,
+        timeoutMs: DASHBOARD_GOAL_TIMEOUT_MS,
       }),
     },
     fetchImplementation,
-    65_000,
+    DASHBOARD_GOAL_HTTP_TIMEOUT_MS,
   );
   const parsed = submitGoalHttpResponseV1Schema.safeParse(value);
   if (

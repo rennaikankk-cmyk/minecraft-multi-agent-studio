@@ -1,5 +1,6 @@
 export type LocalAIConfig = Readonly<{
   enabled: boolean;
+  provider: LocalAIProvider;
   baseUrl: string | null;
   model: string | null;
   maxConcurrency: number;
@@ -8,10 +9,13 @@ export type LocalAIConfig = Readonly<{
   requestTimeoutMs: number;
 }>;
 
+export type LocalAIProvider = "ollama" | "vllm";
+
 export type LocalAIConfigErrorCode =
   | "LOCAL_AI_CONFIG_INCOMPLETE"
   | "LOCAL_AI_URL_INVALID"
   | "LOCAL_AI_MODEL_INVALID"
+  | "LOCAL_AI_PROVIDER_INVALID"
   | "LOCAL_AI_LIMIT_INVALID";
 
 export class LocalAIConfigError extends Error {
@@ -26,9 +30,11 @@ export function loadLocalAIConfig(
 ): LocalAIConfig {
   const rawUrl = env.LOCAL_AI_HUB_URL?.trim() ?? "";
   const rawModel = env.LOCAL_AI_MODEL?.trim() ?? "";
+  const provider = localAIProvider(env.LOCAL_AI_PROVIDER);
   if (!rawUrl && !rawModel) {
     return {
       enabled: false,
+      provider,
       baseUrl: null,
       model: null,
       maxConcurrency: 4,
@@ -88,6 +94,7 @@ export function loadLocalAIConfig(
   );
   return {
     enabled: true,
+    provider,
     baseUrl: url.origin,
     model: rawModel,
     maxConcurrency,
@@ -95,6 +102,15 @@ export function loadLocalAIConfig(
     perBotConcurrency,
     requestTimeoutMs,
   };
+}
+
+function localAIProvider(raw: string | undefined): LocalAIProvider {
+  const provider = raw?.trim().toLowerCase() || "vllm";
+  if (provider === "ollama" || provider === "vllm") return provider;
+  throw new LocalAIConfigError(
+    "LOCAL_AI_PROVIDER_INVALID",
+    "Local AI provider must be ollama or vllm.",
+  );
 }
 
 function integer(

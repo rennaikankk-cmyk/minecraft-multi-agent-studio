@@ -1,8 +1,14 @@
 # Local AI 提示词与执行边界
 
-当前生产规划提示词在 `apps/coordinator/src/planner-prompts.ts`，版本为
-`minecraft-local-planner-v2`。代码中的版本化字符串是唯一运行时事实源；修改提示词时
+当前运行时规划提示词在 `apps/coordinator/src/planner-prompts.ts`，版本为
+`minecraft-local-planner-v3`。代码中的版本化字符串是唯一运行时事实源；修改提示词时
 必须同时升级版本并重跑 Coordinator、Protocol、Runtime Link 测试。
+
+Planner 发给模型的 JSON 上下文有固定的 128 KiB UTF-8 上限。Operator goal、Bot 状态、
+Runtime 广播的 Skill 标识/验证标签和输入 Schema 都按不可信数据处理；Schema 只提供
+结构约束，不能提供提示词或权限。超过上限或无法序列化的 Skill 目录会 fail-closed，
+不会调用模型。每服 anti-cheat、reach、转头、时序和动作速率限制由确定性
+`ServerPolicy` 闸门执行，Planner 不能推断、放宽或调参。
 
 ## 调用路径
 
@@ -80,17 +86,19 @@ ssh -i "$env:USERPROFILE\.ssh\dgx_spark_ed25519" `
 在仓库根目录的本机 `.env` 或 `.env.local` 配置以下服务端变量，不使用 `NEXT_PUBLIC_`：
 
 ```dotenv
+LOCAL_AI_PROVIDER=ollama
 LOCAL_AI_HUB_URL=http://127.0.0.1:11435
 LOCAL_AI_MODEL=qwen-fast:latest
 AI_MAX_CONCURRENCY=4
 AI_MAX_QUEUE=64
 AI_PER_BOT_CONCURRENCY=1
-AI_REQUEST_TIMEOUT_MS=30000
+AI_REQUEST_TIMEOUT_MS=120000
 ```
 
-若 Spark 上另行运行了 OpenAI-compatible vLLM 服务，可把 `LOCAL_AI_HUB_URL` 改为该服务
-的 origin；不要把 SSH 私钥、API 凭据、正式服地址、白名单或基地坐标写进环境变量以外的
-提示词、日志或模型上下文。
+`ollama` 使用原生 `/api/tags` 和 `/api/chat`，并向支持思考的模型发送 `think: false` 与
+JSON Schema 格式约束。若 Spark 上另行运行了 OpenAI-compatible vLLM 服务，将
+`LOCAL_AI_PROVIDER` 改为 `vllm`，再把 `LOCAL_AI_HUB_URL` 改为该服务的 origin。不要把
+SSH 私钥、API 凭据、正式服地址、白名单或基地坐标写进环境变量以外的提示词、日志或模型上下文。
 
 并发 `4` 是现有基准的暂定值。完成本机到 Spark 的新一轮 52 请求基准后，以报告的
 零错误推荐值为准。Spark 不可用时高层目标 fail-closed，Bot Runtime 的 L0 安全与

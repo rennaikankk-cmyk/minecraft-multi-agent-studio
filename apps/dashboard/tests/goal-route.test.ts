@@ -38,7 +38,7 @@ describe("Dashboard goal route", () => {
         requestId: REQUEST_ID,
         botId: "worker-01",
         operatorGoal: "采集附近的木材",
-        timeoutMs: 60_000,
+        timeoutMs: 120_000,
       });
       return new Response(JSON.stringify({
         schemaVersion: "1.0",
