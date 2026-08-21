@@ -12,6 +12,7 @@
  * 同一种子 + 同一输入 = 同一输出，单测可以逐帧断言。
  */
 
+import { DeterministicJitter } from "./deterministic-jitter.js";
 import type { CombatVector3 } from "./threat-analyzer.js";
 
 export type CombatOrientation = Readonly<{
@@ -89,29 +90,6 @@ export function eyePosition(footPosition: CombatVector3): CombatVector3 {
     y: footPosition.y + EYE_HEIGHT,
     z: footPosition.z,
   };
-}
-
-/**
- * 确定性 PRNG（xorshift32）。噪声必须可复现，否则单测只能断言"大概"。
- * 不用于任何安全用途。
- */
-class DeterministicJitter {
-  private state: number;
-
-  constructor(seed: number) {
-    // 0 是 xorshift 的不动点，换成任意非零常量。
-    this.state = (seed | 0) === 0 ? 0x9e3779b9 : seed | 0;
-  }
-
-  /** 返回 [-1, 1) 的确定性抖动系数。 */
-  next(): number {
-    let x = this.state;
-    x ^= x << 13;
-    x ^= x >>> 17;
-    x ^= x << 5;
-    this.state = x | 0;
-    return (x >>> 0) / 0x8000_0000 - 1;
-  }
 }
 
 export class RotationController {

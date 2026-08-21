@@ -19,6 +19,15 @@ export {
   type CombatIdentityErrorCode,
   type CombatWhitelistSource,
 } from "./identity.js";
+export { DeterministicJitter } from "./deterministic-jitter.js";
+export {
+  DEFAULT_MOVEMENT_POLICY,
+  MovementController,
+  type CombatMovementIntent,
+  type CombatMovementPlan,
+  type CombatMovementPolicy,
+  type CombatMovementSnapshot,
+} from "./movement-controller.js";
 export {
   DEFAULT_PREDICTION_POLICY,
   PredictionEngine,
