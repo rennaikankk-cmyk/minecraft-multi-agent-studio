@@ -201,6 +201,27 @@ export { SkillExecutor } from "./executor.js";
 export { SkillRegistry } from "./registry.js";
 export { resolveSkillCompatibility } from "./compatibility.js";
 export {
+  builtinSkillIds,
+  builtinSkills,
+  builtinSkillStatusCatalog,
+} from "./builtin/catalog.js";
+export {
+  buildSkillStatusCatalog,
+  deriveSkillStatus,
+  evidenceIssuesFor,
+  evidenceSupportsVerifiedClaim,
+  pendingGatesFor,
+  skillEvidenceGates,
+  skillEvidenceIssues,
+  skillIdsWithRecordedEvidence,
+  skillStatuses,
+  type SkillEvidence,
+  type SkillEvidenceGate,
+  type SkillEvidenceIssue,
+  type SkillStatus,
+  type SkillStatusEntry,
+} from "./skill-status.js";
+export {
   builtinSkillVerificationManifestsV1,
   skillScenarioCategories,
   skillScenarioCategorySchema,

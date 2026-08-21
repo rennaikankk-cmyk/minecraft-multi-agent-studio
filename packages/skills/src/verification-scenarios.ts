@@ -6,6 +6,8 @@ import {
 } from "@minecraft-studio/protocol";
 import { z } from "zod";
 
+import { builtinSkills } from "./builtin/catalog.js";
+
 export const skillScenarioCategories = [
   "success",
   "insufficient-materials",
@@ -122,24 +124,41 @@ function scenario(
   };
 }
 
-const baseInputs = {
-  "movement.goto": { target: { x: 4, y: 64, z: 0 }, dimension, serverProfileId: server },
+/**
+ * 每个技能的验收基准输入。**键必须是真实注册的技能 id**——下面的组装会拿
+ * `builtinSkills` 逐个查表，查不到就抛。此前这里写着 `equipment.equip-armor`，
+ * 而注册的是 `inventory.equip-armor`：一份指向不存在技能的验收清单，
+ * 静静躺着通过了所有 schema 校验。
+ */
+const baseInputs: Readonly<Record<string, z.infer<typeof skillJsonValueSchema>>> = {
+  "movement.goto": { target: { x: 4, y: 64, z: 0, dimension, serverProfileId: server }, radius: 1 },
   "collect.block": { blockName: "oak_log", maxCount: 4, maxDistance: 16, dimension, serverProfileId: server },
   "craft.item": { itemName: "crafting_table", count: 1, craftingTable: null, dimension, serverProfileId: server },
   "world.place-block": { itemName: "cobblestone", referenceBlock: { x: 1, y: 63, z: 0 }, face: { x: 0, y: 1, z: 0 }, dimension, serverProfileId: server },
   "container.transfer": { direction: "deposit", itemName: "cobblestone", count: 4, container: { x: 3, y: 64, z: 0 }, dimension, serverProfileId: server },
-  "equipment.equip-armor": { minimumScoreGain: 1 },
+  "inventory.equip-armor": { serverProfileId: server },
   "smelt.item": { inputItemName: "raw_iron", fuelItemName: "coal", fuelCount: 1, count: 5, furnace: { x: 2, y: 64, z: 0 }, dimension, serverProfileId: server },
-} as const;
+};
 
+/**
+ * 按**注册的技能定义**组装验收清单，而不是按手写的键列表遍历。
+ * 技能的 id 与 version 直接取自定义，所以清单不可能指向一个不存在的技能，
+ * 也不可能漏掉一个已注册的技能（漏了就抛，不是静默少一份）。
+ */
 export const builtinSkillVerificationManifestsV1: readonly SkillVerificationManifestV1[] =
-  Object.entries(baseInputs).map(([skillId, input]) =>
-    skillVerificationManifestV1Schema.parse({
-      schemaVersion: "1.0",
-      manifestId: `${skillId.replaceAll(".", "-")}-acceptance`,
-      skillId,
-      skillVersion: "1.0.0",
-      minecraftVersions: ["1.21.8"],
-      scenarios: skillScenarioCategories.map((category) => scenario(category, input)),
+  Object.freeze(
+    builtinSkills.map((skill) => {
+      const input = baseInputs[skill.id];
+      if (input === undefined) {
+        throw new Error(`Verification base input missing for skill ${skill.id}`);
+      }
+      return skillVerificationManifestV1Schema.parse({
+        schemaVersion: "1.0",
+        manifestId: `${skill.id.replaceAll(".", "-")}-acceptance`,
+        skillId: skill.id,
+        skillVersion: skill.version,
+        minecraftVersions: ["1.21.8"],
+        scenarios: skillScenarioCategories.map((category) => scenario(category, input)),
+      });
     }),
   );
