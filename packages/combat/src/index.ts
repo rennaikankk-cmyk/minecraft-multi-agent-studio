@@ -21,6 +21,23 @@ export {
 } from "./identity.js";
 export { DeterministicJitter } from "./deterministic-jitter.js";
 export {
+  CombatReflexNotClearedError,
+  REFLEX_BUDGET_MS,
+  decideReflexClearance,
+  type CombatReflexDecision,
+  type CombatReflexDenialCode,
+  type CombatReflexProbeReport,
+} from "./reflex-clearance.js";
+export {
+  DEFAULT_TOTEM_POLICY,
+  TotemManager,
+  type CombatTotemAction,
+  type CombatTotemDecision,
+  type CombatTotemPolicy,
+  type CombatTotemReason,
+  type CombatTotemSnapshot,
+} from "./totem-manager.js";
+export {
   DEFAULT_MOVEMENT_POLICY,
   MovementController,
   type CombatMovementIntent,
