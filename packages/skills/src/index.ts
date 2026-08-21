@@ -183,6 +183,20 @@ export {
   type RecoveryAction,
   type RecoveryDecision,
 } from "./recovery/failure-classifier.js";
+export {
+  MAX_ATTEMPTS_PER_STEP,
+  MAX_REPAIRS_PER_STEP,
+  MAX_TOTAL_REPAIRS,
+  PlanSupervisor,
+  recoveryActionNeedsEffect,
+  recoveryActionRewritesPlan,
+  type RecoveryEffects,
+  type StepExecutor,
+  type StepOutcome,
+  type SupervisionResult,
+  type SupervisorEvent,
+  type SupervisorEventKind,
+} from "./recovery/plan-supervisor.js";
 export { SkillExecutor } from "./executor.js";
 export { SkillRegistry } from "./registry.js";
 export { resolveSkillCompatibility } from "./compatibility.js";
