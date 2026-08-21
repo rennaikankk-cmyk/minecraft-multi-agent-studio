@@ -29,6 +29,17 @@ export {
   type CombatReflexProbeReport,
 } from "./reflex-clearance.js";
 export {
+  CrystalEngine,
+  DEFAULT_CRYSTAL_POLICY,
+  type CombatCrystalCandidate,
+  type CombatCrystalDetonateDecision,
+  type CombatCrystalPlan,
+  type CombatCrystalPolicy,
+  type CombatCrystalRefusalCode,
+  type CombatCrystalScore,
+  type CombatCrystalSelfState,
+} from "./crystal-engine.js";
+export {
   DEFAULT_TOTEM_POLICY,
   TotemManager,
   type CombatTotemAction,
