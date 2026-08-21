@@ -49,11 +49,17 @@ describe("Bot Process Supervisor 配置", () => {
     );
   });
 
-  it("拒绝 ServerProfile 通过符号链接逃逸配置根目录", async () => {
+  it("拒绝 ServerProfile 通过符号链接逃逸配置根目录", async (context) => {
     const fixture = await createFixture();
     const outside = path.join(fixture.root, "outside.json");
     await writeFile(outside, JSON.stringify(serverProfile("studio-bot-01", "OutsideBot")));
     await rm(path.join(fixture.profileRoot, "bot-01.json"));
+    if (!await canCreateSymlink(fixture.root)) {
+      context.skip(
+        "当前主机不允许创建符号链接（Windows 需要管理员权限或开发者模式）。",
+      );
+      return;
+    }
     await symlink(outside, path.join(fixture.profileRoot, "bot-01.json"));
 
     await expect(
@@ -174,6 +180,21 @@ async function createFixture(): Promise<Readonly<{
     }),
   );
   return { root, profileRoot, configPath };
+}
+
+async function canCreateSymlink(root: string): Promise<boolean> {
+  const target = path.join(root, "symlink-probe-target");
+  const link = path.join(root, "symlink-probe-link");
+  await writeFile(target, "probe");
+  try {
+    await symlink(target, link);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await rm(link, { force: true });
+    await rm(target, { force: true });
+  }
 }
 
 function baseEnvironment(
