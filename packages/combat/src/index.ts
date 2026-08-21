@@ -20,6 +20,15 @@ export {
   type CombatWhitelistSource,
 } from "./identity.js";
 export {
+  DEFAULT_ROTATION_POLICY,
+  RotationController,
+  eyePosition,
+  orientationToward,
+  type CombatOrientation,
+  type CombatRotationPolicy,
+  type CombatRotationStep,
+} from "./rotation-controller.js";
+export {
   DEFAULT_RETREAT_POLICY,
   RetreatController,
   type CombatRetreatAction,
