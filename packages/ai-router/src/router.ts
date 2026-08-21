@@ -9,7 +9,9 @@ export class AIRouter {
 
   async generate(opts: GenerateOptions): Promise<GenerateResult> {
     for (const adapter of this.adapters) {
+      throwIfAborted(opts.signal);
       const health = await adapter.health();
+      throwIfAborted(opts.signal);
       if (health.available) {
         return adapter.generate(opts);
       }
@@ -27,4 +29,10 @@ export class AIRouter {
     );
     return results;
   }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  throw new Error('AI request was aborted.');
 }

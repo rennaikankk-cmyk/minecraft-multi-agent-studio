@@ -31,7 +31,13 @@ export class VLLMAdapter implements AIAdapter {
 
   async generate(request: GenerateOptions): Promise<GenerateResult> {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), request.timeoutMs);
+    const timeout = setTimeout(
+      () => controller.abort(new Error(`vLLM request exceeded ${request.timeoutMs}ms.`)),
+      request.timeoutMs,
+    );
+    const abortFromCaller = () => controller.abort(request.signal?.reason);
+    if (request.signal?.aborted) abortFromCaller();
+    else request.signal?.addEventListener('abort', abortFromCaller, { once: true });
 
     try {
       const response = await fetch(`${this.baseUrl}/v1/chat/completions`, {
@@ -63,6 +69,7 @@ export class VLLMAdapter implements AIAdapter {
       };
     } finally {
       clearTimeout(timeout);
+      request.signal?.removeEventListener('abort', abortFromCaller);
     }
   }
 }

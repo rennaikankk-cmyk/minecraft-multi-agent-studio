@@ -22,6 +22,7 @@ export interface GenerateOptions {
   schema?: z.ZodSchema;
   timeoutMs: number;
   traceId: string;
+  signal?: AbortSignal;
 }
 
 export interface GenerateResult {
