@@ -20,6 +20,15 @@ export {
   type CombatWhitelistSource,
 } from "./identity.js";
 export {
+  DEFAULT_WEAPON_POLICY,
+  WeaponManager,
+  type CombatSwingDecision,
+  type CombatWeaponCandidate,
+  type CombatWeaponKind,
+  type CombatWeaponPolicy,
+  type CombatWeaponSelection,
+} from "./weapon-manager.js";
+export {
   DEFAULT_ROTATION_POLICY,
   RotationController,
   eyePosition,
