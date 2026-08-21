@@ -1,0 +1,198 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  CombatIdentityRegistry,
+  type CombatWhitelistSource,
+} from "../src/identity.js";
+import {
+  ThreatAnalyzer,
+  type CombatEntityObservation,
+  type CombatThreatSnapshot,
+} from "../src/threat-analyzer.js";
+
+const SERVER = "local-isolated-test";
+
+const whitelist: CombatWhitelistSource = {
+  provenance: "operator-config",
+  serverProfileId: SERVER,
+  selfUsername: "StudioBot",
+  usernames: ["Renna"],
+  uuids: [],
+};
+
+function analyzer(): ThreatAnalyzer {
+  return new ThreatAnalyzer(
+    CombatIdentityRegistry.fromOperatorConfig(whitelist),
+  );
+}
+
+function observation(
+  overrides: Partial<CombatEntityObservation> = {},
+): CombatEntityObservation {
+  return {
+    entity: { entityId: 1, kind: "player", username: "Stranger", uuid: null },
+    position: { x: 30, y: 64, z: 0 },
+    velocity: null,
+    health: 20,
+    armorPoints: 0,
+    wieldingWeapon: false,
+    crystalNearby: false,
+    ...overrides,
+  };
+}
+
+function snapshot(
+  overrides: Partial<CombatThreatSnapshot> = {},
+): CombatThreatSnapshot {
+  return {
+    observedAtMs: 1_000,
+    serverProfileId: SERVER,
+    selfPosition: { x: 0, y: 64, z: 0 },
+    selfHealth: 20,
+    totemCount: 2,
+    entities: [],
+    ...overrides,
+  };
+}
+
+describe("ThreatAnalyzer", () => {
+  it("reports no threat when only whitelisted players are present", () => {
+    const assessment = analyzer().assess(
+      snapshot({
+        entities: [
+          observation({
+            entity: {
+              entityId: 7,
+              kind: "player",
+              username: "Renna",
+              uuid: null,
+            },
+            position: { x: 1, y: 64, z: 0 },
+          }),
+        ],
+      }),
+    );
+    expect(assessment).toMatchObject({
+      level: "none",
+      hostileCount: 0,
+      threats: [],
+      evaluatedAtMs: 1_000,
+    });
+  });
+
+  it("escalates to critical for an armed hostile inside crystal range", () => {
+    const assessment = analyzer().assess(
+      snapshot({
+        entities: [
+          observation({
+            position: { x: 2, y: 64, z: 0 },
+            velocity: { x: -5, y: 0, z: 0 },
+            wieldingWeapon: true,
+            crystalNearby: true,
+          }),
+        ],
+      }),
+    );
+    expect(assessment.level).toBe("critical");
+    expect(assessment.threats[0]?.reasons).toEqual([
+      "WITHIN_CRYSTAL_RANGE",
+      "WITHIN_MELEE_RANGE",
+      "CLOSING_FAST",
+      "CRYSTAL_PLACED",
+      "ARMED",
+    ]);
+    expect(assessment.threats[0]?.closingSpeed).toBeCloseTo(5, 6);
+  });
+
+  it("scores a distant unarmed hostile as low without inventing danger", () => {
+    const assessment = analyzer().assess(
+      snapshot({ entities: [observation()] }),
+    );
+    expect(assessment.level).toBe("low");
+    expect(assessment.threats[0]).toMatchObject({
+      score: 0,
+      reasons: [],
+      closingSpeed: null,
+    });
+    expect(assessment.threats[0]?.distance).toBeCloseTo(30, 6);
+  });
+
+  it("treats an unobservable velocity as stationary, not as worst case", () => {
+    const assessment = analyzer().assess(
+      snapshot({
+        entities: [observation({ position: { x: 2, y: 64, z: 0 } })],
+      }),
+    );
+    expect(assessment.threats[0]?.reasons).not.toContain("CLOSING_FAST");
+  });
+
+  it("does not credit a retreating hostile with closing speed", () => {
+    const assessment = analyzer().assess(
+      snapshot({
+        entities: [
+          observation({
+            position: { x: 2, y: 64, z: 0 },
+            velocity: { x: 6, y: 0, z: 0 },
+          }),
+        ],
+      }),
+    );
+    expect(assessment.threats[0]?.closingSpeed).toBeCloseTo(-6, 6);
+    expect(assessment.threats[0]?.reasons).not.toContain("CLOSING_FAST");
+  });
+
+  it("orders threats deterministically by score, then distance, then id", () => {
+    const assessment = analyzer().assess(
+      snapshot({
+        entities: [
+          observation({
+            entity: { entityId: 9, kind: "player", username: "A", uuid: null },
+            position: { x: 40, y: 64, z: 0 },
+          }),
+          observation({
+            entity: { entityId: 3, kind: "player", username: "B", uuid: null },
+            position: { x: 40, y: 64, z: 0 },
+          }),
+          observation({
+            entity: { entityId: 5, kind: "player", username: "C", uuid: null },
+            position: { x: 4, y: 64, z: 0 },
+          }),
+        ],
+      }),
+    );
+    expect(assessment.threats.map(({ entityId }) => entityId)).toEqual([5, 3, 9]);
+    expect(assessment.hostileCount).toBe(3);
+  });
+
+  it("flags a depleted totem reserve as the §1 downgrade signal", () => {
+    const assessment = analyzer().assess(snapshot({ totemCount: 0 }));
+    expect(assessment.totemDepleted).toBe(true);
+    expect(analyzer().assess(snapshot()).totemDepleted).toBe(false);
+  });
+
+  it("rejects a snapshot without a server profile or with broken numbers", () => {
+    expect(() => analyzer().assess(snapshot({ serverProfileId: " " }))).toThrowError(
+      TypeError,
+    );
+    expect(() =>
+      analyzer().assess(snapshot({ totemCount: -1 })),
+    ).toThrowError(TypeError);
+    expect(() =>
+      analyzer().assess(
+        snapshot({
+          entities: [observation({ position: { x: Number.NaN, y: 64, z: 0 } })],
+        }),
+      ),
+    ).toThrowError(TypeError);
+  });
+
+  it("refuses to assess entities observed on a different server", () => {
+    expect(() =>
+      analyzer().assess(
+        snapshot({ serverProfileId: "other", entities: [observation()] }),
+      ),
+    ).toThrowError(
+      expect.objectContaining({ code: "IDENTITY_SERVER_PROFILE_MISMATCH" }),
+    );
+  });
+});
