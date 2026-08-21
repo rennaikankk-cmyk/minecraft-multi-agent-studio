@@ -124,3 +124,19 @@ export {
   unsupportedVersionCompatibility,
   type MinecraftVersionSelection,
 } from "./version-compatibility.js";
+export {
+  categorizeStepFailure,
+  GoalExecutor,
+  stepOutcomeFromResult,
+  STEP_DISPATCH_UNAVAILABLE,
+  STEP_INVOCATION_INVALID,
+  STEP_TARGET_NOT_FOUND,
+} from "./goal-execution.js";
+export type {
+  DispatchableStep,
+  GoalExecutionDependencies,
+  GoalExecutionLogger,
+  GoalExecutionOutcome,
+  StepDispatcher,
+  StepInvoker,
+} from "./goal-execution.js";

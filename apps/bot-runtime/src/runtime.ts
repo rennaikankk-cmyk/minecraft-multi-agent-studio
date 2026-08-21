@@ -9,11 +9,16 @@ import {
   botStatusV1Schema,
   parseBotProtocolMessage,
   parseBotTelemetryMessage,
+  parseSkillCancellation,
+  parseSkillInvocation,
+  skillJsonValueSchema,
   type BotDisconnectedV1,
   type BotHeartbeatV1,
   type BotSkillCatalogEntryV1,
   type BotSkillCatalogV1,
   type SkillExecutionResultV1,
+  type SkillCancellationV1,
+  type SkillInvocationV1,
   type BotStopResultV1,
   type BotStatusV1,
   type BotVersionV1,
@@ -40,11 +45,21 @@ import {
   SkillExecutor,
   SkillFault,
   SkillRegistry,
+  type GoalRequest,
+  type PlannerInventory,
+  type RecoveryEffects,
   type SkillCapabilityRequest,
   type SkillCompatibilityEnvironment,
   type SkillCompatibilityResolution,
   type SkillExecutionAuthorization,
 } from "@minecraft-studio/skills";
+import { z } from "zod";
+
+import {
+  GoalExecutor,
+  type GoalExecutionOutcome,
+  type StepDispatcher,
+} from "./goal-execution.js";
 
 import type {
   BotClient,
@@ -59,7 +74,6 @@ import type {
   RuntimeLogger,
 } from "./runtime-types.js";
 import { unsupportedVersionCompatibility } from "./version-compatibility.js";
-import { AIRuntimeLoop, type AILoopConfig } from "./ai-runtime-loop.js";
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
@@ -75,9 +89,20 @@ export type RuntimeDependencies = {
    * 直到 ServerPolicyDetector 实测出更宽的档位并 upsert 进来。
    */
   serverPolicyStore?: ServerPolicyStore;
+  /**
+   * 把一步计划绑定成完整的 skill.invoke.v1 信封 + 授权。
+   *
+   * 运行时**不自己造**这两样：protocol 把 source.service 钉死为 "coordinator"，
+   * 授权还要与 skillId / skillVersion / invocationId 逐字段对上，bot-runtime
+   * 无权自签；挖哪一格、用哪个工作台也是世界状态问题，规划器不知道。
+   * 不注入时 pursueGoals 会如实失败（PLAN_STEP_DISPATCH_UNAVAILABLE），
+   * 不假装成功。
+   */
+  goalStepDispatcher?: StepDispatcher;
+  /** 恢复阶梯的副作用钩子。缺失的钩子记 repair-rejected，不假装执行过。 */
+  goalRecoveryEffects?: RecoveryEffects;
   now?: () => Date;
   randomId?: () => string;
-  aiLoopConfig?: AILoopConfig;
 };
 
 export type RuntimeStopOutcome =
@@ -86,7 +111,8 @@ export type RuntimeStopOutcome =
 
 export type RuntimeControlErrorCode =
   | "CONTROL_MESSAGE_REQUIRED"
-  | "COMMAND_ID_CONFLICT";
+  | "COMMAND_ID_CONFLICT"
+  | "CONTROL_IDENTITY_MISMATCH";
 
 export class RuntimeControlError extends Error {
   readonly code: RuntimeControlErrorCode;
@@ -140,7 +166,12 @@ function skillResultTelemetryDigest(
 
 function skillCatalogEntry(
   resolution: SkillCompatibilityResolution,
+  registry: SkillRegistry,
 ): BotSkillCatalogEntryV1 {
+  const definition = registry.resolve(resolution.skillId, resolution.skillVersion);
+  if (!definition) {
+    throw new Error("Skill compatibility catalog references an unknown definition.");
+  }
   const unavailableReasons = resolution.availability === "available"
     ? []
     : resolution.variants.flatMap((variant) =>
@@ -176,6 +207,9 @@ function skillCatalogEntry(
     skillVersion: resolution.skillVersion,
     availability: resolution.availability,
     verification: resolution.verification,
+    inputSchema: skillJsonValueSchema.parse(z.toJSONSchema(definition.inputSchema)),
+    timeoutMs: definition.timeoutMs,
+    idempotent: definition.idempotent,
     selectedVariantId: resolution.selectedVariantId,
     unavailableReasons,
   };
@@ -190,6 +224,7 @@ export class SingleBotRuntime {
   private readonly safetyController: L0SafetyController;
   private readonly skillRegistry: SkillRegistry;
   private readonly skillExecutor: SkillExecutor;
+  private readonly goalExecutor: GoalExecutor;
   private state: BotConnectionState = "offline";
   private client: BotClient | null = null;
   private generation = 0;
@@ -223,9 +258,12 @@ export class SingleBotRuntime {
     string,
     { fingerprint: string; result: Promise<BotStopResultV1> }
   >();
-  private readonly activeSkillControllers = new Set<AbortController>();
+  private readonly activeSkillControllers = new Map<string, AbortController>();
+  private readonly skillExecutions = new Map<
+    string,
+    { fingerprint: string; result: Promise<SkillExecutionResultV1> }
+  >();
   private readonly serverPolicyStore: ServerPolicyStore;
-  private aiLoop: AIRuntimeLoop | null = null;
 
   constructor(
     private readonly profile: ServerProfile,
@@ -257,15 +295,25 @@ export class SingleBotRuntime {
       policyView: (serverProfileId) =>
         new ServerPolicyGate(this.serverPolicyStore.resolve(serverProfileId)),
     });
-
-    // 初始化 AI 决策循环
-    if (dependencies.aiLoopConfig?.enabled) {
-      this.aiLoop = new AIRuntimeLoop(
-        dependencies.aiLoopConfig,
-        this.skillExecutor,
-        () => this.client
-      );
-    }
+    // §4 的接线：目标分解与恢复阶梯从此走真实派发路径。invoke 直接绑到
+    // handleSkillInvocation——同一条路径、同一套协议校验、同一份遥测，
+    // 不给计划步骤开旁路。
+    this.goalExecutor = new GoalExecutor({
+      invoke: (invocation, authorization, signal) =>
+        this.handleSkillInvocation(invocation, authorization, signal),
+      ...(dependencies.goalStepDispatcher
+        ? { dispatch: dependencies.goalStepDispatcher }
+        : {}),
+      ...(dependencies.goalRecoveryEffects
+        ? { effects: dependencies.goalRecoveryEffects }
+        : {}),
+      logger: {
+        info: (event, fields) =>
+          this.dependencies.logger.info(event, this.logFields(fields)),
+        warn: (event, fields) =>
+          this.dependencies.logger.warn(event, this.logFields(fields)),
+      },
+    });
   }
 
   getState(): BotConnectionState {
@@ -315,10 +363,6 @@ export class SingleBotRuntime {
     this.reconnectAttempts = 0;
     this.connect();
 
-    // 启动 AI 决策循环
-    if (this.aiLoop) {
-      this.aiLoop.start();
-    }
   }
 
   stop(
@@ -376,16 +420,17 @@ export class SingleBotRuntime {
     authorization: SkillExecutionAuthorization,
     externalSignal?: AbortSignal,
   ): Promise<SkillExecutionResultV1> {
+    const invocation = parseSkillInvocation(input);
     const controller = new AbortController();
     const cancelFromCaller = () => controller.abort();
     externalSignal?.addEventListener("abort", cancelFromCaller, { once: true });
     if (externalSignal?.aborted) cancelFromCaller();
-    this.activeSkillControllers.add(controller);
+    this.activeSkillControllers.set(invocation.payload.invocationId, controller);
 
     try {
       const startedAtMs = this.now().getTime();
       const result = await this.skillExecutor.execute(
-        input,
+        invocation,
         authorization,
         this.skillState(),
         controller.signal,
@@ -424,9 +469,128 @@ export class SingleBotRuntime {
       );
       return result;
     } finally {
-      this.activeSkillControllers.delete(controller);
+      if (this.activeSkillControllers.get(invocation.payload.invocationId) === controller) {
+        this.activeSkillControllers.delete(invocation.payload.invocationId);
+      }
       externalSignal?.removeEventListener("abort", cancelFromCaller);
     }
+  }
+
+  /**
+   * 追一组物品目标：分解成计划、逐步派发、失败按恢复阶梯处理。
+   *
+   * 这是 §4 智能层唯一的入口。三条 fail-closed 前置：
+   *   - bot 不在线或 L0 暂停了普通动作 → 立刻拒，不进规划（BOT_NOT_ONLINE /
+   *     NORMAL_ACTIONS_PAUSED 都会被分类成 SAFETY_INTERRUPT，阶梯会等恢复）。
+   *   - 没注入 dispatcher → GoalExecutor 自己如实失败并升级人工。
+   * `inventory` 由调用方给：运行时读不到可信的库存快照，猜一个会让补齐子计划
+   * 重复采集或漏采。给空对象就是"当作什么都没有"，不是"假装够了"。
+   */
+  pursueGoals(
+    goals: readonly GoalRequest[],
+    inventory: PlannerInventory = {},
+    externalSignal?: AbortSignal,
+  ): Promise<GoalExecutionOutcome> {
+    if (this.state !== "online") {
+      return Promise.resolve({
+        planned: false,
+        errorCode: "BOT_NOT_ONLINE",
+        blockedOn: this.state,
+      });
+    }
+    if (!this.canAcceptNormalActions()) {
+      return Promise.resolve({
+        planned: false,
+        errorCode: "NORMAL_ACTIONS_PAUSED",
+        blockedOn: this.safetyStatus.mode,
+      });
+    }
+    return this.goalExecutor.pursue(goals, inventory, externalSignal);
+  }
+
+  handleCoordinatorSkillCancellation(
+    input: unknown,
+    coordinatorInstanceId: string,
+  ): boolean {
+    const cancellation = parseSkillCancellation(input);
+    if (
+      cancellation.source.instanceId !== coordinatorInstanceId ||
+      cancellation.botId !== this.profile.botId
+    ) {
+      throw new RuntimeControlError(
+        "CONTROL_IDENTITY_MISMATCH",
+        "Skill cancellation does not match the authenticated Runtime Link identity.",
+      );
+    }
+    if (this.now().getTime() > Date.parse(cancellation.payload.expiresAt)) return false;
+    const controller = this.activeSkillControllers.get(
+      cancellation.payload.invocationId,
+    );
+    if (!controller) return false;
+    controller.abort();
+    return true;
+  }
+
+  handleCoordinatorSkillInvocation(
+    input: unknown,
+    coordinatorInstanceId: string,
+    externalSignal?: AbortSignal,
+  ): Promise<SkillExecutionResultV1> {
+    const invocation = parseSkillInvocation(input);
+    if (
+      invocation.source.instanceId !== coordinatorInstanceId ||
+      invocation.botId !== this.profile.botId
+    ) {
+      throw new RuntimeControlError(
+        "CONTROL_IDENTITY_MISMATCH",
+        "Skill invocation does not match the authenticated Runtime Link identity.",
+      );
+    }
+
+    const fingerprint = JSON.stringify(invocation);
+    const existing = this.skillExecutions.get(invocation.payload.invocationId);
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) {
+        throw new RuntimeControlError(
+          "COMMAND_ID_CONFLICT",
+          "The invocation ID was already used with different skill parameters.",
+        );
+      }
+      return existing.result;
+    }
+
+    const definition = this.skillRegistry.resolve(
+      invocation.payload.skillId,
+      invocation.payload.skillVersion,
+    );
+    const authorization: SkillExecutionAuthorization = {
+      decisionId: invocation.payload.authorization.decisionId,
+      actorId: invocation.payload.authorization.actorId,
+      sourceInstanceId: invocation.source.instanceId,
+      traceId: invocation.traceId,
+      taskId: invocation.taskId,
+      botId: invocation.botId,
+      invocationId: invocation.payload.invocationId,
+      skillId: invocation.payload.skillId,
+      skillVersion: invocation.payload.skillVersion,
+      issuedAt: invocation.payload.authorization.issuedAt,
+      expiresAt: invocation.payload.authorization.expiresAt,
+      allowedCapabilities: new Set(definition?.requiredCapabilities ?? []),
+    };
+    const result = this.handleSkillInvocation(
+      invocation,
+      authorization,
+      externalSignal,
+    );
+    this.skillExecutions.set(invocation.payload.invocationId, {
+      fingerprint,
+      result,
+    });
+    void result.then(
+      () => this.trimSkillExecutions(),
+      () => this.trimSkillExecutions(),
+    );
+    return result;
   }
 
   private async performStop(
@@ -434,11 +598,6 @@ export class SingleBotRuntime {
     operationTraceId: string,
   ): Promise<RuntimeStopOutcome> {
     this.stopping = true;
-
-    // 停止 AI 决策循环
-    if (this.aiLoop) {
-      this.aiLoop.stop();
-    }
 
     this.cancelActiveSkills();
     this.metrics.increment("bot_stop_requests_total", {
@@ -563,6 +722,16 @@ export class SingleBotRuntime {
     }
   }
 
+  private trimSkillExecutions(): void {
+    while (this.skillExecutions.size > 128) {
+      const oldest = this.skillExecutions.keys().next().value as
+        | string
+        | undefined;
+      if (!oldest) return;
+      this.skillExecutions.delete(oldest);
+    }
+  }
+
   private connect(): void {
     this.generation += 1;
     const activeGeneration = this.generation;
@@ -658,11 +827,6 @@ export class SingleBotRuntime {
     this.startStatusTimer(generation);
     this.emitStatus(generation);
     this.emitHeartbeat();
-
-    // 启动 AI 决策循环
-    if (this.aiLoop) {
-      this.aiLoop.start();
-    }
 
     this.dependencies.logger.info("bot_runtime_online", this.logFields({
       serverProfileId: this.profile.id,
@@ -1003,7 +1167,9 @@ export class SingleBotRuntime {
         observedAt: this.now().toISOString(),
         minecraftVersion: environment.minecraftVersion,
         protocolVersion: environment.protocolVersion,
-        skills: this.skillCompatibilityCatalog.map(skillCatalogEntry),
+        skills: this.skillCompatibilityCatalog.map((resolution) =>
+          skillCatalogEntry(resolution, this.skillRegistry),
+        ),
       },
     });
     this.emit(message);
@@ -1140,7 +1306,7 @@ export class SingleBotRuntime {
   }
 
   private cancelActiveSkills(): void {
-    for (const controller of this.activeSkillControllers) {
+    for (const controller of this.activeSkillControllers.values()) {
       controller.abort();
     }
   }
@@ -1156,4 +1322,3 @@ export class SingleBotRuntime {
     }
   }
 }
-

@@ -8,6 +8,7 @@ import type { AddressInfo } from "node:net";
 import type { Duplex } from "node:stream";
 
 import type { AppLogger } from "@minecraft-studio/observability";
+import { AISchedulerError } from "@minecraft-studio/ai-router";
 import {
   CONTROL_LINK_MAX_BOTS,
   CONTROL_LINK_MAX_PAYLOAD_BYTES,
@@ -16,6 +17,7 @@ import {
   controlLinkAcceptedV1Schema,
   controlLinkChallengeV1Schema,
   controlLinkClientProofInput,
+  controlLinkGoalResponseV1Schema,
   controlLinkServerProofInput,
   controlLinkSnapshotBeginV1Schema,
   controlLinkSnapshotEndV1Schema,
@@ -24,27 +26,39 @@ import {
   controlLinkStopResponseV1Schema,
   parseControlLinkClientMessage,
   type ControlLinkAuthenticateV1,
+  type ControlLinkGoalErrorCode,
+  type ControlLinkGoalRequestV1,
   type ControlLinkProofContext,
   type ControlLinkServerMessageV1,
   type ControlLinkStateUpsertV1,
   type ControlLinkStopErrorCode,
   type ControlLinkStopRequestV1,
   type PublicBotDetailV1,
+  type GoalDispatchResultV1,
 } from "@minecraft-studio/protocol";
 import { WebSocket, WebSocketServer } from "ws";
 
 import { BotRegistry, type BotRegistryRecord } from "./bot-registry.js";
 import type { ControlLinkClientConfig } from "./control-link-config.js";
 import {
+  LocalPlannerError,
+  type CoordinatorLocalPlanner,
+  type LocalPlanResult,
+} from "./local-planner.js";
+import {
   CoordinatorStopError,
   type StopController,
 } from "./stop-controller.js";
 
 const HANDSHAKE_TIMEOUT_MS = 5_000;
+const MAX_CLOCK_SKEW_MS = 30_000;
 const STOP_TIMEOUT_MS = 15_000;
 const STOP_GRACE_PERIOD_MS = 5_000;
 const MAX_SOCKET_BUFFERED_BYTES = 256 * 1_024;
 const MAX_RESPONDERS_PER_STOP = 4;
+const MAX_RESPONDERS_PER_GOAL = 4;
+const COMPLETED_GOAL_TTL_MS = 5 * 60_000;
+const MAX_COMPLETED_GOALS = 512;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 
@@ -60,6 +74,7 @@ export type ControlLinkServerOptions = Readonly<{
   clients: readonly ControlLinkClientConfig[];
   registry: BotRegistry;
   stopController: Pick<StopController, "requestStop">;
+  goalPlanner?: Pick<CoordinatorLocalPlanner, "planAndDispatch">;
   logger: AppLogger;
   now?: () => Date;
   randomId?: () => string;
@@ -97,6 +112,27 @@ type PendingStop = {
   responders: Map<string, StopResponder>;
 };
 
+type GoalResponder = {
+  session: ControlSession;
+  requestMessageId: string;
+};
+
+type PendingGoal = {
+  fingerprint: string;
+  request: ControlLinkGoalRequestV1;
+  responders: Map<string, GoalResponder>;
+  controller: AbortController;
+};
+
+type CompletedGoal = Readonly<{
+  fingerprint: string;
+  expiresAtMs: number;
+}> &
+  (
+    | Readonly<{ result: GoalDispatchResultV1; errorCode?: never }>
+    | Readonly<{ result: null; errorCode: ControlLinkGoalErrorCode }>
+  );
+
 export class ControlLinkServer {
   private readonly now: () => Date;
   private readonly randomId: () => string;
@@ -105,6 +141,8 @@ export class ControlLinkServer {
   private readonly sessions = new Set<ControlSession>();
   private readonly activeSessions = new Map<string, ControlSession>();
   private readonly pendingStops = new Map<string, PendingStop>();
+  private readonly pendingGoals = new Map<string, PendingGoal>();
+  private readonly completedGoals = new Map<string, CompletedGoal>();
   private readonly httpServer: HttpServer;
   private readonly webSocketServer: WebSocketServer;
   private readonly unsubscribeRegistry: () => void;
@@ -145,9 +183,16 @@ export class ControlLinkServer {
         this.clients.has(client.keyId) ||
         clientIds.has(client.clientId) ||
         hashes.has(client.secretSha256) ||
-        capabilities.size !== 2 ||
+        capabilities.size < 2 ||
+        capabilities.size > 3 ||
         !capabilities.has("bot.read") ||
-        !capabilities.has("bot.stop")
+        !capabilities.has("bot.stop") ||
+        [...capabilities].some(
+          (capability) =>
+            capability !== "bot.read" &&
+            capability !== "bot.stop" &&
+            capability !== "goal.submit",
+        )
       ) {
         throw new TypeError("Control Link client configuration is invalid.");
       }
@@ -261,6 +306,12 @@ export class ControlLinkServer {
       pending.responders.clear();
     }
     this.pendingStops.clear();
+    for (const pending of this.pendingGoals.values()) {
+      pending.responders.clear();
+      pending.controller.abort(new Error("coordinator_shutdown"));
+    }
+    this.pendingGoals.clear();
+    this.completedGoals.clear();
     const closures = [...this.sessions].map((session) => {
       this.revokeSession(session);
       return closeWebSocket(session.socket);
@@ -395,6 +446,10 @@ export class ControlLinkServer {
       this.closeSession(session, 1008, "message_invalid");
       return;
     }
+    if (!withinClockSkew(message.timestamp, validNow(this.now()))) {
+      this.closeSession(session, 1008, "message_time_invalid");
+      return;
+    }
     if (!session.authenticated) {
       if (message.type !== "control.link.authenticate.v1") {
         this.closeSession(session, 1008, "authentication_required");
@@ -411,7 +466,11 @@ export class ControlLinkServer {
       this.closeSession(session, 1008, "session_identity_mismatch");
       return;
     }
-    this.handleStopRequest(session, message);
+    if (message.type === "control.link.stop-request.v1") {
+      this.handleStopRequest(session, message);
+      return;
+    }
+    this.handleGoalRequest(session, message);
   }
 
   private authenticate(
@@ -657,7 +716,11 @@ export class ControlLinkServer {
   ): void {
     if (session.closing || !session.authenticated || !session.ready) return;
     const operationId = request.payload.operationId;
-    const fingerprint = JSON.stringify(request.payload);
+    // Authorization timestamps are intentionally excluded. The Control API
+    // may renew the short authorization window when retrying the same
+    // idempotent operation after a lost response; identity and command
+    // parameters remain conflict-bound.
+    const fingerprint = stopFingerprint(request);
     const existing = this.pendingStops.get(operationId);
     if (existing) {
       if (existing.fingerprint !== fingerprint) {
@@ -683,7 +746,7 @@ export class ControlLinkServer {
     const issuedAt = new Date(request.payload.issuedAt);
     const expiresAt = new Date(request.payload.expiresAt);
     if (
-      issuedAt.getTime() > now.getTime() ||
+      !withinClockSkew(request.payload.issuedAt, now) ||
       expiresAt.getTime() < now.getTime() + STOP_TIMEOUT_MS ||
       !session.client?.capabilities.includes("bot.stop")
     ) {
@@ -825,9 +888,243 @@ export class ControlLinkServer {
     });
   }
 
+  private handleGoalRequest(
+    session: ControlSession,
+    request: ControlLinkGoalRequestV1,
+  ): void {
+    if (session.closing || !session.authenticated || !session.ready) return;
+    const operationId = request.payload.operationId;
+    const fingerprint = goalFingerprint(request);
+    const now = validNow(this.now());
+    this.pruneCompletedGoals(now.getTime());
+    const completed = this.completedGoals.get(operationId);
+    if (completed) {
+      if (completed.fingerprint !== fingerprint) {
+        this.sendGoalFailure(session, request, "GOAL_ID_CONFLICT");
+      } else if (completed.result) {
+        this.sendGoalSuccess(
+          { session, requestMessageId: request.messageId },
+          request,
+          completed.result,
+        );
+      } else {
+        this.sendGoalFailure(
+          session,
+          request,
+          completed.errorCode ?? "CONTROL_LINK_INTERNAL_ERROR",
+        );
+      }
+      return;
+    }
+    const existing = this.pendingGoals.get(operationId);
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) {
+        this.sendGoalFailure(session, request, "GOAL_ID_CONFLICT");
+        return;
+      }
+      if (existing.responders.size >= MAX_RESPONDERS_PER_GOAL) {
+        this.sendGoalFailure(session, request, "CONTROL_LINK_BACKPRESSURE");
+        return;
+      }
+      existing.responders.set(request.messageId, {
+        session,
+        requestMessageId: request.messageId,
+      });
+      return;
+    }
+    if (this.pendingGoals.size >= this.maxPendingStops) {
+      this.sendGoalFailure(session, request, "CONTROL_LINK_BACKPRESSURE");
+      return;
+    }
+
+    const issuedAt = new Date(request.payload.issuedAt);
+    const expiresAt = new Date(request.payload.expiresAt);
+    if (
+      !withinClockSkew(request.payload.issuedAt, now) ||
+      expiresAt.getTime() < now.getTime() + request.payload.timeoutMs ||
+      !session.client?.capabilities.includes("goal.submit")
+    ) {
+      this.sendGoalFailure(session, request, "AUTHORIZATION_REJECTED");
+      return;
+    }
+    if (!this.options.goalPlanner) {
+      this.sendGoalFailure(session, request, "AI_UNAVAILABLE");
+      return;
+    }
+
+    const pending: PendingGoal = {
+      fingerprint,
+      request,
+      responders: new Map([
+        [
+          request.messageId,
+          { session, requestMessageId: request.messageId },
+        ],
+      ]),
+      controller: new AbortController(),
+    };
+    this.pendingGoals.set(operationId, pending);
+    void this.executeGoal(pending);
+  }
+
+  private async executeGoal(pending: PendingGoal): Promise<void> {
+    const request = pending.request;
+    const controller = pending.controller;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new Error("goal_timeout"));
+    }, request.payload.timeoutMs);
+    try {
+      const planResult = await this.options.goalPlanner!.planAndDispatch({
+        requestId: request.payload.operationId,
+        traceId: request.payload.operationId,
+        taskId: request.payload.taskId,
+        botId: request.payload.botId,
+        operatorGoal: request.payload.operatorGoal,
+        timeoutMs: request.payload.timeoutMs,
+        signal: controller.signal,
+      });
+      if (timedOut || controller.signal.aborted) {
+        throw new Error("goal_timeout");
+      }
+      const result = publicGoalResult(request, planResult);
+      if (this.stopped || this.pendingGoals.get(request.payload.operationId) !== pending) {
+        return;
+      }
+      this.rememberCompletedGoal(request.payload.operationId, {
+        fingerprint: pending.fingerprint,
+        result,
+        expiresAtMs: validNow(this.now()).getTime() + COMPLETED_GOAL_TTL_MS,
+      });
+      for (const responder of pending.responders.values()) {
+        this.sendGoalSuccess(responder, request, result);
+      }
+      safeLog(this.options.logger, "info", "coordinator_control_link_goal_result", {
+        traceId: request.payload.operationId,
+        taskId: request.payload.taskId,
+        botId: request.payload.botId,
+        clientId: request.payload.clientId,
+        action: result.action,
+      });
+    } catch (cause) {
+      const errorCode = goalErrorCode(cause, timedOut);
+      if (this.stopped || this.pendingGoals.get(request.payload.operationId) !== pending) {
+        return;
+      }
+      this.rememberCompletedGoal(request.payload.operationId, {
+        fingerprint: pending.fingerprint,
+        result: null,
+        errorCode,
+        expiresAtMs: validNow(this.now()).getTime() + COMPLETED_GOAL_TTL_MS,
+      });
+      for (const responder of pending.responders.values()) {
+        this.sendGoalFailure(
+          responder.session,
+          request,
+          errorCode,
+          responder.requestMessageId,
+        );
+      }
+      safeLog(this.options.logger, "warn", "coordinator_control_link_goal_failed", {
+        traceId: request.payload.operationId,
+        taskId: request.payload.taskId,
+        botId: request.payload.botId,
+        clientId: request.payload.clientId,
+        code: errorCode,
+      });
+    } finally {
+      clearTimeout(timer);
+      if (this.pendingGoals.get(request.payload.operationId) === pending) {
+        this.pendingGoals.delete(request.payload.operationId);
+      }
+    }
+  }
+
+  private rememberCompletedGoal(operationId: string, completed: CompletedGoal): void {
+    this.completedGoals.delete(operationId);
+    this.completedGoals.set(operationId, completed);
+    while (this.completedGoals.size > MAX_COMPLETED_GOALS) {
+      const oldest = this.completedGoals.keys().next().value as string | undefined;
+      if (!oldest) break;
+      this.completedGoals.delete(oldest);
+    }
+  }
+
+  private pruneCompletedGoals(nowMs: number): void {
+    for (const [operationId, completed] of this.completedGoals) {
+      if (completed.expiresAtMs <= nowMs) this.completedGoals.delete(operationId);
+    }
+  }
+
+  private sendGoalSuccess(
+    responder: GoalResponder,
+    request: ControlLinkGoalRequestV1,
+    result: GoalDispatchResultV1,
+  ): void {
+    if (responder.session.closing) return;
+    let response: ReturnType<typeof controlLinkGoalResponseV1Schema.parse>;
+    try {
+      response = controlLinkGoalResponseV1Schema.parse({
+        schemaVersion: "1.0",
+        messageId: this.randomId(),
+        timestamp: validNow(this.now()).toISOString(),
+        type: "control.link.goal-response.v1",
+        ok: true,
+        payload: {
+          coordinatorInstanceId: this.options.instanceId,
+          requestMessageId: responder.requestMessageId,
+          operationId: request.payload.operationId,
+          taskId: request.payload.taskId,
+          botId: request.payload.botId,
+          result,
+        },
+      });
+    } catch {
+      this.closeSession(responder.session, 1011, "goal_response_invalid");
+      return;
+    }
+    this.sendFrame(responder.session.socket, response, (error) => {
+      if (error) this.closeSession(responder.session, 1013, "goal_response_failed");
+    });
+  }
+
+  private sendGoalFailure(
+    session: ControlSession,
+    request: ControlLinkGoalRequestV1,
+    errorCode: ControlLinkGoalErrorCode,
+    requestMessageId = request.messageId,
+  ): void {
+    if (session.closing) return;
+    let response: ReturnType<typeof controlLinkGoalResponseV1Schema.parse>;
+    try {
+      response = controlLinkGoalResponseV1Schema.parse({
+        schemaVersion: "1.0",
+        messageId: this.randomId(),
+        timestamp: validNow(this.now()).toISOString(),
+        type: "control.link.goal-response.v1",
+        ok: false,
+        payload: {
+          coordinatorInstanceId: this.options.instanceId,
+          requestMessageId,
+          operationId: request.payload.operationId,
+          taskId: request.payload.taskId,
+          botId: request.payload.botId,
+          errorCode,
+        },
+      });
+    } catch {
+      this.closeSession(session, 1011, "goal_response_invalid");
+      return;
+    }
+    this.sendFrame(session.socket, response, (error) => {
+      if (error) this.closeSession(session, 1013, "goal_response_failed");
+    });
+  }
+
   private matchesSession(
     session: ControlSession,
-    request: ControlLinkStopRequestV1,
+    request: ControlLinkStopRequestV1 | ControlLinkGoalRequestV1,
   ): boolean {
     return (
       request.payload.coordinatorInstanceId === this.options.instanceId &&
@@ -925,6 +1222,13 @@ export class ControlLinkServer {
         }
       }
     }
+    for (const pending of this.pendingGoals.values()) {
+      for (const [requestMessageId, responder] of pending.responders) {
+        if (responder.session === session) {
+          pending.responders.delete(requestMessageId);
+        }
+      }
+    }
   }
 
   private terminateSession(session: ControlSession): void {
@@ -993,6 +1297,14 @@ function validNow(value: Date): Date {
   return value;
 }
 
+function withinClockSkew(value: string, now: Date): boolean {
+  const timestamp = Date.parse(value);
+  return (
+    Number.isFinite(timestamp) &&
+    Math.abs(timestamp - now.getTime()) <= MAX_CLOCK_SKEW_MS
+  );
+}
+
 function hasControlLinkProtocol(value: string | string[] | undefined): boolean {
   const joined = Array.isArray(value) ? value.join(",") : value;
   return (
@@ -1053,6 +1365,89 @@ function safeLog(
   } catch {
     // Observability failures cannot alter authenticated transport state.
   }
+}
+
+function publicGoalResult(
+  request: ControlLinkGoalRequestV1,
+  result: LocalPlanResult,
+): GoalDispatchResultV1 {
+  const ai = {
+    attempts: result.ai.attempts,
+    queueTimeMs: Math.round(result.ai.queueTimeMs),
+    executionTimeMs: Math.round(result.ai.executionTimeMs),
+    totalTimeMs: Math.round(result.ai.totalTimeMs),
+  };
+  if (result.action === "noop") {
+    return {
+      action: "noop",
+      botId: request.payload.botId,
+      taskId: request.payload.taskId,
+      reasonCode: result.reasonCode,
+      ai,
+    };
+  }
+  const payload = result.result.payload;
+  const base = {
+    action: "skill_result",
+    botId: request.payload.botId,
+    taskId: request.payload.taskId,
+    reasonCode: result.reasonCode,
+    skillId: payload.skillId,
+    skillVersion: payload.skillVersion,
+    outcome: payload.outcome,
+    ai,
+  } as const;
+  return payload.outcome === "completed"
+    ? base
+    : { ...base, errorCode: payload.errorCode };
+}
+
+function goalErrorCode(
+  cause: unknown,
+  timedOut: boolean,
+): ControlLinkGoalErrorCode {
+  if (timedOut) return "AI_TIMEOUT";
+  if (cause instanceof AISchedulerError) {
+    if (cause.code === "AI_QUEUE_FULL") return "AI_QUEUE_FULL";
+    if (cause.code === "AI_REQUEST_TIMEOUT") return "AI_TIMEOUT";
+    return "AI_UNAVAILABLE";
+  }
+  if (cause instanceof LocalPlannerError) {
+    if (cause.code === "PLANNER_TIMEOUT") return "AI_TIMEOUT";
+    if (
+      cause.code === "PLANNER_BOT_UNAVAILABLE" ||
+      cause.code === "PLANNER_SAFETY_PAUSED" ||
+      cause.code === "PLANNER_SKILL_CATALOG_UNAVAILABLE"
+    ) {
+      return "BOT_UNAVAILABLE";
+    }
+    return "PLANNER_REJECTED";
+  }
+  return "SKILL_DISPATCH_FAILED";
+}
+
+function goalFingerprint(request: ControlLinkGoalRequestV1): string {
+  return JSON.stringify({
+    operationId: request.payload.operationId,
+    taskId: request.payload.taskId,
+    botId: request.payload.botId,
+    clientId: request.payload.clientId,
+    controlApiInstanceId: request.payload.controlApiInstanceId,
+    coordinatorInstanceId: request.payload.coordinatorInstanceId,
+    operatorGoal: request.payload.operatorGoal,
+    timeoutMs: request.payload.timeoutMs,
+  });
+}
+
+function stopFingerprint(request: ControlLinkStopRequestV1): string {
+  return JSON.stringify({
+    coordinatorInstanceId: request.payload.coordinatorInstanceId,
+    clientId: request.payload.clientId,
+    controlApiInstanceId: request.payload.controlApiInstanceId,
+    operationId: request.payload.operationId,
+    botId: request.payload.botId,
+    actorId: request.payload.actorId,
+  });
 }
 
 function boundedInteger(

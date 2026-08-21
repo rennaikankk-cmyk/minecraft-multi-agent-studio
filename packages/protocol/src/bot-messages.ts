@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+import {
+  skillIdentifierSchema,
+  skillVersionSchema,
+} from "./skill-identifiers.js";
+
 export const identifierSchema = z
   .string()
   .min(1)
@@ -107,23 +112,373 @@ export const skillCompatibilityVerificationSchema = z.enum([
   "unverified",
 ]);
 
-const skillCatalogIdentifierSchema = z
+export const SKILL_INPUT_SCHEMA_MAX_BYTES = 32_768;
+export const SKILL_INPUT_SCHEMA_MAX_DEPTH = 16;
+export const SKILL_INPUT_SCHEMA_MAX_PROPERTIES = 256;
+const SKILL_INPUT_SCHEMA_MAX_NODES = 512;
+const SKILL_INPUT_SCHEMA_MAX_ARRAY_LENGTH = 64;
+const SKILL_INPUT_SCHEMA_MAX_STRING_LENGTH = 256;
+const SKILL_INPUT_SCHEMA_MAX_KEYS_PER_NODE = 256;
+const SKILL_INPUT_SCHEMA_DRAFT =
+  "https://json-schema.org/draft/2020-12/schema";
+
+const skillInputSchemaAllowedKeys = new Set([
+  "$schema",
+  "type",
+  "enum",
+  "const",
+  "anyOf",
+  "oneOf",
+  "allOf",
+  "properties",
+  "required",
+  "additionalProperties",
+  "items",
+  "prefixItems",
+  "minItems",
+  "maxItems",
+  "minLength",
+  "maxLength",
+  "pattern",
+  "format",
+  "minimum",
+  "maximum",
+  "exclusiveMinimum",
+  "exclusiveMaximum",
+  "multipleOf",
+]);
+
+// Variant IDs are local compatibility labels rather than Skill identifiers;
+// preserve their historical one-character lower-case boundary.
+const skillVariantIdentifierSchema = z
   .string()
   .min(1)
   .max(128)
   .regex(/^[a-z0-9][a-z0-9._-]*[a-z0-9]$/u);
 
-const skillCatalogVersionSchema = z
-  .string()
-  .min(5)
-  .max(64)
-  .regex(
-    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u,
+const skillInputSchemaPropertyName = /^[A-Za-z0-9][A-Za-z0-9_.:-]*$/u;
+const skillInputSchemaReservedPropertyNames = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
+const skillInputSchemaFormats = new Set([
+  "base64",
+  "base64url",
+  "cidr",
+  "cidr-v6",
+  "cuid",
+  "cuid2",
+  "date",
+  "date-time",
+  "duration",
+  "e164",
+  "email",
+  "emoji",
+  "ipv4",
+  "ipv6",
+  "jwt",
+  "ksuid",
+  "mac",
+  "nanoid",
+  "time",
+  "ulid",
+  "uri",
+  "uri-reference",
+  "uuid",
+  "xid",
+]);
+
+type SkillInputSchemaObject = Record<string, unknown>;
+type SkillInputJsonPrimitive = string | number | boolean | null;
+type SkillInputJsonValue =
+  | SkillInputJsonPrimitive
+  | SkillInputJsonValue[]
+  | { [key: string]: SkillInputJsonValue };
+type SkillInputSchemaIssue = {
+  path: (string | number)[];
+  message: string;
+};
+
+function isSkillInputSchemaPrimitive(value: unknown): value is SkillInputJsonPrimitive {
+  return (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean" ||
+    (typeof value === "number" && Number.isFinite(value))
   );
+}
+
+function isSkillInputSchemaObject(value: unknown): value is SkillInputSchemaObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function addSkillInputSchemaIssue(
+  issues: SkillInputSchemaIssue[],
+  path: (string | number)[],
+  message: string,
+): void {
+  if (issues.length < 32) issues.push({ path, message });
+}
+
+function validateSkillInputSchema(value: unknown): SkillInputSchemaIssue[] {
+  const issues: SkillInputSchemaIssue[] = [];
+  if (!isSkillInputSchemaObject(value)) {
+    return [{ path: [], message: "Skill inputSchema must be a JSON Schema object." }];
+  }
+
+  let propertyCount = 0;
+  let nodeCount = 0;
+  const visitedObjects = new WeakSet<object>();
+
+  const visit = (node: unknown, path: (string | number)[], depth: number): void => {
+    if (!isSkillInputSchemaObject(node)) {
+      addSkillInputSchemaIssue(issues, path, "Schema nodes must be JSON objects.");
+      return;
+    }
+    if (visitedObjects.has(node)) {
+      addSkillInputSchemaIssue(issues, path, "Schema nodes must not contain cycles or shared object references.");
+      return;
+    }
+    visitedObjects.add(node);
+    nodeCount += 1;
+    if (nodeCount > SKILL_INPUT_SCHEMA_MAX_NODES) {
+      addSkillInputSchemaIssue(issues, path, "Skill inputSchema exceeds the node limit.");
+      return;
+    }
+    if (depth > SKILL_INPUT_SCHEMA_MAX_DEPTH) {
+      addSkillInputSchemaIssue(issues, path, "Skill inputSchema exceeds the depth limit.");
+      return;
+    }
+    const keys = Object.keys(node);
+    if (keys.length > SKILL_INPUT_SCHEMA_MAX_KEYS_PER_NODE) {
+      addSkillInputSchemaIssue(
+        issues,
+        path,
+        "A Skill inputSchema node contains too many keywords.",
+      );
+    }
+    if (keys.length === 0) {
+      addSkillInputSchemaIssue(issues, path, "Schema nodes must contain a validation keyword.");
+    }
+    if (
+      !["type", "enum", "const", "anyOf", "oneOf", "allOf"].some(
+        (key) => key in node,
+      )
+    ) {
+      addSkillInputSchemaIssue(
+        issues,
+        path,
+        "Schema nodes must declare a concrete type or bounded composition.",
+      );
+    }
+    for (const key of keys.slice(0, SKILL_INPUT_SCHEMA_MAX_KEYS_PER_NODE)) {
+      if (!skillInputSchemaAllowedKeys.has(key)) {
+        addSkillInputSchemaIssue(
+          issues,
+          [...path, key],
+          `Unsupported or annotation JSON Schema keyword: ${key}.`,
+        );
+      }
+    }
+
+    if ("$schema" in node && node.$schema !== SKILL_INPUT_SCHEMA_DRAFT) {
+      addSkillInputSchemaIssue(issues, [...path, "$schema"], "Only the draft 2020-12 JSON Schema dialect is allowed.");
+    }
+    if ("type" in node) {
+      const types = Array.isArray(node.type) ? node.type : [node.type];
+      if (
+        types.length === 0 ||
+        types.length > 4 ||
+        new Set(types).size !== types.length ||
+        types.some(
+          (type) =>
+            typeof type !== "string" ||
+            !["object", "array", "string", "number", "integer", "boolean", "null"].includes(type),
+        )
+      ) {
+        addSkillInputSchemaIssue(issues, [...path, "type"], "Schema type must use the bounded JSON Schema type set.");
+      }
+    }
+
+    const validateNonNegativeInteger = (key: string): void => {
+      if (
+        key in node &&
+        (!Number.isSafeInteger(node[key]) || (node[key] as number) < 0)
+      ) {
+        addSkillInputSchemaIssue(issues, [...path, key], `${key} must be a non-negative safe integer.`);
+      }
+    };
+    for (const key of [
+      "minItems",
+      "maxItems",
+      "minLength",
+      "maxLength",
+    ]) {
+      validateNonNegativeInteger(key);
+    }
+    for (const [minimumKey, maximumKey] of [
+      ["minItems", "maxItems"],
+      ["minLength", "maxLength"],
+    ] as const) {
+      if (
+        typeof node[minimumKey] === "number" &&
+        typeof node[maximumKey] === "number" &&
+        node[minimumKey] > node[maximumKey]
+      ) {
+        addSkillInputSchemaIssue(issues, [...path, maximumKey], `${maximumKey} cannot be less than ${minimumKey}.`);
+      }
+    }
+    for (const key of [
+      "minimum",
+      "maximum",
+      "multipleOf",
+      "exclusiveMinimum",
+      "exclusiveMaximum",
+    ]) {
+      if (key in node && (typeof node[key] !== "number" || !Number.isFinite(node[key]))) {
+        addSkillInputSchemaIssue(issues, [...path, key], `${key} must be a finite number.`);
+      }
+    }
+    if (typeof node.multipleOf === "number" && node.multipleOf <= 0) {
+      addSkillInputSchemaIssue(issues, [...path, "multipleOf"], "multipleOf must be positive.");
+    }
+    for (const key of ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"]) {
+      if (typeof node[key] === "number" && Math.abs(node[key]) > Number.MAX_SAFE_INTEGER) {
+        addSkillInputSchemaIssue(issues, [...path, key], `${key} exceeds the safe numeric range.`);
+      }
+    }
+    if ("pattern" in node) {
+      if (
+        typeof node.pattern !== "string" ||
+        node.pattern.length > SKILL_INPUT_SCHEMA_MAX_STRING_LENGTH
+      ) {
+        addSkillInputSchemaIssue(issues, [...path, "pattern"], "pattern must be a short string.");
+      } else {
+        try {
+          // Compile here so fromJSONSchema cannot fail after catalog admission.
+          new RegExp(node.pattern);
+        } catch {
+          addSkillInputSchemaIssue(issues, [...path, "pattern"], "pattern must be a valid regular expression.");
+        }
+      }
+    }
+    if ("format" in node && (typeof node.format !== "string" || !skillInputSchemaFormats.has(node.format))) {
+      addSkillInputSchemaIssue(issues, [...path, "format"], "format is not in the supported validation subset.");
+    }
+
+    if ("enum" in node) {
+      if (!Array.isArray(node.enum) || node.enum.length === 0 || node.enum.length > SKILL_INPUT_SCHEMA_MAX_ARRAY_LENGTH) {
+        addSkillInputSchemaIssue(issues, [...path, "enum"], "enum must be a bounded non-empty primitive array.");
+      } else if (node.enum.some((entry) => !isSkillInputSchemaPrimitive(entry))) {
+        addSkillInputSchemaIssue(issues, [...path, "enum"], "enum values must be primitive JSON values.");
+      }
+    }
+    if ("const" in node && !isSkillInputSchemaPrimitive(node.const)) {
+      addSkillInputSchemaIssue(issues, [...path, "const"], "const must be a primitive JSON value.");
+    }
+
+    if ("required" in node) {
+      if (!Array.isArray(node.required) || node.required.length > SKILL_INPUT_SCHEMA_MAX_ARRAY_LENGTH) {
+        addSkillInputSchemaIssue(issues, [...path, "required"], "required must be a bounded array of safe property names.");
+      } else {
+        const required = new Set<string>();
+        for (const [index, name] of node.required.entries()) {
+          if (
+            typeof name !== "string" ||
+            name.length > 128 ||
+            !skillInputSchemaPropertyName.test(name) ||
+            skillInputSchemaReservedPropertyNames.has(name) ||
+            required.has(name)
+          ) {
+            addSkillInputSchemaIssue(issues, [...path, "required", index], "required contains an invalid or duplicate property name.");
+          }
+          if (typeof name === "string") required.add(name);
+        }
+      }
+    }
+    if ("properties" in node) {
+      if (!isSkillInputSchemaObject(node.properties)) {
+        addSkillInputSchemaIssue(issues, [...path, "properties"], "properties must be an object of schema nodes.");
+      } else {
+        const properties = Object.entries(node.properties);
+        const remainingPropertyBudget = Math.max(
+          0,
+          SKILL_INPUT_SCHEMA_MAX_PROPERTIES - propertyCount,
+        );
+        propertyCount += properties.length;
+        if (propertyCount > SKILL_INPUT_SCHEMA_MAX_PROPERTIES) {
+          addSkillInputSchemaIssue(issues, [...path, "properties"], "Skill inputSchema exceeds the property limit.");
+        }
+        for (const [index, [name, child]] of properties.entries()) {
+          if (index >= remainingPropertyBudget) break;
+          if (name.length > 128 || !skillInputSchemaPropertyName.test(name)) {
+            addSkillInputSchemaIssue(issues, [...path, "properties", name], "Property names must be short safe identifiers.");
+          }
+          if (skillInputSchemaReservedPropertyNames.has(name)) {
+            addSkillInputSchemaIssue(issues, [...path, "properties", name], "Reserved property names are not allowed.");
+          }
+          visit(child, [...path, "properties", name], depth + 1);
+        }
+      }
+    }
+
+    if ("additionalProperties" in node) {
+      if (typeof node.additionalProperties === "boolean") {
+        // Boolean additionalProperties is a safe strict/loose object boundary.
+      } else {
+        visit(node.additionalProperties, [...path, "additionalProperties"], depth + 1);
+      }
+    }
+    if ("items" in node) visit(node.items, [...path, "items"], depth + 1);
+    if ("prefixItems" in node) {
+      if (!Array.isArray(node.prefixItems) || node.prefixItems.length > SKILL_INPUT_SCHEMA_MAX_ARRAY_LENGTH) {
+        addSkillInputSchemaIssue(issues, [...path, "prefixItems"], "prefixItems must be a bounded schema array.");
+      } else {
+        node.prefixItems.forEach((child, index) => visit(child, [...path, "prefixItems", index], depth + 1));
+      }
+    }
+    for (const key of ["anyOf", "oneOf", "allOf"] as const) {
+      if (key in node) {
+        if (!Array.isArray(node[key]) || node[key].length === 0 || node[key].length > SKILL_INPUT_SCHEMA_MAX_ARRAY_LENGTH) {
+          addSkillInputSchemaIssue(issues, [...path, key], `${key} must be a bounded non-empty schema array.`);
+        } else {
+          node[key].forEach((child, index) => visit(child, [...path, key, index], depth + 1));
+        }
+      }
+    }
+  };
+
+  visit(value, [], 0);
+  try {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined || new TextEncoder().encode(serialized).byteLength > SKILL_INPUT_SCHEMA_MAX_BYTES) {
+      addSkillInputSchemaIssue(issues, [], "Skill inputSchema exceeds the serialized byte limit.");
+    }
+  } catch {
+    addSkillInputSchemaIssue(issues, [], "Skill inputSchema must be serializable JSON.");
+  }
+  if (issues.length === 0) {
+    try {
+      z.fromJSONSchema(value as Parameters<typeof z.fromJSONSchema>[0]);
+    } catch {
+      addSkillInputSchemaIssue(issues, [], "Skill inputSchema is not supported by Zod fromJSONSchema.");
+    }
+  }
+  return issues;
+}
+
+const skillInputSchemaValueSchema = z.custom<SkillInputJsonValue>(() => true);
+
+export const skillInputSchemaSchema = skillInputSchemaValueSchema.superRefine((value, context) => {
+  for (const issue of validateSkillInputSchema(value)) {
+    context.addIssue({ code: "custom", path: issue.path, message: issue.message });
+  }
+});
 
 export const skillCompatibilityReasonSchema = z
   .object({
-    variantId: skillCatalogIdentifierSchema,
+    variantId: skillVariantIdentifierSchema,
     code: z.enum([
       "FEATURE_MISSING",
       "RESOURCE_MISSING",
@@ -137,11 +492,14 @@ export const skillCompatibilityReasonSchema = z
 
 export const botSkillCatalogEntryV1Schema = z
   .object({
-    skillId: skillCatalogIdentifierSchema,
-    skillVersion: skillCatalogVersionSchema,
+    skillId: skillIdentifierSchema,
+    skillVersion: skillVersionSchema,
     availability: skillCompatibilityAvailabilitySchema,
     verification: skillCompatibilityVerificationSchema,
-    selectedVariantId: skillCatalogIdentifierSchema.nullable(),
+    inputSchema: skillInputSchemaSchema,
+    timeoutMs: z.number().int().min(10).max(60_000),
+    idempotent: z.boolean(),
+    selectedVariantId: skillVariantIdentifierSchema.nullable(),
     unavailableReasons: z.array(skillCompatibilityReasonSchema).max(128),
   })
   .strict()

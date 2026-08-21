@@ -10,14 +10,12 @@ import {
 import type { RuntimeLinkClientConfig } from "./runtime-link-config.js";
 import { SingleBotRuntime, type RuntimeStopOutcome } from "./runtime.js";
 import type { ServerProfile } from "./server-profile.js";
-import type { AILoopConfig } from "./ai-runtime-loop.js";
 
 export type BotRuntimeHostOptions = Readonly<{
   profile: ServerProfile;
   runtimeLinkConfig: RuntimeLinkClientConfig;
   logger: AppLogger;
   createClient?: BotClientFactory;
-  aiLoopConfig?: AILoopConfig;
   onFatal?: (error: RuntimeLinkClientError) => Promise<void> | void;
 }>;
 
@@ -37,7 +35,6 @@ export class BotRuntimeHost {
         runtimeLink?.publishTelemetry(message);
       },
       logger: options.logger,
-      ...(options.aiLoopConfig ? { aiLoopConfig: options.aiLoopConfig } : {}),
     });
     this.runtimeLink = runtimeLink = new RuntimeLinkClient({
       config: options.runtimeLinkConfig,
@@ -46,6 +43,16 @@ export class BotRuntimeHost {
       logger: options.logger,
       handleStopCommand: (command, authorizationContext) =>
         this.runtime.handleStopCommand(command, authorizationContext),
+      handleSkillInvocation: (invocation, coordinatorInstanceId) =>
+        this.runtime.handleCoordinatorSkillInvocation(
+          invocation,
+          coordinatorInstanceId,
+        ),
+      handleSkillCancellation: (cancellation, coordinatorInstanceId) =>
+        this.runtime.handleCoordinatorSkillCancellation(
+          cancellation,
+          coordinatorInstanceId,
+        ),
       publishCurrentState: () => this.runtime.publishCurrentState(),
       failClosed: async (error) => {
         options.logger.error("bot_runtime_control_link_lost", {

@@ -9,7 +9,7 @@ test("console navigation reaches every page", async ({ page }) => {
   await expect(page.getByTestId("bot-overview-counts")).toBeVisible();
 
   await page.getByRole("link", { name: "任务" }).click();
-  await expect(page.getByTestId("tasks-not-connected")).toContainText("后端未接入");
+  await expect(page.getByTestId("goal-console")).toBeVisible();
 
   await page.getByRole("link", { name: "作战" }).click();
   await expect(page.getByTestId("combat-role-grid")).toBeVisible();
@@ -20,10 +20,72 @@ test("console navigation reaches every page", async ({ page }) => {
 });
 
 test("tasks page shows no fabricated task data", async ({ page }) => {
+  await routeEmptyBots(page);
   await page.goto("/tasks");
-  await expect(page.getByTestId("tasks-not-connected")).toBeVisible();
-  // No task cards, no queue counts — the page is an explicit placeholder.
+  await expect(page.getByTestId("goal-console")).toBeVisible();
+  await expect(page.getByText("尚未提交目标。")).toBeVisible();
   await expect(page.locator(".botCard")).toHaveCount(0);
+});
+
+test("tasks page renders a real goal result and preserves failed styling", async ({ page }) => {
+  await page.route(/\/api\/bots$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: {
+          source: "control-api",
+          generatedAt: NOW,
+          capabilities: { stopConfirmationConfigured: false },
+          bots: [{
+            botId: "worker-01",
+            connectionState: "online",
+            lastMessageAt: NOW,
+            lastHeartbeatAt: NOW,
+            lastStatusAt: NOW,
+            health: { current: 20, maximum: 20 },
+            food: { level: 20, saturation: 5 },
+            armorPoints: 20,
+            latencyMs: 20,
+            currentTask: null,
+            position: null,
+            positionRedacted: true,
+            minecraftVersion: null,
+          }],
+        },
+      }),
+    });
+  });
+  await page.route(/\/api\/goals$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: {
+          action: "skill_result",
+          botId: "worker-01",
+          taskId: UUID,
+          reasonCode: "SKILL_EXECUTION_FAILED",
+          skillId: "movement.wander",
+          skillVersion: "1.0.0",
+          outcome: "failed",
+          errorCode: "PATH_BLOCKED",
+          ai: { attempts: 1, queueTimeMs: 1, executionTimeMs: 4, totalTimeMs: 5 },
+        },
+      }),
+    });
+  });
+  await page.goto("/tasks");
+  await page.getByLabel("目标").fill("采集附近的木材");
+  await page.getByRole("button", { name: "提交目标" }).click();
+  await expect(page.getByTestId("goal-result-state")).toHaveText("failed");
+  await expect(page.getByTestId("goal-result-state")).toHaveClass(/unavailable/);
+  await expect(page.getByText(UUID)).toBeVisible();
+  await expect(page.getByText("PATH_BLOCKED")).toBeVisible();
 });
 
 test("bots page falls back to explicit polling when the stream is unavailable", async ({ page }) => {

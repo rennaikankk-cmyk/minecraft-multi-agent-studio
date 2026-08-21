@@ -60,3 +60,29 @@ export {
   type ExpiredLeaseRecoveryRepository,
   type ExpiredLeaseRecoveryResult,
 } from "./expired-lease-recovery.js";
+
+export {
+  LocalAIConfigError,
+  loadLocalAIConfig,
+  type LocalAIConfig,
+  type LocalAIConfigErrorCode,
+} from "./local-ai-config.js";
+
+export {
+  CoordinatorLocalPlanner,
+  LocalPlannerError,
+  localPlannerDecisionSchema,
+  type CoordinatorLocalPlannerOptions,
+  type LocalPlanRequest,
+  type LocalPlanResult,
+  type LocalPlannerDecision,
+  type LocalPlannerErrorCode,
+  type SkillInvocationTransport,
+} from "./local-planner.js";
+
+export {
+  LOCAL_PLANNER_PROMPT_VERSION,
+  LOCAL_PLANNER_SYSTEM_PROMPT,
+  buildLocalPlannerPrompt,
+  type LocalPlannerPromptContext,
+} from "./planner-prompts.js";

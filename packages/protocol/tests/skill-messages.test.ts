@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   parseSkillExecutionResult,
+  parseSkillCancellation,
   parseSkillInvocation,
   skillExecutionResultV1Schema,
   skillInvocationV1Schema,
@@ -50,6 +51,12 @@ describe("SkillInvocationV1", () => {
       skillInvocationV1Schema.safeParse({
         ...invocation,
         payload: { ...invocation.payload, input: { execute: () => undefined } },
+      }).success,
+    ).toBe(false);
+    expect(
+      skillInvocationV1Schema.safeParse({
+        ...invocation,
+        payload: { ...invocation.payload, skillId: "x" },
       }).success,
     ).toBe(false);
   });
@@ -133,5 +140,29 @@ describe("SkillExecutionResultV1", () => {
         },
       }).success,
     ).toBe(true);
+  });
+});
+
+describe("SkillCancellationV1", () => {
+  it("accepts a short-lived correlated cancellation and rejects unknown fields", () => {
+    const cancellation = {
+      schemaVersion: "1.0" as const,
+      messageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      traceId: invocation.traceId,
+      timestamp: NOW,
+      source: invocation.source,
+      botId: invocation.botId,
+      taskId: invocation.taskId,
+      type: "skill.cancel.v1" as const,
+      payload: {
+        invocationId: invocation.payload.invocationId,
+        reason: "task_cancelled" as const,
+        expiresAt: "2026-07-27T08:00:30.000Z",
+      },
+    };
+    expect(parseSkillCancellation(cancellation)).toEqual(cancellation);
+    expect(() =>
+      parseSkillCancellation({ ...cancellation, rawAction: "stopDigging" }),
+    ).toThrow();
   });
 });

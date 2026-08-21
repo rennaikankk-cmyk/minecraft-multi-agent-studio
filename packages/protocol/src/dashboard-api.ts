@@ -1,7 +1,10 @@
 import { z } from "zod";
 
 import { identifierSchema } from "./bot-messages.js";
-import { publicBotDetailV1Schema } from "./control-api.js";
+import {
+  goalDispatchResultV1Schema,
+  publicBotDetailV1Schema,
+} from "./control-api.js";
 
 const timestampSchema = z.string().datetime({ offset: true });
 
@@ -48,6 +51,31 @@ export const dashboardStopResponseV1Schema = z
   })
   .strict();
 
+export const dashboardGoalRequestV1Schema = z
+  .object({
+    schemaVersion: z.literal("1.0"),
+    requestId: z.string().uuid(),
+    botId: identifierSchema,
+    operatorGoal: z
+      .string()
+      .trim()
+      .min(1)
+      .max(4_096)
+      .refine(
+        (value) =>
+          !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(value),
+      ),
+  })
+  .strict();
+
+export const dashboardGoalResponseV1Schema = z
+  .object({
+    schemaVersion: z.literal("1.0"),
+    requestId: z.string().uuid(),
+    data: goalDispatchResultV1Schema,
+  })
+  .strict();
+
 export const dashboardApiErrorCodeSchema = z.enum([
   "DASHBOARD_CONTROL_NOT_CONFIGURED",
   "CONTROL_API_UNAVAILABLE",
@@ -57,6 +85,7 @@ export const dashboardApiErrorCodeSchema = z.enum([
   "CONFIRMATION_REQUIRED",
   "RATE_LIMITED",
   "STOP_FAILED",
+  "GOAL_FAILED",
 ]);
 
 export const dashboardApiErrorV1Schema = z
@@ -80,6 +109,12 @@ export type DashboardStopRequestV1 = z.infer<
 >;
 export type DashboardStopResponseV1 = z.infer<
   typeof dashboardStopResponseV1Schema
+>;
+export type DashboardGoalRequestV1 = z.infer<
+  typeof dashboardGoalRequestV1Schema
+>;
+export type DashboardGoalResponseV1 = z.infer<
+  typeof dashboardGoalResponseV1Schema
 >;
 export type DashboardApiErrorCode = z.infer<typeof dashboardApiErrorCodeSchema>;
 export type DashboardApiErrorV1 = z.infer<typeof dashboardApiErrorV1Schema>;

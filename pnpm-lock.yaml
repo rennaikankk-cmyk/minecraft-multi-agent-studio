@@ -25,9 +25,6 @@ importers:
 
   apps/bot-runtime:
     dependencies:
-      '@minecraft-studio/ai-router':
-        specifier: workspace:*
-        version: link:../../packages/ai-router
       '@minecraft-studio/cpu-resource-manager':
         specifier: workspace:*
         version: link:../../packages/cpu-resource-manager
@@ -93,6 +90,9 @@ importers:
 
   apps/coordinator:
     dependencies:
+      '@minecraft-studio/ai-router':
+        specifier: workspace:*
+        version: link:../../packages/ai-router
       '@minecraft-studio/observability':
         specifier: workspace:*
         version: link:../../packages/observability
@@ -105,6 +105,9 @@ importers:
       ws:
         specifier: 8.21.1
         version: 8.21.1
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
     devDependencies:
       '@types/ws':
         specifier: 8.18.1

@@ -4,8 +4,12 @@ import {
   botDetailResponseV1Schema,
   botListResponseV1Schema,
   controlApiErrorV1Schema,
+  submitGoalHttpResponseV1Schema,
   stopBotHttpResponseV1Schema,
+  type ControlApiErrorCode,
+  type DashboardApiErrorCode,
   type PublicBotDetailV1,
+  type GoalDispatchResultV1,
   type StopBotHttpResponseV1,
 } from "@minecraft-studio/protocol";
 
@@ -19,16 +23,14 @@ export type DashboardControlConfig = Readonly<{
   stopConfirmationSha256: string | null;
 }>;
 
-export type DashboardControlErrorCode =
-  | "DASHBOARD_CONTROL_NOT_CONFIGURED"
-  | "CONTROL_API_UNAVAILABLE"
-  | "CONTROL_API_REJECTED"
-  | "INVALID_CONTROL_RESPONSE";
+export type DashboardControlErrorCode = DashboardApiErrorCode;
 
 export class DashboardControlError extends Error {
   constructor(
     readonly code: DashboardControlErrorCode,
     message: string,
+    readonly httpStatus: number = defaultHttpStatus(code),
+    readonly upstreamCode: ControlApiErrorCode | null = null,
   ) {
     super(message);
     this.name = "DashboardControlError";
@@ -165,6 +167,46 @@ export async function requestDashboardBotStop(
   return parsed.data;
 }
 
+export async function requestDashboardGoal(
+  config: DashboardControlConfig,
+  request: Readonly<{
+    requestId: string;
+    botId: string;
+    operatorGoal: string;
+  }>,
+  fetchImplementation: typeof fetch = fetch,
+): Promise<GoalDispatchResultV1> {
+  const value = await requestJson(
+    config,
+    "/v1/goals",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        schemaVersion: "1.0",
+        requestId: request.requestId,
+        botId: request.botId,
+        operatorGoal: request.operatorGoal,
+        timeoutMs: 60_000,
+      }),
+    },
+    fetchImplementation,
+    65_000,
+  );
+  const parsed = submitGoalHttpResponseV1Schema.safeParse(value);
+  if (
+    !parsed.success ||
+    parsed.data.data.botId !== request.botId ||
+    parsed.data.data.taskId !== request.requestId
+  ) {
+    throw new DashboardControlError(
+      "INVALID_CONTROL_RESPONSE",
+      "Control API 返回了无法识别的目标执行结果。",
+    );
+  }
+  return parsed.data.data;
+}
+
 export function verifyStopConfirmation(
   config: DashboardControlConfig,
   confirmationCode: string,
@@ -213,11 +255,112 @@ async function requestJson(
   }
   if (!response.ok) {
     const error = controlApiErrorV1Schema.safeParse(value);
-    const suffix = error.success ? `（${error.data.error.code}）` : "";
+    if (!error.success) {
+      throw new DashboardControlError(
+        "INVALID_CONTROL_RESPONSE",
+        "Control API 返回了无法识别的错误响应。",
+        502,
+      );
+    }
+    const mapped = mapControlApiError(error.data.error.code, response.status);
     throw new DashboardControlError(
-      response.status >= 500 ? "CONTROL_API_UNAVAILABLE" : "CONTROL_API_REJECTED",
-      `Control API 拒绝了请求${suffix}。`,
+      mapped.code,
+      mapped.message,
+      mapped.httpStatus,
+      error.data.error.code,
     );
   }
   return value;
+}
+
+function mapControlApiError(
+  upstreamCode: ControlApiErrorCode,
+  upstreamStatus: number,
+): Readonly<{
+  code: DashboardControlErrorCode;
+  message: string;
+  httpStatus: number;
+}> {
+  switch (upstreamCode) {
+    case "AI_QUEUE_FULL":
+      return {
+        code: "RATE_LIMITED",
+        message: "Local AI 队列已满，请稍后重试。",
+        httpStatus: 429,
+      };
+    case "RATE_LIMITED":
+      return {
+        code: "RATE_LIMITED",
+        message: "Control API 请求过于频繁，请稍后重试。",
+        httpStatus: 429,
+      };
+    case "AI_UNAVAILABLE":
+      return {
+        code: "CONTROL_API_UNAVAILABLE",
+        message: "Local AI 当前不可用。",
+        httpStatus: 503,
+      };
+    case "CONTROL_UNAVAILABLE":
+      return {
+        code: "CONTROL_API_UNAVAILABLE",
+        message: "Coordinator 控制链路当前不可用。",
+        httpStatus: 503,
+      };
+    case "GOAL_TIMEOUT":
+      return {
+        code: "GOAL_FAILED",
+        message: "目标执行结果在时限内无法确认。",
+        httpStatus: 504,
+      };
+    case "GOAL_REJECTED":
+      return {
+        code: "CONTROL_API_REJECTED",
+        message: "Coordinator 拒绝了该目标。",
+        httpStatus: 409,
+      };
+    case "STOP_TIMEOUT":
+      return {
+        code: "STOP_FAILED",
+        message: "停止结果在时限内无法确认。",
+        httpStatus: 504,
+      };
+    case "STOP_FAILED":
+      return {
+        code: "STOP_FAILED",
+        message: "机器人停止操作失败。",
+        httpStatus: 502,
+      };
+    default:
+      return {
+        code: upstreamStatus >= 500
+          ? "CONTROL_API_UNAVAILABLE"
+          : "CONTROL_API_REJECTED",
+        message: `Control API 拒绝了请求（${upstreamCode}）。`,
+        httpStatus: upstreamStatus >= 500
+          ? 502
+          : normalizeUpstreamStatus(upstreamStatus),
+      };
+  }
+}
+
+function normalizeUpstreamStatus(status: number): number {
+  return Number.isInteger(status) && status >= 400 && status <= 499 ? status : 409;
+}
+
+function defaultHttpStatus(code: DashboardControlErrorCode): number {
+  switch (code) {
+    case "DASHBOARD_CONTROL_NOT_CONFIGURED":
+    case "CONTROL_API_UNAVAILABLE":
+      return 503;
+    case "RATE_LIMITED":
+      return 429;
+    case "CONTROL_API_REJECTED":
+      return 409;
+    case "CONFIRMATION_REQUIRED":
+      return 403;
+    case "INVALID_REQUEST":
+      return 400;
+    default:
+      return 502;
+  }
 }

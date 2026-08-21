@@ -513,6 +513,158 @@ describe("SingleBotRuntime", () => {
     await runtime.stop("test_cleanup");
   });
 
+  // §4 的验收：目标分解与恢复阶梯是否真的落在 bot 的派发路径上。
+  //
+  // dispatcher 在真实系统里由 coordinator 侧绑定世界坐标与授权；这里替换成一个
+  // 协议合法的 movement 信封，因为断言的对象是**接线**——每一步是否真的穿过
+  // handleSkillInvocation、executor 的协议校验、授权逐字段比对，一直到
+  // capability adapter。步骤语义与技能是否对应是 dispatcher 的职责，不在此。
+  it("drives a decomposed goal through the real skill dispatch path", async () => {
+    const client = new FakeBotClient();
+    const dispatchedItems: string[] = [];
+    const runtime = new SingleBotRuntime(profile, {
+      createClient: () => client,
+      messageSink: () => undefined,
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+      goalStepDispatcher: (step) => {
+        const suffix = String(dispatchedItems.length).padStart(2, "0");
+        const base = movementInvocation();
+        const invocation: SkillInvocationV1 = {
+          ...base,
+          payload: {
+            ...base.payload,
+            invocationId: `33333333-3333-4333-8333-3333333333${suffix}`,
+          },
+        };
+        dispatchedItems.push(step.itemName);
+        return { invocation, authorization: skillAuthorization(invocation) };
+      },
+    });
+    runtime.start();
+    client.spawn();
+
+    const outcome = await runtime.pursueGoals([
+      { itemName: "crafting_table", count: 1 },
+    ]);
+
+    expect(outcome.planned).toBe(true);
+    if (!outcome.planned) return;
+    expect(outcome.supervision.completed).toBe(true);
+    expect(outcome.supervision.failure).toBeNull();
+    // 计划真的展开了多步，并且每一步都走到了 client 的 capability。
+    expect(dispatchedItems.length).toBeGreaterThan(1);
+    expect(client.capabilityCalls).toHaveLength(dispatchedItems.length);
+    expect(outcome.supervision.stepsCompleted).toBe(dispatchedItems.length);
+    await runtime.stop("test_cleanup");
+  });
+
+  it("fails a goal closed when no step dispatcher is wired", async () => {
+    const client = new FakeBotClient();
+    const runtime = new SingleBotRuntime(profile, {
+      createClient: () => client,
+      messageSink: () => undefined,
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+    runtime.start();
+    client.spawn();
+
+    const outcome = await runtime.pursueGoals([
+      { itemName: "crafting_table", count: 1 },
+    ]);
+
+    expect(outcome.planned).toBe(true);
+    if (!outcome.planned) return;
+    expect(outcome.supervision.completed).toBe(false);
+    expect(outcome.supervision.failure).toMatchObject({
+      errorCode: "PLAN_STEP_DISPATCH_UNAVAILABLE",
+      category: "CONTRACT_BUG",
+      action: "ESCALATE_TO_OPERATOR",
+    });
+    // 接线缺失不能变成"悄悄什么都没做但报成功"。
+    expect(client.capabilityCalls).toHaveLength(0);
+    await runtime.stop("test_cleanup");
+  });
+
+  it("refuses to plan a goal while offline or while L0 pauses normal actions", async () => {
+    const client = new FakeBotClient();
+    let dispatchCalls = 0;
+    const runtime = new SingleBotRuntime(profile, {
+      createClient: () => client,
+      messageSink: () => undefined,
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+      goalStepDispatcher: () => {
+        dispatchCalls += 1;
+        return null;
+      },
+    });
+
+    const offline = await runtime.pursueGoals([
+      { itemName: "crafting_table", count: 1 },
+    ]);
+    expect(offline).toMatchObject({
+      planned: false,
+      errorCode: "BOT_NOT_ONLINE",
+    });
+
+    runtime.start();
+    client.spawn();
+    client.setSnapshot({ ...snapshot, health: { current: 8, maximum: 20 } });
+    client.stateChanged();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(runtime.canAcceptNormalActions()).toBe(false);
+
+    const paused = await runtime.pursueGoals([
+      { itemName: "crafting_table", count: 1 },
+    ]);
+    expect(paused).toMatchObject({
+      planned: false,
+      errorCode: "NORMAL_ACTIONS_PAUSED",
+    });
+    // 两种拒绝都发生在规划之前：一步都没派发。
+    expect(dispatchCalls).toBe(0);
+    expect(client.capabilityCalls).toHaveLength(0);
+    await runtime.stop("test_cleanup");
+  });
+
+  it("derives capability authorization for an authenticated Coordinator invocation", async () => {
+    const client = new FakeBotClient();
+    const runtime = new SingleBotRuntime(profile, {
+      createClient: () => client,
+      messageSink: () => undefined,
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+    runtime.start();
+    client.spawn();
+    const invocation = movementInvocation();
+
+    const first = runtime.handleCoordinatorSkillInvocation(
+      invocation,
+      invocation.source.instanceId,
+    );
+    const duplicate = runtime.handleCoordinatorSkillInvocation(
+      invocation,
+      invocation.source.instanceId,
+    );
+
+    expect(duplicate).toBe(first);
+    await expect(first).resolves.toMatchObject({
+      payload: { outcome: "completed", skillId: "movement.goto" },
+    });
+    expect(client.capabilityCalls).toHaveLength(1);
+    expect(() =>
+      runtime.handleCoordinatorSkillInvocation(invocation, "coordinator-forged")
+    ).toThrowError(expect.objectContaining({ code: "CONTROL_IDENTITY_MISMATCH" }));
+    await runtime.stop("test_cleanup");
+  });
+
   it("cancels an active Pathfinder skill when L0 takes control", async () => {
     const client = new FakeBotClient();
     vi.spyOn(client, "invokeSkillCapability").mockImplementation(
@@ -554,6 +706,60 @@ describe("SingleBotRuntime", () => {
         outcome: "cancelled",
         errorCode: "SKILL_CANCELLED",
       },
+    });
+    await runtime.stop("test_cleanup");
+  });
+
+  it("cancels an active skill through an authenticated Coordinator command", async () => {
+    const client = new FakeBotClient();
+    vi.spyOn(client, "invokeSkillCapability").mockImplementation(
+      async (request) =>
+        new Promise((_resolve, reject) => {
+          request.signal.addEventListener(
+            "abort",
+            () => reject(new Error("cancelled by Coordinator")),
+            { once: true },
+          );
+        }),
+    );
+    const runtime = new SingleBotRuntime(profile, {
+      createClient: () => client,
+      messageSink: () => undefined,
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+    runtime.start();
+    client.spawn();
+    const invocation = movementInvocation();
+    const pending = runtime.handleCoordinatorSkillInvocation(
+      invocation,
+      invocation.source.instanceId,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(
+      runtime.handleCoordinatorSkillCancellation(
+        {
+          schemaVersion: "1.0",
+          messageId: "55555555-5555-4555-8555-555555555555",
+          traceId: invocation.traceId,
+          timestamp: "2026-07-19T10:00:01.000Z",
+          source: invocation.source,
+          botId: invocation.botId,
+          taskId: invocation.taskId,
+          type: "skill.cancel.v1",
+          payload: {
+            invocationId: invocation.payload.invocationId,
+            reason: "task_cancelled",
+            expiresAt: "2026-07-19T10:00:30.000Z",
+          },
+        },
+        invocation.source.instanceId,
+      ),
+    ).toBe(true);
+    await expect(pending).resolves.toMatchObject({
+      payload: { outcome: "cancelled", errorCode: "SKILL_CANCELLED" },
     });
     await runtime.stop("test_cleanup");
   });

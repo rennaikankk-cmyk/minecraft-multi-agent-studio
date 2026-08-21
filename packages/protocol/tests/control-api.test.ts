@@ -8,9 +8,13 @@ import {
   controlApiErrorV1Schema,
   dashboardApiErrorV1Schema,
   dashboardBotListResponseV1Schema,
+  dashboardGoalRequestV1Schema,
+  dashboardGoalResponseV1Schema,
   dashboardStopRequestV1Schema,
   stopBotHttpRequestV1Schema,
   stopBotHttpResponseV1Schema,
+  submitGoalHttpRequestV1Schema,
+  submitGoalHttpResponseV1Schema,
 } from "../src/index.js";
 
 const UUID = "11111111-1111-4111-8111-111111111111";
@@ -169,5 +173,117 @@ describe("Control API v1 protocol", () => {
         },
       }).error.code,
     ).toBe("CONTROL_API_UNAVAILABLE");
+  });
+
+  it("validates bounded goal submission and redacted results", () => {
+    const request = {
+      schemaVersion: "1.0",
+      requestId: UUID,
+      botId: "worker-01",
+      operatorGoal: "采集附近的木材",
+      timeoutMs: 60_000,
+    } as const;
+    const result = {
+      action: "noop",
+      botId: "worker-01",
+      taskId: UUID,
+      reasonCode: "NO_SAFE_SKILL",
+      ai: {
+        attempts: 1,
+        queueTimeMs: 3,
+        executionTimeMs: 100,
+        totalTimeMs: 103,
+      },
+    } as const;
+    expect(submitGoalHttpRequestV1Schema.parse(request)).toEqual(request);
+    expect(
+      submitGoalHttpResponseV1Schema.parse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: result,
+      }).data,
+    ).toEqual(result);
+    expect(
+      dashboardGoalRequestV1Schema.parse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        botId: request.botId,
+        operatorGoal: request.operatorGoal,
+      }).operatorGoal,
+    ).toBe(request.operatorGoal);
+    expect(
+      dashboardGoalResponseV1Schema.parse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: result,
+      }).data.action,
+    ).toBe("noop");
+    expect(
+      submitGoalHttpRequestV1Schema.safeParse({
+        ...request,
+        operatorGoal: "bad\u0000goal",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("keeps goal skill results semantically consistent by outcome", () => {
+    const completed = {
+      action: "skill_result" as const,
+      botId: "worker-01",
+      taskId: UUID,
+      reasonCode: "SKILL_COMPLETED",
+      skillId: "movement.goto",
+      skillVersion: "1.0.0",
+      outcome: "completed" as const,
+      ai: { attempts: 1, queueTimeMs: 1, executionTimeMs: 2, totalTimeMs: 3 },
+    };
+    expect(
+      submitGoalHttpResponseV1Schema.parse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: completed,
+      }).data,
+    ).toEqual(completed);
+    expect(
+      submitGoalHttpResponseV1Schema.safeParse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: { ...completed, errorCode: "SHOULD_NOT_BE_PRESENT" },
+      }).success,
+    ).toBe(false);
+    expect(
+      submitGoalHttpResponseV1Schema.safeParse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: { ...completed, errorCode: undefined },
+      }).success,
+    ).toBe(false);
+
+    const failed = {
+      ...completed,
+      outcome: "failed" as const,
+      errorCode: "SKILL_HANDLER_FAILED",
+    };
+    expect(
+      submitGoalHttpResponseV1Schema.parse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: failed,
+      }).data,
+    ).toEqual(failed);
+    expect(
+      submitGoalHttpResponseV1Schema.safeParse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: { ...completed, outcome: "failed" },
+      }).success,
+    ).toBe(false);
+    expect(
+      submitGoalHttpResponseV1Schema.safeParse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: { ...failed, errorCode: "not-stable" },
+      }).success,
+    ).toBe(false);
   });
 });

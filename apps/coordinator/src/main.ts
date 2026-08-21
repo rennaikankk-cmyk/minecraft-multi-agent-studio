@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
 
+import {
+  AIRouter,
+  AIRequestScheduler,
+  ScheduledAIRouter,
+  VLLMAdapter,
+} from "@minecraft-studio/ai-router";
 import { createStructuredLogger } from "@minecraft-studio/observability";
 
 import { BotRegistry } from "./bot-registry.js";
@@ -14,6 +20,8 @@ import {
 } from "./runtime-link-config.js";
 import { RuntimeLinkServer } from "./runtime-link-server.js";
 import { InMemoryStopAuditSink, StopController } from "./stop-controller.js";
+import { LocalAIConfigError, loadLocalAIConfig } from "./local-ai-config.js";
+import { CoordinatorLocalPlanner } from "./local-planner.js";
 
 const instanceId = `coordinator-${randomUUID()}`;
 const logger = createStructuredLogger({ service: "coordinator", instanceId });
@@ -21,6 +29,7 @@ const logger = createStructuredLogger({ service: "coordinator", instanceId });
 async function main(): Promise<void> {
   const runtimeConfig = loadRuntimeLinkConfig();
   const controlConfig = loadControlLinkConfig();
+  const localAIConfig = loadLocalAIConfig();
   const registry = new BotRegistry({
     staleAfterMs: runtimeConfig.botStaleAfterMs,
   });
@@ -39,6 +48,36 @@ async function main(): Promise<void> {
     auditSink: new InMemoryStopAuditSink(),
     logger,
   });
+  let aiScheduler: AIRequestScheduler | null = null;
+  let aiRouter: AIRouter | null = null;
+  let localPlanner: CoordinatorLocalPlanner | undefined;
+  if (localAIConfig.enabled && localAIConfig.baseUrl && localAIConfig.model) {
+    aiRouter = new AIRouter();
+    aiRouter.register(new VLLMAdapter(localAIConfig.baseUrl, localAIConfig.model));
+    aiScheduler = new AIRequestScheduler({
+      maxConcurrency: localAIConfig.maxConcurrency,
+      maxQueue: localAIConfig.maxQueue,
+      perBotConcurrency: localAIConfig.perBotConcurrency,
+      defaultTimeoutMs: localAIConfig.requestTimeoutMs,
+      onEvent: (event) => {
+        logger.info("coordinator_ai_request", {
+          requestId: event.requestId,
+          botId: event.botId,
+          priority: event.priority,
+          state: event.type,
+          attempt: event.attempt,
+          queueTimeMs: event.queueTimeMs,
+          errorCode: event.errorCode,
+        });
+      },
+    });
+    localPlanner = new CoordinatorLocalPlanner({
+      ai: new ScheduledAIRouter(aiRouter, aiScheduler),
+      registry,
+      transport: runtimeServer,
+      coordinatorInstanceId: instanceId,
+    });
+  }
   const controlServer = new ControlLinkServer({
     host: controlConfig.host,
     port: controlConfig.port,
@@ -46,6 +85,7 @@ async function main(): Promise<void> {
     clients: controlConfig.clients,
     registry,
     stopController,
+    ...(localPlanner ? { goalPlanner: localPlanner } : {}),
     logger,
   });
   let staleTimer: ReturnType<typeof setInterval> | null = null;
@@ -70,6 +110,15 @@ async function main(): Promise<void> {
       bindScope: "loopback",
       port: controlAddress.port,
     });
+    if (aiRouter) {
+      const health = await aiRouter.healthCheck();
+      logger.info("coordinator_local_ai_health", {
+        available: [...health.values()].some(Boolean),
+        adapters: health.size,
+      });
+    } else {
+      logger.info("coordinator_local_ai_disabled", { available: false });
+    }
   } catch (cause) {
     if (staleTimer) clearInterval(staleTimer);
     await Promise.allSettled([controlServer.stop(), runtimeServer.stop()]);
@@ -81,6 +130,7 @@ async function main(): Promise<void> {
     if (stopping) return;
     stopping = true;
     if (staleTimer) clearInterval(staleTimer);
+    aiScheduler?.close("coordinator shutdown");
     logger.info("coordinator_stopping", { signal });
     await Promise.allSettled([controlServer.stop(), runtimeServer.stop()]);
   };
@@ -90,7 +140,9 @@ async function main(): Promise<void> {
 
 void main().catch((cause: unknown) => {
   const code =
-    cause instanceof RuntimeLinkConfigError || cause instanceof ControlLinkConfigError
+    cause instanceof RuntimeLinkConfigError ||
+      cause instanceof ControlLinkConfigError ||
+      cause instanceof LocalAIConfigError
       ? cause.code
       : "COORDINATOR_START_FAILED";
   logger.error("coordinator_start_failed", { code });

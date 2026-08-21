@@ -15,12 +15,16 @@ import {
   CONTROL_LINK_SUBPROTOCOL,
   controlLinkAuthenticateV1Schema,
   controlLinkClientProofInput,
+  controlLinkGoalRequestV1Schema,
   controlLinkServerProofInput,
   controlLinkStopRequestV1Schema,
   parseControlLinkServerMessage,
   type BotStopResultV1,
   type ControlLinkAcceptedV1,
   type ControlLinkChallengeV1,
+  type ControlLinkGoalErrorCode,
+  type ControlLinkGoalRequestV1,
+  type ControlLinkGoalResponseV1,
   type ControlLinkSnapshotBeginV1,
   type ControlLinkSnapshotEndV1,
   type ControlLinkSnapshotItemV1,
@@ -28,6 +32,7 @@ import {
   type ControlLinkStopRequestV1,
   type ControlLinkStopResponseV1,
   type ControlLinkStopErrorCode,
+  type GoalDispatchResultV1,
   type PublicBotDetailV1,
 } from "@minecraft-studio/protocol";
 import WebSocket, { type RawData } from "ws";
@@ -39,7 +44,11 @@ import type {
   BotStopRequester,
 } from "./bot-state-source.js";
 import type { CoordinatorLinkClientConfig } from "./coordinator-link-config.js";
-import type { ControlApiLogger } from "./server.js";
+import type {
+  ControlApiLogger,
+  GoalSubmitter,
+  SubmitGoalRequest,
+} from "./server.js";
 
 const MAX_CLOCK_SKEW_MS = 30_000;
 const RETIRED_STOP_TTL_MS = 5 * 60_000;
@@ -63,6 +72,16 @@ export class CoordinatorLinkClientError extends Error {
   ) {
     super(message);
     this.name = "CoordinatorLinkClientError";
+  }
+}
+
+export class CoordinatorGoalError extends Error {
+  constructor(
+    readonly code: ControlLinkGoalErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "CoordinatorGoalError";
   }
 }
 
@@ -108,8 +127,19 @@ type RetiredStop = Readonly<{
   expiresAtMs: number;
 }>;
 
+type PendingGoal = {
+  fingerprint: string;
+  message: ControlLinkGoalRequestV1;
+  serialized: string;
+  sent: boolean;
+  timer: ReturnType<typeof setTimeout>;
+  promise: Promise<GoalDispatchResultV1>;
+  resolve: (result: GoalDispatchResultV1) => void;
+  reject: (error: Error) => void;
+};
+
 export class CoordinatorLinkClient
-  implements BotStateSource, BotStopRequester
+  implements BotStateSource, BotStopRequester, GoalSubmitter
 {
   private readonly now: () => Date;
   private readonly randomId: () => string;
@@ -121,6 +151,7 @@ export class CoordinatorLinkClient
   private readonly availabilityListeners =
     new Set<BotStateAvailabilityListener>();
   private readonly pendingStops = new Map<string, PendingStop>();
+  private readonly pendingGoals = new Map<string, PendingGoal>();
   private readonly retiredStops = new Map<string, RetiredStop>();
   private readonly failedSockets = new WeakSet<WebSocket>();
   private socket: WebSocket | null = null;
@@ -279,6 +310,81 @@ export class CoordinatorLinkClient
     return promise;
   }
 
+  submitGoal(request: SubmitGoalRequest): Promise<GoalDispatchResultV1> {
+    const fingerprint = goalFingerprint(request);
+    const existing = this.pendingGoals.get(request.operationId);
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) {
+        throw new CoordinatorGoalError(
+          "GOAL_ID_CONFLICT",
+          "The goal operation ID is already pending with different parameters.",
+        );
+      }
+      return existing.promise;
+    }
+    if (!this.ready || !this.coordinatorInstanceId) {
+      throw new CoordinatorLinkClientError(
+        "COORDINATOR_LINK_UNAVAILABLE",
+        "Coordinator Link has no complete authoritative snapshot.",
+      );
+    }
+    if (this.pendingGoals.size >= this.options.config.maxPendingStops) {
+      throw new CoordinatorGoalError(
+        "CONTROL_LINK_BACKPRESSURE",
+        "Coordinator Link has reached its pending goal limit.",
+      );
+    }
+
+    const now = validDate(this.now());
+    const message = controlLinkGoalRequestV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: this.randomId(),
+      timestamp: now.toISOString(),
+      type: "control.link.goal-request.v1",
+      payload: {
+        coordinatorInstanceId: this.coordinatorInstanceId,
+        clientId: this.options.config.clientId,
+        controlApiInstanceId: this.options.instanceId,
+        operationId: request.operationId,
+        taskId: request.taskId,
+        botId: request.botId,
+        actorId: request.actorId,
+        operatorGoal: request.operatorGoal,
+        timeoutMs: request.timeoutMs,
+        issuedAt: request.issuedAt.toISOString(),
+        expiresAt: request.expiresAt.toISOString(),
+      },
+    });
+    let resolve!: (result: GoalDispatchResultV1) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<GoalDispatchResultV1>((resolveValue, rejectValue) => {
+      resolve = resolveValue;
+      reject = rejectValue;
+    });
+    const pending: PendingGoal = {
+      fingerprint,
+      message,
+      serialized: JSON.stringify(message),
+      sent: false,
+      timer: setTimeout(() => {
+        if (this.pendingGoals.get(request.operationId) !== pending) return;
+        this.pendingGoals.delete(request.operationId);
+        pending.reject(
+          new CoordinatorGoalError(
+            "AI_TIMEOUT",
+            "Coordinator Link did not return a goal result before the deadline.",
+          ),
+        );
+      }, request.timeoutMs + 5_000),
+      promise,
+      resolve,
+      reject,
+    };
+    this.pendingGoals.set(request.operationId, pending);
+    this.sendPendingGoal(pending);
+    return promise;
+  }
+
   async close(): Promise<void> {
     if (this.closing) return;
     this.closing = true;
@@ -292,6 +398,7 @@ export class CoordinatorLinkClient
     this.firstReadyResolve = null;
     this.firstReadyReject = null;
     this.rejectPendingStops(error);
+    this.rejectPendingGoals(error);
     const socket = this.socket;
     this.socket = null;
     if (socket && socket.readyState !== WebSocket.CLOSED) {
@@ -429,6 +536,9 @@ export class CoordinatorLinkClient
           return;
         case "control.link.stop-response.v1":
           this.handleStopResponse(message);
+          return;
+        case "control.link.goal-response.v1":
+          this.handleGoalResponse(message);
           return;
       }
     } catch (cause) {
@@ -633,6 +743,34 @@ export class CoordinatorLinkClient
     pending.reject(stopResponseError(message.payload.errorCode));
   }
 
+  private handleGoalResponse(message: ControlLinkGoalResponseV1): void {
+    this.assertAuthenticatedIdentity(message.payload.coordinatorInstanceId);
+    const pending = this.pendingGoals.get(message.payload.operationId);
+    if (!pending) return;
+    if (
+      message.payload.requestMessageId !== pending.message.messageId ||
+      message.payload.botId !== pending.message.payload.botId ||
+      message.payload.taskId !== pending.message.payload.taskId
+    ) {
+      throw new CoordinatorLinkClientError(
+        "COORDINATOR_LINK_IDENTITY_MISMATCH",
+        "Coordinator Link goal response identity does not match its request.",
+      );
+    }
+    clearTimeout(pending.timer);
+    this.pendingGoals.delete(message.payload.operationId);
+    if (message.ok) {
+      pending.resolve(message.payload.result);
+      return;
+    }
+    pending.reject(
+      new CoordinatorGoalError(
+        message.payload.errorCode,
+        "Coordinator rejected or could not execute the goal operation.",
+      ),
+    );
+  }
+
   private retireStop(pending: PendingStop): void {
     const nowMs = validDate(this.now()).getTime();
     this.pruneRetiredStops(nowMs);
@@ -700,9 +838,25 @@ export class CoordinatorLinkClient
     }
   }
 
+  private sendPendingGoal(pending: PendingGoal): void {
+    const socket = this.socket;
+    if (!this.ready || !socket || socket.readyState !== WebSocket.OPEN) return;
+    try {
+      this.sendSerialized(socket, pending.serialized);
+      pending.sent = true;
+    } catch {
+      this.failedSockets.add(socket);
+      this.invalidateSession();
+      socket.close(1013, "backpressure");
+    }
+  }
+
   private flushPending(): void {
     for (const pending of this.pendingStops.values()) {
       if (!pending.sent) this.sendPending(pending);
+    }
+    for (const pending of this.pendingGoals.values()) {
+      if (!pending.sent) this.sendPendingGoal(pending);
     }
   }
 
@@ -799,6 +953,7 @@ export class CoordinatorLinkClient
     this.clearHandshakeTimer();
     this.clearLivenessTimer();
     for (const pending of this.pendingStops.values()) pending.sent = false;
+    for (const pending of this.pendingGoals.values()) pending.sent = false;
     this.markUnavailable();
   }
 
@@ -820,6 +975,16 @@ export class CoordinatorLinkClient
       this.pendingStops.delete(operationId);
       pending.reject(error);
     }
+    for (const [operationId, pending] of this.pendingGoals) {
+      if (
+        pending.message.payload.coordinatorInstanceId === coordinatorInstanceId
+      ) {
+        continue;
+      }
+      clearTimeout(pending.timer);
+      this.pendingGoals.delete(operationId);
+      pending.reject(error);
+    }
   }
 
   private permanentFailure(error: CoordinatorLinkClientError): void {
@@ -830,6 +995,7 @@ export class CoordinatorLinkClient
     this.firstReadyResolve = null;
     this.firstReadyReject = null;
     this.rejectPendingStops(error);
+    this.rejectPendingGoals(error);
   }
 
   private rejectPendingStops(error: Error): void {
@@ -838,6 +1004,14 @@ export class CoordinatorLinkClient
       pending.reject(error);
     }
     this.pendingStops.clear();
+  }
+
+  private rejectPendingGoals(error: Error): void {
+    for (const pending of this.pendingGoals.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pendingGoals.clear();
   }
 
   private markUnavailable(): void {
@@ -962,6 +1136,17 @@ function stopFingerprint(request: StopBotRequest): string {
     decisionId: request.authorization.decisionId,
     actorId: request.authorization.actorId,
     permissions: [...request.authorization.permissions].sort(),
+  });
+}
+
+function goalFingerprint(request: SubmitGoalRequest): string {
+  return JSON.stringify({
+    operationId: request.operationId,
+    taskId: request.taskId,
+    botId: request.botId,
+    actorId: request.actorId,
+    operatorGoal: request.operatorGoal,
+    timeoutMs: request.timeoutMs,
   });
 }
 
