@@ -168,6 +168,21 @@ export {
   type PlanStep,
   type PlanStepKind,
 } from "./planning/goal-planner.js";
+export {
+  classificationSources,
+  classifyFailure,
+  failureCategories,
+  isRecoverableFailure,
+  isTerminalRecoveryAction,
+  planRecovery,
+  recoveryActions,
+  recoveryLadderFor,
+  type ClassificationSource,
+  type FailureCategory,
+  type FailureClassification,
+  type RecoveryAction,
+  type RecoveryDecision,
+} from "./recovery/failure-classifier.js";
 export { SkillExecutor } from "./executor.js";
 export { SkillRegistry } from "./registry.js";
 export { resolveSkillCompatibility } from "./compatibility.js";
