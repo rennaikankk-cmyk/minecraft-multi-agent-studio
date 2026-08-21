@@ -96,6 +96,8 @@ const EXPLICIT: Readonly<Record<string, FailureCategory>> = Object.freeze({
   RUNTIME_STOPPING: "SAFETY_INTERRUPT",
   BOT_NOT_ONLINE: "SAFETY_INTERRUPT",
   BOT_OFFLINE: "SAFETY_INTERRUPT",
+  // 能力执行期间掉线/被 L0 暂停：等恢复，不是技能坏了。
+  SKILL_EXECUTION_INTERRUPTED: "SAFETY_INTERRUPT",
 
   // —— 世界状态过期：重新观察，别原样重试 ——
   REFERENCE_BLOCK_NOT_FOUND: "STALE_WORLD",
@@ -104,7 +106,19 @@ const EXPLICIT: Readonly<Record<string, FailureCategory>> = Object.freeze({
   CRAFTING_TABLE_NOT_FOUND: "STALE_WORLD",
   CONTAINER_NOT_FOUND: "STALE_WORLD",
   FURNACE_NOT_FOUND: "STALE_WORLD",
+  // 熔炉里有别人的东西、或炉内容物中途被改：都是世界变了，不是接线坏了。
+  // 没有这两条显式项，FURNACE_NOT_EMPTY 会落到 UNKNOWN（把"炉子占着"升级给人工），
+  // FURNACE_OUTPUT_MISMATCH 会被 "MISMATCH" 形态规则读成 CONTRACT_BUG（让人去查一个
+  // 并不存在的 schema 问题）。重新观察后换一个空炉子才是对的下一步。
+  FURNACE_NOT_EMPTY: "STALE_WORLD",
+  FURNACE_OUTPUT_MISMATCH: "STALE_WORLD",
+  SMELT_OUTPUT_NOT_CONFIRMED: "STALE_WORLD",
   BOT_POSITION_UNAVAILABLE: "STALE_WORLD",
+  // 寻路自认为到了，但读回的真实距离仍超出 radius+0.5：世界模型与实际不符
+  // （地形被改、被推开、目标本就进不去）。原样重投同一个 goal 会再短一次，
+  // 所以下一步是重新观察。没有这条显式项它会落到 UNKNOWN，把"走近了但不够近"
+  // 当成未知故障升级给人工。
+  PATH_TARGET_NOT_REACHED: "STALE_WORLD",
   // 前置条件不满足通常是"世界还没到位"，不是技能坏了：重新观察再试。
   // 但前置条件求值本身抛异常是前置条件的代码有问题，得人来修。
   SKILL_PRECONDITION_FAILED: "STALE_WORLD",
@@ -123,6 +137,9 @@ const EXPLICIT: Readonly<Record<string, FailureCategory>> = Object.freeze({
   ARMOR_ITEM_NOT_IN_INVENTORY: "MISSING_RESOURCE",
   INSUFFICIENT_MATERIALS: "MISSING_RESOURCE",
   TOOL_TIER_INSUFFICIENT: "MISSING_RESOURCE",
+  // 熔炼在开炉前就查原料与燃料，两者都能靠补齐子计划解决（燃料同样是可规划物品）。
+  SMELT_INPUT_INSUFFICIENT: "MISSING_RESOURCE",
+  SMELT_FUEL_INSUFFICIENT: "MISSING_RESOURCE",
 
   // —— 偶发：重试有意义 ——
   COLLECT_BLOCKS_FAILED: "TRANSIENT",
@@ -137,6 +154,8 @@ const EXPLICIT: Readonly<Record<string, FailureCategory>> = Object.freeze({
   SKILL_HANDLER_FAILED: "TRANSIENT",
   // 适配器把底层错误原样抬上来：可能是抖动，重试一次是合理的第一步。
   SKILL_CAPABILITY_FAILED: "TRANSIENT",
+  // pathfinder 抛错常是一次性的（区块没加载、目标瞬时被占）：先原样重试。
+  PATHFINDER_GOTO_FAILED: "TRANSIENT",
 
   // —— 契约/接线问题：重试一万次也一样 ——
   SKILL_CAPABILITY_UNSUPPORTED: "UNSUPPORTED",

@@ -34,13 +34,7 @@ import {
   type L0SafetyDecision,
 } from "@minecraft-studio/safety";
 import {
-  collectBlockSkill,
-  containerTransferSkill,
-  craftItemSkill,
-  equipArmorSkill,
-  movementGotoSkill,
-  placeBlockSkill,
-  smeltItemSkill,
+  builtinSkills,
   SkillExecutor,
   SkillFault,
   SkillRegistry,
@@ -236,13 +230,9 @@ export class SingleBotRuntime {
     this.safetyController = dependencies.safetyController ?? new L0SafetyController();
     const skillRegistry = dependencies.skillRegistry ?? new SkillRegistry();
     if (!dependencies.skillRegistry) {
-      skillRegistry.register(movementGotoSkill);
-      skillRegistry.register(equipArmorSkill);
-      skillRegistry.register(collectBlockSkill);
-      skillRegistry.register(craftItemSkill);
-      skillRegistry.register(placeBlockSkill);
-      skillRegistry.register(containerTransferSkill);
-      skillRegistry.register(smeltItemSkill);
+      // 从单一清单注册，不再逐行列举：此前 register 列表、验收场景清单与
+      // SKILLS.md 各存一份"有哪些技能"，smelt.item 只漏掉一处就没人发现。
+      for (const skill of builtinSkills) skillRegistry.register(skill);
     }
     this.skillRegistry = skillRegistry;
     this.skillExecutor = new SkillExecutor(skillRegistry, {

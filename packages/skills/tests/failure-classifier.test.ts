@@ -1,3 +1,7 @@
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -109,6 +113,33 @@ describe("classifyFailure uses the explicit table for known codes", () => {
     for (const code of ["PLAN_GOAL_INVALID", "PLAN_CYCLIC_DEPENDENCY"]) {
       expect(classifyFailure(code).category).toBe("CONTRACT_BUG");
     }
+  });
+
+  it("keeps every smelt failure on the rung its cause deserves", () => {
+    // 这六条曾经有两条是错的，而且都是形态规则"顺手"给出的错答案：
+    // FURNACE_NOT_EMPTY 没进表，落到 UNKNOWN → 把"炉子被别人占着"升级成人工工单；
+    // FURNACE_OUTPUT_MISMATCH 被 "MISMATCH" 规则读成 CONTRACT_BUG → 让人去查一个
+    // 并不存在的 schema 问题。两者其实都是世界变了，重新观察换个空炉子就能继续。
+    // 所以这里锁的不只是分类，还有"凭什么"——source 必须是 table，
+    // 将来谁改形态规则都不会把它们悄悄拽回去。
+    const smelt: readonly (readonly [string, FailureCategory])[] = [
+      ["FURNACE_NOT_EMPTY", "STALE_WORLD"],
+      ["FURNACE_OUTPUT_MISMATCH", "STALE_WORLD"],
+      ["SMELT_OUTPUT_NOT_CONFIRMED", "STALE_WORLD"],
+      ["SMELT_INPUT_INSUFFICIENT", "MISSING_RESOURCE"],
+      ["SMELT_FUEL_INSUFFICIENT", "MISSING_RESOURCE"],
+      ["SMELT_FAILED", "TRANSIENT"],
+    ];
+    for (const [code, category] of smelt) {
+      expect(classifyFailure(code)).toMatchObject({ category, source: "table" });
+    }
+    // 缺料/缺燃料要能生成补齐子计划，缺一步都到不了 GoalPlanner。
+    expect(walk("SMELT_INPUT_INSUFFICIENT", 1)[0]).toBe("ACQUIRE_RESOURCES_THEN_RETRY");
+    expect(walk("SMELT_FUEL_INSUFFICIENT", 1)[0]).toBe("ACQUIRE_RESOURCES_THEN_RETRY");
+    // 炉子被占的第一步是重新观察，不是找人。
+    expect(walk("FURNACE_NOT_EMPTY", 1)[0]).toBe("REOBSERVE_THEN_RETRY");
+    expect(isRecoverableFailure("FURNACE_NOT_EMPTY")).toBe(true);
+    expect(isRecoverableFailure("FURNACE_OUTPUT_MISMATCH")).toBe(true);
   });
 
   it("normalizes case and surrounding whitespace", () => {
@@ -289,15 +320,137 @@ describe("planRecovery advances the ladder by attempt", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// 从源码里**扫**出实际会落到技能结果上的错误码，而不是手抄一份清单。
+//
+// 手抄过一次，代价已经付了：适配器那批码整体漏收，PATH_TARGET_NOT_REACHED
+// 一直落在 UNKNOWN 上，把"走到了但差半格"升级成人工工单——而这恰是
+// movement.goto 最常见的失败。清单是第二份真相，第二份真相一定会漂。
+//
+// 只认**产生机制**，不认具体码，所以新技能新抛一个码就自动进入断言：
+//   SkillFault / PlanAbort / SkillAbortError / 前置条件 failureCode /
+//   策略闸 deny() / executor 直接构造的 rejected|failed 结果码。
+//
+// 刻意不收 apps/bot-runtime 里的裸 `errorCode:` 字面量：那些是
+// L0SafetyActionResult 与 RuntimeStopOutcome 的字段（NO_SAFE_FOOD、
+// RUNTIME_ACTION_REQUIRED、SAFETY_ACTION_FAILED、CLIENT_CLOSE_FAILED），
+// 走的是安全动作/停机协议，永远不会作为技能失败码出现。把它们塞进来只会
+// 逼分类器去认领一个它不负责的域。
+// ---------------------------------------------------------------------------
+
+const SKILL_FAILURE_PATTERNS: readonly RegExp[] = [
+  /new SkillFault\(\s*"([A-Z0-9_]+)"/g,
+  /new PlanAbort\(\s*"([A-Z0-9_]+)"/g,
+  /new SkillAbortError\(\s*"([A-Z0-9_]+)"/g,
+  /failureCode:\s*"([A-Z0-9_]+)"/g,
+  /\bdeny\(\s*"([A-Z0-9_]+)"/g,
+  /"(?:rejected|failed)",\s*[^,)]*,\s*[^,)]*,\s*"([A-Z0-9_]+)"/g,
+];
+
+/** packages/skills 内部的策略/探针结果码也是操作者可见的失败面，一并收。 */
+const SKILL_PACKAGE_ERROR_CODE = /errorCode:\s*"([A-Z0-9_]+)"/g;
+
+const testDir = path.dirname(fileURLToPath(import.meta.url));
+const skillsSrc = path.join(testDir, "..", "src");
+const runtimeSrc = path.join(testDir, "..", "..", "..", "apps", "bot-runtime", "src");
+
+function typescriptFilesIn(dir: string): readonly string[] {
+  const found: string[] = [];
+  const visit = (current: string): void => {
+    for (const entry of readdirSync(current)) {
+      const full = path.join(current, entry);
+      if (statSync(full).isDirectory()) visit(full);
+      else if (full.endsWith(".ts") && !full.endsWith(".d.ts")) found.push(full);
+    }
+  };
+  visit(dir);
+  return found;
+}
+
+function scanEmittedFailureCodes(): readonly string[] {
+  const codes = new Set<string>();
+  const skillFiles = typescriptFilesIn(skillsSrc);
+  const runtimeFiles = typescriptFilesIn(runtimeSrc);
+  for (const file of [...skillFiles, ...runtimeFiles]) {
+    const source = readFileSync(file, "utf8");
+    for (const pattern of SKILL_FAILURE_PATTERNS) {
+      for (const match of source.matchAll(pattern)) codes.add(match[1] as string);
+    }
+  }
+  for (const file of skillFiles) {
+    const source = readFileSync(file, "utf8");
+    for (const match of source.matchAll(SKILL_PACKAGE_ERROR_CODE)) {
+      codes.add(match[1] as string);
+    }
+  }
+  return Object.freeze([...codes].sort());
+}
+
 describe("every error code the package emits is classifiable", () => {
-  /**
-   * 这些码是从 packages/skills/src 里 grep 出来的实际抛出值。
-   * 断言全部不落到 UNKNOWN——分类器上线第一天就不该对自家错误码一无所知。
-   */
-  const emitted: readonly string[] = [
+  const emitted = scanEmittedFailureCodes();
+
+  it("actually found the emission sites (a silent zero-hit scan proves nothing)", () => {
+    // 扫不到东西的扫描器会让下面每条断言都空转通过。
+    expect(emitted.length).toBeGreaterThan(60);
+    // 六种机制各抓一个代表码，任一模式失效都会在这里露出来。
+    for (const code of [
+      "NORMAL_ACTIONS_PAUSED", // SkillFault
+      "PLAN_CYCLIC_DEPENDENCY", // PlanAbort
+      "SKILL_TIMEOUT", // SkillAbortError
+      "FURNACE_OUT_OF_REACH", // 前置条件 failureCode
+      "POLICY_REACH_EXCEEDED", // 策略闸 deny()
+      "SKILL_NOT_FOUND", // executor 结果码
+      "PATH_TARGET_NOT_REACHED", // 适配器码：曾整批漏收的那一类
+      "RUNTIME_STOPPING", // 适配器 SkillFault
+    ]) {
+      expect(emitted).toContain(code);
+    }
+  });
+
+  it("keeps the L0 safety-action vocabulary out of the skill failure domain", () => {
+    // 这些码属于安全动作/停机协议，不该被当成技能失败码收进来。
+    for (const code of [
+      "NO_SAFE_FOOD",
+      "RUNTIME_ACTION_REQUIRED",
+      "SAFETY_ACTION_FAILED",
+      "CLIENT_CLOSE_FAILED",
+    ]) {
+      expect(emitted).not.toContain(code);
+    }
+  });
+
+  const legacyList: readonly string[] = [
+    "ARMOR_EQUIP_FAILED",
+    "ARMOR_ITEM_NOT_IN_INVENTORY",
+    "ARMOR_ITEM_SLOT_MISMATCH",
+    "BLOCK_NAME_UNKNOWN",
+    "BOT_MOVEMENT_BUSY",
     "BOT_NOT_ONLINE",
     "BOT_OFFLINE",
     "BOT_POSITION_UNAVAILABLE",
+    "COLLECT_BLOCKS_FAILED",
+    "CONTAINER_NOT_FOUND",
+    "CONTAINER_TRANSFER_FAILED",
+    "CRAFTING_TABLE_NOT_FOUND",
+    "CRAFT_FAILED",
+    "FURNACE_NOT_EMPTY",
+    "FURNACE_NOT_FOUND",
+    "FURNACE_OUTPUT_MISMATCH",
+    "ITEM_NAME_UNKNOWN",
+    "ITEM_NOT_IN_INVENTORY",
+    "NORMAL_ACTIONS_PAUSED",
+    "PATHFINDER_GOTO_FAILED",
+    "PATH_TARGET_NOT_REACHED",
+    "PLACE_BLOCK_FAILED",
+    "PLACE_NOT_CONFIRMED",
+    "PLACE_TARGET_OCCUPIED",
+    "RECIPE_UNAVAILABLE",
+    "REFERENCE_BLOCK_NOT_FOUND",
+    "SKILL_EXECUTION_INTERRUPTED",
+    "SMELT_FAILED",
+    "SMELT_FUEL_INSUFFICIENT",
+    "SMELT_INPUT_INSUFFICIENT",
+    "SMELT_OUTPUT_NOT_CONFIRMED",
     "CONTAINER_OUT_OF_REACH",
     "CRAFTING_TABLE_OUT_OF_REACH",
     "FURNACE_OUT_OF_REACH",
@@ -354,14 +507,23 @@ describe("every error code the package emits is classifiable", () => {
     "TARGET_SERVER_PROFILE_MISMATCH",
   ];
 
-  it.each(emitted)("classifies %s without falling through to UNKNOWN", (code) => {
+  /**
+   * 扫描是活的来源，这份历史清单是**回归地板**：其中有些码只以联合类型成员
+   * 存在（如 BOT_OFFLINE），扫不到但仍会出现在结果里。两者取并集断言，
+   * 于是"扫描漏了"和"曾经分对过的码退化了"都盖得住。
+   */
+  const allCodes: readonly string[] = Object.freeze(
+    [...new Set([...emitted, ...legacyList])].sort(),
+  );
+
+  it.each(allCodes)("classifies %s without falling through to UNKNOWN", (code) => {
     const result = classifyFailure(code);
     expect(result.category).not.toBe("UNKNOWN");
     expect(result.source).not.toBe("default");
   });
 
   it("never leaves a classified failure without an actionable first rung", () => {
-    for (const code of emitted) {
+    for (const code of allCodes) {
       const first = planRecovery(code, 1);
       expect(recoveryActions).toContain(first.action);
       expect(first.attempt).toBe(1);
