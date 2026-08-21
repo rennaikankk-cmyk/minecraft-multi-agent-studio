@@ -8,6 +8,65 @@ afterEach(() => {
 });
 
 describe('VLLMAdapter', () => {
+  it('falls back to OpenAI model discovery when the provider has no /health endpoint', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('not found', { status: 404 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ data: [{ id: 'qwen-fast:latest' }] }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = new VLLMAdapter('http://127.0.0.1:11435', 'qwen-fast:latest');
+
+    await expect(adapter.health()).resolves.toMatchObject({ available: true });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      'http://127.0.0.1:11435/health',
+      'http://127.0.0.1:11435/v1/models',
+    ]);
+  });
+
+  it('reports unavailable when the configured model is not advertised', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(new Response('not found', { status: 404 }))
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ data: [{ id: 'other-model' }] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        ),
+    );
+    const adapter = new VLLMAdapter('http://127.0.0.1:11435', 'qwen-fast:latest');
+
+    await expect(adapter.health()).resolves.toMatchObject({
+      available: false,
+      error: 'Model qwen-fast:latest is not advertised.',
+    });
+  });
+
+  it('fails closed when model discovery returns an invalid payload', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(new Response('not found', { status: 404 }))
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ data: [{ name: 'qwen-fast:latest' }] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        ),
+    );
+    const adapter = new VLLMAdapter('http://127.0.0.1:11435', 'qwen-fast:latest');
+
+    await expect(adapter.health()).resolves.toMatchObject({ available: false });
+  });
+
   it('requests strict OpenAI-compatible structured output and validates the response', async () => {
     const fetchMock = vi.fn(async () =>
       new Response(

@@ -150,28 +150,36 @@ export class CoordinatorLocalPlanner {
     }
     const operatorGoal = safeOperatorGoal(request.operatorGoal, record);
 
-    const prompt = buildLocalPlannerPrompt({
-      promptVersion: LOCAL_PLANNER_PROMPT_VERSION,
-      operatorGoal,
-      bot: safeBotContext(record, request.taskId),
-      availableSkills: availableSkills.map(
-        ({
-          skillId,
-          skillVersion,
-          verification,
-          inputSchema,
-          timeoutMs,
-          idempotent,
-        }) => ({
-          skillId,
-          skillVersion,
-          verification,
-          inputSchema: plannerInputSchema(inputSchema),
-          timeoutMs,
-          idempotent,
-        }),
-      ),
-    });
+    let prompt: string;
+    try {
+      prompt = buildLocalPlannerPrompt({
+        promptVersion: LOCAL_PLANNER_PROMPT_VERSION,
+        operatorGoal,
+        bot: safeBotContext(record, request.taskId),
+        availableSkills: availableSkills.map(
+          ({
+            skillId,
+            skillVersion,
+            verification,
+            inputSchema,
+            timeoutMs,
+            idempotent,
+          }) => ({
+            skillId,
+            skillVersion,
+            verification,
+            inputSchema: plannerInputSchema(inputSchema),
+            timeoutMs,
+            idempotent,
+          }),
+        ),
+      });
+    } catch {
+      throw new LocalPlannerError(
+        "PLANNER_SKILL_CATALOG_UNAVAILABLE",
+        "Advertised Skill catalog cannot be represented within the planner prompt boundary.",
+      );
+    }
     const ai = await this.options.ai.generate({
       requestId: request.requestId,
       botId: request.botId,

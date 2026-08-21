@@ -21,6 +21,12 @@ const chatCompletionResponseSchema = z
   })
   .loose();
 
+const modelListResponseSchema = z
+  .object({
+    data: z.array(z.object({ id: z.string().min(1) }).loose()).min(1),
+  })
+  .loose();
+
 export class VLLMAdapter implements AIAdapter {
   readonly name = 'vllm';
   readonly type = 'local' as const;
@@ -36,10 +42,35 @@ export class VLLMAdapter implements AIAdapter {
       const response = await fetch(`${this.baseUrl}/health`, {
         signal: AbortSignal.timeout(5000)
       });
+      if (response.ok) {
+        return { available: true, latencyMs: Date.now() - start };
+      }
+      // Ollama and some other OpenAI-compatible hubs do not expose /health,
+      // but do expose the standard model discovery endpoint. Only fall back
+      // for an absent endpoint; preserve real upstream failures as unavailable.
+      if (response.status !== 404 && response.status !== 405) {
+        return {
+          available: false,
+          latencyMs: Date.now() - start,
+          error: `HTTP ${response.status}`,
+        };
+      }
+      const modelsResponse = await fetch(`${this.baseUrl}/v1/models`, {
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!modelsResponse.ok) {
+        return {
+          available: false,
+          latencyMs: Date.now() - start,
+          error: `HTTP ${modelsResponse.status}`,
+        };
+      }
+      const models = modelListResponseSchema.parse(await modelsResponse.json());
+      const modelAvailable = models.data.some(({ id }) => id === this.model);
       return {
-        available: response.ok,
+        available: modelAvailable,
         latencyMs: Date.now() - start,
-        ...(response.ok ? {} : { error: `HTTP ${response.status}` })
+        ...(modelAvailable ? {} : { error: `Model ${this.model} is not advertised.` }),
       };
     } catch (error) {
       return {

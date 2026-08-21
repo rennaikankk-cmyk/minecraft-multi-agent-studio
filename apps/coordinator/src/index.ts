@@ -81,6 +81,7 @@ export {
 } from "./local-planner.js";
 
 export {
+  MAX_LOCAL_PLANNER_PROMPT_BYTES,
   LOCAL_PLANNER_PROMPT_VERSION,
   LOCAL_PLANNER_SYSTEM_PROMPT,
   buildLocalPlannerPrompt,

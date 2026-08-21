@@ -11,6 +11,10 @@ import {
   type LocalPlanRequest,
   type SkillInvocationTransport,
 } from "../src/local-planner.js";
+import {
+  LOCAL_PLANNER_PROMPT_VERSION,
+  LOCAL_PLANNER_SYSTEM_PROMPT,
+} from "../src/planner-prompts.js";
 
 const NOW = new Date("2026-08-21T12:00:00.000Z");
 const BOT_ID = "worker-01";
@@ -81,6 +85,8 @@ describe("CoordinatorLocalPlanner", () => {
     expect(options.prompt).not.toContain("isolated-test");
     expect(options.prompt).toContain("$CURRENT_SERVER_PROFILE");
     expect(options.prompt).toContain('"health":20');
+    expect(options.systemPrompt).toBe(LOCAL_PLANNER_SYSTEM_PROMPT);
+    expect(JSON.parse(options.prompt).promptVersion).toBe(LOCAL_PLANNER_PROMPT_VERSION);
     expect(options.temperature).toBe(0);
     expect(options.schema).toBeDefined();
     expect(sendSkillInvocation).toHaveBeenCalledWith(
@@ -298,6 +304,47 @@ describe("CoordinatorLocalPlanner", () => {
 
     await expect(planner.planAndDispatch(planRequest())).rejects.toMatchObject({
       code: "PLANNER_SAFETY_PAUSED",
+    });
+    expect(generate).not.toHaveBeenCalled();
+  });
+
+  it("fails closed before model use when the advertised catalog exceeds the prompt limit", async () => {
+    const current = registry.get(BOT_ID, NOW)!;
+    const baseSkill = current.skillCatalog!.skills[0]!;
+    const oversizedSchema = {
+      type: "object",
+      properties: {
+        note: {
+          type: "string",
+          enum: Array.from({ length: 8_000 }, (_, index) => `catalog-value-${index}`),
+        },
+      },
+      required: ["note"],
+      additionalProperties: false,
+    };
+    const oversizedRecord = {
+      ...current,
+      skillCatalog: {
+        ...current.skillCatalog!,
+        skills: Array.from({ length: 16 }, (_, index) => ({
+          ...baseSkill,
+          skillId: `movement.goto-${index}`,
+          inputSchema: oversizedSchema,
+        })),
+      },
+    };
+    const generate = vi.fn();
+    const planner = new CoordinatorLocalPlanner({
+      ai: { generate },
+      registry: { get: () => oversizedRecord },
+      transport: { sendSkillInvocation: vi.fn() },
+      coordinatorInstanceId: "coordinator-01",
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    await expect(planner.planAndDispatch(planRequest())).rejects.toMatchObject({
+      code: "PLANNER_SKILL_CATALOG_UNAVAILABLE",
     });
     expect(generate).not.toHaveBeenCalled();
   });

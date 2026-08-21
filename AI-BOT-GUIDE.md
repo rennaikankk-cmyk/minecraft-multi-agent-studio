@@ -34,14 +34,19 @@ The removed `AI_ENABLED`, `AI_API_URL` and `index-ai.js` path was an unsafe inco
 U9 AI settings are server-side only:
 
 ```text
-LOCAL_AI_HUB_URL=http://192.168.100.2:8000
+LOCAL_AI_HUB_URL=http://127.0.0.1:11435
+LOCAL_AI_MODEL=qwen-fast:latest
 AI_MAX_CONCURRENCY=4
 AI_MAX_QUEUE=64
 AI_PER_BOT_CONCURRENCY=1
 AI_REQUEST_TIMEOUT_MS=30000
 ```
 
-The model name and endpoint must match the model service actually verified on Spark. Do not put credentials, production server addresses, player allow-lists or base coordinates in prompts or logs.
+The local port is a read-only SSH tunnel to Spark Ollama (`127.0.0.1:11434` on Spark). If the
+tunnel is not running, the Coordinator reports Local AI as unavailable and fails closed. The
+model name and endpoint must match the model service actually verified on Spark. Do not put
+credentials, production server addresses, player allow-lists or base coordinates in prompts or
+logs. See `docs/LOCAL_AI_PROMPTS.md` for the tunnel command and safe goal examples.
 
 See `docs/AI_SCHEDULER.md` for queue semantics and priority assignments. Bot Runtime and Coordinator startup still use their normal commands:
 
@@ -54,4 +59,8 @@ Both require the existing authenticated Runtime Link configuration. Only an isol
 
 ## Current status
 
-The authenticated SkillInvocation transport, strict protocol validation and deterministic runtime execution are implemented and tested. The Coordinator planner and external goal/chat ingress are separate control-plane modules; until those report ready, the Dashboard must continue to show Local AI Hub as unavailable or starting rather than claiming autonomous AI operation.
+The authenticated SkillInvocation transport, strict protocol validation, deterministic runtime
+execution, Coordinator planner, and authenticated goal ingress are implemented and tested. The
+Dashboard reports the actual Local AI health and still fails closed when Spark, a Bot, or the
+advertised Skill catalog is unavailable; it never claims autonomous operation from simulated
+state.
