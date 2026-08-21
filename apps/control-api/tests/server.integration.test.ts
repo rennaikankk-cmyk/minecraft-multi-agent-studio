@@ -14,6 +14,7 @@ import {
   type ApiPrincipalConfig,
   type BotStateSource,
   type ControlApiLogger,
+  type GoalSubmitter,
 } from "../src/index.js";
 
 const READER_TOKEN = "control-api-reader-token-000000000001";
@@ -40,7 +41,7 @@ const principals: ApiPrincipalConfig[] = [
   {
     subject: "operator-01",
     tokenSha256: hash(OPERATOR_TOKEN),
-    permissions: ["bot.read", "bot.position.read", "bot.stop"],
+    permissions: ["bot.read", "bot.position.read", "bot.stop", "goal.submit"],
   },
 ];
 
@@ -266,6 +267,58 @@ describe("Control API HTTP and WebSocket integration", () => {
     expect((await response.json()).error.code).toBe("CONTROL_UNAVAILABLE");
   });
 
+  it("requires goal permission and returns only the bounded dispatch summary", async () => {
+    const submitGoal = vi.fn<GoalSubmitter["submitGoal"]>(async (request) => ({
+      action: "skill_result",
+      botId: request.botId,
+      taskId: request.taskId,
+      reasonCode: "GOAL_ADVANCED",
+      skillId: "gather.wood",
+      skillVersion: "1.0.0",
+      outcome: "completed",
+      ai: {
+        attempts: 1,
+        queueTimeMs: 4,
+        executionTimeMs: 120,
+        totalTimeMs: 124,
+      },
+    }));
+    const { baseUrl } = await startServer({ goalController: { submitGoal } });
+    const requestId = testUuid(2_010);
+
+    const denied = await goalFetch(baseUrl, READER_TOKEN, requestId);
+    expect(denied.status).toBe(403);
+    expect((await denied.json()).error.code).toBe("PERMISSION_DENIED");
+
+    const accepted = await goalFetch(baseUrl, OPERATOR_TOKEN, requestId);
+    expect(accepted.status).toBe(200);
+    expect((await accepted.json()).data).toEqual({
+      action: "skill_result",
+      botId: "worker-01",
+      taskId: requestId,
+      reasonCode: "GOAL_ADVANCED",
+      skillId: "gather.wood",
+      skillVersion: "1.0.0",
+      outcome: "completed",
+      ai: {
+        attempts: 1,
+        queueTimeMs: 4,
+        executionTimeMs: 120,
+        totalTimeMs: 124,
+      },
+    });
+    expect(submitGoal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operationId: requestId,
+        taskId: requestId,
+        botId: "worker-01",
+        actorId: "operator-01",
+        operatorGoal: "采集附近的木材",
+        timeoutMs: 60_000,
+      }),
+    );
+  });
+
   it("returns 503 instead of an empty list when the Coordinator mirror is unavailable", async () => {
     const unavailableSource: BotStateSource = {
       isReady: () => false,
@@ -368,6 +421,7 @@ async function startServer(
     stopController: Pick<StopController, "requestStop">;
     stateSource: BotStateSource;
     maxConnectionsPerSubject: number;
+    goalController: GoalSubmitter;
   }> = {},
 ): Promise<{
   server: ControlApiServer;
@@ -391,6 +445,9 @@ async function startServer(
     ...(overrides.stopController === undefined
       ? {}
       : { stopController: overrides.stopController }),
+    ...(overrides.goalController === undefined
+      ? {}
+      : { goalController: overrides.goalController }),
     ...(overrides.maxConnectionsPerSubject === undefined
       ? {}
       : { maxConnectionsPerSubject: overrides.maxConnectionsPerSubject }),
@@ -460,6 +517,23 @@ function stopFetch(baseUrl: string, token: string, requestId: string): Promise<R
       schemaVersion: "1.0",
       requestId,
       confirmation: "confirmed",
+    }),
+  });
+}
+
+function goalFetch(baseUrl: string, token: string, requestId: string): Promise<Response> {
+  return fetch(`${baseUrl}/v1/goals`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      schemaVersion: "1.0",
+      requestId,
+      botId: "worker-01",
+      operatorGoal: "采集附近的木材",
+      timeoutMs: 60_000,
     }),
   });
 }

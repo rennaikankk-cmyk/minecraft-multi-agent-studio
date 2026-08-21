@@ -37,7 +37,7 @@ describe("CoordinatorLocalPlanner", () => {
               y: 64,
               z: 10,
               dimension: "minecraft:overworld",
-              serverProfileId: "isolated-test",
+              serverProfileId: "$CURRENT_SERVER_PROFILE",
             },
             radius: 2,
           },
@@ -79,6 +79,7 @@ describe("CoordinatorLocalPlanner", () => {
     const options = generate.mock.calls[0]![0];
     expect(options.prompt).not.toContain('"position"');
     expect(options.prompt).not.toContain("isolated-test");
+    expect(options.prompt).toContain("$CURRENT_SERVER_PROFILE");
     expect(options.prompt).toContain('"health":20');
     expect(options.temperature).toBe(0);
     expect(options.schema).toBeDefined();
@@ -87,6 +88,13 @@ describe("CoordinatorLocalPlanner", () => {
         botId: BOT_ID,
         taskId: "task-01",
         type: "skill.invoke.v1",
+        payload: expect.objectContaining({
+          input: expect.objectContaining({
+            target: expect.objectContaining({
+              serverProfileId: "isolated-test",
+            }),
+          }),
+        }),
       }),
       RUNTIME_ID,
       expect.any(AbortSignal),
@@ -125,6 +133,117 @@ describe("CoordinatorLocalPlanner", () => {
       await expect(planner.planAndDispatch(planRequest())).rejects.toMatchObject({
         code: expectedCodes[index],
       });
+    }
+  });
+
+  it("rejects a model-supplied ServerProfile identity", async () => {
+    const planner = plannerWith(async (options) =>
+      aiResult(
+        JSON.stringify({
+          action: "invoke_skill",
+          botId: BOT_ID,
+          taskId: "task-01",
+          skillId: "movement.goto",
+          skillVersion: "1.0.0",
+          input: {
+            target: {
+              x: 10,
+              y: 64,
+              z: 10,
+              dimension: "minecraft:overworld",
+              serverProfileId: "model-invented-profile",
+            },
+            radius: 2,
+          },
+          reasonCode: "ADVANCE_TASK",
+        }),
+        options.requestId,
+      ),
+    );
+
+    await expect(planner.planAndDispatch(planRequest())).rejects.toMatchObject({
+      code: "PLANNER_DECISION_INVALID",
+    });
+  });
+
+  it("rejects ungrounded coordinate inputs even when they satisfy the advertised schema", async () => {
+    const planner = plannerWith(async (options) =>
+      aiResult(
+        JSON.stringify({
+          action: "invoke_skill",
+          botId: BOT_ID,
+          taskId: "task-01",
+          skillId: "movement.goto",
+          skillVersion: "1.0.0",
+          input: {
+            target: {
+              x: 10,
+              y: 64,
+              z: 10,
+              dimension: "minecraft:overworld",
+              serverProfileId: "$CURRENT_SERVER_PROFILE",
+            },
+            radius: 2,
+          },
+          reasonCode: "ADVANCE_TASK",
+        }),
+        options.requestId,
+      ),
+    );
+
+    await expect(
+      planner.planAndDispatch({
+        ...planRequest(),
+        operatorGoal: "Move toward the approved work area.",
+      }),
+    ).rejects.toMatchObject({ code: "PLANNER_INPUT_UNGROUNDED" });
+  });
+
+  it("rejects wrong types and unknown Skill input fields before dispatch", async () => {
+    const invalidInputs = [
+      {
+        target: {
+          x: "10",
+          y: 64,
+          z: 10,
+          dimension: "minecraft:overworld",
+          serverProfileId: "$CURRENT_SERVER_PROFILE",
+        },
+        radius: 2,
+      },
+      {
+        target: {
+          x: 10,
+          y: 64,
+          z: 10,
+          dimension: "minecraft:overworld",
+          serverProfileId: "$CURRENT_SERVER_PROFILE",
+        },
+        radius: 2,
+        extra: true,
+      },
+    ];
+    for (const input of invalidInputs) {
+      const planner = plannerWith(async (options) =>
+        aiResult(
+          JSON.stringify({
+            action: "invoke_skill",
+            botId: BOT_ID,
+            taskId: "task-01",
+            skillId: "movement.goto",
+            skillVersion: "1.0.0",
+            input,
+            reasonCode: "ADVANCE_TASK",
+          }),
+          options.requestId,
+        ),
+      );
+      await expect(
+        planner.planAndDispatch({
+          ...planRequest(),
+          operatorGoal: "Move toward the approved work area at coordinates (10, 64, 10).",
+        }),
+      ).rejects.toMatchObject({ code: "PLANNER_DECISION_INVALID" });
     }
   });
 
@@ -204,7 +323,7 @@ function planRequest(): LocalPlanRequest {
     traceId: "trace-plan-01",
     taskId: "task-01",
     botId: BOT_ID,
-    operatorGoal: "Move toward the approved work area.",
+      operatorGoal: "Move toward the approved work area at coordinates (10, 64, 10).",
     timeoutMs: 30_000,
   };
 }
@@ -257,6 +376,28 @@ function readyRegistry(): BotRegistry {
         skillVersion: "1.0.0",
         availability: "available",
         verification: "unverified",
+        inputSchema: {
+          type: "object",
+          properties: {
+            target: {
+              type: "object",
+              properties: {
+                x: { type: "integer" },
+                y: { type: "integer" },
+                z: { type: "integer" },
+                dimension: { type: "string" },
+                serverProfileId: { type: "string" },
+              },
+              required: ["x", "y", "z", "dimension", "serverProfileId"],
+              additionalProperties: false,
+            },
+            radius: { type: "integer", minimum: 1, maximum: 4 },
+          },
+          required: ["target", "radius"],
+          additionalProperties: false,
+        },
+        timeoutMs: 20_000,
+        idempotent: false,
         selectedVariantId: "portable",
         unavailableReasons: [],
       }],

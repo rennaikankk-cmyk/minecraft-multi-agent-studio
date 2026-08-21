@@ -8,6 +8,13 @@ import {
   minecraftVersionCompatibilitySchema,
   taskStatusSchema,
 } from "./bot-messages.js";
+import {
+  skillErrorCodeSchema,
+} from "./skill-messages.js";
+import {
+  skillIdentifierSchema,
+  skillVersionSchema,
+} from "./skill-identifiers.js";
 
 const timestampSchema = z.string().datetime({ offset: true });
 
@@ -15,7 +22,135 @@ export const controlApiPermissionSchema = z.enum([
   "bot.read",
   "bot.position.read",
   "bot.stop",
+  "goal.submit",
 ]);
+
+const reasonCodeSchema = z
+  .string()
+  .min(3)
+  .max(64)
+  .regex(/^[A-Z][A-Z0-9_]*$/u);
+
+const goalTextSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(4_096)
+  .refine(
+    (value) => !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(value),
+    "Goal contains unsupported control characters.",
+  );
+
+const goalAiTimingSchema = z
+  .object({
+    attempts: z.number().int().min(1).max(5),
+    queueTimeMs: z.number().int().nonnegative().max(10 * 60_000),
+    executionTimeMs: z.number().int().nonnegative().max(10 * 60_000),
+    totalTimeMs: z.number().int().nonnegative().max(10 * 60_000),
+  })
+  .strict();
+
+const goalDispatchNoopV1Schema = z
+  .object({
+    action: z.literal("noop"),
+    botId: identifierSchema,
+    taskId: identifierSchema,
+    reasonCode: reasonCodeSchema,
+    ai: goalAiTimingSchema,
+  })
+  .strict();
+
+const goalSkillResultCommonShape = {
+  action: z.literal("skill_result"),
+  botId: identifierSchema,
+  taskId: identifierSchema,
+  reasonCode: reasonCodeSchema,
+  skillId: skillIdentifierSchema,
+  skillVersion: skillVersionSchema,
+  ai: goalAiTimingSchema,
+};
+
+const goalSkillResultCompletedV1Schema = z
+  .object({
+    ...goalSkillResultCommonShape,
+    outcome: z.literal("completed"),
+    // Keep the property available to consumers as `undefined`, while
+    // rejecting an explicitly supplied error code on successful outcomes.
+    errorCode: z.never().optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (Object.prototype.hasOwnProperty.call(value, "errorCode")) {
+      context.addIssue({
+        code: "custom",
+        path: ["errorCode"],
+        message: "A completed goal result cannot contain an error code.",
+      });
+    }
+  });
+
+const goalSkillResultRejectedV1Schema = z
+  .object({
+    ...goalSkillResultCommonShape,
+    outcome: z.literal("rejected"),
+    errorCode: skillErrorCodeSchema,
+  })
+  .strict();
+
+const goalSkillResultFailedV1Schema = z
+  .object({
+    ...goalSkillResultCommonShape,
+    outcome: z.literal("failed"),
+    errorCode: skillErrorCodeSchema,
+  })
+  .strict();
+
+const goalSkillResultCancelledV1Schema = z
+  .object({
+    ...goalSkillResultCommonShape,
+    outcome: z.literal("cancelled"),
+    errorCode: skillErrorCodeSchema,
+  })
+  .strict();
+
+const goalSkillResultTimedOutV1Schema = z
+  .object({
+    ...goalSkillResultCommonShape,
+    outcome: z.literal("timed_out"),
+    errorCode: skillErrorCodeSchema,
+  })
+  .strict();
+
+const goalSkillResultV1Schema = z.discriminatedUnion("outcome", [
+  goalSkillResultCompletedV1Schema,
+  goalSkillResultRejectedV1Schema,
+  goalSkillResultFailedV1Schema,
+  goalSkillResultCancelledV1Schema,
+  goalSkillResultTimedOutV1Schema,
+]);
+
+export const goalDispatchResultV1Schema = z.union([
+  goalDispatchNoopV1Schema,
+  goalSkillResultV1Schema,
+]);
+
+export const submitGoalHttpRequestV1Schema = z
+  .object({
+    schemaVersion: z.literal("1.0"),
+    requestId: z.string().uuid(),
+    botId: identifierSchema,
+    operatorGoal: goalTextSchema,
+    timeoutMs: z.number().int().min(1_000).max(120_000),
+  })
+  .strict();
+
+export const submitGoalHttpResponseV1Schema = z
+  .object({
+    schemaVersion: z.literal("1.0"),
+    requestId: z.string().uuid(),
+    data: goalDispatchResultV1Schema,
+  })
+  .strict();
 
 export const publicBotSummaryV1Schema = z
   .object({
@@ -101,6 +236,10 @@ export const controlApiErrorCodeSchema = z.enum([
   "CONTROL_UNAVAILABLE",
   "STOP_TIMEOUT",
   "STOP_FAILED",
+  "AI_UNAVAILABLE",
+  "AI_QUEUE_FULL",
+  "GOAL_TIMEOUT",
+  "GOAL_REJECTED",
   "INTERNAL_ERROR",
 ]);
 
@@ -184,3 +323,25 @@ export type BotStreamSnapshotV1 = z.infer<typeof botStreamSnapshotV1Schema>;
 export type BotStreamEventV1 = z.infer<typeof botStreamEventV1Schema>;
 export type StopBotHttpRequestV1 = z.infer<typeof stopBotHttpRequestV1Schema>;
 export type StopBotHttpResponseV1 = z.infer<typeof stopBotHttpResponseV1Schema>;
+/**
+ * Consumer-facing result type deliberately keeps the historical nullable
+ * errorCode shape. Runtime parsing is stricter: completed outcomes reject the
+ * field and every unsuccessful outcome requires a stable Skill error code.
+ * Keeping this compatibility view lets transports normalize a result from the
+ * Skill execution union without unsafe outcome/error-code casts.
+ */
+export type GoalDispatchResultV1 =
+  | z.infer<typeof goalDispatchNoopV1Schema>
+  | {
+      action: "skill_result";
+      botId: z.infer<typeof identifierSchema>;
+      taskId: z.infer<typeof identifierSchema>;
+      reasonCode: z.infer<typeof reasonCodeSchema>;
+      skillId: z.infer<typeof skillIdentifierSchema>;
+      skillVersion: z.infer<typeof skillVersionSchema>;
+      outcome: "completed" | "rejected" | "failed" | "cancelled" | "timed_out";
+      errorCode?: z.infer<typeof skillErrorCodeSchema> | null | undefined;
+      ai: z.infer<typeof goalAiTimingSchema>;
+    };
+export type SubmitGoalHttpRequestV1 = z.infer<typeof submitGoalHttpRequestV1Schema>;
+export type SubmitGoalHttpResponseV1 = z.infer<typeof submitGoalHttpResponseV1Schema>;

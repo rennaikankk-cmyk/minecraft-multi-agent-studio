@@ -5,6 +5,7 @@ import {
   CONTROL_LINK_SUBPROTOCOL,
   controlLinkAuthenticateV1Schema,
   controlLinkClientProofInput,
+  controlLinkGoalRequestV1Schema,
   controlLinkServerProofInput,
   controlLinkStopRequestV1Schema,
   parseControlLinkServerMessage,
@@ -128,6 +129,70 @@ describe("Coordinator Control Link server", () => {
     );
   });
 
+  it("treats renewed authorization timestamps as the same idempotent stop", async () => {
+    let release: ((result: any) => void) | undefined;
+    const requestStop = vi.fn(
+      (request) =>
+        new Promise((resolve) => {
+          release = resolve as (result: any) => void;
+        }).then(() => ({
+      schemaVersion: "1.0" as const,
+      messageId: testUuid(915),
+      traceId: request.traceId,
+      timestamp: NOW.toISOString(),
+      source: { service: "bot-runtime" as const, instanceId: RUNTIME_ID },
+      botId: request.botId,
+      type: "bot.stop.result.v1" as const,
+      payload: {
+        commandId: request.commandId,
+        runtimeInstanceId: RUNTIME_ID,
+        outcome: "completed" as const,
+        completedAt: NOW.toISOString(),
+      },
+        })),
+    );
+    const { registry, server, url } = await startServer({
+      stopController: { requestStop },
+    });
+    registry.ingest(statusMessage(1), NOW);
+    const { socket, reader } = await authenticate(url);
+    await readSnapshot(reader);
+    const operationId = testUuid(916);
+    socket.send(JSON.stringify(stopRequest(operationId, testUuid(917))));
+    await vi.waitFor(() => expect(requestStop).toHaveBeenCalledTimes(1));
+
+    const retried = stopRequest(operationId, testUuid(918));
+    socket.send(
+      JSON.stringify({
+        ...retried,
+        timestamp: new Date(NOW.getTime() + 1_000).toISOString(),
+        payload: {
+          ...retried.payload,
+          issuedAt: new Date(NOW.getTime() + 1_000).toISOString(),
+          expiresAt: new Date(NOW.getTime() + 31_000).toISOString(),
+        },
+      }),
+    );
+    await vi.waitFor(() => {
+      const pending = (server as unknown as {
+        pendingStops: Map<string, { responders: Map<string, unknown> }>;
+      }).pendingStops.get(operationId);
+      expect(pending?.responders.size).toBe(2);
+    });
+    release?.({});
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.stop-response.v1",
+      ok: true,
+      payload: { operationId },
+    });
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.stop-response.v1",
+      ok: true,
+      payload: { requestMessageId: testUuid(918), operationId },
+    });
+    expect(requestStop).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects an invalid client proof", async () => {
     const { url } = await startServer();
     const socket = new WebSocket(url, CONTROL_LINK_SUBPROTOCOL);
@@ -172,6 +237,22 @@ describe("Coordinator Control Link server", () => {
     });
     socket.send(Buffer.from("{}"));
     await expect(closed).resolves.toBe(1003);
+  });
+
+  it("rejects authenticated client frames outside the clock-skew window", async () => {
+    const { url } = await startServer();
+    const { socket, reader } = await authenticate(url);
+    await readSnapshot(reader);
+    const closed = new Promise<number>((resolve) => {
+      socket.once("close", (code) => resolve(code));
+    });
+    socket.send(
+      JSON.stringify({
+        ...stopRequest(testUuid(932), testUuid(933)),
+        timestamp: new Date(NOW.getTime() - 31_000).toISOString(),
+      }),
+    );
+    await expect(closed).resolves.toBe(1008);
   });
 
   it("fails closed before a queued valid stop request can be dispatched", async () => {
@@ -224,6 +305,165 @@ describe("Coordinator Control Link server", () => {
     });
     releaseFirst?.();
   });
+
+  it("executes an authenticated goal through the guarded planner", async () => {
+    const planAndDispatch = vi.fn(async (request: any) => ({
+      action: "noop" as const,
+      reasonCode: "NO_SAFE_SKILL",
+      ai: {
+        requestId: request.requestId,
+        botId: request.botId,
+        priority: 30,
+        value: { content: "{}", model: "local-test", usage: {} },
+        attempts: 1,
+        enqueuedAt: NOW.toISOString(),
+        startedAt: NOW.toISOString(),
+        completedAt: NOW.toISOString(),
+        queueTimeMs: 2,
+        executionTimeMs: 98,
+        totalTimeMs: 100,
+      },
+    }));
+    const { url } = await startServer({ goalPlanner: { planAndDispatch } });
+    const { socket, reader } = await authenticate(url);
+    await readSnapshot(reader);
+    const operationId = testUuid(980);
+    const goalMessage = controlLinkGoalRequestV1Schema.parse({
+          schemaVersion: "1.0",
+          messageId: testUuid(981),
+          timestamp: NOW.toISOString(),
+          type: "control.link.goal-request.v1",
+          payload: {
+            coordinatorInstanceId: "coordinator-test",
+            clientId: CLIENT_ID,
+            controlApiInstanceId: CONTROL_API_INSTANCE_ID,
+            operationId,
+            taskId: operationId,
+            botId: BOT_ID,
+            actorId: "operator-01",
+            operatorGoal: "采集附近的木材",
+            timeoutMs: 30_000,
+            issuedAt: NOW.toISOString(),
+            expiresAt: new Date(NOW.getTime() + 35_000).toISOString(),
+          },
+        });
+    socket.send(JSON.stringify(goalMessage));
+
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.goal-response.v1",
+      ok: true,
+      payload: {
+        operationId,
+        botId: BOT_ID,
+        result: {
+          action: "noop",
+          reasonCode: "NO_SAFE_SKILL",
+          ai: { queueTimeMs: 2, executionTimeMs: 98, totalTimeMs: 100 },
+        },
+      },
+    });
+    expect(planAndDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        requestId: operationId,
+        taskId: operationId,
+        botId: BOT_ID,
+        operatorGoal: "采集附近的木材",
+      }),
+    );
+
+    socket.send(JSON.stringify({ ...goalMessage, messageId: testUuid(982) }));
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.goal-response.v1",
+      ok: true,
+      payload: {
+        requestMessageId: testUuid(982),
+        operationId,
+        result: { action: "noop", reasonCode: "NO_SAFE_SKILL" },
+      },
+    });
+    expect(planAndDispatch).toHaveBeenCalledTimes(1);
+
+    socket.send(JSON.stringify({
+      ...goalMessage,
+      messageId: testUuid(984),
+      timestamp: new Date(NOW.getTime() + 1_000).toISOString(),
+      payload: {
+        ...goalMessage.payload,
+        issuedAt: new Date(NOW.getTime() + 1_000).toISOString(),
+        expiresAt: new Date(NOW.getTime() + 36_000).toISOString(),
+      },
+    }));
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.goal-response.v1",
+      ok: true,
+      payload: {
+        requestMessageId: testUuid(984),
+        operationId,
+        result: { action: "noop", reasonCode: "NO_SAFE_SKILL" },
+      },
+    });
+    expect(planAndDispatch).toHaveBeenCalledTimes(1);
+
+    socket.send(JSON.stringify({
+      ...goalMessage,
+      messageId: testUuid(983),
+      payload: { ...goalMessage.payload, operatorGoal: "冲突目标" },
+    }));
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.goal-response.v1",
+      ok: false,
+      payload: { requestMessageId: testUuid(983), errorCode: "GOAL_ID_CONFLICT" },
+    });
+    expect(planAndDispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts an active goal when the Coordinator stops", async () => {
+    let receivedSignal: AbortSignal | undefined;
+    const planAndDispatch = vi.fn(
+      async (request: any) =>
+        new Promise((_resolve, reject) => {
+          receivedSignal = request.signal;
+          request.signal.addEventListener(
+            "abort",
+            () => reject(request.signal.reason),
+            { once: true },
+          );
+        }),
+    );
+    const { server, url } = await startServer({
+      goalPlanner: { planAndDispatch },
+    });
+    const { socket, reader } = await authenticate(url);
+    await readSnapshot(reader);
+    socket.send(
+      JSON.stringify(
+        controlLinkGoalRequestV1Schema.parse({
+          schemaVersion: "1.0",
+          messageId: testUuid(991),
+          timestamp: NOW.toISOString(),
+          type: "control.link.goal-request.v1",
+          payload: {
+            coordinatorInstanceId: "coordinator-test",
+            clientId: CLIENT_ID,
+            controlApiInstanceId: CONTROL_API_INSTANCE_ID,
+            operationId: testUuid(990),
+            taskId: testUuid(990),
+            botId: BOT_ID,
+            actorId: "operator-01",
+            operatorGoal: "等待关闭测试",
+            timeoutMs: 30_000,
+            issuedAt: NOW.toISOString(),
+            expiresAt: new Date(NOW.getTime() + 35_000).toISOString(),
+          },
+        }),
+      ),
+    );
+    await vi.waitFor(() => expect(receivedSignal).toBeDefined());
+
+    await server.stop();
+
+    expect(receivedSignal?.aborted).toBe(true);
+  });
 });
 
 async function startServer(
@@ -231,6 +471,7 @@ async function startServer(
     maxSessions: number;
     maxPendingStops: number;
     stopController: { requestStop: (...args: any[]) => Promise<any> };
+    goalPlanner: { planAndDispatch: (...args: any[]) => Promise<any> };
   }> = {},
 ): Promise<{ registry: BotRegistry; server: ControlLinkServer; url: string }> {
   const registry = new BotRegistry({ staleAfterMs: 15_000, now: () => NOW });
@@ -248,11 +489,16 @@ async function startServer(
         clientId: CLIENT_ID,
         keyId: KEY_ID,
         secretSha256: SECRET_SHA256,
-        capabilities: ["bot.read", "bot.stop"],
+        capabilities: overrides.goalPlanner
+          ? ["bot.read", "bot.stop", "goal.submit"]
+          : ["bot.read", "bot.stop"],
       },
     ],
     registry,
     stopController,
+    ...(overrides.goalPlanner === undefined
+      ? {}
+      : { goalPlanner: overrides.goalPlanner }),
     logger,
     now: () => NOW,
     randomId: uuidSequence(1),

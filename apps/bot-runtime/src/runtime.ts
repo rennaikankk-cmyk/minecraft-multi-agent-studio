@@ -11,6 +11,7 @@ import {
   parseBotTelemetryMessage,
   parseSkillCancellation,
   parseSkillInvocation,
+  skillJsonValueSchema,
   type BotDisconnectedV1,
   type BotHeartbeatV1,
   type BotSkillCatalogEntryV1,
@@ -47,6 +48,7 @@ import {
   type SkillCompatibilityResolution,
   type SkillExecutionAuthorization,
 } from "@minecraft-studio/skills";
+import { z } from "zod";
 
 import type {
   BotClient,
@@ -136,7 +138,12 @@ function skillResultTelemetryDigest(
 
 function skillCatalogEntry(
   resolution: SkillCompatibilityResolution,
+  registry: SkillRegistry,
 ): BotSkillCatalogEntryV1 {
+  const definition = registry.resolve(resolution.skillId, resolution.skillVersion);
+  if (!definition) {
+    throw new Error("Skill compatibility catalog references an unknown definition.");
+  }
   const unavailableReasons = resolution.availability === "available"
     ? []
     : resolution.variants.flatMap((variant) =>
@@ -172,6 +179,9 @@ function skillCatalogEntry(
     skillVersion: resolution.skillVersion,
     availability: resolution.availability,
     verification: resolution.verification,
+    inputSchema: skillJsonValueSchema.parse(z.toJSONSchema(definition.inputSchema)),
+    timeoutMs: definition.timeoutMs,
+    idempotent: definition.idempotent,
     selectedVariantId: resolution.selectedVariantId,
     unavailableReasons,
   };
@@ -1071,7 +1081,9 @@ export class SingleBotRuntime {
         observedAt: this.now().toISOString(),
         minecraftVersion: environment.minecraftVersion,
         protocolVersion: environment.protocolVersion,
-        skills: this.skillCompatibilityCatalog.map(skillCatalogEntry),
+        skills: this.skillCompatibilityCatalog.map((resolution) =>
+          skillCatalogEntry(resolution, this.skillRegistry),
+        ),
       },
     });
     this.emit(message);

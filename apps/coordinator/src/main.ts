@@ -48,17 +48,9 @@ async function main(): Promise<void> {
     auditSink: new InMemoryStopAuditSink(),
     logger,
   });
-  const controlServer = new ControlLinkServer({
-    host: controlConfig.host,
-    port: controlConfig.port,
-    instanceId,
-    clients: controlConfig.clients,
-    registry,
-    stopController,
-    logger,
-  });
   let aiScheduler: AIRequestScheduler | null = null;
   let aiRouter: AIRouter | null = null;
+  let localPlanner: CoordinatorLocalPlanner | undefined;
   if (localAIConfig.enabled && localAIConfig.baseUrl && localAIConfig.model) {
     aiRouter = new AIRouter();
     aiRouter.register(new VLLMAdapter(localAIConfig.baseUrl, localAIConfig.model));
@@ -79,13 +71,23 @@ async function main(): Promise<void> {
         });
       },
     });
-    new CoordinatorLocalPlanner({
+    localPlanner = new CoordinatorLocalPlanner({
       ai: new ScheduledAIRouter(aiRouter, aiScheduler),
       registry,
       transport: runtimeServer,
       coordinatorInstanceId: instanceId,
     });
   }
+  const controlServer = new ControlLinkServer({
+    host: controlConfig.host,
+    port: controlConfig.port,
+    instanceId,
+    clients: controlConfig.clients,
+    registry,
+    stopController,
+    ...(localPlanner ? { goalPlanner: localPlanner } : {}),
+    logger,
+  });
   let staleTimer: ReturnType<typeof setInterval> | null = null;
 
   try {

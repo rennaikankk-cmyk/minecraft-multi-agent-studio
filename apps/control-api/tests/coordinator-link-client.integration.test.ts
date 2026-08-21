@@ -146,6 +146,98 @@ describe("Control API Coordinator Link client", () => {
     );
   });
 
+  it("submits one authenticated goal and reuses an identical pending operation", async () => {
+    const registry = new BotRegistry({ staleAfterMs: 15_000, now: () => NOW });
+    const planAndDispatch = vi.fn(async (request: any) => ({
+      action: "noop" as const,
+      reasonCode: "NO_SAFE_SKILL",
+      ai: {
+        requestId: request.requestId,
+        botId: request.botId,
+        priority: 30,
+        value: { content: "{}", model: "local-test", usage: {} },
+        attempts: 1,
+        enqueuedAt: NOW.toISOString(),
+        startedAt: NOW.toISOString(),
+        completedAt: NOW.toISOString(),
+        queueTimeMs: 2,
+        executionTimeMs: 98,
+        totalTimeMs: 100,
+      },
+    }));
+    const server = new ControlLinkServer({
+      host: "127.0.0.1",
+      port: 0,
+      instanceId: "coordinator-goal-test",
+      clients: [{
+        clientId: "control-api-test",
+        keyId: "control-key-test",
+        secretSha256: createHash("sha256")
+          .update(SECRET, "utf8")
+          .digest("hex"),
+        capabilities: ["bot.read", "bot.stop", "goal.submit"],
+      }],
+      registry,
+      stopController: {
+        requestStop: vi.fn(async () => {
+          throw new Error("stop_not_expected");
+        }),
+      },
+      goalPlanner: { planAndDispatch },
+      logger,
+      now: () => NOW,
+    });
+    servers.push(server);
+    const address = await server.start();
+    const client = new CoordinatorLinkClient({
+      config: {
+        url: `ws://127.0.0.1:${address.port}/v1/control-link`,
+        clientId: "control-api-test",
+        keyId: "control-key-test",
+        secret: SECRET,
+        handshakeTimeoutMs: 2_000,
+        livenessTimeoutMs: 75_000,
+        stopTimeoutMs: 3_000,
+        reconnect: { baseDelayMs: 10, maxDelayMs: 50 },
+        maxPendingStops: 8,
+        maxSocketBufferedBytes: 256 * 1_024,
+      },
+      instanceId: "control-api-goal-test",
+      logger,
+      now: () => NOW,
+      random: () => 0.5,
+    });
+    clients.push(client);
+    await client.start();
+
+    const request = {
+      operationId: OPERATION_ID,
+      taskId: OPERATION_ID,
+      botId: BOT_ID,
+      actorId: "operator-01",
+      operatorGoal: "采集附近的木材",
+      timeoutMs: 60_000,
+      issuedAt: NOW,
+      expiresAt: new Date(NOW.getTime() + 65_000),
+    };
+    const first = client.submitGoal(request);
+    const duplicate = client.submitGoal({
+      ...request,
+      issuedAt: new Date(NOW.getTime() + 1_000),
+      expiresAt: new Date(NOW.getTime() + 66_000),
+    });
+
+    expect(duplicate).toBe(first);
+    await expect(first).resolves.toMatchObject({
+      action: "noop",
+      botId: BOT_ID,
+      taskId: OPERATION_ID,
+      reasonCode: "NO_SAFE_SKILL",
+      ai: { totalTimeMs: 100 },
+    });
+    expect(planAndDispatch).toHaveBeenCalledTimes(1);
+  });
+
   it("fails closed when the Coordinator cannot verify its configured secret", async () => {
     const registry = new BotRegistry({ staleAfterMs: 15_000, now: () => NOW });
     const server = new ControlLinkServer({

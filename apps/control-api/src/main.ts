@@ -29,6 +29,7 @@ async function main(): Promise<void> {
     port: config.port,
     registry: coordinatorLink,
     stopController: coordinatorLink,
+    goalController: coordinatorLink,
     principals: config.principals,
     requestLimitPerMinute: config.requestLimitPerMinute,
     handshakeLimitPerMinute: config.handshakeLimitPerMinute,

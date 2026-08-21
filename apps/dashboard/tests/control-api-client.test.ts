@@ -7,6 +7,7 @@ import {
   fetchDashboardBots,
   loadDashboardControlConfig,
   requestDashboardBotStop,
+  requestDashboardGoal,
   verifyStopConfirmation,
 } from "../lib/control-api-client";
 
@@ -107,6 +108,100 @@ describe("Dashboard Control API client", () => {
     );
     expect(result.data.traceId).toBe(UUID);
     expect(timeoutSpy).toHaveBeenCalledWith(20_000);
+  });
+
+  it("submits a bounded goal and validates its Bot/task identity", async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    const fetcher = vi.fn<typeof fetch>(async (_input, init) => {
+      expect(init?.method).toBe("POST");
+      expect(JSON.parse(String(init?.body))).toEqual({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        botId: "worker-01",
+        operatorGoal: "采集附近的木材",
+        timeoutMs: 60_000,
+      });
+      return jsonResponse({
+        schemaVersion: "1.0",
+        requestId: "22222222-2222-4222-8222-222222222222",
+        data: {
+          action: "noop",
+          botId: "worker-01",
+          taskId: UUID,
+          reasonCode: "NO_SAFE_SKILL",
+          ai: {
+            attempts: 1,
+            queueTimeMs: 2,
+            executionTimeMs: 98,
+            totalTimeMs: 100,
+          },
+        },
+      });
+    });
+
+    await expect(requestDashboardGoal(config(), {
+      requestId: UUID,
+      botId: "worker-01",
+      operatorGoal: "采集附近的木材",
+    }, fetcher)).resolves.toMatchObject({
+      action: "noop",
+      taskId: UUID,
+    });
+    expect(timeoutSpy).toHaveBeenCalledWith(65_000);
+  });
+
+  it.each([
+    ["AI_QUEUE_FULL", 429, "RATE_LIMITED", 429],
+    ["AI_UNAVAILABLE", 503, "CONTROL_API_UNAVAILABLE", 503],
+    ["GOAL_TIMEOUT", 504, "GOAL_FAILED", 504],
+    ["GOAL_REJECTED", 409, "CONTROL_API_REJECTED", 409],
+  ] as const)(
+    "maps upstream %s without losing HTTP semantics",
+    async (upstreamCode, upstreamStatus, dashboardCode, dashboardStatus) => {
+      const fetcher = vi.fn<typeof fetch>(async () => jsonResponse({
+        schemaVersion: "1.0",
+        requestId: "22222222-2222-4222-8222-222222222222",
+        error: { code: upstreamCode, message: "bounded upstream error" },
+      }, upstreamStatus));
+
+      await expect(requestDashboardGoal(config(), {
+        requestId: UUID,
+        botId: "worker-01",
+        operatorGoal: "采集附近的木材",
+      }, fetcher)).rejects.toMatchObject({
+        code: dashboardCode,
+        httpStatus: dashboardStatus,
+        upstreamCode,
+      });
+    },
+  );
+
+  it("rejects an invalid goal response identity", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => jsonResponse({
+      schemaVersion: "1.0",
+      requestId: "22222222-2222-4222-8222-222222222222",
+      data: {
+        action: "noop",
+        botId: "other-bot",
+        taskId: UUID,
+        reasonCode: "NO_SAFE_SKILL",
+        ai: {
+          attempts: 1,
+          queueTimeMs: 2,
+          executionTimeMs: 98,
+          totalTimeMs: 100,
+        },
+      },
+    }));
+
+    await expect(requestDashboardGoal(config(), {
+      requestId: UUID,
+      botId: "worker-01",
+      operatorGoal: "采集附近的木材",
+    }, fetcher)).rejects.toMatchObject({
+      code: "INVALID_CONTROL_RESPONSE",
+      httpStatus: 502,
+    });
   });
 });
 

@@ -10,6 +10,8 @@ import {
   controlLinkBotStateV1Schema,
   controlLinkChallengeV1Schema,
   controlLinkClientProofInput,
+  controlLinkGoalRequestV1Schema,
+  controlLinkGoalResponseV1Schema,
   controlLinkServerProofInput,
   controlLinkSnapshotBeginV1Schema,
   controlLinkSnapshotEndV1Schema,
@@ -262,6 +264,68 @@ describe("Control Link protocol", () => {
           errorCode: "CONTROL_LINK_BACKPRESSURE",
         },
       }).ok,
+    ).toBe(false);
+  });
+
+  it("binds a bounded goal request and result to one Bot task", () => {
+    const request = {
+      schemaVersion: "1.0",
+      messageId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      timestamp: NOW,
+      type: "control.link.goal-request.v1",
+      payload: {
+        coordinatorInstanceId: "coordinator-01",
+        clientId: "control-api",
+        controlApiInstanceId: "control-api-01",
+        operationId: OPERATION_ID,
+        taskId: OPERATION_ID,
+        botId: bot.botId,
+        actorId: "operator-01",
+        operatorGoal: "采集附近的木材",
+        timeoutMs: 30_000,
+        issuedAt: NOW,
+        expiresAt: "2026-08-07T10:00:35.000Z",
+      },
+    } as const;
+    expect(controlLinkGoalRequestV1Schema.parse(request)).toEqual(request);
+    expect(parseControlLinkClientMessage(request)).toEqual(request);
+
+    const response = {
+      schemaVersion: "1.0",
+      messageId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      timestamp: LATER,
+      type: "control.link.goal-response.v1",
+      ok: true,
+      payload: {
+        coordinatorInstanceId: "coordinator-01",
+        requestMessageId: request.messageId,
+        operationId: OPERATION_ID,
+        taskId: OPERATION_ID,
+        botId: bot.botId,
+        result: {
+          action: "noop",
+          botId: bot.botId,
+          taskId: OPERATION_ID,
+          reasonCode: "NO_SAFE_SKILL",
+          ai: {
+            attempts: 1,
+            queueTimeMs: 2,
+            executionTimeMs: 98,
+            totalTimeMs: 100,
+          },
+        },
+      },
+    } as const;
+    expect(controlLinkGoalResponseV1Schema.parse(response)).toEqual(response);
+    expect(parseControlLinkServerMessage(response)).toEqual(response);
+    expect(
+      controlLinkGoalResponseV1Schema.safeParse({
+        ...response,
+        payload: {
+          ...response.payload,
+          result: { ...response.payload.result, botId: "other-bot" },
+        },
+      }).success,
     ).toBe(false);
   });
 });

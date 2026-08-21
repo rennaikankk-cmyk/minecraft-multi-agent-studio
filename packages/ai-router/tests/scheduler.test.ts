@@ -120,6 +120,43 @@ describe('AIRequestScheduler', () => {
     expect(scheduler.snapshot()).toMatchObject({ queued: 0, running: 0, bots: [] });
   });
 
+  it.each([1, 3, 5, 10])(
+    'drains planning work for %i Bots within the configured concurrency boundary',
+    async (botCount) => {
+      const scheduler = new AIRequestScheduler({
+        maxConcurrency: 4,
+        maxQueue: 64,
+        perBotConcurrency: 1,
+      });
+      let active = 0;
+      let maximumActive = 0;
+      const scheduled = Array.from({ length: botCount }, (_, index) =>
+        scheduler.schedule(request(
+          `matrix-${botCount}-${index}`,
+          `bot-${index}`,
+          async () => {
+            active += 1;
+            maximumActive = Math.max(maximumActive, active);
+            await Promise.resolve();
+            active -= 1;
+            return index;
+          },
+        )),
+      );
+
+      const results = await Promise.all(scheduled);
+
+      expect(results).toHaveLength(botCount);
+      expect(maximumActive).toBe(Math.min(4, botCount));
+      expect(scheduler.snapshot()).toMatchObject({
+        accepting: true,
+        queued: 0,
+        running: 0,
+        bots: [],
+      });
+    },
+  );
+
   it('rejects backpressure and duplicate request identifiers without replacing active work', async () => {
     const scheduler = new AIRequestScheduler({ maxConcurrency: 1, maxQueue: 1 });
     const gate = deferred<string>();

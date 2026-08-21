@@ -11,6 +11,7 @@ const ALLOWED_PERMISSIONS = new Set<ControlApiPermission>([
   "bot.read",
   "bot.position.read",
   "bot.stop",
+  "goal.submit",
 ]);
 
 export type ApiPrincipalConfig = Readonly<{

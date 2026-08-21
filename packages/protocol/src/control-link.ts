@@ -1,7 +1,10 @@
 import { z } from "zod";
 
 import { botStopResultV1Schema, identifierSchema } from "./bot-messages.js";
-import { publicBotDetailV1Schema } from "./control-api.js";
+import {
+  goalDispatchResultV1Schema,
+  publicBotDetailV1Schema,
+} from "./control-api.js";
 
 export const CONTROL_LINK_PATH = "/v1/control-link";
 export const CONTROL_LINK_SUBPROTOCOL = "minecraft-studio.control-link.v1";
@@ -21,7 +24,11 @@ const controlLinkEnvelopeShape = {
   timestamp: timestampSchema,
 };
 
-export const controlLinkCapabilitySchema = z.enum(["bot.read", "bot.stop"]);
+export const controlLinkCapabilitySchema = z.enum([
+  "bot.read",
+  "bot.stop",
+  "goal.submit",
+]);
 
 export const controlLinkBotStateV1Schema = publicBotDetailV1Schema.superRefine(
   (bot, context) => {
@@ -247,9 +254,120 @@ export const controlLinkStopResponseV1Schema = z.discriminatedUnion("ok", [
     .strict(),
 ]);
 
+export const controlLinkGoalRequestV1Schema = z
+  .object({
+    ...controlLinkEnvelopeShape,
+    type: z.literal("control.link.goal-request.v1"),
+    payload: z
+      .object({
+        coordinatorInstanceId: identifierSchema,
+        clientId: identifierSchema,
+        controlApiInstanceId: identifierSchema,
+        operationId: z.string().uuid(),
+        taskId: identifierSchema,
+        botId: identifierSchema,
+        actorId: identifierSchema,
+        operatorGoal: z
+          .string()
+          .trim()
+          .min(1)
+          .max(4_096)
+          .refine(
+            (value) =>
+              !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(value),
+          ),
+        timeoutMs: z.number().int().min(1_000).max(120_000),
+        issuedAt: timestampSchema,
+        expiresAt: timestampSchema,
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((message, context) => {
+    const issuedAt = Date.parse(message.payload.issuedAt);
+    const expiresAt = Date.parse(message.payload.expiresAt);
+    if (
+      expiresAt <= issuedAt ||
+      expiresAt - issuedAt > 180_000 ||
+      expiresAt - issuedAt < message.payload.timeoutMs
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "expiresAt"],
+        message: "Goal authorization must cover the request timeout and expire within three minutes.",
+      });
+    }
+  });
+
+export const controlLinkGoalErrorCodeSchema = z.enum([
+  "REQUEST_INVALID",
+  "GOAL_ID_CONFLICT",
+  "AUTHORIZATION_REJECTED",
+  "BOT_UNAVAILABLE",
+  "AI_UNAVAILABLE",
+  "AI_QUEUE_FULL",
+  "AI_TIMEOUT",
+  "AI_REQUEST_FAILED",
+  "PLANNER_REJECTED",
+  "SKILL_DISPATCH_FAILED",
+  "CONTROL_LINK_BACKPRESSURE",
+  "CONTROL_LINK_STOPPED",
+  "CONTROL_LINK_INTERNAL_ERROR",
+]);
+
+const goalResponseIdentityShape = {
+  coordinatorInstanceId: identifierSchema,
+  requestMessageId: z.string().uuid(),
+  operationId: z.string().uuid(),
+  taskId: identifierSchema,
+  botId: identifierSchema,
+};
+
+export const controlLinkGoalResponseV1Schema = z.discriminatedUnion("ok", [
+  z
+    .object({
+      ...controlLinkEnvelopeShape,
+      type: z.literal("control.link.goal-response.v1"),
+      ok: z.literal(true),
+      payload: z
+        .object({
+          ...goalResponseIdentityShape,
+          result: goalDispatchResultV1Schema,
+        })
+        .strict(),
+    })
+    .strict()
+    .superRefine((message, context) => {
+      if (
+        message.payload.result.botId !== message.payload.botId ||
+        message.payload.result.taskId !== message.payload.taskId
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["payload", "result"],
+          message: "Goal result identity does not match the operation.",
+        });
+      }
+    }),
+  z
+    .object({
+      ...controlLinkEnvelopeShape,
+      type: z.literal("control.link.goal-response.v1"),
+      ok: z.literal(false),
+      payload: z
+        .object({
+          ...goalResponseIdentityShape,
+          errorCode: controlLinkGoalErrorCodeSchema,
+        })
+        .strict(),
+    })
+    .strict(),
+]);
+
 export const controlLinkClientMessageV1Schema = z.union([
   controlLinkAuthenticateV1Schema,
   controlLinkStopRequestV1Schema,
+  controlLinkGoalRequestV1Schema,
 ]);
 
 export const controlLinkServerMessageV1Schema = z.union([
@@ -260,6 +378,7 @@ export const controlLinkServerMessageV1Schema = z.union([
   controlLinkSnapshotEndV1Schema,
   controlLinkStateUpsertV1Schema,
   controlLinkStopResponseV1Schema,
+  controlLinkGoalResponseV1Schema,
 ]);
 
 export type ControlLinkCapability = z.infer<typeof controlLinkCapabilitySchema>;
@@ -289,6 +408,15 @@ export type ControlLinkStopErrorCode = z.infer<
 >;
 export type ControlLinkStopResponseV1 = z.infer<
   typeof controlLinkStopResponseV1Schema
+>;
+export type ControlLinkGoalRequestV1 = z.infer<
+  typeof controlLinkGoalRequestV1Schema
+>;
+export type ControlLinkGoalErrorCode = z.infer<
+  typeof controlLinkGoalErrorCodeSchema
+>;
+export type ControlLinkGoalResponseV1 = z.infer<
+  typeof controlLinkGoalResponseV1Schema
 >;
 export type ControlLinkClientMessageV1 = z.infer<
   typeof controlLinkClientMessageV1Schema

@@ -27,6 +27,7 @@ export {
 export {
   CoordinatorLinkClient,
   CoordinatorLinkClientError,
+  CoordinatorGoalError,
   type CoordinatorLinkClientErrorCode,
   type CoordinatorLinkClientOptions,
 } from "./coordinator-link-client.js";
@@ -43,4 +44,6 @@ export {
   type ControlApiAddress,
   type ControlApiLogger,
   type ControlApiServerOptions,
+  type GoalSubmitter,
+  type SubmitGoalRequest,
 } from "./server.js";

@@ -53,6 +53,12 @@ describe("SkillInvocationV1", () => {
         payload: { ...invocation.payload, input: { execute: () => undefined } },
       }).success,
     ).toBe(false);
+    expect(
+      skillInvocationV1Schema.safeParse({
+        ...invocation,
+        payload: { ...invocation.payload, skillId: "x" },
+      }).success,
+    ).toBe(false);
   });
 
   it("rejects overlong invocations and authorization that expires early", () => {
