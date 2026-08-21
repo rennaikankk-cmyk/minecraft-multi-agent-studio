@@ -9,11 +9,13 @@ import {
   botStatusV1Schema,
   parseBotProtocolMessage,
   parseBotTelemetryMessage,
+  parseSkillInvocation,
   type BotDisconnectedV1,
   type BotHeartbeatV1,
   type BotSkillCatalogEntryV1,
   type BotSkillCatalogV1,
   type SkillExecutionResultV1,
+  type SkillInvocationV1,
   type BotStopResultV1,
   type BotStatusV1,
   type BotVersionV1,
@@ -63,7 +65,6 @@ import type {
   RuntimeLogger,
 } from "./runtime-types.js";
 import { unsupportedVersionCompatibility } from "./version-compatibility.js";
-import { AIRuntimeLoop, type AILoopConfig } from "./ai-runtime-loop.js";
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
@@ -76,7 +77,6 @@ export type RuntimeDependencies = {
   skillRegistry?: SkillRegistry;
   now?: () => Date;
   randomId?: () => string;
-  aiLoopConfig?: AILoopConfig;
 };
 
 export type RuntimeStopOutcome =
@@ -85,7 +85,8 @@ export type RuntimeStopOutcome =
 
 export type RuntimeControlErrorCode =
   | "CONTROL_MESSAGE_REQUIRED"
-  | "COMMAND_ID_CONFLICT";
+  | "COMMAND_ID_CONFLICT"
+  | "CONTROL_IDENTITY_MISMATCH";
 
 export class RuntimeControlError extends Error {
   readonly code: RuntimeControlErrorCode;
@@ -223,7 +224,10 @@ export class SingleBotRuntime {
     { fingerprint: string; result: Promise<BotStopResultV1> }
   >();
   private readonly activeSkillControllers = new Set<AbortController>();
-  private aiLoop: AIRuntimeLoop | null = null;
+  private readonly skillExecutions = new Map<
+    string,
+    { fingerprint: string; result: Promise<SkillExecutionResultV1> }
+  >();
 
   constructor(
     private readonly profile: ServerProfile,
@@ -254,14 +258,6 @@ export class SingleBotRuntime {
       messageId: this.randomId,
     });
 
-    // 初始化 AI 决策循环
-    if (dependencies.aiLoopConfig?.enabled) {
-      this.aiLoop = new AIRuntimeLoop(
-        dependencies.aiLoopConfig,
-        this.skillExecutor,
-        () => this.client
-      );
-    }
   }
 
   getState(): BotConnectionState {
@@ -311,10 +307,6 @@ export class SingleBotRuntime {
     this.reconnectAttempts = 0;
     this.connect();
 
-    // 启动 AI 决策循环
-    if (this.aiLoop) {
-      this.aiLoop.start();
-    }
   }
 
   stop(
@@ -425,16 +417,73 @@ export class SingleBotRuntime {
     }
   }
 
+  handleCoordinatorSkillInvocation(
+    input: unknown,
+    coordinatorInstanceId: string,
+    externalSignal?: AbortSignal,
+  ): Promise<SkillExecutionResultV1> {
+    const invocation = parseSkillInvocation(input);
+    if (
+      invocation.source.instanceId !== coordinatorInstanceId ||
+      invocation.botId !== this.profile.botId
+    ) {
+      throw new RuntimeControlError(
+        "CONTROL_IDENTITY_MISMATCH",
+        "Skill invocation does not match the authenticated Runtime Link identity.",
+      );
+    }
+
+    const fingerprint = JSON.stringify(invocation);
+    const existing = this.skillExecutions.get(invocation.payload.invocationId);
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) {
+        throw new RuntimeControlError(
+          "COMMAND_ID_CONFLICT",
+          "The invocation ID was already used with different skill parameters.",
+        );
+      }
+      return existing.result;
+    }
+
+    const definition = this.skillRegistry.resolve(
+      invocation.payload.skillId,
+      invocation.payload.skillVersion,
+    );
+    const authorization: SkillExecutionAuthorization = {
+      decisionId: invocation.payload.authorization.decisionId,
+      actorId: invocation.payload.authorization.actorId,
+      sourceInstanceId: invocation.source.instanceId,
+      traceId: invocation.traceId,
+      taskId: invocation.taskId,
+      botId: invocation.botId,
+      invocationId: invocation.payload.invocationId,
+      skillId: invocation.payload.skillId,
+      skillVersion: invocation.payload.skillVersion,
+      issuedAt: invocation.payload.authorization.issuedAt,
+      expiresAt: invocation.payload.authorization.expiresAt,
+      allowedCapabilities: new Set(definition?.requiredCapabilities ?? []),
+    };
+    const result = this.handleSkillInvocation(
+      invocation,
+      authorization,
+      externalSignal,
+    );
+    this.skillExecutions.set(invocation.payload.invocationId, {
+      fingerprint,
+      result,
+    });
+    void result.then(
+      () => this.trimSkillExecutions(),
+      () => this.trimSkillExecutions(),
+    );
+    return result;
+  }
+
   private async performStop(
     reason: string,
     operationTraceId: string,
   ): Promise<RuntimeStopOutcome> {
     this.stopping = true;
-
-    // 停止 AI 决策循环
-    if (this.aiLoop) {
-      this.aiLoop.stop();
-    }
 
     this.cancelActiveSkills();
     this.metrics.increment("bot_stop_requests_total", {
@@ -559,6 +608,16 @@ export class SingleBotRuntime {
     }
   }
 
+  private trimSkillExecutions(): void {
+    while (this.skillExecutions.size > 128) {
+      const oldest = this.skillExecutions.keys().next().value as
+        | string
+        | undefined;
+      if (!oldest) return;
+      this.skillExecutions.delete(oldest);
+    }
+  }
+
   private connect(): void {
     this.generation += 1;
     const activeGeneration = this.generation;
@@ -654,11 +713,6 @@ export class SingleBotRuntime {
     this.startStatusTimer(generation);
     this.emitStatus(generation);
     this.emitHeartbeat();
-
-    // 启动 AI 决策循环
-    if (this.aiLoop) {
-      this.aiLoop.start();
-    }
 
     this.dependencies.logger.info("bot_runtime_online", this.logFields({
       serverProfileId: this.profile.id,
@@ -1152,4 +1206,3 @@ export class SingleBotRuntime {
     }
   }
 }
-

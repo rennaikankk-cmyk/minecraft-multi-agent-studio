@@ -513,6 +513,39 @@ describe("SingleBotRuntime", () => {
     await runtime.stop("test_cleanup");
   });
 
+  it("derives capability authorization for an authenticated Coordinator invocation", async () => {
+    const client = new FakeBotClient();
+    const runtime = new SingleBotRuntime(profile, {
+      createClient: () => client,
+      messageSink: () => undefined,
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+    runtime.start();
+    client.spawn();
+    const invocation = movementInvocation();
+
+    const first = runtime.handleCoordinatorSkillInvocation(
+      invocation,
+      invocation.source.instanceId,
+    );
+    const duplicate = runtime.handleCoordinatorSkillInvocation(
+      invocation,
+      invocation.source.instanceId,
+    );
+
+    expect(duplicate).toBe(first);
+    await expect(first).resolves.toMatchObject({
+      payload: { outcome: "completed", skillId: "movement.goto" },
+    });
+    expect(client.capabilityCalls).toHaveLength(1);
+    expect(() =>
+      runtime.handleCoordinatorSkillInvocation(invocation, "coordinator-forged")
+    ).toThrowError(expect.objectContaining({ code: "CONTROL_IDENTITY_MISMATCH" }));
+    await runtime.stop("test_cleanup");
+  });
+
   it("cancels an active Pathfinder skill when L0 takes control", async () => {
     const client = new FakeBotClient();
     vi.spyOn(client, "invokeSkillCapability").mockImplementation(

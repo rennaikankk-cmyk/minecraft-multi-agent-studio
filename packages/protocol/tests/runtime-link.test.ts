@@ -10,6 +10,8 @@ import {
   runtimeLinkClientProofInput,
   runtimeLinkServerProofInput,
   runtimeLinkTelemetryAckV1Schema,
+  skillExecutionResultV1Schema,
+  skillInvocationV1Schema,
 } from "../src/index.js";
 import { describe, expect, it } from "vitest";
 
@@ -128,5 +130,59 @@ describe("Runtime Link protocol", () => {
     expect(serverInput).toContain("runtime-link/server/v1");
     expect(serverInput.endsWith(authenticate.messageId)).toBe(true);
     expect(serverInput).not.toBe(clientInput);
+  });
+
+  it("transports only strictly validated skill invocations and results", () => {
+    const invocation = skillInvocationV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: "66666666-6666-4666-8666-666666666666",
+      traceId: "trace-runtime-skill",
+      timestamp: "2026-08-07T00:00:03.000Z",
+      source: { service: "coordinator", instanceId: "coordinator-01" },
+      botId: "studio-bot-01",
+      taskId: "task-runtime-skill",
+      type: "skill.invoke.v1",
+      payload: {
+        invocationId: "77777777-7777-4777-8777-777777777777",
+        skillId: "movement.goto",
+        skillVersion: "1.0.0",
+        expiresAt: "2026-08-07T00:01:00.000Z",
+        input: { target: { x: 1, y: 64, z: 2 } },
+        authorization: {
+          decisionId: "88888888-8888-4888-8888-888888888888",
+          actorId: "coordinator-agent",
+          issuedAt: "2026-08-07T00:00:02.000Z",
+          expiresAt: "2026-08-07T00:01:00.000Z",
+        },
+      },
+    });
+    const result = skillExecutionResultV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: "99999999-9999-4999-8999-999999999999",
+      traceId: invocation.traceId,
+      timestamp: "2026-08-07T00:00:04.000Z",
+      source: { service: "bot-runtime", instanceId: "runtime-01" },
+      botId: invocation.botId,
+      taskId: invocation.taskId,
+      type: "skill.result.v1",
+      payload: {
+        invocationId: invocation.payload.invocationId,
+        skillId: invocation.payload.skillId,
+        skillVersion: invocation.payload.skillVersion,
+        completedAt: "2026-08-07T00:00:04.000Z",
+        outcome: "completed",
+        attempts: 1,
+        output: { reached: true },
+      },
+    });
+
+    expect(parseRuntimeLinkServerMessage(invocation)).toEqual(invocation);
+    expect(parseRuntimeLinkClientMessage(result)).toEqual(result);
+    expect(() =>
+      parseRuntimeLinkServerMessage({
+        ...invocation,
+        payload: { ...invocation.payload, rawMineflayerCall: "bot.attack()" },
+      }),
+    ).toThrow();
   });
 });

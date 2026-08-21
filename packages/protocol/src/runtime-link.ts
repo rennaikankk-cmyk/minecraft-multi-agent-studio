@@ -6,6 +6,10 @@ import {
   identifierSchema,
   stopBotCommandV1Schema,
 } from "./bot-messages.js";
+import {
+  skillExecutionResultV1Schema,
+  skillInvocationV1Schema,
+} from "./skill-messages.js";
 
 export const RUNTIME_LINK_PATH = "/v1/runtime-link";
 export const RUNTIME_LINK_SUBPROTOCOL = "minecraft-studio.runtime.v1";
@@ -109,6 +113,7 @@ export const runtimeLinkClientMessageV1Schema = z.union([
   runtimeLinkAuthenticateV1Schema,
   botTelemetryMessageV1Schema,
   botStopResultV1Schema,
+  skillExecutionResultV1Schema,
 ]);
 
 export const runtimeLinkServerMessageV1Schema = z.union([
@@ -116,6 +121,7 @@ export const runtimeLinkServerMessageV1Schema = z.union([
   runtimeLinkAcceptedV1Schema,
   runtimeLinkTelemetryAckV1Schema,
   stopBotCommandV1Schema,
+  skillInvocationV1Schema,
 ]);
 
 export type RuntimeLinkChallengeV1 = z.infer<
@@ -170,9 +176,9 @@ export function parseRuntimeLinkClientMessage(
 }
 
 /**
- * This parser validates the transport shape only. A returned stop command is
- * not authorized until Bot Runtime rebuilds a trusted context from an
- * authenticated Runtime Link session and calls parseBotProtocolMessage.
+ * This parser validates the transport shape only. Control messages are not
+ * authorized until Bot Runtime rebuilds a trusted context from the mutually
+ * authenticated Runtime Link session.
  */
 export function parseRuntimeLinkServerMessage(
   input: unknown,

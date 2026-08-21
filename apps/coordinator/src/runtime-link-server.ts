@@ -15,6 +15,8 @@ import {
   parseBotProtocolMessage,
   parseBotStopResult,
   parseRuntimeLinkClientMessage,
+  parseSkillExecutionResult,
+  parseSkillInvocation,
   runtimeLinkAcceptedV1Schema,
   runtimeLinkChallengeV1Schema,
   runtimeLinkClientProofInput,
@@ -25,6 +27,8 @@ import {
   type RuntimeLinkAuthenticateV1,
   type RuntimeLinkClientMessageV1,
   type RuntimeLinkProofContext,
+  type SkillExecutionResultV1,
+  type SkillInvocationV1,
   type StopBotCommandV1,
 } from "@minecraft-studio/protocol";
 import { WebSocket, WebSocketServer } from "ws";
@@ -55,6 +59,7 @@ export type RuntimeLinkServerOptions = Readonly<{
   randomNonce?: () => string;
   maxSessions?: number;
   maxPendingStops?: number;
+  maxPendingSkills?: number;
 }>;
 
 export type RuntimeLinkTransportErrorCode =
@@ -94,6 +99,15 @@ type PendingStop = {
   removeAbortListener: () => void;
 };
 
+type PendingSkill = {
+  invocation: SkillInvocationV1;
+  expectedRuntimeInstanceId: string;
+  session: RuntimeSession;
+  resolve: (result: SkillExecutionResultV1) => void;
+  reject: (error: Error) => void;
+  removeAbortListener: () => void;
+};
+
 export class RuntimeLinkServer implements StopCommandTransport {
   private readonly now: () => Date;
   private readonly randomId: () => string;
@@ -102,10 +116,12 @@ export class RuntimeLinkServer implements StopCommandTransport {
   private readonly sessions = new Set<RuntimeSession>();
   private readonly activeSessions = new Map<string, RuntimeSession>();
   private readonly pendingStops = new Map<string, PendingStop>();
+  private readonly pendingSkills = new Map<string, PendingSkill>();
   private readonly httpServer: HttpServer;
   private readonly webSocketServer: WebSocketServer;
   private readonly maxSessions: number;
   private readonly maxPendingStops: number;
+  private readonly maxPendingSkills: number;
   private started = false;
   private stopped = false;
 
@@ -159,6 +175,12 @@ export class RuntimeLinkServer implements StopCommandTransport {
       1,
       10_000,
       "maxPendingStops",
+    );
+    this.maxPendingSkills = boundedInteger(
+      options.maxPendingSkills ?? 128,
+      1,
+      10_000,
+      "maxPendingSkills",
     );
     this.httpServer = createServer(
       {
@@ -231,6 +253,9 @@ export class RuntimeLinkServer implements StopCommandTransport {
     );
     for (const pending of [...this.pendingStops.values()]) {
       this.rejectPending(pending, error);
+    }
+    for (const pending of [...this.pendingSkills.values()]) {
+      this.rejectPendingSkill(pending, error);
     }
     const sessionClosures = [...this.sessions].map((session) => {
       clearTimeout(session.handshakeTimer);
@@ -323,6 +348,87 @@ export class RuntimeLinkServer implements StopCommandTransport {
             new RuntimeLinkTransportError(
               "RUNTIME_LINK_SEND_FAILED",
               "The stop command could not be sent to Bot Runtime.",
+            ),
+          );
+        }
+      });
+    });
+  }
+
+  sendSkillInvocation(
+    input: SkillInvocationV1,
+    expectedRuntimeInstanceId: string,
+    signal: AbortSignal,
+  ): Promise<SkillExecutionResultV1> {
+    let invocation: SkillInvocationV1;
+    try {
+      invocation = parseSkillInvocation(input);
+      if (invocation.source.instanceId !== this.options.instanceId) {
+        throw new Error("Skill invocation source does not match this Coordinator.");
+      }
+      if (!IDENTIFIER_PATTERN.test(expectedRuntimeInstanceId)) {
+        throw new Error("Expected Runtime identity is invalid.");
+      }
+    } catch (cause) {
+      return Promise.reject(cause);
+    }
+
+    const session = this.activeSessions.get(invocation.botId);
+    if (
+      !session ||
+      !session.authenticated ||
+      session.socket.readyState !== WebSocket.OPEN ||
+      session.runtimeInstanceId !== expectedRuntimeInstanceId
+    ) {
+      return Promise.reject(
+        new RuntimeLinkTransportError(
+          "RUNTIME_LINK_UNAVAILABLE",
+          "The authenticated target Runtime Link session is unavailable.",
+        ),
+      );
+    }
+    if (this.pendingSkills.has(invocation.payload.invocationId)) {
+      return Promise.reject(
+        new RuntimeLinkTransportError(
+          "RUNTIME_LINK_COMMAND_CONFLICT",
+          "The Runtime Link invocation ID is already pending.",
+        ),
+      );
+    }
+    if (this.pendingSkills.size >= this.maxPendingSkills) {
+      return Promise.reject(
+        new RuntimeLinkTransportError(
+          "RUNTIME_LINK_BACKPRESSURE",
+          "The Runtime Link pending skill limit was reached.",
+        ),
+      );
+    }
+    if (signal.aborted) return Promise.reject(abortedError("skill result"));
+
+    return new Promise<SkillExecutionResultV1>((resolve, reject) => {
+      const abort = () => {
+        const pending = this.pendingSkills.get(invocation.payload.invocationId);
+        if (pending) this.rejectPendingSkill(pending, abortedError("skill result"));
+      };
+      signal.addEventListener("abort", abort, { once: true });
+      const pending: PendingSkill = {
+        invocation,
+        expectedRuntimeInstanceId,
+        session,
+        resolve,
+        reject,
+        removeAbortListener: () => signal.removeEventListener("abort", abort),
+      };
+      this.pendingSkills.set(invocation.payload.invocationId, pending);
+      this.sendFrame(session.socket, invocation, (error) => {
+        if (!error) return;
+        const current = this.pendingSkills.get(invocation.payload.invocationId);
+        if (current === pending) {
+          this.rejectPendingSkill(
+            pending,
+            new RuntimeLinkTransportError(
+              "RUNTIME_LINK_SEND_FAILED",
+              "The skill invocation could not be sent to Bot Runtime.",
             ),
           );
         }
@@ -451,6 +557,10 @@ export class RuntimeLinkServer implements StopCommandTransport {
       this.handleStopResult(session, message);
       return;
     }
+    if (message.type === "skill.result.v1") {
+      this.handleSkillResult(session, message);
+      return;
+    }
     this.handleTelemetry(session, message);
   }
 
@@ -534,7 +644,7 @@ export class RuntimeLinkServer implements StopCommandTransport {
     session: RuntimeSession,
     message: Exclude<
       RuntimeLinkClientMessageV1,
-      RuntimeLinkAuthenticateV1 | BotStopResultV1
+      RuntimeLinkAuthenticateV1 | BotStopResultV1 | SkillExecutionResultV1
     >,
   ): void {
     try {
@@ -617,16 +727,61 @@ export class RuntimeLinkServer implements StopCommandTransport {
     pending.resolve(result);
   }
 
+  private handleSkillResult(
+    session: RuntimeSession,
+    input: SkillExecutionResultV1,
+  ): void {
+    let result: SkillExecutionResultV1;
+    try {
+      result = parseSkillExecutionResult(input);
+    } catch {
+      session.socket.close(1008, "skill_result_invalid");
+      return;
+    }
+    const pending = this.pendingSkills.get(result.payload.invocationId);
+    if (!pending) {
+      safeLog(this.options.logger, "warn", "coordinator_runtime_link_late_skill_result", {
+        traceId: result.traceId,
+        botId: result.botId,
+        invocationId: result.payload.invocationId,
+        code: "RUNTIME_LINK_RESULT_NOT_PENDING",
+      });
+      return;
+    }
+    if (
+      pending.session !== session ||
+      result.botId !== pending.invocation.botId ||
+      result.traceId !== pending.invocation.traceId ||
+      result.taskId !== pending.invocation.taskId ||
+      result.source.instanceId !== pending.expectedRuntimeInstanceId ||
+      result.payload.skillId !== pending.invocation.payload.skillId ||
+      result.payload.skillVersion !== pending.invocation.payload.skillVersion
+    ) {
+      this.rejectPendingSkill(
+        pending,
+        new RuntimeLinkTransportError(
+          "RUNTIME_LINK_SEND_FAILED",
+          "The skill result did not match the pending Runtime Link invocation.",
+        ),
+      );
+      session.socket.close(1008, "skill_result_identity_mismatch");
+      return;
+    }
+    this.pendingSkills.delete(result.payload.invocationId);
+    pending.removeAbortListener();
+    pending.resolve(result);
+  }
+
   private matchesSession(
     session: RuntimeSession,
     message: Exclude<RuntimeLinkClientMessageV1, RuntimeLinkAuthenticateV1>,
   ): boolean {
-    const runtimeInstanceId = message.payload.runtimeInstanceId;
     return (
       message.botId === session.botId &&
       message.source.service === "bot-runtime" &&
       message.source.instanceId === session.runtimeInstanceId &&
-      runtimeInstanceId === session.runtimeInstanceId
+      (message.type === "skill.result.v1" ||
+        message.payload.runtimeInstanceId === session.runtimeInstanceId)
     );
   }
 
@@ -652,12 +807,23 @@ export class RuntimeLinkServer implements StopCommandTransport {
     for (const pending of [...this.pendingStops.values()]) {
       if (pending.session === session) this.rejectPending(pending, error);
     }
+    for (const pending of [...this.pendingSkills.values()]) {
+      if (pending.session === session) this.rejectPendingSkill(pending, error);
+    }
   }
 
   private rejectPending(pending: PendingStop, error: Error): void {
     const commandId = pending.command.payload.commandId;
     if (this.pendingStops.get(commandId) !== pending) return;
     this.pendingStops.delete(commandId);
+    pending.removeAbortListener();
+    pending.reject(error);
+  }
+
+  private rejectPendingSkill(pending: PendingSkill, error: Error): void {
+    const invocationId = pending.invocation.payload.invocationId;
+    if (this.pendingSkills.get(invocationId) !== pending) return;
+    this.pendingSkills.delete(invocationId);
     pending.removeAbortListener();
     pending.reject(error);
   }
@@ -737,10 +903,10 @@ function rejectUpgrade(socket: Duplex, status: number, statusText: string): void
   );
 }
 
-function abortedError(): RuntimeLinkTransportError {
+function abortedError(subject = "stop confirmation"): RuntimeLinkTransportError {
   return new RuntimeLinkTransportError(
     "RUNTIME_LINK_ABORTED",
-    "Runtime Link stop confirmation was cancelled.",
+    `Runtime Link ${subject} was cancelled.`,
   );
 }
 

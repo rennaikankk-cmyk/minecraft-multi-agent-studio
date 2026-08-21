@@ -10,10 +10,13 @@ import {
   runtimeLinkClientProofInput,
   runtimeLinkServerProofInput,
   runtimeLinkTelemetryAckV1Schema,
+  skillInvocationV1Schema,
   stopBotCommandV1Schema,
   type BotStopResultV1,
   type BotTelemetryMessageV1,
   type RuntimeLinkAuthenticateV1,
+  type SkillExecutionResultV1,
+  type SkillInvocationV1,
   type StopBotCommandV1,
 } from "@minecraft-studio/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -37,6 +40,7 @@ type TestServer = {
   sockets: Set<WebSocket>;
   telemetry: BotTelemetryMessageV1[];
   stopResults: BotStopResultV1[];
+  skillResults: SkillExecutionResultV1[];
   receivedTelemetryIds: string[];
   connectionCount: () => number;
   authenticated: Promise<WebSocket>;
@@ -137,6 +141,29 @@ describe("RuntimeLinkClient", () => {
     await client.close();
   });
 
+  it("executes a Coordinator skill invocation only after mutual authentication", async () => {
+    const testServer = await createTestServer();
+    const handled = vi.fn<RuntimeLinkClientOptions["handleSkillInvocation"]>(
+      async (invocation, coordinatorInstanceId) => {
+        expect(coordinatorInstanceId).toBe(COORDINATOR_ID);
+        return skillResult(invocation);
+      },
+    );
+    const client = runtimeLinkClient(testServer.url, {
+      handleSkillInvocation: handled,
+    });
+
+    await client.start();
+    const socket = await testServer.authenticated;
+    const invocation = skillInvocation();
+    socket.send(JSON.stringify(invocation));
+    await vi.waitFor(() => {
+      expect(handled).toHaveBeenCalledWith(invocation, COORDINATOR_ID);
+      expect(testServer.skillResults).toEqual([skillResult(invocation)]);
+    });
+    await client.close();
+  });
+
   it("rejects a forged server proof and fails closed after bounded retries", async () => {
     const testServer = await createTestServer({ forgeServerProof: true });
     const failClosed = vi.fn();
@@ -232,6 +259,9 @@ function runtimeLinkClient(
     }),
     handleStopCommand:
       overrides.handleStopCommand ?? (async (command) => stopResult(command)),
+    handleSkillInvocation:
+      overrides.handleSkillInvocation ??
+      (async (invocation) => skillResult(invocation)),
     publishCurrentState: overrides.publishCurrentState ?? (() => undefined),
     failClosed: overrides.failClosed ?? (() => undefined),
   });
@@ -246,6 +276,7 @@ async function createTestServer(
 ): Promise<TestServer> {
   const telemetry: BotTelemetryMessageV1[] = [];
   const stopResults: BotStopResultV1[] = [];
+  const skillResults: SkillExecutionResultV1[] = [];
   const receivedTelemetryIds: string[] = [];
   const sockets = new Set<WebSocket>();
   let connectionCount = 0;
@@ -327,6 +358,10 @@ async function createTestServer(
         stopResults.push(message);
         return;
       }
+      if (message.type === "skill.result.v1") {
+        skillResults.push(message);
+        return;
+      }
       receivedTelemetryIds.push(message.messageId);
       if (options.closeBeforeFirstAck && receivedTelemetryIds.length === 1) {
         socket.close(1013, "test_retry");
@@ -366,6 +401,7 @@ async function createTestServer(
     sockets,
     telemetry,
     stopResults,
+    skillResults,
     receivedTelemetryIds,
     connectionCount: () => connectionCount,
     authenticated,
@@ -490,6 +526,55 @@ function stopResult(command: StopBotCommandV1): BotStopResultV1 {
       runtimeInstanceId: RUNTIME_ID,
       outcome: "completed",
       completedAt,
+    },
+  };
+}
+
+function skillInvocation(): SkillInvocationV1 {
+  const requestedAt = new Date();
+  return skillInvocationV1Schema.parse({
+    schemaVersion: "1.0",
+    messageId: "77777777-7777-4777-8777-777777777777",
+    traceId: "trace-runtime-skill",
+    timestamp: requestedAt.toISOString(),
+    source: { service: "coordinator", instanceId: COORDINATOR_ID },
+    botId: BOT_ID,
+    taskId: "task-runtime-skill",
+    type: "skill.invoke.v1",
+    payload: {
+      invocationId: "88888888-8888-4888-8888-888888888888",
+      skillId: "movement.goto",
+      skillVersion: "1.0.0",
+      expiresAt: new Date(requestedAt.getTime() + 5_000).toISOString(),
+      input: { target: { x: 1, y: 64, z: 2 } },
+      authorization: {
+        decisionId: "99999999-9999-4999-8999-999999999999",
+        actorId: "coordinator-agent",
+        issuedAt: new Date(requestedAt.getTime() - 1_000).toISOString(),
+        expiresAt: new Date(requestedAt.getTime() + 5_000).toISOString(),
+      },
+    },
+  });
+}
+
+function skillResult(invocation: SkillInvocationV1): SkillExecutionResultV1 {
+  return {
+    schemaVersion: "1.0",
+    messageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    traceId: invocation.traceId,
+    timestamp: invocation.timestamp,
+    source: { service: "bot-runtime", instanceId: RUNTIME_ID },
+    botId: invocation.botId,
+    taskId: invocation.taskId,
+    type: "skill.result.v1",
+    payload: {
+      invocationId: invocation.payload.invocationId,
+      skillId: invocation.payload.skillId,
+      skillVersion: invocation.payload.skillVersion,
+      completedAt: invocation.timestamp,
+      outcome: "completed",
+      attempts: 1,
+      output: { reached: true },
     },
   };
 }

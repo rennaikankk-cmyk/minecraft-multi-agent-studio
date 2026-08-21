@@ -12,6 +12,8 @@ import {
   type ControlAuthorizationContext,
   type RuntimeLinkChallengeV1,
   type RuntimeLinkProofContext,
+  type SkillExecutionResultV1,
+  type SkillInvocationV1,
   type StopBotCommandV1,
 } from "@minecraft-studio/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -148,6 +150,29 @@ describe("Coordinator Runtime Link server", () => {
     expect(registry.get(BOT_ID, NOW)?.lastSequence).toBe(1);
   });
 
+  it("delivers a bounded skill invocation and validates its correlated result", async () => {
+    const { server, url } = await startServer();
+    const socket = await authenticateAndActivate(url);
+    const invocation = skillInvocation(testUuid(750));
+    const received = nextServerMessage(socket);
+    const pending = server.sendSkillInvocation(
+      invocation,
+      RUNTIME_ID,
+      new AbortController().signal,
+    );
+
+    await expect(received).resolves.toEqual(invocation);
+    socket.send(JSON.stringify(skillResult(invocation)));
+    await expect(pending).resolves.toMatchObject({
+      traceId: invocation.traceId,
+      taskId: invocation.taskId,
+      payload: {
+        invocationId: invocation.payload.invocationId,
+        outcome: "completed",
+      },
+    });
+  });
+
   it("rejects an invalid client proof before registry mutation", async () => {
     const { registry, url } = await startServer();
     const socket = new WebSocket(url, RUNTIME_LINK_SUBPROTOCOL);
@@ -262,7 +287,11 @@ describe("Coordinator Runtime Link server", () => {
 });
 
 async function startServer(
-  overrides: Partial<{ maxSessions: number; maxPendingStops: number }> = {},
+  overrides: Partial<{
+    maxSessions: number;
+    maxPendingStops: number;
+    maxPendingSkills: number;
+  }> = {},
 ): Promise<{
   registry: BotRegistry;
   server: RuntimeLinkServer;
@@ -425,6 +454,63 @@ function stopCommand(commandId: string, traceId: string): StopBotCommandV1 {
         issuedAt: new Date(NOW.getTime() - 1_000).toISOString(),
         expiresAt: new Date(NOW.getTime() + 10_000).toISOString(),
       },
+    },
+  };
+}
+
+function skillInvocation(invocationId: string): SkillInvocationV1 {
+  return {
+    schemaVersion: "1.0",
+    messageId: testUuid(751),
+    traceId: "trace-runtime-skill",
+    timestamp: NOW.toISOString(),
+    source: { service: "coordinator", instanceId: "coordinator-test" },
+    botId: BOT_ID,
+    taskId: "task-runtime-skill",
+    type: "skill.invoke.v1",
+    payload: {
+      invocationId,
+      skillId: "movement.goto",
+      skillVersion: "1.0.0",
+      expiresAt: new Date(NOW.getTime() + 10_000).toISOString(),
+      input: {
+        target: {
+          x: 12,
+          y: 64,
+          z: -20,
+          dimension: "minecraft:overworld",
+          serverProfileId: "isolated-test",
+        },
+        radius: 2,
+      },
+      authorization: {
+        decisionId: testUuid(752),
+        actorId: "coordinator-agent",
+        issuedAt: new Date(NOW.getTime() - 1_000).toISOString(),
+        expiresAt: new Date(NOW.getTime() + 10_000).toISOString(),
+      },
+    },
+  };
+}
+
+function skillResult(invocation: SkillInvocationV1): SkillExecutionResultV1 {
+  return {
+    schemaVersion: "1.0",
+    messageId: testUuid(753),
+    traceId: invocation.traceId,
+    timestamp: NOW.toISOString(),
+    source: { service: "bot-runtime", instanceId: RUNTIME_ID },
+    botId: invocation.botId,
+    taskId: invocation.taskId,
+    type: "skill.result.v1",
+    payload: {
+      invocationId: invocation.payload.invocationId,
+      skillId: invocation.payload.skillId,
+      skillVersion: invocation.payload.skillVersion,
+      completedAt: NOW.toISOString(),
+      outcome: "completed",
+      attempts: 1,
+      output: { reached: true },
     },
   };
 }
