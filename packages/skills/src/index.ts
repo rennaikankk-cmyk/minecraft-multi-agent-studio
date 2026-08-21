@@ -84,6 +84,37 @@ export {
   smeltItemSkill,
   smeltItemStateSchema,
 } from "./builtin/smelt-item.js";
+export {
+  antiCheatCompatibilityProfiles,
+  antiCheatCompatibilityProfileSchema,
+  baselineLimits,
+  baselineServerPolicy,
+  DEFAULT_UNKNOWN_SERVER_PROFILE,
+  intersectLimits,
+  isAtLeastAsConservative,
+  MINECRAFT_TICK_MS,
+  profileIsAtLeastAsConservative,
+  serverPolicyLimitsSchema,
+  serverPolicySchema,
+  VANILLA_BLOCK_INTERACTION_REACH,
+  VANILLA_ENTITY_ATTACK_REACH,
+  type AntiCheatCompatibilityProfile,
+  type BaselineAntiCheatProfile,
+  type ServerPolicy,
+  type ServerPolicyLimits,
+} from "./policy/server-policy.js";
+export {
+  ServerPolicyStore,
+  type ServerPolicyWriteResult,
+} from "./policy/policy-store.js";
+export {
+  policyActionKinds,
+  ServerPolicyGate,
+  type ClampedRotation,
+  type PolicyActionKind,
+  type PolicyDecision,
+  type PolicyDenialCode,
+} from "./policy/policy-gate.js";
 export { SkillExecutor } from "./executor.js";
 export { SkillRegistry } from "./registry.js";
 export { resolveSkillCompatibility } from "./compatibility.js";
