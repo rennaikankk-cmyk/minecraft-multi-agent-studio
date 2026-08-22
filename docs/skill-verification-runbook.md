@@ -138,9 +138,9 @@ targetsFound, itemsCollected, requestedCount, craftedCount, movedCount
 pnpm test:minecraft-skills
 ```
 
-脚本会复用固定 Minecraft 1.21.8 服务端哈希、安全 `server.properties` 与本地 ServerProfile 校验，启动临时回环服，执行真实连接、断线恢复以及 `smelt.item@1.0.0` 场景，最后输出 `MINECRAFT_SKILL_ACCEPTANCE=PASS`。测试场景只触发脚本内硬编码的白名单控制台命令；marker 文件内容不会作为服务器命令执行。
+脚本会复用固定 Minecraft 1.21.8 服务端哈希、安全 `server.properties` 与本地 ServerProfile 校验，启动临时回环服，执行真实连接、断线恢复，以及全部七个内建技能各一个成功场景，最后输出 `MINECRAFT_SKILL_ACCEPTANCE=PASS`。测试场景只触发脚本内硬编码的白名单控制台命令；marker 文件内容不会作为服务器命令执行。只有 CI 或本地真实运行完成后才能登记证据；测试代码存在本身不改变任何技能的 `verification=unverified` 状态。
 
-当前第一版覆盖 `5 raw_iron + 1 coal → 5 iron_ingot`。后续技能应沿用同一入口增加固定场景，不另建启动器。
+当前固定成功场景依次覆盖移动、采集单个原木、合成工作台、放置方块、箱子存入、四槽铁甲换装，以及 `1 raw_iron + 1 coal -> 1 iron_ingot`。后续场景应沿用同一入口扩展，不另建启动器。
 
 ### 版本化场景清单
 

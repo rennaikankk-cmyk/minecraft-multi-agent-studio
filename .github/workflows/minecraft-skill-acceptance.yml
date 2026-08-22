@@ -70,6 +70,9 @@ jobs:
       - name: 安装锁定依赖
         run: pnpm install --frozen-lockfile
 
+      - name: 构建验收所需工作区产物
+        run: pnpm build
+
       - name: 准备固定版本回环测试服
         shell: pwsh
         run: |

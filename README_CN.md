@@ -164,14 +164,22 @@ Benchmark。DGX Spark 的 ARM64 双簇不会被猜测为 Intel P/E Core，而会
 多版本 Skill 策略：
 
 - Skill 的 SemVer 是执行契约版本，不等于 Minecraft 版本。每个定义另带有序兼容变体；Runtime 使用连接后真实协商出的 `minecraftVersion`、`protocolVersion`、`majorVersion` 和 registry/feature 能力选择第一个满足条件的变体。
-- 当前六个已注册 Skill 声明为 `portable` 通用变体，因此不会仅因版本号不同被禁用；“可用性”和“实机验证状态”分开上报，它们在跨版本真实场景矩阵完成前仍标记为 `unverified`。
+- 当前七个已注册 Skill 声明为 `portable` 通用变体，因此不会仅因版本号不同被禁用；“可用性”和“实机验证状态”分开上报，它们在跨版本真实场景矩阵完成前仍标记为 `unverified`。
 - 新版本特色 Skill 应声明所需 feature、物品/方块/实体及必要的服务端能力。缺少资源时标记 `unavailable`；服务端能力尚未经过显式探针时标记 `unknown` 并拒绝执行，不按版本号猜测。
 - 当前通用输入仍使用目标版本 registry 的原生名称，例如旧版本和新版本的原木 ID 可能不同。兼容层已经支持有序资源变体，但面向规划器的跨版本语义资源别名仍是下一模块。
-- 回环协议夹具已验证 `minecraftVersion: "auto"` 能分别协商 1.8.8、1.12.2、1.16.5 和 1.21.11，并得到对应协议号；该测试不连接外部服务器，也不等于六个 Skill 已在四个版本真实执行。
+- 回环协议夹具已验证 `minecraftVersion: "auto"` 能分别协商 1.8.8、1.12.2、1.16.5 和 1.21.11，并得到对应协议号；该测试不连接外部服务器，也不等于七个 Skill 已在四个版本真实执行。
 
 ## 真实联机验收
 
-验收脚本只使用项目 `runtime-data` 中预先准备的可信 Java、官方 Minecraft 1.21.8 服务端和本地配置。它不会下载依赖或自动接受 EULA；缺少文件、哈希不符、属性不安全或端口已占用时会停止。
+仓库不提交真实服务端、Java 运行时、世界存档或本地 ServerProfile。先运行准备命令：
+
+```powershell
+pnpm prepare:minecraft
+```
+
+该命令只从固定的 Mojang 官方地址取得 Minecraft 1.21.8 服务端并校验 SHA-1/SHA-256，生成 `127.0.0.1:25565`、离线认证、禁用 RCON/Query 的服务端属性和本地 ServerProfile。它不会下载 Java、启动服务端或替用户接受 EULA。请按 `docs/runbooks/isolated-minecraft.md` 放置并校验 Java 21，阅读 EULA 后手工将 `runtime-data/isolated-test/server/eula.txt` 改为 `eula=true`。
+
+验收脚本只使用项目 `runtime-data` 中已准备的可信 Java、官方 Minecraft 1.21.8 服务端和本地配置。它不会自动接受 EULA；缺少文件、哈希不符、属性不安全或端口已占用时会停止。
 
 准备完成并由用户明确接受 Minecraft EULA 后运行：
 
@@ -179,7 +187,7 @@ Benchmark。DGX Spark 的 ARM64 双簇不会被猜测为 Intel P/E Core，而会
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-isolated-minecraft-test.ps1
 ```
 
-脚本仅绑定 `127.0.0.1:25565`，验证真实连接、正常停止、服务端断开和有限重连，完成后自动关闭本次启动的服务。服务器文件、世界、日志和本地 ServerProfile 均不会提交到版本库。
+脚本仅绑定 `127.0.0.1:25565`，验证真实连接、七个内建技能各一个成功场景、正常停止、服务端断开和有限重连，完成后自动关闭本次启动的服务。只有实际运行通过才能登记证据；脚本或测试代码存在本身不会把技能从 `unverified` 升级。服务器文件、世界、日志和本地 ServerProfile 均不会提交到版本库。
 
 ## Coordinator 当前边界
 
@@ -343,7 +351,7 @@ Dashboard 的 Bot 卡片显示真实 L0 状态。旧 Runtime 未上报该字段�
 
 ## Pathfinder 确定性技能
 
-当前已注册的六个确定性 Skill 见 [`SKILLS.md`](SKILLS.md)。其中 `movement.goto@1.0.0` 的目标必须与 Bot 当前 ServerProfile 和维度一致，距离最多 64 格，半径 1～4 格，超时 20 秒。L0 暂停、Runtime 停止、断线或取消会停止寻路。
+当前已注册的七个确定性 Skill 见 [`SKILLS.md`](SKILLS.md)。其中 `movement.goto@1.0.0` 的目标必须与 Bot 当前 ServerProfile 和维度一致，距离最多 64 格，半径 1～4 格，超时 20 秒。L0 暂停、Runtime 停止、断线或取消会停止寻路。
 
 该技能已通过离线测试，但尚未在真实隔离服运行路径场景和跨版本矩阵，因此不能视为实机寻路验收完成。
 

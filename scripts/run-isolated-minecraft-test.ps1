@@ -9,14 +9,62 @@ $ErrorActionPreference = "Stop"
 
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $runtimeRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot "runtime-data\isolated-test"))
-if (-not $runtimeRoot.StartsWith($projectRoot, [StringComparison]::OrdinalIgnoreCase)) {
-  throw "Resolved runtime directory is outside the project."
+
+function Assert-ContainedPath {
+  param(
+    [Parameter(Mandatory = $true)][string]$Candidate,
+    [Parameter(Mandatory = $true)][string]$Root,
+    [Parameter(Mandatory = $true)][string]$Label
+  )
+
+  $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar)
+  $candidateFull = [IO.Path]::GetFullPath($Candidate)
+  $prefix = $rootFull + [IO.Path]::DirectorySeparatorChar
+  if (-not $candidateFull.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "$Label is outside the permitted directory: $candidateFull"
+  }
+  return $candidateFull
+}
+
+function Assert-NoReparsePointInPath {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$Label
+  )
+
+  $cursor = [IO.Path]::GetFullPath($Path)
+  while (-not [string]::IsNullOrWhiteSpace($cursor)) {
+    if (Test-Path -LiteralPath $cursor) {
+      $item = Get-Item -LiteralPath $cursor -Force
+      if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "$Label contains a reparse point: $cursor"
+      }
+    }
+    $parentInfo = [IO.Directory]::GetParent($cursor)
+    $parent = if ($null -eq $parentInfo) { $null } else { $parentInfo.FullName }
+    if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $cursor) {
+      break
+    }
+    $cursor = $parent
+  }
+}
+
+$runtimeRoot = Assert-ContainedPath -Candidate $runtimeRoot -Root $projectRoot -Label "Runtime directory"
+Assert-NoReparsePointInPath -Path $runtimeRoot -Label "Runtime directory"
+if (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) {
+  throw "Runtime directory is missing; run scripts/prepare-isolated-minecraft.ps1 first."
 }
 
 if ([string]::IsNullOrWhiteSpace($JavaExecutable)) {
-  $JavaExecutable = Get-ChildItem -LiteralPath (Join-Path $runtimeRoot "java") -Recurse -File -Filter java.exe |
-    Where-Object { $_.FullName -match "\\bin\\java\.exe$" } |
-    Select-Object -First 1 -ExpandProperty FullName
+  $javaRoot = Join-Path $runtimeRoot "java"
+  if (Test-Path -LiteralPath $javaRoot -PathType Container) {
+    $JavaExecutable = Get-ChildItem -LiteralPath $javaRoot -Recurse -File -Filter java.exe |
+      Where-Object { $_.FullName -match "\\bin\\java\.exe$" } |
+      Select-Object -First 1 -ExpandProperty FullName
+  }
+}
+if ([string]::IsNullOrWhiteSpace($JavaExecutable)) {
+  throw "Java 21 is missing. Place a trusted Java 21 runtime under runtime-data\\isolated-test\\java or set MC_TEST_JAVA_EXE."
 }
 if ([string]::IsNullOrWhiteSpace($ServerDirectory)) {
   $ServerDirectory = Join-Path $runtimeRoot "server"
@@ -29,21 +77,42 @@ if ([string]::IsNullOrWhiteSpace($PnpmExecutable)) {
 }
 
 $JavaExecutable = [IO.Path]::GetFullPath($JavaExecutable)
-$ServerDirectory = [IO.Path]::GetFullPath($ServerDirectory)
-$ServerProfilePath = [IO.Path]::GetFullPath($ServerProfilePath)
+if (-not [IO.Path]::IsPathRooted($ServerDirectory)) {
+  $ServerDirectory = Join-Path $runtimeRoot $ServerDirectory
+}
+if (-not [IO.Path]::IsPathRooted($ServerProfilePath)) {
+  $ServerProfilePath = Join-Path $projectRoot $ServerProfilePath
+}
+$ServerDirectory = Assert-ContainedPath -Candidate $ServerDirectory -Root $runtimeRoot -Label "Server directory"
+$ServerProfilePath = Assert-ContainedPath -Candidate $ServerProfilePath -Root (Join-Path $projectRoot "configs\servers") -Label "ServerProfile"
+Assert-NoReparsePointInPath -Path $ServerDirectory -Label "Server directory"
+Assert-NoReparsePointInPath -Path $ServerProfilePath -Label "ServerProfile"
 $serverJar = Join-Path $ServerDirectory "server.jar"
 $eulaPath = Join-Path $ServerDirectory "eula.txt"
 $propertiesPath = Join-Path $ServerDirectory "server.properties"
-$readyFile = Join-Path $runtimeRoot "acceptance\bot-ready.marker"
-$skillSetupRequest = Join-Path $runtimeRoot "acceptance\smelt-item.setup-request.marker"
-$skillSetupReady = Join-Path $runtimeRoot "acceptance\smelt-item.setup-ready.marker"
-$testStdout = Join-Path $runtimeRoot "acceptance\vitest.stdout.log"
-$testStderr = Join-Path $runtimeRoot "acceptance\vitest.stderr.log"
-$latestServerLog = Join-Path $ServerDirectory "logs\latest.log"
+$acceptanceRoot = Assert-ContainedPath -Candidate (Join-Path $runtimeRoot "acceptance") -Root $runtimeRoot -Label "Acceptance directory"
+$serverLogsDirectory = Assert-ContainedPath -Candidate (Join-Path $ServerDirectory "logs") -Root $ServerDirectory -Label "Server logs directory"
+$serverWorldDirectory = Assert-ContainedPath -Candidate (Join-Path $ServerDirectory "world") -Root $ServerDirectory -Label "Server world directory"
+foreach ($guardedDirectory in @($acceptanceRoot, $serverLogsDirectory, $serverWorldDirectory)) {
+  Assert-NoReparsePointInPath -Path $guardedDirectory -Label "Isolated-server writable directory"
+}
+$readyFile = Join-Path $acceptanceRoot "bot-ready.marker"
+$skillSetupRequest = Join-Path $acceptanceRoot "builtin-skills.setup-request.marker"
+$skillSetupReady = Join-Path $acceptanceRoot "builtin-skills.setup-ready.marker"
+$testStdout = Join-Path $acceptanceRoot "vitest.stdout.log"
+$testStderr = Join-Path $acceptanceRoot "vitest.stderr.log"
+$latestServerLog = Join-Path $serverLogsDirectory "latest.log"
 
 foreach ($requiredPath in @($JavaExecutable, $serverJar, $eulaPath, $propertiesPath, $ServerProfilePath, $PnpmExecutable)) {
   if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
     throw "Required file is missing: $requiredPath"
+  }
+}
+
+foreach ($requiredFile in @($serverJar, $eulaPath, $propertiesPath, $ServerProfilePath)) {
+  $fileItem = Get-Item -LiteralPath $requiredFile -Force
+  if ($fileItem.PSIsContainer -or (($fileItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+    throw "Required isolated-server file must be a regular non-reparse file: $requiredFile"
   }
 }
 
@@ -111,9 +180,11 @@ if ($null -ne $existingListener) {
   throw "Port 25565 is already in use; refusing to stop or reuse an unknown process."
 }
 
-$acceptanceRoot = Split-Path -Parent $readyFile
 New-Item -ItemType Directory -Path $acceptanceRoot -Force | Out-Null
+Assert-NoReparsePointInPath -Path $acceptanceRoot -Label "Acceptance directory"
 foreach ($artifact in @($readyFile, $skillSetupRequest, $skillSetupReady, $testStdout, $testStderr)) {
+  $artifact = Assert-ContainedPath -Candidate $artifact -Root $acceptanceRoot -Label "Acceptance artifact"
+  Assert-NoReparsePointInPath -Path $artifact -Label "Acceptance artifact"
   if (Test-Path -LiteralPath $artifact) {
     Remove-Item -LiteralPath $artifact -Force
   }
@@ -178,21 +249,61 @@ try {
   if (-not $testProcess.Start()) {
     throw "Failed to start the real Minecraft integration test process."
   }
+  $testStdoutTask = $testProcess.StandardOutput.ReadToEndAsync()
+  $testStderrTask = $testProcess.StandardError.ReadToEndAsync()
+  $testDeadline = [DateTime]::UtcNow.AddMinutes(8)
 
   while (-not $testProcess.HasExited) {
+    if ([DateTime]::UtcNow -ge $testDeadline) {
+      throw "Real Minecraft integration tests exceeded the 8 minute hard deadline."
+    }
     if ((Test-Path -LiteralPath $skillSetupRequest) -and -not (Test-Path -LiteralPath $skillSetupReady)) {
-      # 固定场景，不读取 marker 内容为命令，避免把测试数据变成控制台注入入口。
+      # Fixed scenario; marker contents are never interpreted as commands.
+      $fixtureSentinel = "MMS_FIXTURE_READY_V1"
+      $fixtureLogBaseline = Get-Content -LiteralPath $latestServerLog -Raw -ErrorAction Stop
       foreach ($command in @(
+        "forceload add -8 -6 10 6",
         "clear StudioBot",
+        "effect clear StudioBot",
+        "fill -8 60 -6 10 70 6 minecraft:air replace",
+        "fill -8 64 -6 10 64 6 minecraft:stone replace",
+        "kill @e[type=minecraft:item,x=-8,y=60,z=-6,dx=18,dy=10,dz=12]",
         "tp StudioBot 0 65 0",
-        "setblock 2 64 0 minecraft:furnace replace",
-        "give StudioBot minecraft:raw_iron 5",
-        "give StudioBot minecraft:coal 1"
+        "setblock 5 65 0 minecraft:oak_log replace",
+        "setblock 5 65 2 minecraft:air replace",
+        "setblock 5 65 -2 minecraft:chest replace",
+        "setblock 3 65 -2 minecraft:furnace replace",
+        "give StudioBot minecraft:oak_planks 4",
+        "give StudioBot minecraft:cobblestone 5",
+        "give StudioBot minecraft:iron_helmet 1",
+        "give StudioBot minecraft:iron_chestplate 1",
+        "give StudioBot minecraft:iron_leggings 1",
+        "give StudioBot minecraft:iron_boots 1",
+        "give StudioBot minecraft:raw_iron 1",
+        "give StudioBot minecraft:coal 1",
+        "execute if entity @a[name=StudioBot,x=0,y=65,z=0,distance=..1] if block 5 65 0 minecraft:oak_log if block 5 65 2 minecraft:air if block 5 65 -2 minecraft:chest if block 3 65 -2 minecraft:furnace run say $fixtureSentinel",
+        "forceload remove -8 -6 10 6"
       )) {
         $serverProcess.StandardInput.WriteLine($command)
       }
       $serverProcess.StandardInput.Flush()
-      Start-Sleep -Milliseconds 500
+      $fixtureDeadline = [DateTime]::UtcNow.AddSeconds(30)
+      $fixtureReady = $false
+      while ([DateTime]::UtcNow -lt $fixtureDeadline -and
+             -not $serverProcess.HasExited -and
+             -not $testProcess.HasExited) {
+        $currentLog = Get-Content -LiteralPath $latestServerLog -Raw -ErrorAction SilentlyContinue
+        if ($null -ne $currentLog -and
+            $currentLog.Length -ge $fixtureLogBaseline.Length -and
+            $currentLog.Substring($fixtureLogBaseline.Length).Contains($fixtureSentinel)) {
+          $fixtureReady = $true
+          break
+        }
+        Start-Sleep -Milliseconds 100
+      }
+      if (-not $fixtureReady) {
+        throw "Isolated Minecraft fixture was not confirmed by the server within 30 seconds."
+      }
       [IO.File]::WriteAllText($skillSetupReady, "ready`n", [Text.UTF8Encoding]::new($false))
     }
     if (-not $serverStopSent -and (Test-Path -LiteralPath $readyFile)) {
@@ -204,8 +315,8 @@ try {
   }
   $testProcess.WaitForExit()
   $testExitCode = $testProcess.ExitCode
-  $testOutput = $testProcess.StandardOutput.ReadToEnd()
-  $testError = $testProcess.StandardError.ReadToEnd()
+  $testOutput = $testStdoutTask.GetAwaiter().GetResult()
+  $testError = $testStderrTask.GetAwaiter().GetResult()
   [IO.File]::WriteAllText($testStdout, $testOutput, [Text.UTF8Encoding]::new($false))
   [IO.File]::WriteAllText($testStderr, $testError, [Text.UTF8Encoding]::new($false))
   if (-not [string]::IsNullOrWhiteSpace($testOutput)) {

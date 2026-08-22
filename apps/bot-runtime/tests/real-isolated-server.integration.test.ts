@@ -1,8 +1,11 @@
 import { access, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import type { BotTelemetryMessageV1 } from "@minecraft-studio/protocol";
-import type { SkillExecutionAuthorization } from "@minecraft-studio/skills";
+import {
+  skillInvocationV1Schema,
+  type BotTelemetryMessageV1,
+  type SkillJsonValue,
+} from "@minecraft-studio/protocol";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { createMineflayerClient } from "../src/mineflayer-client.js";
@@ -12,6 +15,16 @@ import type { RuntimeLogger } from "../src/runtime-types.js";
 
 const enabled = process.env.RUN_REAL_MC_TEST === "1";
 const integrationDescribe = enabled ? describe : describe.skip;
+const ACCEPTANCE_COORDINATOR_ID = "coordinator-real-acceptance";
+const REAL_ACCEPTANCE_SKILL_IDS = [
+  "movement.goto",
+  "collect.block",
+  "craft.item",
+  "world.place-block",
+  "container.transfer",
+  "inventory.equip-armor",
+  "smelt.item",
+] as const;
 
 const runtimeEvents: string[] = [];
 const logger: RuntimeLogger = {
@@ -52,6 +65,70 @@ async function waitForMessage<T extends BotTelemetryMessageV1>(
   );
 }
 
+function acceptanceUuid(value: number): string {
+  return `90000000-0000-4000-8000-${value.toString(16).padStart(12, "0")}`;
+}
+
+function outputNumber(output: SkillJsonValue, key: string): number {
+  if (!output || typeof output !== "object" || Array.isArray(output)) {
+    throw new Error(`Skill output is not an object while reading ${key}.`);
+  }
+  const value = output[key];
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`Skill output ${key} is not a finite number.`);
+  }
+  return value;
+}
+
+async function executeAcceptanceSkill(
+  runtime: SingleBotRuntime,
+  profile: Awaited<ReturnType<typeof loadServerProfile>>,
+  skillId: (typeof REAL_ACCEPTANCE_SKILL_IDS)[number],
+  input: SkillJsonValue,
+  sequence: number,
+): Promise<SkillJsonValue> {
+  const issuedAt = new Date();
+  const expiresAt = new Date(issuedAt.getTime() + 180_000).toISOString();
+  const invocation = skillInvocationV1Schema.parse({
+    schemaVersion: "1.0",
+    messageId: acceptanceUuid(sequence * 3),
+    traceId: `trace-real-${skillId.replaceAll(".", "-")}`,
+    timestamp: issuedAt.toISOString(),
+    source: {
+      service: "coordinator",
+      instanceId: ACCEPTANCE_COORDINATOR_ID,
+    },
+    botId: profile.botId,
+    taskId: `task-real-${skillId.replaceAll(".", "-")}`,
+    type: "skill.invoke.v1",
+    payload: {
+      invocationId: acceptanceUuid(sequence * 3 + 1),
+      skillId,
+      skillVersion: "1.0.0",
+      expiresAt,
+      input,
+      authorization: {
+        decisionId: acceptanceUuid(sequence * 3 + 2),
+        actorId: "isolated-acceptance",
+        issuedAt: issuedAt.toISOString(),
+        expiresAt,
+      },
+    },
+  });
+  const result = await runtime.handleCoordinatorSkillInvocation(
+    invocation,
+    ACCEPTANCE_COORDINATOR_ID,
+  );
+  if (result.payload.outcome !== "completed") {
+    const errorCode =
+      "errorCode" in result.payload ? result.payload.errorCode : "UNKNOWN";
+    throw new Error(
+      `Real acceptance failed for ${skillId}: ${result.payload.outcome}/${errorCode}`,
+    );
+  }
+  return result.payload.output;
+}
+
 integrationDescribe("real isolated Minecraft 1.21.8 server", () => {
   beforeEach(() => {
     runtimeEvents.length = 0;
@@ -75,7 +152,9 @@ integrationDescribe("real isolated Minecraft 1.21.8 server", () => {
           (message): message is Extract<
             BotTelemetryMessageV1,
             { type: "bot.status.v1" }
-          > => message.type === "bot.status.v1",
+          > =>
+            message.type === "bot.status.v1" &&
+            message.payload.connectionState === "online",
           45_000,
         );
 
@@ -133,7 +212,7 @@ integrationDescribe("real isolated Minecraft 1.21.8 server", () => {
   );
 
   it(
-    "executes smelt.item against the real isolated server",
+    "executes all seven builtin skills against the real isolated server",
     async () => {
       const setupRequest = process.env.MC_SKILL_SETUP_REQUEST_FILE;
       const setupReady = process.env.MC_SKILL_SETUP_READY_FILE;
@@ -155,67 +234,128 @@ integrationDescribe("real isolated Minecraft 1.21.8 server", () => {
           45_000,
         );
         await mkdir(path.dirname(setupRequest), { recursive: true });
-        await writeFile(setupRequest, "smelt-item.basic.v1\n", { encoding: "utf8", flag: "wx" });
-        await waitForFile(setupReady, 10_000);
-        await new Promise((resolve) => setTimeout(resolve, 500));
-
-        const now = new Date();
-        const expiresAt = new Date(now.getTime() + 90_000).toISOString();
-        const invocation = {
-          schemaVersion: "1.0" as const,
-          messageId: "71111111-1111-4111-8111-111111111111",
-          traceId: "trace-real-smelt-001",
-          timestamp: now.toISOString(),
-          source: { service: "coordinator" as const, instanceId: "coordinator-real-test" },
-          botId: profile.botId,
-          taskId: "task-real-smelt-001",
-          type: "skill.invoke.v1" as const,
-          payload: {
-            invocationId: "72222222-2222-4222-8222-222222222222",
-            skillId: "smelt.item",
-            skillVersion: "1.0.0",
-            expiresAt,
-            input: {
-              inputItemName: "raw_iron",
-              fuelItemName: "coal",
-              fuelCount: 1,
-              count: 5,
-              furnace: { x: 2, y: 64, z: 0 },
-              dimension: status.payload.position.dimension,
-              serverProfileId: profile.id,
-            },
-            authorization: {
-              decisionId: "73333333-3333-4333-8333-333333333333",
-              actorId: "isolated-acceptance",
-              issuedAt: now.toISOString(),
-              expiresAt,
-            },
-          },
-        };
-        const authorization: SkillExecutionAuthorization = {
-          decisionId: invocation.payload.authorization.decisionId,
-          actorId: invocation.payload.authorization.actorId,
-          sourceInstanceId: invocation.source.instanceId,
-          traceId: invocation.traceId,
-          taskId: invocation.taskId,
-          botId: invocation.botId,
-          invocationId: invocation.payload.invocationId,
-          skillId: invocation.payload.skillId,
-          skillVersion: invocation.payload.skillVersion,
-          issuedAt: invocation.payload.authorization.issuedAt,
-          expiresAt,
-          allowedCapabilities: new Set(["craft.execute"]),
-        };
-        const result = await runtime.handleSkillInvocation(invocation, authorization);
-        expect(result.payload).toMatchObject({
-          outcome: "completed",
-          output: { outputItemName: "iron_ingot", requestedCount: 5, smeltedCount: 5 },
+        await writeFile(setupRequest, "builtin-skills.success.v1\n", {
+          encoding: "utf8",
+          flag: "wx",
         });
+        await waitForFile(setupReady, 10_000);
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+
+        const dimension = status.payload.position.dimension;
+        const serverProfileId = profile.id;
+        const completedSkillIds: string[] = [];
+        const execute = async (
+          skillId: (typeof REAL_ACCEPTANCE_SKILL_IDS)[number],
+          input: SkillJsonValue,
+        ) => {
+          const output = await executeAcceptanceSkill(
+            runtime,
+            profile,
+            skillId,
+            input,
+            completedSkillIds.length + 1,
+          );
+          completedSkillIds.push(skillId);
+          return output;
+        };
+
+        const movementOutput = await execute("movement.goto", {
+          target: { x: 3, y: 65, z: 0, dimension, serverProfileId },
+          radius: 1,
+        });
+        expect(movementOutput).toMatchObject({ reached: true });
+        expect(outputNumber(movementOutput, "distanceToTarget")).toBeLessThanOrEqual(
+          1.5,
+        );
+
+        const collectOutput = await execute("collect.block", {
+          blockName: "oak_log",
+          maxCount: 1,
+          maxDistance: 4,
+          dimension,
+          serverProfileId,
+        });
+        expect(collectOutput).toMatchObject({
+          blockName: "oak_log",
+          targetsFound: 1,
+        });
+        expect(outputNumber(collectOutput, "itemsCollected")).toBe(1);
+
+        await expect(
+          execute("craft.item", {
+            itemName: "crafting_table",
+            count: 1,
+            craftingTable: null,
+            dimension,
+            serverProfileId,
+          }),
+        ).resolves.toMatchObject({
+          itemName: "crafting_table",
+          requestedCount: 1,
+          craftedCount: 1,
+          usedCraftingTable: false,
+        });
+
+        await expect(
+          execute("world.place-block", {
+            itemName: "cobblestone",
+            referenceBlock: { x: 5, y: 64, z: 2 },
+            face: { x: 0, y: 1, z: 0 },
+            dimension,
+            serverProfileId,
+          }),
+        ).resolves.toMatchObject({
+          placed: true,
+          placedBlockName: "cobblestone",
+          position: { x: 5, y: 65, z: 2 },
+        });
+
+        await expect(
+          execute("container.transfer", {
+            direction: "deposit",
+            itemName: "cobblestone",
+            count: 4,
+            container: { x: 5, y: 65, z: -2 },
+            dimension,
+            serverProfileId,
+          }),
+        ).resolves.toMatchObject({
+          direction: "deposit",
+          itemName: "cobblestone",
+          requestedCount: 4,
+          movedCount: 4,
+        });
+
+        await expect(
+          execute("inventory.equip-armor", { serverProfileId }),
+        ).resolves.toMatchObject({
+          changedCount: 4,
+          totalScoreBefore: 0,
+          totalScoreAfter: 15,
+        });
+
+        await expect(
+          execute("smelt.item", {
+            inputItemName: "raw_iron",
+            fuelItemName: "coal",
+            fuelCount: 1,
+            count: 1,
+            furnace: { x: 3, y: 65, z: -2 },
+            dimension,
+            serverProfileId,
+          }),
+        ).resolves.toMatchObject({
+          outputItemName: "iron_ingot",
+          requestedCount: 1,
+          smeltedCount: 1,
+        });
+
+        expect(completedSkillIds).toEqual(REAL_ACCEPTANCE_SKILL_IDS);
       } finally {
-        await runtime.stop("real_smelt_acceptance_cleanup");
+        await runtime.stop("real_skill_acceptance_cleanup");
       }
     },
-    120_000,
+    180_000,
   );
 
   it(
@@ -239,7 +379,9 @@ integrationDescribe("real isolated Minecraft 1.21.8 server", () => {
           (message): message is Extract<
             BotTelemetryMessageV1,
             { type: "bot.status.v1" }
-          > => message.type === "bot.status.v1",
+          > =>
+            message.type === "bot.status.v1" &&
+            message.payload.connectionState === "online",
           45_000,
         );
 
@@ -277,4 +419,3 @@ integrationDescribe("real isolated Minecraft 1.21.8 server", () => {
     75_000,
   );
 });
-
