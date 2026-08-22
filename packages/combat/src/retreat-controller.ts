@@ -16,6 +16,7 @@
  * 返回 null 而不是瞎给一个向量。
  */
 
+import type { CombatGearAssessment } from "./gear-assessor.js";
 import {
   DEFAULT_SURVIVAL_STANCE,
   totemAbsenceForcesRetreat,
@@ -32,7 +33,8 @@ export type CombatRetreatReason =
   | "HEALTH_CRITICAL"
   | "HEALTH_LOW"
   | "OUTNUMBERED"
-  | "CRYSTAL_THREAT";
+  | "CRYSTAL_THREAT"
+  | "GEAR_OUTCLASSED";
 
 export type CombatRetreatAction =
   | "DISENGAGE_MOVE"
@@ -53,6 +55,11 @@ export type CombatRetreatPolicy = Readonly<{
    * `reasons`，也就不会升级成 emergency、不会压制进攻。血量与人数照旧。
    */
   stance: CombatSurvivalStance;
+  /**
+   * 是否让装备差参与撤退判定。true 时 `evaluate` 收到 `shouldAvoid` 的装备评估
+   * 会记入 `GEAR_OUTCLASSED`（普通 withdraw 级别，不升级为 emergency）。
+   */
+  respectGearGap: boolean;
 }>;
 
 export const DEFAULT_RETREAT_POLICY: CombatRetreatPolicy = {
@@ -61,6 +68,7 @@ export const DEFAULT_RETREAT_POLICY: CombatRetreatPolicy = {
   outnumberedAbove: 3,
   allowDisconnect: true,
   stance: DEFAULT_SURVIVAL_STANCE,
+  respectGearGap: true,
 };
 
 export type CombatRetreatDecision = Readonly<{
@@ -81,6 +89,7 @@ const REASON_ORDER: readonly CombatRetreatReason[] = [
   "HEALTH_CRITICAL",
   "OUTNUMBERED",
   "CRYSTAL_THREAT",
+  "GEAR_OUTCLASSED",
   "HEALTH_LOW",
 ];
 
@@ -100,7 +109,8 @@ export class RetreatController {
       policy.withdrawHealth < policy.emergencyHealth ||
       policy.withdrawHealth > 20 ||
       !Number.isInteger(policy.outnumberedAbove) ||
-      policy.outnumberedAbove < 1
+      policy.outnumberedAbove < 1 ||
+      typeof policy.respectGearGap !== "boolean"
     ) {
       throw new TypeError("撤退策略越界，拒绝使用该策略。");
     }
@@ -117,6 +127,7 @@ export class RetreatController {
     selfHealth: number,
     selfPosition: CombatVector3,
     hostilePositions: ReadonlyMap<number, CombatVector3>,
+    gear: CombatGearAssessment | null = null,
   ): CombatRetreatDecision {
     if (!Number.isFinite(selfHealth) || selfHealth < 0) {
       throw new TypeError("selfHealth 必须是非负有限数。");
@@ -139,6 +150,11 @@ export class RetreatController {
       assessment.threats.some(({ reasons }) => reasons.includes("CRYSTAL_PLACED"))
     ) {
       detected.add("CRYSTAL_THREAT");
+    }
+    // 装备被压制：普通撤退原因，不是 emergency —— 装备差是"这架不该打"，
+    // 不是"下一击会死"。两者混同会让每次遇到满配玩家都触发断线。
+    if (gear !== null && gear.shouldAvoid && this.policy.respectGearGap) {
+      detected.add("GEAR_OUTCLASSED");
     }
 
     // 场上没有敌人时，图腾耗尽仍值得撤离补给，但不算紧急交战脱离。

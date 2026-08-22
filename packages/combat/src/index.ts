@@ -92,6 +92,18 @@ export {
   type CombatRotationStep,
 } from "./rotation-controller.js";
 export {
+  DEFAULT_GEAR_POLICY,
+  assessGearMatchup,
+  assessWorstMatchup,
+  gearPower,
+  validateGearPolicy,
+  type CombatArmorMaterial,
+  type CombatGearAssessment,
+  type CombatGearPolicy,
+  type CombatGearSnapshot,
+  type CombatGearVerdict,
+} from "./gear-assessor.js";
+export {
   DEFAULT_RETREAT_POLICY,
   RetreatController,
   type CombatRetreatAction,

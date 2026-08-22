@@ -164,3 +164,75 @@ describe("TargetSelector", () => {
     );
   });
 });
+
+describe("TargetSelector gear gate", () => {
+  const OUTCLASSED = {
+    verdict: "outclassed",
+    selfPower: 100,
+    opponentPower: 400,
+    opponentAdvantage: 4,
+    shouldAvoid: true,
+  } as const;
+
+  it("refuses to engage a target whose gear outclasses ours", () => {
+    const decision = new TargetSelector().select(
+      assessment([threat()]),
+      20,
+      2,
+      OUTCLASSED,
+    );
+    expect(decision).toMatchObject({
+      target: null,
+      refusal: "GEAR_OUTCLASSED",
+      engageableCount: 1,
+    });
+  });
+
+  it("checks gear only after the three survival gates", () => {
+    // 血量与装备同时不过时报血量：先看自己撑不撑得住。
+    expect(
+      new TargetSelector().select(assessment([threat()]), 4, 2, OUTCLASSED)
+        .refusal,
+    ).toBe("HEALTH_BELOW_ENGAGE_FLOOR");
+  });
+
+  it("engages normally when the matchup is favourable", () => {
+    const decision = new TargetSelector().select(assessment([threat()]), 20, 2, {
+      verdict: "favorable",
+      selfPower: 400,
+      opponentPower: 100,
+      opponentAdvantage: 0.25,
+      shouldAvoid: false,
+    });
+    expect(decision.refusal).toBeNull();
+    expect(decision.target?.entityId).toBe(1);
+  });
+
+  it("does not treat an unmeasured matchup as no gap", () => {
+    // 不传评估 = 没观测，行为与旧调用点一致，不静默拦下交战。
+    expect(
+      new TargetSelector().select(assessment([threat()]), 20, 2).refusal,
+    ).toBeNull();
+  });
+
+  it("lets a harassment bot ignore the gear gap entirely", () => {
+    const decision = new TargetSelector({
+      ...DEFAULT_ENGAGEMENT_POLICY,
+      stance: "expendable",
+      minimumEngageHealth: 1,
+      minimumTotemCount: 0,
+      respectGearGap: false,
+    }).select(assessment([threat()]), 1, 0, OUTCLASSED);
+    expect(decision.refusal).toBeNull();
+    expect(decision.target?.entityId).toBe(1);
+  });
+
+  it("rejects a non-boolean gear switch", () => {
+    expect(() =>
+      validateEngagementPolicy({
+        ...DEFAULT_ENGAGEMENT_POLICY,
+        respectGearGap: "yes" as never,
+      }),
+    ).toThrowError(CombatPolicyError);
+  });
+});

@@ -9,10 +9,11 @@
  * （`CombatEngagementPolicy`），本模块按参数做确定性算术。AI 不能在这里直接
  * 指定打谁——`select` 不接受任何"指定目标"入参。
  *
- * "打得过就打，打不过先保命"落在 `refusal` 上：血量、图腾余量、敌方数量三条
- * 硬闸门任意一条不过，就返回 null 目标 + 拒绝原因码，交由上层撤退。
+ * "打得过就打，打不过先保命"落在 `refusal` 上：血量、图腾余量、敌方数量、装备差
+ * 四条硬闸门任意一条不过，就返回 null 目标 + 拒绝原因码，交由上层撤退。
  */
 
+import type { CombatGearAssessment } from "./gear-assessor.js";
 import {
   DEFAULT_SURVIVAL_STANCE,
   totemAbsenceForcesRetreat,
@@ -36,6 +37,11 @@ export type CombatEngagementPolicy = Readonly<{
    * 一半"的配置比直接报错更难查。血量与人数闸门不受立场影响。
    */
   stance: CombatSurvivalStance;
+  /**
+   * 是否让装备差参与交战判定。true 时 `select` 收到 `shouldAvoid` 的装备评估
+   * 即拒绝交战。骚扰型/可弃 bot 可以关掉——它的目的不是打赢。
+   */
+  respectGearGap: boolean;
 }>;
 
 /** 有确定性数值边界的策略字段。`stance` 是枚举，单独校验。 */
@@ -49,7 +55,8 @@ export type CombatTargetRefusalCode =
   | "NO_HOSTILE_IN_RANGE"
   | "HEALTH_BELOW_ENGAGE_FLOOR"
   | "TOTEM_RESERVE_INSUFFICIENT"
-  | "OUTNUMBERED";
+  | "OUTNUMBERED"
+  | "GEAR_OUTCLASSED";
 
 export type CombatTargetDecision = Readonly<{
   evaluatedAtMs: number;
@@ -78,6 +85,7 @@ export const DEFAULT_ENGAGEMENT_POLICY: CombatEngagementPolicy = {
   maximumHostileCount: 3,
   maximumEngageDistance: 24,
   stance: DEFAULT_SURVIVAL_STANCE,
+  respectGearGap: true,
 };
 
 export class CombatPolicyError extends Error {
@@ -107,6 +115,9 @@ export function validateEngagementPolicy(
   if (policy.stance !== "preserve-life" && policy.stance !== "expendable") {
     throw new CombatPolicyError("交战策略 stance 越界，拒绝使用该策略。");
   }
+  if (typeof policy.respectGearGap !== "boolean") {
+    throw new CombatPolicyError("交战策略 respectGearGap 必须是布尔值。");
+  }
   validateSurvivalStance(policy.stance);
   return policy;
 }
@@ -126,6 +137,7 @@ export class TargetSelector {
     assessment: CombatThreatAssessment,
     selfHealth: number,
     totemCount: number,
+    gear: CombatGearAssessment | null = null,
   ): CombatTargetDecision {
     if (!Number.isFinite(selfHealth) || selfHealth < 0) {
       throw new TypeError("selfHealth 必须是非负有限数。");
@@ -160,6 +172,11 @@ export class TargetSelector {
     }
     if (engageable.length > this.policy.maximumHostileCount) {
       return decision(null, "OUTNUMBERED");
+    }
+    // 装备闸门放在最后：前面三条都过了才值得比装备。
+    // 不传评估时不做判定 —— 不把"没看"当成"没差距"，由调用方决定是否观测。
+    if (gear !== null && gear.shouldAvoid && this.policy.respectGearGap) {
+      return decision(null, "GEAR_OUTCLASSED");
     }
     // 威胁评估已按 score → distance → entityId 排好序，取第一个即最高威胁。
     return decision(engageable[0] ?? null, null);

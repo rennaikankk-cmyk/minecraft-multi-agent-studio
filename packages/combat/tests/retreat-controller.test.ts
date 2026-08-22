@@ -215,3 +215,96 @@ describe("RetreatController", () => {
     ).toThrowError(TypeError);
   });
 });
+
+describe("RetreatController gear gap", () => {
+  const OUTCLASSED = {
+    verdict: "outclassed",
+    selfPower: 100,
+    opponentPower: 400,
+    opponentAdvantage: 4,
+    shouldAvoid: true,
+  } as const;
+
+  it("withdraws from a fight it is outgeared in", () => {
+    const decision = new RetreatController().evaluate(
+      assessment([threat()]),
+      20,
+      SELF,
+      positions([1, { x: 5, y: 64, z: 0 }]),
+      OUTCLASSED,
+    );
+    expect(decision).toMatchObject({
+      urgency: "withdraw",
+      reasons: ["GEAR_OUTCLASSED"],
+      suppressOffense: true,
+    });
+    // 装备差不是"下一击会死"，不该升级成断线。
+    expect(decision.actions).toEqual(["DISENGAGE_MOVE"]);
+  });
+
+  it("does not upgrade a gear gap into an emergency on its own", () => {
+    const decision = new RetreatController().evaluate(
+      assessment([threat()]),
+      20,
+      SELF,
+      positions([1, { x: 5, y: 64, z: 0 }]),
+      OUTCLASSED,
+    );
+    expect(decision.urgency).not.toBe("emergency");
+    expect(decision.actions).not.toContain("BREAK_LINE_OF_SIGHT");
+  });
+
+  it("still reports the health emergency alongside the gear gap", () => {
+    const decision = new RetreatController().evaluate(
+      assessment([threat()]),
+      3,
+      SELF,
+      positions([1, { x: 5, y: 64, z: 0 }]),
+      OUTCLASSED,
+    );
+    expect(decision.urgency).toBe("emergency");
+    expect(decision.reasons).toEqual(["HEALTH_CRITICAL", "GEAR_OUTCLASSED"]);
+  });
+
+  it("ignores an unobserved matchup rather than assuming the worst", () => {
+    expect(
+      new RetreatController().evaluate(
+        assessment([threat({ reasons: ["WITHIN_MELEE_RANGE"] })]),
+        20,
+        SELF,
+        positions([1, { x: 5, y: 64, z: 0 }]),
+      ).urgency,
+    ).toBe("none");
+  });
+
+  it("lets a harassment bot fight on regardless of the gap", () => {
+    const decision = new RetreatController({
+      ...DEFAULT_RETREAT_POLICY,
+      stance: "expendable",
+      emergencyHealth: 1,
+      withdrawHealth: 1,
+      respectGearGap: false,
+    }).evaluate(
+      assessment([threat({ reasons: ["WITHIN_MELEE_RANGE"] })], true),
+      20,
+      SELF,
+      positions([1, { x: 5, y: 64, z: 0 }]),
+      OUTCLASSED,
+    );
+    expect(decision).toMatchObject({
+      urgency: "none",
+      reasons: [],
+      suppressOffense: false,
+    });
+  });
+
+  it("rejects a non-boolean gear switch", () => {
+    expect(
+      () =>
+        new RetreatController({
+          ...DEFAULT_RETREAT_POLICY,
+          respectGearGap: "yes" as never,
+        }),
+    ).toThrowError(TypeError);
+  });
+});
