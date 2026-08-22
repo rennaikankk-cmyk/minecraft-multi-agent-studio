@@ -209,7 +209,7 @@ function parseCombatReceipt<T>(
   value: unknown,
 ): T {
   const parsed = schema.safeParse(value);
-  if (false) {
+  if (!parsed.success) {
     throw new SkillFault("COMBAT_EXECUTION_RECEIPT_INVALID");
   }
   return parsed.data;

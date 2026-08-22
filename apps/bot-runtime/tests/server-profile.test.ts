@@ -33,6 +33,147 @@ describe("ServerProfile", () => {
     expect(serverProfileSchema.parse(validProfile)).toEqual(validProfile);
   });
 
+  it("accepts an explicit bounded combat configuration", () => {
+    const combat = {
+      enabled: true,
+      stance: "preserve-life",
+      whitelist: {
+        usernames: ["AlliedBot", "NeutralUser"],
+        uuids: [
+          "11111111111141118111111111111111",
+          "22222222-2222-4222-8222-222222222222",
+        ],
+      },
+    } as const;
+
+    expect(serverProfileSchema.parse({ ...validProfile, combat })).toEqual({
+      ...validProfile,
+      combat,
+    });
+  });
+
+  it("allows combat to remain absent or explicitly disabled", () => {
+    expect(serverProfileSchema.parse(validProfile)).not.toHaveProperty("combat");
+    expect(
+      serverProfileSchema.safeParse({
+        ...validProfile,
+        combat: {
+          enabled: false,
+          stance: "expendable",
+          whitelist: { usernames: [], uuids: [] },
+        },
+      }).success,
+    ).toBe(true);
+  });
+
+  it("rejects malformed or non-explicit combat configuration", () => {
+    const combat = {
+      enabled: true,
+      stance: "preserve-life",
+      whitelist: { usernames: ["AlliedBot"], uuids: [] },
+    };
+
+    expect(
+      serverProfileSchema.safeParse({
+        ...validProfile,
+        combat: { ...combat, stance: "ignore-survival" },
+      }).success,
+    ).toBe(false);
+    expect(
+      serverProfileSchema.safeParse({
+        ...validProfile,
+        combat: { enabled: true, stance: "preserve-life" },
+      }).success,
+    ).toBe(false);
+    expect(
+      serverProfileSchema.safeParse({
+        ...validProfile,
+        combat: { ...combat, targetUsername: "Enemy" },
+      }).success,
+    ).toBe(false);
+    expect(
+      serverProfileSchema.safeParse({
+        ...validProfile,
+        combat: {
+          ...combat,
+          whitelist: { usernames: ["x"], uuids: [] },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      serverProfileSchema.safeParse({
+        ...validProfile,
+        combat: {
+          ...combat,
+          whitelist: { usernames: [], uuids: ["not-a-uuid"] },
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects normalized duplicate combat whitelist entries", () => {
+    expect(
+      serverProfileSchema.safeParse({
+        ...validProfile,
+        combat: {
+          enabled: true,
+          stance: "preserve-life",
+          whitelist: {
+            usernames: ["AlliedBot", "alliedbot"],
+            uuids: [],
+          },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      serverProfileSchema.safeParse({
+        ...validProfile,
+        combat: {
+          enabled: true,
+          stance: "preserve-life",
+          whitelist: {
+            usernames: [],
+            uuids: [
+              "11111111111141118111111111111111",
+              "11111111-1111-4111-8111-111111111111",
+            ],
+          },
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("caps each combat whitelist identity class", () => {
+    const usernames = Array.from(
+      { length: 257 },
+      (_, index) => `Bot${index.toString().padStart(3, "0")}`,
+    );
+    const uuids = Array.from(
+      { length: 257 },
+      (_, index) => index.toString(16).padStart(32, "0"),
+    );
+    expect(
+      serverProfileSchema.safeParse({
+        ...validProfile,
+        combat: {
+          enabled: true,
+          stance: "preserve-life",
+          whitelist: { usernames, uuids: [] },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      serverProfileSchema.safeParse({
+        ...validProfile,
+        combat: {
+          enabled: true,
+          stance: "preserve-life",
+          whitelist: { usernames: [], uuids },
+        },
+      }).success,
+    ).toBe(false);
+  });
+
   it("accepts auto detection and rejects untested fixed versions", () => {
     expect(
       serverProfileSchema.safeParse({
@@ -73,6 +214,12 @@ describe("ServerProfile", () => {
       serverProfileSchema.safeParse({
         ...validProfile,
         purpose: "production",
+      }).success,
+    ).toBe(false);
+    expect(
+      serverProfileSchema.safeParse({
+        ...validProfile,
+        auth: "microsoft",
       }).success,
     ).toBe(false);
     expect(

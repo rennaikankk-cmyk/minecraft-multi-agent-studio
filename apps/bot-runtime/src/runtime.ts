@@ -53,6 +53,7 @@ import {
   type SkillCompatibilityResolution,
   type SkillExecutionAuthorization,
 } from "@minecraft-studio/skills";
+import { combatControlInputSchema } from "@minecraft-studio/skills";
 import { z } from "zod";
 
 import {
@@ -68,6 +69,11 @@ import type {
   BotDisconnectInfo,
 } from "./client.js";
 import type { ServerProfile } from "./server-profile.js";
+import {
+  CombatDriver,
+  type CombatDriverReceipt,
+} from "./combat-driver.js";
+import type { CombatReflexProbeReport } from "@minecraft-studio/combat";
 import type {
   BotConnectionState,
   BotMessageSink,
@@ -108,6 +114,8 @@ export type RuntimeDependencies = {
   goalRecoveryEffects?: RecoveryEffects;
   now?: () => Date;
   randomId?: () => string;
+  /** Optional measured probe report; absent is deliberately NO_PROBE_DATA. */
+  combatReflexProbe?: CombatReflexProbeReport | null;
 };
 
 export type RuntimeStopOutcome =
@@ -272,6 +280,7 @@ export class SingleBotRuntime {
     { fingerprint: string; result: Promise<SkillExecutionResultV1> }
   >();
   private readonly serverPolicyStore: ServerPolicyStore;
+  private readonly combatDriver: CombatDriver | null;
 
   constructor(
     private readonly profile: ServerProfile,
@@ -291,6 +300,20 @@ export class SingleBotRuntime {
     this.skillRegistry = skillRegistry;
     this.serverPolicyStore =
       dependencies.serverPolicyStore ?? new ServerPolicyStore();
+    this.combatDriver = profile.combat?.enabled === true
+      ? new CombatDriver({
+          serverProfileId: profile.id,
+          selfUsername: profile.username,
+          stance: profile.combat.stance,
+          whitelist: profile.combat.whitelist,
+          policyGate: new ServerPolicyGate(
+            this.serverPolicyStore.resolve(profile.id),
+          ),
+          policyGateProvider: () =>
+            new ServerPolicyGate(this.serverPolicyStore.resolve(profile.id)),
+          reflexProbe: dependencies.combatReflexProbe ?? null,
+        })
+      : null;
     this.skillExecutor = new SkillExecutor(skillRegistry, {
       runtimeInstanceId: this.runtimeInstanceId,
       capabilityAdapter: {
@@ -784,6 +807,7 @@ export class SingleBotRuntime {
   private connect(): void {
     this.generation += 1;
     const activeGeneration = this.generation;
+    this.combatDriver?.reset();
     this.safetyController.reset();
     this.safetyStatus = {
       mode: "monitoring",
@@ -836,6 +860,13 @@ export class SingleBotRuntime {
 
   private handleSpawn(generation: number): void {
     if (generation !== this.generation || this.stopping || !this.client) return;
+    this.combatDriver?.reset();
+    this.client.resetCombat?.();
+    this.client.setCombatClock?.(() => this.now().getTime());
+    // A probe report is connection-scoped. Install it only after the new
+    // Mineflayer session has spawned; reset() deliberately clears the prior
+    // session's clearance so reconnects cannot inherit a stale pass.
+    this.combatDriver?.setReflexProbe(this.dependencies.combatReflexProbe ?? null);
     try {
       const versionCompatibility = this.client.versionCompatibility();
       const compatibilityEnvironment =
@@ -911,6 +942,8 @@ export class SingleBotRuntime {
       this.emitStatus(generation, false);
     }
     this.cancelActiveSkills();
+    this.combatDriver?.reset();
+    this.client?.resetCombat?.();
     this.client = null;
     this.clearTimer("heartbeat");
     this.clearTimer("status");
@@ -1028,6 +1061,12 @@ export class SingleBotRuntime {
           latencyMs: snapshot.latencyMs,
           currentTask: this.currentTask,
           safety: this.safetyStatus,
+          ...(this.combatDriver &&
+          this.client?.combatObservation &&
+          this.client?.executeCombatAction &&
+          this.combatObservationAvailable()
+            ? { combat: this.combatDriver.status() }
+            : {}),
           ...(this.minecraftVersionCompatibility
             ? { minecraftVersion: this.minecraftVersionCompatibility }
             : {}),
@@ -1085,6 +1124,10 @@ export class SingleBotRuntime {
     };
     if (decision.normalTasksPaused) {
       this.cancelActiveSkills();
+      // L0 pause is not a new server session; retain the current connection's
+      // probe report so combat can resume after safety clears.
+      this.combatDriver?.reset(false);
+      this.client?.resetCombat?.();
     }
 
     if (decision.changed || decision.actions.length > 0) {
@@ -1334,21 +1377,78 @@ export class SingleBotRuntime {
       online: this.state === "online",
       normalActionsAllowed: this.canAcceptNormalActions(),
       serverProfileId: this.profile.id,
+      combatAvailable:
+        this.combatDriver !== null &&
+        this.client?.combatObservation !== undefined &&
+        this.client?.executeCombatAction !== undefined,
+      combatObservationAvailable: this.combatObservationAvailable(),
       position,
       inventory,
     };
+  }
+
+  private combatObservationAvailable(): boolean {
+    if (
+      this.combatDriver === null ||
+      this.state !== "online" ||
+      !this.client?.combatObservation
+    ) {
+      return false;
+    }
+    try {
+      const observation = this.client.combatObservation(this.now().getTime());
+      return observation !== null &&
+        this.combatDriver.observationAvailable(observation);
+    } catch {
+      return false;
+    }
   }
 
   private async invokeSkillCapability(
     request: SkillCapabilityRequest,
   ): Promise<unknown> {
     const activeClient = this.client;
+    const combatIntent = combatIntentForRequest(request);
+    const isCombatDisengage =
+      combatIntent === "DISENGAGE" && request.skillId === "combat.disengage";
+    const combatPairValid =
+      combatIntent === null ||
+      (combatIntent === "ENGAGE" && request.skillId === "combat.engage") ||
+      (combatIntent === "DISENGAGE" && request.skillId === "combat.disengage");
+    if (!combatPairValid) {
+      this.auditCombatAction(
+        request,
+        syntheticCombatReceipt(
+          combatIntent ?? "ENGAGE",
+          this.now().getTime(),
+          "SKILL_CAPABILITY_DENIED",
+        ),
+      );
+      throw new SkillFault("SKILL_CAPABILITY_DENIED");
+    }
     if (
       !activeClient ||
       this.state !== "online" ||
-      this.safetyStatus.normalTasksPaused
+      (this.safetyStatus.normalTasksPaused && !isCombatDisengage)
     ) {
+      if (combatIntent !== null) {
+        this.auditCombatAction(
+          request,
+          syntheticCombatReceipt(
+            combatIntent,
+            this.now().getTime(),
+            "NORMAL_ACTIONS_PAUSED",
+          ),
+        );
+      }
       throw new SkillFault("NORMAL_ACTIONS_PAUSED");
+    }
+    if (
+      request.capability === "combat.control" &&
+      (request.operation === "combat.engage" ||
+        request.operation === "combat.disengage")
+    ) {
+      return this.invokeCombatControl(request, activeClient, isCombatDisengage);
     }
     if (!activeClient.invokeSkillCapability) {
       throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE");
@@ -1357,11 +1457,149 @@ export class SingleBotRuntime {
     if (
       this.client !== activeClient ||
       this.state !== "online" ||
-      this.safetyStatus.normalTasksPaused
+      (this.safetyStatus.normalTasksPaused && !isCombatDisengage)
     ) {
       throw new SkillFault("SKILL_EXECUTION_INTERRUPTED");
     }
     return output;
+  }
+
+  private async invokeCombatControl(
+    request: SkillCapabilityRequest,
+    activeClient: BotClient,
+    isDisengage: boolean,
+  ): Promise<unknown> {
+    const requestedAtMs = this.now().getTime();
+    let audited = false;
+    try {
+      if (
+        !this.combatDriver ||
+        !activeClient.executeCombatAction ||
+        !activeClient.combatObservation
+      ) {
+        throw new SkillFault("COMBAT_DRIVER_UNAVAILABLE");
+      }
+      const input = combatControlInputSchema.safeParse(request.input);
+      if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+      if (input.data.serverProfileId !== this.profile.id) {
+        throw new SkillFault("TARGET_SERVER_PROFILE_MISMATCH");
+      }
+      const receipt = isDisengage
+        ? await this.combatDriver.disengage(
+            requestedAtMs,
+            (action, signal) => activeClient.executeCombatAction!(action, signal),
+            request.signal,
+          )
+        : await this.runCombatEngage(
+            requestedAtMs,
+            activeClient,
+            request.signal,
+          );
+      const sessionStillActive =
+        this.client === activeClient &&
+        this.state === "online" &&
+        (!this.safetyStatus.normalTasksPaused || isDisengage);
+      const finalReceipt = sessionStillActive
+        ? receipt
+        : {
+            requested: receipt.requested,
+            actual: {
+              disposition: "dropped" as const,
+              action: "NONE" as const,
+              primitiveAction: "NONE" as const,
+              executedAtMs: null,
+              reasonCode: "SKILL_EXECUTION_INTERRUPTED",
+              targetEntityId: receipt.actual.targetEntityId,
+            },
+          };
+      this.auditCombatAction(request, finalReceipt);
+      audited = true;
+      return {
+        requested: finalReceipt.requested,
+        actual: {
+          disposition: finalReceipt.actual.disposition,
+          action: finalReceipt.actual.action,
+          executedAtMs: finalReceipt.actual.executedAtMs,
+          reasonCode: finalReceipt.actual.reasonCode,
+          targetEntityId: finalReceipt.actual.targetEntityId,
+        },
+      };
+    } catch (error) {
+      if (!audited) {
+        this.auditCombatAction(
+          request,
+          syntheticCombatReceipt(
+            isDisengage ? "DISENGAGE" : "ENGAGE",
+            requestedAtMs,
+            error instanceof SkillFault ? error.code : "SKILL_CAPABILITY_FAILED",
+          ),
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async runCombatEngage(
+    requestedAtMs: number,
+    activeClient: BotClient,
+    signal: AbortSignal,
+  ): Promise<CombatDriverReceipt> {
+    let observation: ReturnType<NonNullable<BotClient["combatObservation"]>>;
+    try {
+      observation = activeClient.combatObservation!(requestedAtMs);
+    } catch {
+      this.combatDriver?.recordUnavailable(
+        "COMBAT_OBSERVATION_UNAVAILABLE",
+        requestedAtMs,
+      );
+      return syntheticCombatReceipt(
+        "ENGAGE",
+        requestedAtMs,
+        "COMBAT_OBSERVATION_UNAVAILABLE",
+      );
+    }
+    if (!observation || !this.combatDriver?.observationAvailable(observation)) {
+      this.combatDriver?.recordUnavailable(
+        "COMBAT_OBSERVATION_UNAVAILABLE",
+        requestedAtMs,
+      );
+      return syntheticCombatReceipt(
+        "ENGAGE",
+        requestedAtMs,
+        "COMBAT_OBSERVATION_UNAVAILABLE",
+      );
+    }
+    return this.combatDriver!.engage(
+      observation,
+      requestedAtMs,
+      (action, actionSignal) =>
+        activeClient.executeCombatAction!(action, actionSignal),
+      signal,
+    );
+  }
+
+  private auditCombatAction(
+    request: SkillCapabilityRequest,
+    receipt: CombatDriverReceipt,
+  ): void {
+    this.dependencies.logger.info(
+      "combat_action_audit",
+      this.logFields(
+        {
+          requestedAction: receipt.requested.action,
+          requestedAtMs: receipt.requested.requestedAtMs,
+          actualAction: receipt.actual.action,
+          primitiveAction: receipt.actual.primitiveAction,
+          disposition: receipt.actual.disposition,
+          executedAtMs: receipt.actual.executedAtMs,
+          reasonCode: receipt.actual.reasonCode,
+          targetEntityId: receipt.actual.targetEntityId,
+        },
+        request.traceId,
+        request.taskId,
+        request.skillId,
+      ),
+    );
   }
 
   private cancelActiveSkills(): void {
@@ -1410,4 +1648,39 @@ export class SingleBotRuntime {
       this[key] = null;
     }
   }
+}
+
+type CombatIntent = "ENGAGE" | "DISENGAGE";
+
+function combatIntentForRequest(
+  request: Pick<SkillCapabilityRequest, "capability" | "operation">,
+): CombatIntent | null {
+  if (request.capability !== "combat.control") return null;
+  if (request.operation === "combat.engage") return "ENGAGE";
+  if (request.operation === "combat.disengage") return "DISENGAGE";
+  return null;
+}
+
+function syntheticCombatReceipt(
+  action: CombatIntent,
+  requestedAtMs: number,
+  reasonCode: string,
+): CombatDriverReceipt {
+  const safeRequestedAtMs = Number.isSafeInteger(requestedAtMs) && requestedAtMs >= 0
+    ? requestedAtMs
+    : 0;
+  const safeReasonCode = /^[A-Z][A-Z0-9_]{2,127}$/u.test(reasonCode)
+    ? reasonCode
+    : "SKILL_CAPABILITY_FAILED";
+  return {
+    requested: { action, requestedAtMs: safeRequestedAtMs },
+    actual: {
+      disposition: "dropped",
+      action: "NONE",
+      primitiveAction: "NONE",
+      executedAtMs: null,
+      reasonCode: safeReasonCode,
+      targetEntityId: null,
+    },
+  };
 }

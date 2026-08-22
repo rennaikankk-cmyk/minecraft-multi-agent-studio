@@ -61,6 +61,17 @@ export {
   type MineflayerCombatRegistryView,
 } from "./combat-entity-adapter.js";
 export {
+  CombatDriver,
+  type CombatActionAcknowledgement,
+  type CombatActionExecutor,
+  type CombatDriverConfig,
+  type CombatDriverEntityObservation,
+  type CombatDriverObservation,
+  type CombatDriverReceipt,
+  type CombatPrimitiveAction,
+} from "./combat-driver.js";
+export { MineflayerCombatAdapter } from "./combat-mineflayer-adapter.js";
+export {
   BotRuntimeHost,
   type BotRuntimeHostOptions,
 } from "./runtime-host.js";
@@ -86,8 +97,10 @@ export {
 export {
   ServerProfileError,
   loadServerProfile,
+  serverProfileCombatConfigSchema,
   serverProfileSchema,
   type ServerProfile,
+  type ServerProfileCombatConfig,
   type ServerProfileErrorCode,
 } from "./server-profile.js";
 export {

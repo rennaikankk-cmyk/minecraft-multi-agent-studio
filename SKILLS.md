@@ -26,8 +26,8 @@
 - 自相矛盾的证据组合**拒绝装载**，例如"真实服跑过但运行时没接线"。
 - 只有四道闸全绿才允许对外称"已验证"（`evidenceSupportsVerifiedClaim`）。
 
-当前七个原有技能为 **Partial**，缺 `isolated-server-scenarios` 与 `cross-version-matrix`
-两道闸；新增的两个 combat 技能为 **Experimental**，尚缺运行时接线以及这两道真实环境闸门。
+当前九个技能均为 **Partial**，缺 `isolated-server-scenarios` 与 `cross-version-matrix`
+两道真实环境闸。combat 技能已接入 Runtime 确定性适配器，但尚未完成隔离服与跨版本验收。
 真实隔离服六类场景与 1.21.8 跨版本矩阵一次没跑过。这与编译产物里的
 `verification=unverified` 是同一个事实的两种表述（AGENTS.md §8：无隔离测试服时不得声称联机测试通过）。
 
@@ -120,18 +120,18 @@
 
 ## `combat.engage@1.0.0`
 
-- 状态：**Experimental**（待 `runtime-wiring`、`isolated-server-scenarios`、`cross-version-matrix`）
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
 - 权限：`combat.control`
 - 风险：R2
 - 适配器操作：`combat.engage`
 - 超时：1 秒
 - 自动重试：无（战斗意图不是幂等操作）
 
-控制面只提交有界的 `ENGAGE` 意图和 `serverProfileId`，不携带目标、坐标、白名单或原始 Tick 动作。确定性 Runtime driver 负责敌我识别、目标选择、反射层门控与实际执行回执；未接线时 fail-closed。白名单外玩家和怪物才会进入敌对候选，动物、未知实体及未明确激怒的末影人保持中立。
+控制面只提交有界的 `ENGAGE` 意图和 `serverProfileId`，不携带目标、坐标、白名单或原始 Tick 动作。确定性 Runtime driver 负责敌我识别、目标选择、反射层门控与实际执行回执；适配器不可用时 fail-closed。白名单外玩家和怪物才会进入敌对候选，动物、未知实体及未明确激怒的末影人保持中立。
 
 ## `combat.disengage@1.0.0`
 
-- 状态：**Experimental**（待 `runtime-wiring`、`isolated-server-scenarios`、`cross-version-matrix`）
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
 - 权限：`combat.control`
 - 风险：R2
 - 适配器操作：`combat.disengage`

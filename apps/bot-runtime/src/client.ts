@@ -9,6 +9,11 @@ import type {
   SkillCapabilityRequest,
   SkillCompatibilityEnvironment,
 } from "@minecraft-studio/skills";
+import type {
+  CombatActionAcknowledgement,
+  CombatDriverObservation,
+  CombatPrimitiveAction,
+} from "./combat-driver.js";
 
 export type BotClientSnapshot = {
   health: { current: number; maximum: number | null };
@@ -54,6 +59,14 @@ export interface BotClient {
   snapshot(): BotClientSnapshot;
   executeSafetyAction(action: L0SafetyAction): Promise<L0SafetyActionResult>;
   invokeSkillCapability?(request: SkillCapabilityRequest): Promise<unknown>;
+  /** Narrow deterministic combat boundary; absent means this client cannot fight. */
+  combatObservation?(nowMs: number): CombatDriverObservation | null;
+  executeCombatAction?(
+    action: CombatPrimitiveAction,
+    signal: AbortSignal,
+  ): Promise<CombatActionAcknowledgement>;
+  resetCombat?(): void;
+  setCombatClock?(clock: () => number): void;
   versionCompatibility(): MinecraftVersionCompatibility;
   skillCompatibilityEnvironment(): SkillCompatibilityEnvironment;
   close(gracePeriodMs: number): Promise<void>;

@@ -108,16 +108,15 @@ describe("builtin skill status catalog", () => {
     }
   });
 
-  it("keeps unwired combat skills Experimental and wired skills Partial", () => {
-    // 诚实基线：没有运行时接线或隔离服结果，就不许显示成 Partial/Stable。
+  it("keeps combat skills Partial until real environment gates are green", () => {
+    // W0 已完成 Runtime adapter 接线；没有隔离服/跨版本结果，仍不许显示成 Stable。
     for (const entry of builtinSkillStatusCatalog) {
       expect(entry.evidence.isolatedServerScenarios).toBe(false);
       expect(entry.evidence.crossVersionMatrix).toBe(false);
       expect(evidenceSupportsVerifiedClaim(entry.evidence)).toBe(false);
       if (entry.skillId.startsWith("combat.")) {
-        expect(entry.status).toBe("Experimental");
+        expect(entry.status).toBe("Partial");
         expect(entry.pendingGates).toEqual([
-          "runtime-wiring",
           "isolated-server-scenarios",
           "cross-version-matrix",
         ]);

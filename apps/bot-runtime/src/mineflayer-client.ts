@@ -32,6 +32,12 @@ import {
   type SkillCompatibilityEnvironment,
   type SkillResourceKind,
 } from "@minecraft-studio/skills";
+import type {
+  CombatActionAcknowledgement,
+  CombatDriverObservation,
+  CombatPrimitiveAction,
+} from "./combat-driver.js";
+import { MineflayerCombatAdapter } from "./combat-mineflayer-adapter.js";
 
 import type {
   BotClient,
@@ -274,12 +280,19 @@ export class MineflayerBotClient implements BotClient {
   private versionUnsupportedReported = false;
   private inventoryListenerBound = false;
   private activePathInvocationId: string | null = null;
+  private readonly combatAdapter: MineflayerCombatAdapter;
 
   constructor(
     private readonly bot: Bot,
     private readonly configuredVersion: ServerProfile["minecraftVersion"],
     private readonly serverProfileId: string | null = null,
+    combatEnabled = false,
   ) {
+    this.combatAdapter = new MineflayerCombatAdapter(
+      bot,
+      serverProfileId ?? "",
+      combatEnabled,
+    );
     bot.on("spawn", () => {
       this.bindInventoryEvents();
       this.handlers?.onSpawn();
@@ -483,6 +496,25 @@ export class MineflayerBotClient implements BotClient {
       return this.invokeContainerTransfer(request);
     }
     throw new SkillFault("SKILL_CAPABILITY_UNSUPPORTED");
+  }
+
+  combatObservation(nowMs: number): CombatDriverObservation | null {
+    return this.combatAdapter.observation(nowMs);
+  }
+
+  executeCombatAction(
+    action: CombatPrimitiveAction,
+    signal: AbortSignal,
+  ): Promise<CombatActionAcknowledgement> {
+    return this.combatAdapter.execute(action, signal);
+  }
+
+  resetCombat(): void {
+    this.combatAdapter.reset();
+  }
+
+  setCombatClock(clock: () => number): void {
+    this.combatAdapter.setClock(clock);
   }
 
   private async invokeMovementGoto(
@@ -1376,6 +1408,7 @@ export function createMineflayerClient(profile: ServerProfile): BotClient {
     bot,
     profile.minecraftVersion,
     profile.id,
+    profile.combat?.enabled === true,
   );
 }
 

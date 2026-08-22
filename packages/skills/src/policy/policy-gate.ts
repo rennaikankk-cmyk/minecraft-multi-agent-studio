@@ -94,6 +94,17 @@ export class ServerPolicyGate {
 
   constructor(private readonly policy: ServerPolicy) {}
 
+  /**
+   * Clear connection-local action accounting. A reconnect starts a new server
+   * session; carrying rate-window timestamps across it would make the first
+   * combat action appear throttled by an action that happened on the old
+   * connection.
+   */
+  reset(): void {
+    this.windows.clear();
+    this.lastActionAtMs = null;
+  }
+
   get serverProfileId(): string {
     return this.policy.serverProfileId;
   }

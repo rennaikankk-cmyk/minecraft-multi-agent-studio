@@ -166,6 +166,16 @@ export class MovementController {
               snapshot.targetPosition.x - snapshot.selfPosition.x,
               snapshot.targetPosition.z - snapshot.selfPosition.z,
             );
+      if (direction !== null && !this.isStepSafe(direction, snapshot)) {
+        return {
+          intent: "HOLD",
+          direction: null,
+          sprint: false,
+          distance,
+          strafeSign: 0,
+          blockedByHazard: true,
+        };
+      }
       return {
         intent: direction === null ? "HOLD" : "DISENGAGE",
         direction,

@@ -1770,6 +1770,16 @@ function projectBotState(
   currentTask: PublicCurrentTask | null = record.currentStatus?.currentTask ?? null,
 ): PublicBotDetailV1 {
   const status = record.currentStatus;
+  // Combat telemetry is connection-scoped. The registry intentionally keeps
+  // the last status for diagnostics, but Dashboard must not present that old
+  // stance/target after the runtime is stale, offline, or replaced.
+  const liveCombat =
+    record.connectionState === "online" &&
+    status !== null &&
+    status.connectionState === "online" &&
+    status.runtimeInstanceId === record.runtimeInstanceId
+      ? status.combat ?? null
+      : null;
   return {
     botId: record.botId,
     connectionState: record.connectionState,
@@ -1785,7 +1795,7 @@ function projectBotState(
     positionRedacted: false,
     minecraftVersion: record.minecraftVersion,
     safety: status?.safety ?? null,
-    combat: status?.combat ?? null,
+    combat: liveCombat,
   };
 }
 

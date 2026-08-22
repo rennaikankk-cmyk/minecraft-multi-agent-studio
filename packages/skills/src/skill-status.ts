@@ -138,7 +138,7 @@ export type SkillStatusEntry = Readonly<{
 /**
  * 每个内建技能的证据位。**只允许在这里改布尔值，且改之前那道闸必须真的跑过。**
  *
- * 当前七个技能全是 Partial：离线单测与运行时接线都有，真实隔离服六类场景与
+ * 当前九个技能全是 Partial：离线单测与运行时接线都有，真实隔离服六类场景与
  * 1.21.8 跨版本矩阵一次没跑过（AGENTS.md §8"无隔离测试服时不得声称联机测试通过"）。
  * 这与技能编译产物里的 `verification: "unverified"` 是同一个事实的两种表述。
  */
@@ -152,11 +152,11 @@ const EVIDENCE: Readonly<Record<string, SkillEvidence>> = Object.freeze({
     isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
   },
   "combat.engage": {
-    offlineTests: true, runtimeWiring: false,
+    offlineTests: true, runtimeWiring: true,
     isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
   },
   "combat.disengage": {
-    offlineTests: true, runtimeWiring: false,
+    offlineTests: true, runtimeWiring: true,
     isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
   },
   "collect.block": {

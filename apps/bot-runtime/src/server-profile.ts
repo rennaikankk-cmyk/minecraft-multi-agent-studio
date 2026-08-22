@@ -7,6 +7,76 @@ import { z } from "zod";
 import { isMineflayerTestedVersion } from "./version-compatibility.js";
 
 const MAX_PROFILE_BYTES = 64 * 1024;
+const MAX_COMBAT_WHITELIST_ENTRIES = 256;
+const MINECRAFT_USERNAME_PATTERN = /^[A-Za-z0-9_]{3,16}$/u;
+const COMPACT_UUID_PATTERN = /^[0-9a-f]{32}$/u;
+const HYPHENATED_UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+
+function normalizedUuid(value: string): string {
+  return value.replaceAll("-", "").toLowerCase();
+}
+
+function rejectNormalizedDuplicates(
+  values: readonly string[],
+  normalize: (value: string) => string,
+  context: z.RefinementCtx,
+): void {
+  const seen = new Set<string>();
+  for (const [index, value] of values.entries()) {
+    const normalized = normalize(value);
+    if (seen.has(normalized)) {
+      context.addIssue({
+        code: "custom",
+        path: [index],
+        message: "Combat whitelist entries must be unique after normalization.",
+      });
+      continue;
+    }
+    seen.add(normalized);
+  }
+}
+
+const combatWhitelistUsernameSchema = z
+  .string()
+  .regex(MINECRAFT_USERNAME_PATTERN);
+
+const combatWhitelistUuidSchema = z.string().refine(
+  (value) => {
+    const lower = value.toLowerCase();
+    return (
+      COMPACT_UUID_PATTERN.test(lower) || HYPHENATED_UUID_PATTERN.test(lower)
+    );
+  },
+  { message: "Combat whitelist UUID must be compact or canonically hyphenated." },
+);
+
+export const serverProfileCombatConfigSchema = z
+  .object({
+    enabled: z.boolean(),
+    stance: z.enum(["preserve-life", "expendable"]),
+    whitelist: z
+      .object({
+        usernames: z
+          .array(combatWhitelistUsernameSchema)
+          .max(MAX_COMBAT_WHITELIST_ENTRIES)
+          .superRefine((values, context) =>
+            rejectNormalizedDuplicates(
+              values,
+              (value) => value.toLowerCase(),
+              context,
+            ),
+          ),
+        uuids: z
+          .array(combatWhitelistUuidSchema)
+          .max(MAX_COMBAT_WHITELIST_ENTRIES)
+          .superRefine((values, context) =>
+            rejectNormalizedDuplicates(values, normalizedUuid, context),
+          ),
+      })
+      .strict(),
+  })
+  .strict();
 
 function isLoopbackHost(host: string): boolean {
   const normalized = host.toLowerCase();
@@ -88,8 +158,9 @@ export const serverProfileSchema = z
       .string()
       .min(3)
       .max(16)
-      .regex(/^[A-Za-z0-9_]+$/u),
+      .regex(MINECRAFT_USERNAME_PATTERN),
     auth: z.literal("offline"),
+    combat: serverProfileCombatConfigSchema.optional(),
     statusIntervalMs: z.number().int().min(250).max(30_000),
     heartbeatIntervalMs: z.number().int().min(1_000).max(60_000),
     stopGracePeriodMs: z.number().int().min(0).max(30_000),
@@ -121,6 +192,9 @@ export const serverProfileSchema = z
   });
 
 export type ServerProfile = z.infer<typeof serverProfileSchema>;
+export type ServerProfileCombatConfig = z.infer<
+  typeof serverProfileCombatConfigSchema
+>;
 
 export type ServerProfileErrorCode =
   | "SERVER_PROFILE_REQUIRED"

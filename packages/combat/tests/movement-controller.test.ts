@@ -82,6 +82,20 @@ describe("MovementController.plan", () => {
     expect(plan.direction).toBeNull();
   });
 
+  it("holds instead of retreating into a known hazard", () => {
+    const plan = new MovementController().plan(
+      snapshot({
+        retreatDirection: { x: 1, y: 0, z: 0 },
+        hazards: [{ x: 1, y: 64, z: 0 }],
+      }),
+    );
+    expect(plan).toMatchObject({
+      intent: "HOLD",
+      direction: null,
+      blockedByHazard: true,
+    });
+  });
+
   it("holds instead of wandering when the target is unknown", () => {
     const plan = new MovementController().plan(
       snapshot({ targetPosition: null }),
