@@ -77,6 +77,7 @@ for (const fragment of forbiddenFragments) {
 }
 
 const requiredRunnerGuards = [
+  "Ensure-FileHashCommand",
   '"purpose" = "isolated-test"',
   '"networkScope" = "loopback"',
   '"host" = "127.0.0.1"',
@@ -89,6 +90,8 @@ const requiredRunnerGuards = [
   'Assert-ContainedPath -Candidate $ServerDirectory -Root $runtimeRoot',
   'Assert-NoReparsePointUnderRoot -Root $ServerDirectory -Label "Server directory"',
   'Assert-NoReparsePointInPath -Path $acceptanceRoot -Label "Acceptance directory"',
+  '$javaVersionOutput = (& $JavaExecutable --version 2>&1 | Out-String)',
+  'Java 21 is required for Minecraft 1.21.8.',
   '"level-name" = "world"',
   '"force-gamemode" = "true"',
   '"fill -8 60 -6 10 100 6 minecraft:air replace"',
@@ -130,6 +133,7 @@ for (const fragment of requiredRealSkillCoverage) {
 }
 
 const requiredPreparationGuards = [
+  "Ensure-FileHashCommand",
   '"https://piston-data.mojang.com/v1/objects/6bce4ef400e4efaa63a13d5e6f6b500be969ef81/server.jar"',
   '$script:ExpectedSha1 = "6bce4ef400e4efaa63a13d5e6f6b500be969ef81"',
   '$script:ExpectedSha256 = "2349d9a8f0d4be2c40e7692890ef46a4b07015e7955b075460d02793be7fbbe7"',
@@ -145,6 +149,8 @@ const requiredPreparationGuards = [
   'minecraftVersion = $script:MinecraftVersion',
   'purpose = "isolated-test"',
   'networkScope = "loopback"',
+  'ConvertFrom-Json -ErrorAction Stop',
+  'ConvertTo-Json -Depth 32 -Compress',
   'Assert-ServerJarHash -Path $temporaryJar',
 ];
 

@@ -7,6 +7,24 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Ensure-FileHashCommand {
+  if ($null -ne (Get-Command Get-FileHash -ErrorAction SilentlyContinue)) {
+    return
+  }
+
+  # pnpm can pass a mixed PowerShell module path to Windows PowerShell. Load
+  # the utility module shipped with the active host before hashing assets.
+  $utilityModule = Join-Path $PSHOME "Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1"
+  if (Test-Path -LiteralPath $utilityModule -PathType Leaf) {
+    Import-Module -Name $utilityModule -Force -ErrorAction Stop
+  }
+  if ($null -eq (Get-Command Get-FileHash -ErrorAction SilentlyContinue)) {
+    throw "PowerShell Get-FileHash is unavailable; refusing to validate Minecraft assets."
+  }
+}
+
+Ensure-FileHashCommand
+
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $runtimeRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot "runtime-data\isolated-test"))
 
@@ -99,6 +117,13 @@ if ([string]::IsNullOrWhiteSpace($PnpmExecutable)) {
 }
 
 $JavaExecutable = [IO.Path]::GetFullPath($JavaExecutable)
+if (-not (Test-Path -LiteralPath $JavaExecutable -PathType Leaf)) {
+  throw "Java executable is missing: $JavaExecutable"
+}
+$javaVersionOutput = (& $JavaExecutable --version 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0 -or $javaVersionOutput -notmatch '(?im)^\s*(?:openjdk|java)(?:\s+version)?\s+["'']?21(?:[.\s"'']|$)') {
+  throw "Java 21 is required for Minecraft 1.21.8. Detected: $($javaVersionOutput.Trim())"
+}
 if (-not [IO.Path]::IsPathRooted($ServerDirectory)) {
   $ServerDirectory = Join-Path $runtimeRoot $ServerDirectory
 }

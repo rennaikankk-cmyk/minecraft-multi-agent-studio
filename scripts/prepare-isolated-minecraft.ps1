@@ -6,6 +6,24 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Ensure-FileHashCommand {
+  if ($null -ne (Get-Command Get-FileHash -ErrorAction SilentlyContinue)) {
+    return
+  }
+
+  # pnpm can pass a mixed PowerShell module path to Windows PowerShell. Load
+  # the utility module shipped with the active host before hashing assets.
+  $utilityModule = Join-Path $PSHOME "Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1"
+  if (Test-Path -LiteralPath $utilityModule -PathType Leaf) {
+    Import-Module -Name $utilityModule -Force -ErrorAction Stop
+  }
+  if ($null -eq (Get-Command Get-FileHash -ErrorAction SilentlyContinue)) {
+    throw "PowerShell Get-FileHash is unavailable; refusing to validate Minecraft assets."
+  }
+}
+
+Ensure-FileHashCommand
+
 # This script only prepares a loopback, offline test server. It never starts a
 # server and it never accepts the Minecraft EULA on the user's behalf.
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -91,7 +109,8 @@ function Write-GeneratedFile {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
     [Parameter(Mandatory = $true)][string]$Content,
-    [Parameter(Mandatory = $true)][string]$Label
+    [Parameter(Mandatory = $true)][string]$Label,
+    [switch]$Json
   )
 
   Assert-NoReparsePointInPath -Path $Path -Label $Label
@@ -102,6 +121,17 @@ function Write-GeneratedFile {
     }
     $current = [IO.File]::ReadAllText($Path)
     if ($current -ne $Content) {
+      if ($Json) {
+        try {
+          $currentCanonical = (($current | ConvertFrom-Json -ErrorAction Stop) | ConvertTo-Json -Depth 32 -Compress)
+          $expectedCanonical = (($Content | ConvertFrom-Json -ErrorAction Stop) | ConvertTo-Json -Depth 32 -Compress)
+          if ($currentCanonical -eq $expectedCanonical) {
+            return $false
+          }
+        } catch {
+          # Malformed JSON must still fail closed below.
+        }
+      }
       throw "$Label already exists with different contents; refusing to overwrite it: $Path"
     }
     return $false
@@ -247,7 +277,7 @@ $profile = [ordered]@{
   }
 }
 $profileText = (($profile | ConvertTo-Json -Depth 8) + [Environment]::NewLine)
-[void](Write-GeneratedFile -Path $ServerProfilePath -Content $profileText -Label "isolated ServerProfile")
+[void](Write-GeneratedFile -Path $ServerProfilePath -Content $profileText -Label "isolated ServerProfile" -Json)
 
 Write-Output "ISOLATED_MINECRAFT_PREPARED=PASS"
 Write-Output "Server directory: $ServerDirectory"
