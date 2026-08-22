@@ -20,8 +20,11 @@ import {
   BotRegistry,
   ControlLinkServer,
   CoordinatorLocalPlanner,
+  durableGoalFingerprint,
   RuntimeLinkServer,
   type CoordinatorLocalPlannerOptions,
+  type GoalLifecycleSnapshot,
+  type GoalLifecycleStore,
 } from "../../coordinator/src/index.js";
 import { CoordinatorLinkClient } from "../src/coordinator-link-client.js";
 import { ControlApiServer } from "../src/server.js";
@@ -370,6 +373,7 @@ async function startStack(
       },
     },
     goalPlanner: planner,
+    goalStore: inMemoryGoalStore(),
     logger,
   });
   const controlAddress = await controlLink.start();
@@ -436,6 +440,74 @@ async function startStack(
   };
   runningStacks.push(stack);
   return stack;
+}
+
+function inMemoryGoalStore(): GoalLifecycleStore {
+  const requests = new Map<string, Parameters<GoalLifecycleStore["begin"]>[0]>();
+  const snapshots = new Map<string, GoalLifecycleSnapshot>();
+  const snapshot = (
+    request: Parameters<GoalLifecycleStore["begin"]>[0],
+    status: GoalLifecycleSnapshot["status"],
+    result: GoalLifecycleSnapshot["result"],
+    errorCode: GoalLifecycleSnapshot["errorCode"],
+  ): GoalLifecycleSnapshot => {
+    const now = new Date().toISOString();
+    return {
+      operationId: request.payload.operationId,
+      taskId: request.payload.taskId,
+      botId: request.payload.botId,
+      fingerprint: durableGoalFingerprint(request),
+      title: "Submitted goal",
+      status,
+      startedAt: now,
+      updatedAt: now,
+      result,
+      errorCode,
+    };
+  };
+
+  return {
+    initialize: async () => [],
+    refresh: async () => [...snapshots.values()],
+    begin: async (request) => {
+      requests.set(request.payload.taskId, request);
+      const running = snapshot(request, "running", null, null);
+      snapshots.set(request.payload.operationId, running);
+      return {
+        kind: "execute",
+        lease: {
+          taskId: request.payload.taskId,
+          leaseOwner: "goal-control-api-test",
+          revision: 2,
+        },
+        snapshot: running,
+      };
+    },
+    recordResult: async (lease, result) => {
+      const request = requests.get(lease.taskId);
+      if (!request) throw new Error("goal_test_request_missing");
+      const status =
+        result.action === "noop"
+          ? "failed"
+          : result.outcome === "completed"
+            ? "completed"
+            : result.outcome === "cancelled"
+              ? "cancelled"
+              : result.outcome === "timed_out"
+                ? "expired"
+                : "failed";
+      const terminal = snapshot(request, status, result, null);
+      snapshots.set(request.payload.operationId, terminal);
+      return terminal;
+    },
+    recordError: async (lease, errorCode, status) => {
+      const request = requests.get(lease.taskId);
+      if (!request) throw new Error("goal_test_request_missing");
+      const terminal = snapshot(request, status, null, errorCode);
+      snapshots.set(request.payload.operationId, terminal);
+      return terminal;
+    },
+  };
 }
 
 function assertInvocationChain(

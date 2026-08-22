@@ -98,6 +98,11 @@ try {
       ? `Local AI configured: ${new URL(environment.LOCAL_AI_HUB_URL).origin}\n`
       : "Local AI is not configured; goal submission will fail closed.\n",
   );
+  process.stdout.write(
+    environment.COORDINATOR_TASK_POSTGRES_URL
+      ? "Durable task history configured; the Coordinator will verify the pre-applied schema.\n"
+      : "Durable task history is not configured and will remain unavailable.\n",
+  );
 } catch (cause) {
   process.stderr.write(`${boundedError(cause)}\n`);
   await stopAll("startup_failure");
@@ -197,7 +202,7 @@ function buildEnvironment(secrets, hostEnvironment, ports) {
   const runtimePeers = hostEnvironment.COORDINATOR_RUNTIME_LINK_PEERS_JSON ||
     JSON.stringify([
       {
-        keyId: "local-runtime-key-01",
+        keyId: "runtime-key-01",
         botId: "studio-bot-01",
         secretSha256: sha256(secrets.runtimeSecret),
       },
@@ -219,7 +224,7 @@ function buildEnvironment(secrets, hostEnvironment, ports) {
         clientId: controlClientId,
         keyId: controlKeyId,
         secretSha256: sha256(controlSecret),
-        capabilities: ["bot.read", "bot.stop", "goal.submit"],
+        capabilities: ["bot.read", "bot.stop", "goal.submit", "task.read"],
       },
     ]);
   const dashboardToken = hostEnvironment.DASHBOARD_CONTROL_API_TOKEN || secrets.dashboardToken;
@@ -230,7 +235,7 @@ function buildEnvironment(secrets, hostEnvironment, ports) {
       {
         subject: "local-dashboard",
         tokenSha256: sha256(dashboardToken),
-        permissions: ["bot.read", "bot.position.read", "bot.stop", "goal.submit"],
+        permissions: ["bot.read", "bot.position.read", "bot.stop", "goal.submit", "task.read"],
       },
     ]);
   return {

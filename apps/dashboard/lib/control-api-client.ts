@@ -6,11 +6,16 @@ import {
   controlApiErrorV1Schema,
   submitGoalHttpResponseV1Schema,
   stopBotHttpResponseV1Schema,
+  taskDetailResponseV1Schema,
+  taskListResponseV1Schema,
   type ControlApiErrorCode,
   type DashboardApiErrorCode,
   type PublicBotDetailV1,
   type GoalDispatchResultV1,
   type StopBotHttpResponseV1,
+  type PublicTaskDetailV1,
+  type TaskHistoryListPageV1,
+  type TaskHistoryListQueryV1,
 } from "@minecraft-studio/protocol";
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "[::1]"]);
@@ -209,6 +214,52 @@ export async function requestDashboardGoal(
   return parsed.data.data;
 }
 
+export async function fetchDashboardTasks(
+  config: DashboardControlConfig,
+  query: TaskHistoryListQueryV1,
+  fetchImplementation: typeof fetch = fetch,
+): Promise<TaskHistoryListPageV1> {
+  const search = new URLSearchParams({ limit: String(query.limit) });
+  if (query.cursor !== null) search.set("cursor", query.cursor);
+  if (query.status !== null) search.set("status", query.status);
+  if (query.botId !== null) search.set("botId", query.botId);
+  const value = await requestJson(
+    config,
+    `/v1/tasks?${search.toString()}`,
+    { method: "GET" },
+    fetchImplementation,
+  );
+  const parsed = taskListResponseV1Schema.safeParse(value);
+  if (!parsed.success) {
+    throw new DashboardControlError(
+      "INVALID_CONTROL_RESPONSE",
+      "Control API 返回了无法识别的任务历史。",
+    );
+  }
+  return parsed.data.data;
+}
+
+export async function fetchDashboardTaskDetail(
+  config: DashboardControlConfig,
+  taskId: string,
+  fetchImplementation: typeof fetch = fetch,
+): Promise<{ generatedAt: string; task: PublicTaskDetailV1 }> {
+  const value = await requestJson(
+    config,
+    `/v1/tasks/${encodeURIComponent(taskId)}`,
+    { method: "GET" },
+    fetchImplementation,
+  );
+  const parsed = taskDetailResponseV1Schema.safeParse(value);
+  if (!parsed.success || parsed.data.data.task.taskId !== taskId) {
+    throw new DashboardControlError(
+      "INVALID_CONTROL_RESPONSE",
+      "Control API 返回了不匹配的任务详情。",
+    );
+  }
+  return parsed.data.data;
+}
+
 export function verifyStopConfirmation(
   config: DashboardControlConfig,
   confirmationCode: string,
@@ -308,6 +359,18 @@ function mapControlApiError(
         message: "Coordinator 控制链路当前不可用。",
         httpStatus: 503,
       };
+    case "TASK_HISTORY_UNAVAILABLE":
+      return {
+        code: "TASK_HISTORY_UNAVAILABLE",
+        message: "任务历史后端当前不可用。",
+        httpStatus: 503,
+      };
+    case "TASK_NOT_FOUND":
+      return {
+        code: "TASK_NOT_FOUND",
+        message: "未找到该任务。",
+        httpStatus: 404,
+      };
     case "GOAL_TIMEOUT":
       return {
         code: "GOAL_FAILED",
@@ -353,6 +416,7 @@ function defaultHttpStatus(code: DashboardControlErrorCode): number {
   switch (code) {
     case "DASHBOARD_CONTROL_NOT_CONFIGURED":
     case "CONTROL_API_UNAVAILABLE":
+    case "TASK_HISTORY_UNAVAILABLE":
       return 503;
     case "RATE_LIMITED":
       return 429;
@@ -362,6 +426,8 @@ function defaultHttpStatus(code: DashboardControlErrorCode): number {
       return 403;
     case "INVALID_REQUEST":
       return 400;
+    case "TASK_NOT_FOUND":
+      return 404;
     default:
       return 502;
   }

@@ -9,6 +9,7 @@ const REQUIRED_CAPABILITIES = new Set<ControlLinkCapability>([
 const ALLOWED_CAPABILITIES = new Set<ControlLinkCapability>([
   ...REQUIRED_CAPABILITIES,
   "goal.submit",
+  "task.read",
 ]);
 
 export type ControlLinkClientConfig = Readonly<{
@@ -147,7 +148,7 @@ function parseClient(value: unknown): ControlLinkClientConfig {
     )
   ) {
     throw invalidClients(
-      "Control Link clients require bot.read and bot.stop; optional capabilities must be recognized and unique.",
+      "Control Link clients require bot.read and bot.stop; goal.submit and task.read are the only optional capabilities.",
     );
   }
   return {

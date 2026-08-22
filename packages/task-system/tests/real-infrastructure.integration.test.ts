@@ -79,6 +79,13 @@ const migrationFiles = [
     sha256:
       "f4f5de71e67fbbd7037678127724ba5be6dbc939a6262f476dc35edd92f395f2",
   },
+  {
+    path: fileURLToPath(
+      new URL("../migrations/0005_task_goal_input.sql", import.meta.url),
+    ),
+    sha256:
+      "dd273906f80d672dde5f01ecf4b075fac5ebc385070e65be557b7bd46d99f472",
+  },
 ] as const;
 
 function isolatedNamespace(input: string | undefined): string {
@@ -602,9 +609,42 @@ describeReal.sequential(
         "studio_tasks",
       ]);
 
-      const created = await repository.createTask(
-        taskCreateCommand("test.database-invariants"),
-      );
+      await expect(
+        repository.verifyGoalLifecycleSchema(),
+      ).resolves.toBeUndefined();
+      const lifecycleInput = {
+        schemaVersion: "1.0",
+        kind: "coordinator.goal.v1",
+        operationId: randomUUID(),
+      };
+      const created = await repository.createTask({
+        ...taskCreateCommand("test.database-invariants"),
+        input: lifecycleInput,
+      });
+      await expect(
+        repository.getTask(created.task.taskId),
+      ).resolves.toMatchObject({ input: lifecycleInput });
+      await expect(
+        repository.listTaskLifecycle({
+          taskType: "test.database-invariants",
+          terminalUpdatedAfter: new Date(0).toISOString(),
+          limit: 1,
+        }),
+      ).resolves.toEqual([
+        expect.objectContaining({
+          taskId: created.task.taskId,
+          input: lifecycleInput,
+        }),
+      ]);
+      await expect(
+        assertionPool.query(
+          "UPDATE studio_tasks SET task_input = $2::jsonb WHERE task_id = $1",
+          [
+            created.task.taskId,
+            JSON.stringify({ payload: "x".repeat(65 * 1_024) }),
+          ],
+        ),
+      ).rejects.toThrow();
       await expect(
         assertionPool.query(
           "DELETE FROM studio_tasks WHERE task_id = $1",

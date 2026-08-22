@@ -18,6 +18,8 @@ import {
   controlLinkGoalRequestV1Schema,
   controlLinkServerProofInput,
   controlLinkStopRequestV1Schema,
+  controlLinkTaskDetailRequestV1Schema,
+  controlLinkTaskListRequestV1Schema,
   parseControlLinkServerMessage,
   type BotStopResultV1,
   type ControlLinkAcceptedV1,
@@ -32,8 +34,14 @@ import {
   type ControlLinkStopRequestV1,
   type ControlLinkStopResponseV1,
   type ControlLinkStopErrorCode,
+  type ControlLinkTaskDetailRequestV1,
+  type ControlLinkTaskDetailResponseV1,
+  type ControlLinkTaskListRequestV1,
+  type ControlLinkTaskListResponseV1,
+  type ControlLinkTaskReadErrorCode,
   type GoalDispatchResultV1,
   type PublicBotDetailV1,
+  type TaskHistoryListPageV1,
 } from "@minecraft-studio/protocol";
 import WebSocket, { type RawData } from "ws";
 
@@ -44,6 +52,13 @@ import type {
   BotStopRequester,
 } from "./bot-state-source.js";
 import type { CoordinatorLinkClientConfig } from "./coordinator-link-config.js";
+import {
+  TaskHistorySourceError,
+  type TaskHistoryDetailRequest,
+  type TaskHistoryDetailResult,
+  type TaskHistoryListRequest,
+  type TaskHistorySource,
+} from "./task-history-source.js";
 import type {
   ControlApiLogger,
   GoalSubmitter,
@@ -53,6 +68,8 @@ import type {
 const MAX_CLOCK_SKEW_MS = 30_000;
 const RETIRED_STOP_TTL_MS = 5 * 60_000;
 const MAX_RETIRED_STOPS = 512;
+const TASK_READ_TIMEOUT_MS = 5_000;
+const MAX_PENDING_TASK_READS = 128;
 
 export type CoordinatorLinkClientErrorCode =
   | "COORDINATOR_LINK_ALREADY_STARTED"
@@ -138,8 +155,30 @@ type PendingGoal = {
   reject: (error: Error) => void;
 };
 
+type PendingTaskList = {
+  fingerprint: string;
+  message: ControlLinkTaskListRequestV1;
+  serialized: string;
+  sent: boolean;
+  timer: ReturnType<typeof setTimeout>;
+  promise: Promise<TaskHistoryListPageV1>;
+  resolve: (result: TaskHistoryListPageV1) => void;
+  reject: (error: Error) => void;
+};
+
+type PendingTaskDetail = {
+  fingerprint: string;
+  message: ControlLinkTaskDetailRequestV1;
+  serialized: string;
+  sent: boolean;
+  timer: ReturnType<typeof setTimeout>;
+  promise: Promise<TaskHistoryDetailResult>;
+  resolve: (result: TaskHistoryDetailResult) => void;
+  reject: (error: Error) => void;
+};
+
 export class CoordinatorLinkClient
-  implements BotStateSource, BotStopRequester, GoalSubmitter
+  implements BotStateSource, BotStopRequester, GoalSubmitter, TaskHistorySource
 {
   private readonly now: () => Date;
   private readonly randomId: () => string;
@@ -152,6 +191,8 @@ export class CoordinatorLinkClient
     new Set<BotStateAvailabilityListener>();
   private readonly pendingStops = new Map<string, PendingStop>();
   private readonly pendingGoals = new Map<string, PendingGoal>();
+  private readonly pendingTaskLists = new Map<string, PendingTaskList>();
+  private readonly pendingTaskDetails = new Map<string, PendingTaskDetail>();
   private readonly retiredStops = new Map<string, RetiredStop>();
   private readonly failedSockets = new WeakSet<WebSocket>();
   private socket: WebSocket | null = null;
@@ -207,6 +248,10 @@ export class CoordinatorLinkClient
   }
 
   isReady(): boolean {
+    return this.ready;
+  }
+
+  isTaskHistoryReady(): boolean {
     return this.ready;
   }
 
@@ -385,6 +430,132 @@ export class CoordinatorLinkClient
     return promise;
   }
 
+  listTaskHistory(
+    request: TaskHistoryListRequest,
+  ): Promise<TaskHistoryListPageV1> {
+    const fingerprint = taskListFingerprint(request);
+    const existing = this.pendingTaskLists.get(request.operationId);
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) {
+        throw new TaskHistorySourceError(
+          "REQUEST_INVALID",
+          "The task list operation ID is already pending with different parameters.",
+        );
+      }
+      return existing.promise;
+    }
+    if (this.pendingTaskDetails.has(request.operationId)) {
+      throw new TaskHistorySourceError(
+        "REQUEST_INVALID",
+        "The task read operation ID is already in use.",
+      );
+    }
+    const coordinatorInstanceId = this.taskReadCoordinatorIdentity();
+    this.assertTaskReadCapacity();
+    const message = controlLinkTaskListRequestV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: this.randomId(),
+      timestamp: validDate(this.now()).toISOString(),
+      type: "control.link.task-list-request.v1",
+      payload: {
+        coordinatorInstanceId,
+        clientId: this.options.config.clientId,
+        controlApiInstanceId: this.options.instanceId,
+        operationId: request.operationId,
+        actorId: request.actorId,
+        query: request.query,
+        issuedAt: validDate(request.issuedAt).toISOString(),
+        expiresAt: validDate(request.expiresAt).toISOString(),
+      },
+    });
+    let resolve!: (result: TaskHistoryListPageV1) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<TaskHistoryListPageV1>((resolveValue, rejectValue) => {
+      resolve = resolveValue;
+      reject = rejectValue;
+    });
+    const pending: PendingTaskList = {
+      fingerprint,
+      message,
+      serialized: JSON.stringify(message),
+      sent: false,
+      timer: setTimeout(() => {
+        if (this.pendingTaskLists.get(request.operationId) !== pending) return;
+        this.pendingTaskLists.delete(request.operationId);
+        pending.reject(taskHistoryUnavailable("Task list response timed out."));
+      }, TASK_READ_TIMEOUT_MS),
+      promise,
+      resolve,
+      reject,
+    };
+    this.pendingTaskLists.set(request.operationId, pending);
+    this.sendPendingTaskRead(pending);
+    return promise;
+  }
+
+  getTaskDetail(
+    request: TaskHistoryDetailRequest,
+  ): Promise<TaskHistoryDetailResult> {
+    const fingerprint = taskDetailFingerprint(request);
+    const existing = this.pendingTaskDetails.get(request.operationId);
+    if (existing) {
+      if (existing.fingerprint !== fingerprint) {
+        throw new TaskHistorySourceError(
+          "REQUEST_INVALID",
+          "The task detail operation ID is already pending with different parameters.",
+        );
+      }
+      return existing.promise;
+    }
+    if (this.pendingTaskLists.has(request.operationId)) {
+      throw new TaskHistorySourceError(
+        "REQUEST_INVALID",
+        "The task read operation ID is already in use.",
+      );
+    }
+    const coordinatorInstanceId = this.taskReadCoordinatorIdentity();
+    this.assertTaskReadCapacity();
+    const message = controlLinkTaskDetailRequestV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: this.randomId(),
+      timestamp: validDate(this.now()).toISOString(),
+      type: "control.link.task-detail-request.v1",
+      payload: {
+        coordinatorInstanceId,
+        clientId: this.options.config.clientId,
+        controlApiInstanceId: this.options.instanceId,
+        operationId: request.operationId,
+        actorId: request.actorId,
+        taskId: request.taskId,
+        issuedAt: validDate(request.issuedAt).toISOString(),
+        expiresAt: validDate(request.expiresAt).toISOString(),
+      },
+    });
+    let resolve!: (result: TaskHistoryDetailResult) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<TaskHistoryDetailResult>((resolveValue, rejectValue) => {
+      resolve = resolveValue;
+      reject = rejectValue;
+    });
+    const pending: PendingTaskDetail = {
+      fingerprint,
+      message,
+      serialized: JSON.stringify(message),
+      sent: false,
+      timer: setTimeout(() => {
+        if (this.pendingTaskDetails.get(request.operationId) !== pending) return;
+        this.pendingTaskDetails.delete(request.operationId);
+        pending.reject(taskHistoryUnavailable("Task detail response timed out."));
+      }, TASK_READ_TIMEOUT_MS),
+      promise,
+      resolve,
+      reject,
+    };
+    this.pendingTaskDetails.set(request.operationId, pending);
+    this.sendPendingTaskRead(pending);
+    return promise;
+  }
+
   async close(): Promise<void> {
     if (this.closing) return;
     this.closing = true;
@@ -399,6 +570,7 @@ export class CoordinatorLinkClient
     this.firstReadyReject = null;
     this.rejectPendingStops(error);
     this.rejectPendingGoals(error);
+    this.rejectPendingTaskReads(taskHistoryUnavailable("Coordinator Link closed."));
     const socket = this.socket;
     this.socket = null;
     if (socket && socket.readyState !== WebSocket.CLOSED) {
@@ -539,6 +711,12 @@ export class CoordinatorLinkClient
           return;
         case "control.link.goal-response.v1":
           this.handleGoalResponse(message);
+          return;
+        case "control.link.task-list-response.v1":
+          this.handleTaskListResponse(message);
+          return;
+        case "control.link.task-detail-response.v1":
+          this.handleTaskDetailResponse(message);
           return;
       }
     } catch (cause) {
@@ -771,6 +949,48 @@ export class CoordinatorLinkClient
     );
   }
 
+  private handleTaskListResponse(message: ControlLinkTaskListResponseV1): void {
+    this.assertAuthenticatedIdentity(message.payload.coordinatorInstanceId);
+    const pending = this.pendingTaskLists.get(message.payload.operationId);
+    if (!pending) return;
+    if (message.payload.requestMessageId !== pending.message.messageId) {
+      throw new CoordinatorLinkClientError(
+        "COORDINATOR_LINK_IDENTITY_MISMATCH",
+        "Coordinator Link task list response identity does not match its request.",
+      );
+    }
+    clearTimeout(pending.timer);
+    this.pendingTaskLists.delete(message.payload.operationId);
+    if (message.ok) {
+      pending.resolve(message.payload.result);
+      return;
+    }
+    pending.reject(taskReadResponseError(message.payload.errorCode));
+  }
+
+  private handleTaskDetailResponse(message: ControlLinkTaskDetailResponseV1): void {
+    this.assertAuthenticatedIdentity(message.payload.coordinatorInstanceId);
+    const pending = this.pendingTaskDetails.get(message.payload.operationId);
+    if (!pending) return;
+    if (
+      message.payload.requestMessageId !== pending.message.messageId ||
+      (message.ok &&
+        message.payload.result.task.taskId !== pending.message.payload.taskId)
+    ) {
+      throw new CoordinatorLinkClientError(
+        "COORDINATOR_LINK_IDENTITY_MISMATCH",
+        "Coordinator Link task detail response identity does not match its request.",
+      );
+    }
+    clearTimeout(pending.timer);
+    this.pendingTaskDetails.delete(message.payload.operationId);
+    if (message.ok) {
+      pending.resolve(message.payload.result);
+      return;
+    }
+    pending.reject(taskReadResponseError(message.payload.errorCode));
+  }
+
   private retireStop(pending: PendingStop): void {
     const nowMs = validDate(this.now()).getTime();
     this.pruneRetiredStops(nowMs);
@@ -851,12 +1071,33 @@ export class CoordinatorLinkClient
     }
   }
 
+  private sendPendingTaskRead(
+    pending: PendingTaskList | PendingTaskDetail,
+  ): void {
+    const socket = this.socket;
+    if (!this.ready || !socket || socket.readyState !== WebSocket.OPEN) return;
+    try {
+      this.sendSerialized(socket, pending.serialized);
+      pending.sent = true;
+    } catch {
+      this.failedSockets.add(socket);
+      this.invalidateSession();
+      socket.close(1013, "backpressure");
+    }
+  }
+
   private flushPending(): void {
     for (const pending of this.pendingStops.values()) {
       if (!pending.sent) this.sendPending(pending);
     }
     for (const pending of this.pendingGoals.values()) {
       if (!pending.sent) this.sendPendingGoal(pending);
+    }
+    for (const pending of this.pendingTaskLists.values()) {
+      if (!pending.sent) this.sendPendingTaskRead(pending);
+    }
+    for (const pending of this.pendingTaskDetails.values()) {
+      if (!pending.sent) this.sendPendingTaskRead(pending);
     }
   }
 
@@ -954,6 +1195,8 @@ export class CoordinatorLinkClient
     this.clearLivenessTimer();
     for (const pending of this.pendingStops.values()) pending.sent = false;
     for (const pending of this.pendingGoals.values()) pending.sent = false;
+    for (const pending of this.pendingTaskLists.values()) pending.sent = false;
+    for (const pending of this.pendingTaskDetails.values()) pending.sent = false;
     this.markUnavailable();
   }
 
@@ -985,6 +1228,22 @@ export class CoordinatorLinkClient
       this.pendingGoals.delete(operationId);
       pending.reject(error);
     }
+    for (const [operationId, pending] of this.pendingTaskLists) {
+      if (pending.message.payload.coordinatorInstanceId === coordinatorInstanceId) {
+        continue;
+      }
+      clearTimeout(pending.timer);
+      this.pendingTaskLists.delete(operationId);
+      pending.reject(taskHistoryUnavailable("Coordinator identity changed."));
+    }
+    for (const [operationId, pending] of this.pendingTaskDetails) {
+      if (pending.message.payload.coordinatorInstanceId === coordinatorInstanceId) {
+        continue;
+      }
+      clearTimeout(pending.timer);
+      this.pendingTaskDetails.delete(operationId);
+      pending.reject(taskHistoryUnavailable("Coordinator identity changed."));
+    }
   }
 
   private permanentFailure(error: CoordinatorLinkClientError): void {
@@ -996,6 +1255,7 @@ export class CoordinatorLinkClient
     this.firstReadyReject = null;
     this.rejectPendingStops(error);
     this.rejectPendingGoals(error);
+    this.rejectPendingTaskReads(taskHistoryUnavailable("Coordinator Link failed."));
   }
 
   private rejectPendingStops(error: Error): void {
@@ -1012,6 +1272,39 @@ export class CoordinatorLinkClient
       pending.reject(error);
     }
     this.pendingGoals.clear();
+  }
+
+  private rejectPendingTaskReads(error: Error): void {
+    for (const pending of this.pendingTaskLists.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pendingTaskLists.clear();
+    for (const pending of this.pendingTaskDetails.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pendingTaskDetails.clear();
+  }
+
+  private taskReadCoordinatorIdentity(): string {
+    if (!this.ready || !this.coordinatorInstanceId) {
+      throw taskHistoryUnavailable(
+        "Coordinator Link has no complete authoritative snapshot.",
+      );
+    }
+    return this.coordinatorInstanceId;
+  }
+
+  private assertTaskReadCapacity(): void {
+    if (
+      this.pendingTaskLists.size + this.pendingTaskDetails.size >=
+      MAX_PENDING_TASK_READS
+    ) {
+      throw taskHistoryUnavailable(
+        "Coordinator Link has reached its pending task read limit.",
+      );
+    }
   }
 
   private markUnavailable(): void {
@@ -1148,6 +1441,42 @@ function goalFingerprint(request: SubmitGoalRequest): string {
     operatorGoal: request.operatorGoal,
     timeoutMs: request.timeoutMs,
   });
+}
+
+function taskListFingerprint(request: TaskHistoryListRequest): string {
+  return JSON.stringify({
+    operationId: request.operationId,
+    actorId: request.actorId,
+    query: request.query,
+    issuedAt: validDate(request.issuedAt).toISOString(),
+    expiresAt: validDate(request.expiresAt).toISOString(),
+  });
+}
+
+function taskDetailFingerprint(request: TaskHistoryDetailRequest): string {
+  return JSON.stringify({
+    operationId: request.operationId,
+    actorId: request.actorId,
+    taskId: request.taskId,
+    issuedAt: validDate(request.issuedAt).toISOString(),
+    expiresAt: validDate(request.expiresAt).toISOString(),
+  });
+}
+
+function taskReadResponseError(
+  code: ControlLinkTaskReadErrorCode,
+): TaskHistorySourceError {
+  if (code === "TASK_NOT_FOUND") {
+    return new TaskHistorySourceError(code, "Task was not found.");
+  }
+  if (code === "AUTHORIZATION_REJECTED" || code === "REQUEST_INVALID") {
+    return new TaskHistorySourceError(code, "Coordinator rejected the task read request.");
+  }
+  return taskHistoryUnavailable("Coordinator task history is unavailable.");
+}
+
+function taskHistoryUnavailable(message: string): TaskHistorySourceError {
+  return new TaskHistorySourceError("TASK_HISTORY_UNAVAILABLE", message);
 }
 
 function stopResponseError(

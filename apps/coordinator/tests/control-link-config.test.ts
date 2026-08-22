@@ -32,6 +32,22 @@ describe("Coordinator Control Link config", () => {
     ).toMatchObject({ host: "127.0.0.1", port: 3_221 });
   });
 
+  it("accepts goal submission and task history as independent optional capabilities", () => {
+    const capabilities = [
+      "bot.read",
+      "bot.stop",
+      "goal.submit",
+      "task.read",
+    ] as const;
+    expect(
+      loadControlLinkConfig({
+        COORDINATOR_CONTROL_LINK_CLIENTS_JSON: JSON.stringify([
+          { ...CLIENT, capabilities },
+        ]),
+      }).clients[0]?.capabilities,
+    ).toEqual(capabilities);
+  });
+
   it("rejects unsafe binds and missing clients", () => {
     expect(() =>
       loadControlLinkConfig({

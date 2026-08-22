@@ -24,6 +24,8 @@ import {
   controlLinkSnapshotItemV1Schema,
   controlLinkStateUpsertV1Schema,
   controlLinkStopResponseV1Schema,
+  controlLinkTaskDetailResponseV1Schema,
+  controlLinkTaskListResponseV1Schema,
   parseControlLinkClientMessage,
   type ControlLinkAuthenticateV1,
   type ControlLinkGoalErrorCode,
@@ -33,6 +35,9 @@ import {
   type ControlLinkStateUpsertV1,
   type ControlLinkStopErrorCode,
   type ControlLinkStopRequestV1,
+  type ControlLinkTaskDetailRequestV1,
+  type ControlLinkTaskListRequestV1,
+  type ControlLinkTaskReadErrorCode,
   type PublicBotDetailV1,
   type GoalDispatchResultV1,
 } from "@minecraft-studio/protocol";
@@ -40,6 +45,13 @@ import { WebSocket, WebSocketServer } from "ws";
 
 import { BotRegistry, type BotRegistryRecord } from "./bot-registry.js";
 import type { ControlLinkClientConfig } from "./control-link-config.js";
+import {
+  durableGoalFingerprint,
+  GoalLifecycleStoreError,
+  type GoalExecutionLease,
+  type GoalLifecycleSnapshot,
+  type GoalLifecycleStore,
+} from "./goal-lifecycle-store.js";
 import {
   LocalPlannerError,
   type CoordinatorLocalPlanner,
@@ -49,6 +61,10 @@ import {
   CoordinatorStopError,
   type StopController,
 } from "./stop-controller.js";
+import {
+  TaskHistoryReaderError,
+  type TaskHistoryReader,
+} from "./task-history-reader.js";
 
 const HANDSHAKE_TIMEOUT_MS = 5_000;
 const MAX_CLOCK_SKEW_MS = 30_000;
@@ -60,6 +76,7 @@ const MAX_RESPONDERS_PER_GOAL = 4;
 const COMPLETED_GOAL_TTL_MS = 5 * 60_000;
 const MAX_COMPLETED_GOALS = 512;
 const MAX_TRACKED_GOALS = 1_000;
+const GOAL_RECOVERY_INTERVAL_MS = 5_000;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 
@@ -76,12 +93,15 @@ export type ControlLinkServerOptions = Readonly<{
   registry: BotRegistry;
   stopController: Pick<StopController, "requestStop">;
   goalPlanner?: Pick<CoordinatorLocalPlanner, "planAndDispatch">;
+  goalStore?: GoalLifecycleStore;
+  taskHistoryReader?: TaskHistoryReader;
   logger: AppLogger;
   now?: () => Date;
   randomId?: () => string;
   randomNonce?: () => string;
   maxSessions?: number;
   maxPendingStops?: number;
+  maxPendingTaskReads?: number;
   maxBufferedSnapshotEvents?: number;
   pingIntervalMs?: number;
 }>;
@@ -123,6 +143,7 @@ type PendingGoal = {
   request: ControlLinkGoalRequestV1;
   responders: Map<string, GoalResponder>;
   controller: AbortController;
+  execution: Promise<void> | null;
 };
 
 type CompletedGoal = Readonly<{
@@ -156,6 +177,7 @@ export class ControlLinkServer {
   private readonly activeSessions = new Map<string, ControlSession>();
   private readonly pendingStops = new Map<string, PendingStop>();
   private readonly pendingGoals = new Map<string, PendingGoal>();
+  private readonly pendingTaskReads = new Set<symbol>();
   private readonly completedGoals = new Map<string, CompletedGoal>();
   private readonly trackedGoals = new Map<string, TrackedGoalTask>();
   private readonly httpServer: HttpServer;
@@ -163,11 +185,14 @@ export class ControlLinkServer {
   private readonly unsubscribeRegistry: () => void;
   private readonly maxSessions: number;
   private readonly maxPendingStops: number;
+  private readonly maxPendingTaskReads: number;
   private readonly maxBufferedSnapshotEvents: number;
   private readonly pingIntervalMs: number;
   private streamSequence = 0;
   private trackedGoalOrder = 0;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private goalRecoveryTimer: ReturnType<typeof setInterval> | null = null;
+  private goalRefreshInFlight: Promise<void> | null = null;
   private started = false;
   private stopped = false;
 
@@ -185,6 +210,11 @@ export class ControlLinkServer {
     if (!IDENTIFIER_PATTERN.test(options.instanceId)) {
       throw new TypeError("Control Link Coordinator instance ID is invalid.");
     }
+    if (options.goalPlanner !== undefined && options.goalStore === undefined) {
+      throw new TypeError(
+        "Control Link goal execution requires durable storage.",
+      );
+    }
     if (options.clients.length === 0 || options.clients.length > 64) {
       throw new TypeError("Control Link requires between 1 and 64 clients.");
     }
@@ -200,14 +230,15 @@ export class ControlLinkServer {
         clientIds.has(client.clientId) ||
         hashes.has(client.secretSha256) ||
         capabilities.size < 2 ||
-        capabilities.size > 3 ||
+        capabilities.size > 4 ||
         !capabilities.has("bot.read") ||
         !capabilities.has("bot.stop") ||
         [...capabilities].some(
           (capability) =>
             capability !== "bot.read" &&
             capability !== "bot.stop" &&
-            capability !== "goal.submit",
+            capability !== "goal.submit" &&
+            capability !== "task.read",
         )
       ) {
         throw new TypeError("Control Link client configuration is invalid.");
@@ -232,6 +263,12 @@ export class ControlLinkServer {
       1,
       1_000,
       "maxPendingStops",
+    );
+    this.maxPendingTaskReads = boundedInteger(
+      options.maxPendingTaskReads ?? 128,
+      1,
+      1_000,
+      "maxPendingTaskReads",
     );
     this.maxBufferedSnapshotEvents = boundedInteger(
       options.maxBufferedSnapshotEvents ?? 256,
@@ -292,6 +329,12 @@ export class ControlLinkServer {
     if (this.started || this.stopped) {
       throw new Error("Control Link server cannot be started more than once.");
     }
+    if (this.options.goalStore) {
+      const snapshots = await this.options.goalStore.initialize(
+        COMPLETED_GOAL_TTL_MS,
+      );
+      this.applyGoalSnapshots(snapshots, validNow(this.now()));
+    }
     await new Promise<void>((resolve, reject) => {
       const onError = (error: Error) => reject(error);
       this.httpServer.once("error", onError);
@@ -305,6 +348,13 @@ export class ControlLinkServer {
     });
     this.started = true;
     this.pingTimer = setInterval(() => this.pingSessions(), this.pingIntervalMs);
+    if (this.options.goalStore) {
+      this.goalRecoveryTimer = setInterval(
+        () => void this.refreshPersistedGoals(),
+        GOAL_RECOVERY_INTERVAL_MS,
+      );
+      this.goalRecoveryTimer.unref?.();
+    }
     const address = this.httpServer.address();
     if (!address || typeof address === "string") {
       throw new Error("Control Link did not receive a TCP address.");
@@ -318,15 +368,22 @@ export class ControlLinkServer {
     this.unsubscribeRegistry();
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.pingTimer = null;
+    if (this.goalRecoveryTimer) clearInterval(this.goalRecoveryTimer);
+    this.goalRecoveryTimer = null;
     for (const pending of this.pendingStops.values()) {
       pending.responders.clear();
     }
     this.pendingStops.clear();
+    const goalExecutions: Promise<void>[] = [];
     for (const pending of this.pendingGoals.values()) {
       pending.responders.clear();
       pending.controller.abort(new Error("coordinator_shutdown"));
+      if (pending.execution) goalExecutions.push(pending.execution);
     }
+    await Promise.allSettled(goalExecutions);
+    await this.goalRefreshInFlight;
     this.pendingGoals.clear();
+    this.pendingTaskReads.clear();
     this.completedGoals.clear();
     this.trackedGoals.clear();
     const closures = [...this.sessions].map((session) => {
@@ -487,7 +544,15 @@ export class ControlLinkServer {
       this.handleStopRequest(session, message);
       return;
     }
-    this.handleGoalRequest(session, message);
+    if (message.type === "control.link.goal-request.v1") {
+      this.handleGoalRequest(session, message);
+      return;
+    }
+    if (message.type === "control.link.task-list-request.v1") {
+      this.handleTaskListRequest(session, message);
+      return;
+    }
+    this.handleTaskDetailRequest(session, message);
   }
 
   private authenticate(
@@ -731,6 +796,166 @@ export class ControlLinkServer {
     }
   }
 
+  private handleTaskListRequest(
+    session: ControlSession,
+    request: ControlLinkTaskListRequestV1,
+  ): void {
+    if (!this.taskReadAuthorized(session, request)) {
+      this.sendTaskListFailure(session, request, "AUTHORIZATION_REJECTED");
+      return;
+    }
+    if (!this.options.taskHistoryReader) {
+      this.sendTaskListFailure(session, request, "TASK_HISTORY_UNAVAILABLE");
+      return;
+    }
+    if (this.pendingTaskReads.size >= this.maxPendingTaskReads) {
+      this.sendTaskListFailure(session, request, "CONTROL_LINK_BACKPRESSURE");
+      return;
+    }
+    const pendingToken = Symbol(request.messageId);
+    this.pendingTaskReads.add(pendingToken);
+    void this.options.taskHistoryReader
+      .listTaskHistory(request.payload.query)
+      .then((result) => {
+        if (session.closing) return;
+        const response = controlLinkTaskListResponseV1Schema.parse({
+          schemaVersion: "1.0",
+          messageId: this.randomId(),
+          timestamp: validNow(this.now()).toISOString(),
+          type: "control.link.task-list-response.v1",
+          ok: true,
+          payload: {
+            coordinatorInstanceId: this.options.instanceId,
+            requestMessageId: request.messageId,
+            operationId: request.payload.operationId,
+            result,
+          },
+        });
+        this.sendFrame(session.socket, response, (error) => {
+          if (error) this.closeSession(session, 1013, "task_list_response_failed");
+        });
+      })
+      .catch((error: unknown) => {
+        this.sendTaskListFailure(session, request, taskReadErrorCode(error));
+      })
+      .finally(() => {
+        this.pendingTaskReads.delete(pendingToken);
+      });
+  }
+
+  private handleTaskDetailRequest(
+    session: ControlSession,
+    request: ControlLinkTaskDetailRequestV1,
+  ): void {
+    if (!this.taskReadAuthorized(session, request)) {
+      this.sendTaskDetailFailure(session, request, "AUTHORIZATION_REJECTED");
+      return;
+    }
+    if (!this.options.taskHistoryReader) {
+      this.sendTaskDetailFailure(session, request, "TASK_HISTORY_UNAVAILABLE");
+      return;
+    }
+    if (this.pendingTaskReads.size >= this.maxPendingTaskReads) {
+      this.sendTaskDetailFailure(session, request, "CONTROL_LINK_BACKPRESSURE");
+      return;
+    }
+    const pendingToken = Symbol(request.messageId);
+    this.pendingTaskReads.add(pendingToken);
+    void this.options.taskHistoryReader
+      .getTaskDetail(request.payload.taskId)
+      .then((result) => {
+        if (result === null) {
+          this.sendTaskDetailFailure(session, request, "TASK_NOT_FOUND");
+          return;
+        }
+        if (session.closing) return;
+        const response = controlLinkTaskDetailResponseV1Schema.parse({
+          schemaVersion: "1.0",
+          messageId: this.randomId(),
+          timestamp: validNow(this.now()).toISOString(),
+          type: "control.link.task-detail-response.v1",
+          ok: true,
+          payload: {
+            coordinatorInstanceId: this.options.instanceId,
+            requestMessageId: request.messageId,
+            operationId: request.payload.operationId,
+            result,
+          },
+        });
+        this.sendFrame(session.socket, response, (error) => {
+          if (error) {
+            this.closeSession(session, 1013, "task_detail_response_failed");
+          }
+        });
+      })
+      .catch((error: unknown) => {
+        this.sendTaskDetailFailure(session, request, taskReadErrorCode(error));
+      })
+      .finally(() => {
+        this.pendingTaskReads.delete(pendingToken);
+      });
+  }
+
+  private taskReadAuthorized(
+    session: ControlSession,
+    request: ControlLinkTaskListRequestV1 | ControlLinkTaskDetailRequestV1,
+  ): boolean {
+    const now = validNow(this.now());
+    return (
+      withinClockSkew(request.payload.issuedAt, now) &&
+      Date.parse(request.payload.expiresAt) > now.getTime() &&
+      session.client?.capabilities.includes("task.read") === true
+    );
+  }
+
+  private sendTaskListFailure(
+    session: ControlSession,
+    request: ControlLinkTaskListRequestV1,
+    errorCode: ControlLinkTaskReadErrorCode,
+  ): void {
+    if (session.closing) return;
+    const response = controlLinkTaskListResponseV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: this.randomId(),
+      timestamp: validNow(this.now()).toISOString(),
+      type: "control.link.task-list-response.v1",
+      ok: false,
+      payload: {
+        coordinatorInstanceId: this.options.instanceId,
+        requestMessageId: request.messageId,
+        operationId: request.payload.operationId,
+        errorCode,
+      },
+    });
+    this.sendFrame(session.socket, response, (error) => {
+      if (error) this.closeSession(session, 1013, "task_list_response_failed");
+    });
+  }
+
+  private sendTaskDetailFailure(
+    session: ControlSession,
+    request: ControlLinkTaskDetailRequestV1,
+    errorCode: ControlLinkTaskReadErrorCode,
+  ): void {
+    if (session.closing) return;
+    const response = controlLinkTaskDetailResponseV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: this.randomId(),
+      timestamp: validNow(this.now()).toISOString(),
+      type: "control.link.task-detail-response.v1",
+      ok: false,
+      payload: {
+        coordinatorInstanceId: this.options.instanceId,
+        requestMessageId: request.messageId,
+        operationId: request.payload.operationId,
+        errorCode,
+      },
+    });
+    this.sendFrame(session.socket, response, (error) => {
+      if (error) this.closeSession(session, 1013, "task_detail_response_failed");
+    });
+  }
+
   private handleStopRequest(
     session: ControlSession,
     request: ControlLinkStopRequestV1,
@@ -968,7 +1193,7 @@ export class ControlLinkServer {
       this.sendGoalFailure(session, request, "AUTHORIZATION_REJECTED");
       return;
     }
-    if (!this.options.goalPlanner) {
+    if (!this.options.goalPlanner || !this.options.goalStore) {
       this.sendGoalFailure(session, request, "AI_UNAVAILABLE");
       return;
     }
@@ -983,21 +1208,69 @@ export class ControlLinkServer {
         ],
       ]),
       controller: new AbortController(),
+      execution: null,
     };
     this.pendingGoals.set(operationId, pending);
-    this.trackGoalStarted(request, now);
-    void this.executeGoal(pending);
+    const execution = this.executeGoal(pending);
+    pending.execution = execution;
+    void execution;
   }
 
   private async executeGoal(pending: PendingGoal): Promise<void> {
     const request = pending.request;
     const controller = pending.controller;
+    let lease: GoalExecutionLease | null = null;
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
       controller.abort(new Error("goal_timeout"));
     }, request.payload.timeoutMs);
     try {
+      const begin = await this.options.goalStore!.begin(request);
+      this.applyGoalSnapshots([begin.snapshot], validNow(this.now()));
+      if (begin.kind === "busy") {
+        for (const responder of pending.responders.values()) {
+          this.sendGoalFailure(
+            responder.session,
+            request,
+            "CONTROL_LINK_BACKPRESSURE",
+            responder.requestMessageId,
+          );
+        }
+        return;
+      }
+      if (begin.kind === "result") {
+        this.rememberCompletedGoal(request.payload.operationId, {
+          fingerprint: begin.snapshot.fingerprint,
+          result: begin.result,
+          expiresAtMs: validNow(this.now()).getTime() + COMPLETED_GOAL_TTL_MS,
+        });
+        for (const responder of pending.responders.values()) {
+          this.sendGoalSuccess(responder, request, begin.result);
+        }
+        return;
+      }
+      if (begin.kind === "error") {
+        this.rememberCompletedGoal(request.payload.operationId, {
+          fingerprint: begin.snapshot.fingerprint,
+          result: null,
+          errorCode: begin.errorCode,
+          expiresAtMs: validNow(this.now()).getTime() + COMPLETED_GOAL_TTL_MS,
+        });
+        for (const responder of pending.responders.values()) {
+          this.sendGoalFailure(
+            responder.session,
+            request,
+            begin.errorCode,
+            responder.requestMessageId,
+          );
+        }
+        return;
+      }
+      lease = begin.lease;
+      if (timedOut || controller.signal.aborted) {
+        throw new Error(timedOut ? "goal_timeout" : "goal_aborted");
+      }
       const planResult = await this.options.goalPlanner!.planAndDispatch({
         requestId: request.payload.operationId,
         traceId: request.payload.operationId,
@@ -1011,17 +1284,17 @@ export class ControlLinkServer {
         throw new Error("goal_timeout");
       }
       const result = publicGoalResult(request, planResult);
-      if (this.stopped || this.pendingGoals.get(request.payload.operationId) !== pending) {
-        return;
-      }
+      const terminal = await this.options.goalStore!.recordResult(lease, result);
+      this.applyGoalSnapshots([terminal], validNow(this.now()));
       this.rememberCompletedGoal(request.payload.operationId, {
-        fingerprint: pending.fingerprint,
+        fingerprint: terminal.fingerprint,
         result,
         expiresAtMs: validNow(this.now()).getTime() + COMPLETED_GOAL_TTL_MS,
       });
-      this.trackGoalFinished(request, goalTaskStatus(result));
-      for (const responder of pending.responders.values()) {
-        this.sendGoalSuccess(responder, request, result);
+      if (!this.stopped) {
+        for (const responder of pending.responders.values()) {
+          this.sendGoalSuccess(responder, request, result);
+        }
       }
       safeLog(this.options.logger, "info", "coordinator_control_link_goal_result", {
         traceId: request.payload.operationId,
@@ -1031,31 +1304,57 @@ export class ControlLinkServer {
         action: result.action,
       });
     } catch (cause) {
-      const errorCode = goalErrorCode(cause, timedOut);
-      if (this.stopped || this.pendingGoals.get(request.payload.operationId) !== pending) {
-        return;
-      }
-      this.rememberCompletedGoal(request.payload.operationId, {
-        fingerprint: pending.fingerprint,
-        result: null,
-        errorCode,
-        expiresAtMs: validNow(this.now()).getTime() + COMPLETED_GOAL_TTL_MS,
-      });
-      this.trackGoalFinished(
-        request,
-        errorCode === "AI_TIMEOUT"
+      let errorCode = goalErrorCode(cause, timedOut, controller.signal.aborted);
+      let terminalPersisted = false;
+      if (lease) {
+        const status = errorCode === "AI_TIMEOUT"
           ? "expired"
           : controller.signal.aborted
             ? "cancelled"
-            : "failed",
-      );
-      for (const responder of pending.responders.values()) {
-        this.sendGoalFailure(
-          responder.session,
-          request,
+            : "failed";
+        try {
+          const terminal = await this.options.goalStore!.recordError(
+            lease,
+            errorCode,
+            status,
+          );
+          this.applyGoalSnapshots([terminal], validNow(this.now()));
+          terminalPersisted = true;
+        } catch (persistenceCause) {
+          errorCode = "CONTROL_LINK_INTERNAL_ERROR";
+          safeLog(
+            this.options.logger,
+            "error",
+            "coordinator_control_link_goal_persistence_failed",
+            {
+              traceId: request.payload.operationId,
+              taskId: request.payload.taskId,
+              botId: request.payload.botId,
+              code:
+                persistenceCause instanceof GoalLifecycleStoreError
+                  ? persistenceCause.code
+                  : "CONTROL_LINK_INTERNAL_ERROR",
+            },
+          );
+        }
+      }
+      if (terminalPersisted) {
+        this.rememberCompletedGoal(request.payload.operationId, {
+          fingerprint: pending.fingerprint,
+          result: null,
           errorCode,
-          responder.requestMessageId,
-        );
+          expiresAtMs: validNow(this.now()).getTime() + COMPLETED_GOAL_TTL_MS,
+        });
+      }
+      if (!this.stopped) {
+        for (const responder of pending.responders.values()) {
+          this.sendGoalFailure(
+            responder.session,
+            request,
+            errorCode,
+            responder.requestMessageId,
+          );
+        }
       }
       safeLog(this.options.logger, "warn", "coordinator_control_link_goal_failed", {
         traceId: request.payload.operationId,
@@ -1088,43 +1387,107 @@ export class ControlLinkServer {
     }
   }
 
-  private trackGoalStarted(request: ControlLinkGoalRequestV1, now: Date): void {
-    this.trackedGoalOrder += 1;
-    const operationId = request.payload.operationId;
-    const runtimeTask = this.options.registry.get(request.payload.botId, now)
-      ?.currentStatus?.currentTask ?? null;
-    this.trackedGoals.delete(operationId);
-    this.trackedGoals.set(operationId, {
-      operationId,
-      taskId: request.payload.taskId,
-      botId: request.payload.botId,
-      title: "Submitted goal",
-      status: "running",
-      startedAt: now.toISOString(),
-      order: this.trackedGoalOrder,
-      expiresAtMs: null,
-      baselineRuntimeTask: runtimeTask
-        ? { taskId: runtimeTask.taskId, startedAt: runtimeTask.startedAt }
-        : null,
-    });
+  private applyGoalSnapshots(
+    snapshots: readonly GoalLifecycleSnapshot[],
+    now: Date,
+  ): void {
+    const nowMs = now.getTime();
+    for (const state of snapshots) {
+      const active = goalTaskActive(state.status);
+      const expiresAtMs = active
+        ? null
+        : Date.parse(state.updatedAt) + COMPLETED_GOAL_TTL_MS;
+      if (expiresAtMs !== null && expiresAtMs <= nowMs) {
+        this.trackedGoals.delete(state.operationId);
+        continue;
+      }
+      const existing = this.trackedGoals.get(state.operationId);
+      const runtimeTask = this.options.registry.get(state.botId, now)
+        ?.currentStatus?.currentTask ?? null;
+      if (!existing) this.trackedGoalOrder += 1;
+      const tracked: TrackedGoalTask = {
+        operationId: state.operationId,
+        taskId: state.taskId,
+        botId: state.botId,
+        title: state.title,
+        status: state.status,
+        startedAt: state.startedAt,
+        order: existing?.order ?? this.trackedGoalOrder,
+        expiresAtMs,
+        baselineRuntimeTask:
+          existing?.baselineRuntimeTask ??
+          (runtimeTask
+            ? { taskId: runtimeTask.taskId, startedAt: runtimeTask.startedAt }
+            : null),
+      };
+      this.trackedGoals.set(state.operationId, tracked);
+      if (!active && (state.result !== null || state.errorCode !== null)) {
+        this.rememberCompletedGoal(state.operationId, {
+          fingerprint: state.fingerprint,
+          ...(state.result !== null
+            ? { result: state.result }
+            : {
+                result: null,
+                errorCode: state.errorCode ?? "CONTROL_LINK_INTERNAL_ERROR",
+              }),
+          expiresAtMs: expiresAtMs ?? nowMs + COMPLETED_GOAL_TTL_MS,
+        });
+      }
+      if (
+        !existing ||
+        existing.status !== tracked.status ||
+        existing.startedAt !== tracked.startedAt ||
+        existing.title !== tracked.title
+      ) {
+        this.publishBotTaskState(state.botId, now);
+      }
+    }
     this.trimTrackedGoals();
-    this.publishBotTaskState(request.payload.botId, now);
   }
 
-  private trackGoalFinished(
-    request: ControlLinkGoalRequestV1,
-    status: PublicCurrentTask["status"],
+  private refreshPersistedGoals(): Promise<void> {
+    if (!this.options.goalStore) return Promise.resolve();
+    if (this.goalRefreshInFlight) return this.goalRefreshInFlight;
+    const refresh = this.options.goalStore
+      .refresh(COMPLETED_GOAL_TTL_MS)
+      .then((snapshots) => {
+        this.applyGoalSnapshots(snapshots, validNow(this.now()));
+        this.removeMissingGoalSnapshots(snapshots, validNow(this.now()));
+      })
+      .catch((error: unknown) => {
+        safeLog(
+          this.options.logger,
+          "error",
+          "coordinator_control_link_goal_recovery_failed",
+          {
+            code:
+              error instanceof GoalLifecycleStoreError
+                ? error.code
+                : "CONTROL_LINK_INTERNAL_ERROR",
+          },
+        );
+      })
+      .finally(() => {
+        if (this.goalRefreshInFlight === refresh) {
+          this.goalRefreshInFlight = null;
+        }
+      });
+    this.goalRefreshInFlight = refresh;
+    return refresh;
+  }
+
+  private removeMissingGoalSnapshots(
+    snapshots: readonly GoalLifecycleSnapshot[],
+    now: Date,
   ): void {
-    const operationId = request.payload.operationId;
-    const tracked = this.trackedGoals.get(operationId);
-    if (!tracked) return;
-    const now = validNow(this.now());
-    this.trackedGoals.set(operationId, {
-      ...tracked,
-      status,
-      expiresAtMs: now.getTime() + COMPLETED_GOAL_TTL_MS,
-    });
-    this.publishBotTaskState(request.payload.botId, now);
+    const persisted = new Set(snapshots.map(({ operationId }) => operationId));
+    for (const [operationId, tracked] of this.trackedGoals) {
+      if (persisted.has(operationId) || this.pendingGoals.has(operationId)) {
+        continue;
+      }
+      this.trackedGoals.delete(operationId);
+      this.publishBotTaskState(tracked.botId, now);
+    }
   }
 
   private publishBotTaskState(botId: string, now: Date): void {
@@ -1142,7 +1505,7 @@ export class ControlLinkServer {
       (tracked.baselineRuntimeTask?.taskId !== runtimeTask.taskId ||
         tracked.baselineRuntimeTask?.startedAt !== runtimeTask.startedAt);
     const currentTask = tracked &&
-      !(tracked.status !== "running" && runtimeTaskReplacedBaseline)
+      !(!goalTaskActive(tracked.status) && runtimeTaskReplacedBaseline)
       ? {
           taskId: tracked.taskId,
           title:
@@ -1164,8 +1527,8 @@ export class ControlLinkServer {
         selected = tracked;
         continue;
       }
-      const trackedActive = tracked.status === "running";
-      const selectedActive = selected.status === "running";
+      const trackedActive = goalTaskActive(tracked.status);
+      const selectedActive = goalTaskActive(selected.status);
       if (
         (trackedActive && !selectedActive) ||
         (trackedActive === selectedActive && tracked.order > selected.order)
@@ -1187,7 +1550,7 @@ export class ControlLinkServer {
   private trimTrackedGoals(): void {
     while (this.trackedGoals.size > MAX_TRACKED_GOALS) {
       const oldestTerminal = [...this.trackedGoals.entries()].find(
-        ([, tracked]) => tracked.status !== "running",
+        ([, tracked]) => !goalTaskActive(tracked.status),
       )?.[0];
       if (!oldestTerminal) break;
       this.trackedGoals.delete(oldestTerminal);
@@ -1261,7 +1624,11 @@ export class ControlLinkServer {
 
   private matchesSession(
     session: ControlSession,
-    request: ControlLinkStopRequestV1 | ControlLinkGoalRequestV1,
+    request:
+      | ControlLinkStopRequestV1
+      | ControlLinkGoalRequestV1
+      | ControlLinkTaskListRequestV1
+      | ControlLinkTaskDetailRequestV1,
   ): boolean {
     return (
       request.payload.coordinatorInstanceId === this.options.instanceId &&
@@ -1390,6 +1757,12 @@ export class ControlLinkServer {
       session.socket.ping();
     }
   }
+}
+
+function taskReadErrorCode(error: unknown): ControlLinkTaskReadErrorCode {
+  return error instanceof TaskHistoryReaderError
+    ? error.code
+    : "CONTROL_LINK_INTERNAL_ERROR";
 }
 
 function projectBotState(
@@ -1555,8 +1928,11 @@ function goalTaskStatus(
 function goalErrorCode(
   cause: unknown,
   timedOut: boolean,
+  aborted = false,
 ): ControlLinkGoalErrorCode {
   if (timedOut) return "AI_TIMEOUT";
+  if (aborted) return "CONTROL_LINK_STOPPED";
+  if (cause instanceof GoalLifecycleStoreError) return cause.code;
   if (cause instanceof AISchedulerError) {
     if (cause.code === "AI_QUEUE_FULL") return "AI_QUEUE_FULL";
     if (cause.code === "AI_REQUEST_TIMEOUT") return "AI_TIMEOUT";
@@ -1577,16 +1953,18 @@ function goalErrorCode(
 }
 
 function goalFingerprint(request: ControlLinkGoalRequestV1): string {
-  return JSON.stringify({
-    operationId: request.payload.operationId,
-    taskId: request.payload.taskId,
-    botId: request.payload.botId,
-    clientId: request.payload.clientId,
-    controlApiInstanceId: request.payload.controlApiInstanceId,
-    coordinatorInstanceId: request.payload.coordinatorInstanceId,
-    operatorGoal: request.payload.operatorGoal,
-    timeoutMs: request.payload.timeoutMs,
-  });
+  return durableGoalFingerprint(request);
+}
+
+function goalTaskActive(status: PublicCurrentTask["status"]): boolean {
+  return (
+    status === "queued" ||
+    status === "assigned" ||
+    status === "running" ||
+    status === "blocked" ||
+    status === "waiting" ||
+    status === "paused"
+  );
 }
 
 function stopFingerprint(request: ControlLinkStopRequestV1): string {

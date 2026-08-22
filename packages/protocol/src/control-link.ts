@@ -5,13 +5,18 @@ import {
   goalDispatchResultV1Schema,
   publicBotDetailV1Schema,
 } from "./control-api.js";
+import {
+  publicTaskDetailV1Schema,
+  taskHistoryListPageV1Schema,
+  taskHistoryListQueryV1Schema,
+} from "./task-history.js";
 
 export const CONTROL_LINK_PATH = "/v1/control-link";
 export const CONTROL_LINK_SUBPROTOCOL = "minecraft-studio.control-link.v1";
 export const CONTROL_LINK_MAX_PAYLOAD_BYTES = 65_536;
 export const CONTROL_LINK_MAX_BOTS = 1_000;
 
-const timestampSchema = z.string().datetime({ offset: true });
+const timestampSchema = z.string().max(35).datetime({ offset: true });
 const nonceOrProofSchema = z
   .string()
   .length(43)
@@ -28,6 +33,7 @@ export const controlLinkCapabilitySchema = z.enum([
   "bot.read",
   "bot.stop",
   "goal.submit",
+  "task.read",
 ]);
 
 export const controlLinkBotStateV1Schema = publicBotDetailV1Schema.superRefine(
@@ -364,10 +370,144 @@ export const controlLinkGoalResponseV1Schema = z.discriminatedUnion("ok", [
     .strict(),
 ]);
 
+const taskReadRequestIdentityShape = {
+  coordinatorInstanceId: identifierSchema,
+  clientId: identifierSchema,
+  controlApiInstanceId: identifierSchema,
+  operationId: z.string().uuid(),
+  actorId: identifierSchema,
+  issuedAt: timestampSchema,
+  expiresAt: timestampSchema,
+};
+
+function validateTaskReadAuthorization(
+  message: { payload: { issuedAt: string; expiresAt: string } },
+  context: z.RefinementCtx,
+): void {
+  const issuedAt = Date.parse(message.payload.issuedAt);
+  const expiresAt = Date.parse(message.payload.expiresAt);
+  if (expiresAt <= issuedAt || expiresAt - issuedAt > 15_000) {
+    context.addIssue({
+      code: "custom",
+      path: ["payload", "expiresAt"],
+      message: "Task read authorization must expire within fifteen seconds.",
+    });
+  }
+}
+
+export const controlLinkTaskListRequestV1Schema = z
+  .object({
+    ...controlLinkEnvelopeShape,
+    type: z.literal("control.link.task-list-request.v1"),
+    payload: z
+      .object({
+        ...taskReadRequestIdentityShape,
+        query: taskHistoryListQueryV1Schema,
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine(validateTaskReadAuthorization);
+
+export const controlLinkTaskDetailRequestV1Schema = z
+  .object({
+    ...controlLinkEnvelopeShape,
+    type: z.literal("control.link.task-detail-request.v1"),
+    payload: z
+      .object({
+        ...taskReadRequestIdentityShape,
+        taskId: z.string().uuid(),
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine(validateTaskReadAuthorization);
+
+export const controlLinkTaskReadErrorCodeSchema = z.enum([
+  "REQUEST_INVALID",
+  "TASK_NOT_FOUND",
+  "TASK_HISTORY_UNAVAILABLE",
+  "AUTHORIZATION_REJECTED",
+  "CONTROL_LINK_BACKPRESSURE",
+  "CONTROL_LINK_STOPPED",
+  "CONTROL_LINK_INTERNAL_ERROR",
+]);
+
+const taskReadResponseIdentityShape = {
+  coordinatorInstanceId: identifierSchema,
+  requestMessageId: z.string().uuid(),
+  operationId: z.string().uuid(),
+};
+
+export const controlLinkTaskListResponseV1Schema = z.discriminatedUnion("ok", [
+  z
+    .object({
+      ...controlLinkEnvelopeShape,
+      type: z.literal("control.link.task-list-response.v1"),
+      ok: z.literal(true),
+      payload: z
+        .object({
+          ...taskReadResponseIdentityShape,
+          result: taskHistoryListPageV1Schema,
+        })
+        .strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ...controlLinkEnvelopeShape,
+      type: z.literal("control.link.task-list-response.v1"),
+      ok: z.literal(false),
+      payload: z
+        .object({
+          ...taskReadResponseIdentityShape,
+          errorCode: controlLinkTaskReadErrorCodeSchema,
+        })
+        .strict(),
+    })
+    .strict(),
+]);
+
+export const controlLinkTaskDetailResponseV1Schema = z.discriminatedUnion("ok", [
+  z
+    .object({
+      ...controlLinkEnvelopeShape,
+      type: z.literal("control.link.task-detail-response.v1"),
+      ok: z.literal(true),
+      payload: z
+        .object({
+          ...taskReadResponseIdentityShape,
+          result: z
+            .object({
+              generatedAt: timestampSchema,
+              task: publicTaskDetailV1Schema,
+            })
+            .strict(),
+        })
+        .strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ...controlLinkEnvelopeShape,
+      type: z.literal("control.link.task-detail-response.v1"),
+      ok: z.literal(false),
+      payload: z
+        .object({
+          ...taskReadResponseIdentityShape,
+          errorCode: controlLinkTaskReadErrorCodeSchema,
+        })
+        .strict(),
+    })
+    .strict(),
+]);
+
 export const controlLinkClientMessageV1Schema = z.union([
   controlLinkAuthenticateV1Schema,
   controlLinkStopRequestV1Schema,
   controlLinkGoalRequestV1Schema,
+  controlLinkTaskListRequestV1Schema,
+  controlLinkTaskDetailRequestV1Schema,
 ]);
 
 export const controlLinkServerMessageV1Schema = z.union([
@@ -379,6 +519,8 @@ export const controlLinkServerMessageV1Schema = z.union([
   controlLinkStateUpsertV1Schema,
   controlLinkStopResponseV1Schema,
   controlLinkGoalResponseV1Schema,
+  controlLinkTaskListResponseV1Schema,
+  controlLinkTaskDetailResponseV1Schema,
 ]);
 
 export type ControlLinkCapability = z.infer<typeof controlLinkCapabilitySchema>;
@@ -417,6 +559,21 @@ export type ControlLinkGoalErrorCode = z.infer<
 >;
 export type ControlLinkGoalResponseV1 = z.infer<
   typeof controlLinkGoalResponseV1Schema
+>;
+export type ControlLinkTaskListRequestV1 = z.infer<
+  typeof controlLinkTaskListRequestV1Schema
+>;
+export type ControlLinkTaskListResponseV1 = z.infer<
+  typeof controlLinkTaskListResponseV1Schema
+>;
+export type ControlLinkTaskDetailRequestV1 = z.infer<
+  typeof controlLinkTaskDetailRequestV1Schema
+>;
+export type ControlLinkTaskDetailResponseV1 = z.infer<
+  typeof controlLinkTaskDetailResponseV1Schema
+>;
+export type ControlLinkTaskReadErrorCode = z.infer<
+  typeof controlLinkTaskReadErrorCodeSchema
 >;
 export type ControlLinkClientMessageV1 = z.infer<
   typeof controlLinkClientMessageV1Schema

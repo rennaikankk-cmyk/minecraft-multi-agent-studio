@@ -27,6 +27,10 @@ const boundedJsonSchema = skillJsonValueSchema.refine(
   (value) => Buffer.byteLength(JSON.stringify(value), "utf8") <= 32 * 1_024,
   "Structured task data exceeds 32 KiB.",
 );
+const boundedTaskInputSchema = boundedJsonSchema.refine(
+  (value) => value !== null,
+  "Structured task input cannot be null.",
+);
 
 export const taskStatusSchema = z.enum([
   "queued",
@@ -98,6 +102,7 @@ export const taskCreateCommandSchema = z
     executionIdempotent: z.boolean(),
     title: z.string().trim().min(1).max(200),
     description: z.string().trim().max(4_000),
+    input: boundedTaskInputSchema.optional(),
     priority: z.number().int().min(0).max(100),
     requiredSkills: z
       .array(taskRequiredSkillSchema)
@@ -262,6 +267,7 @@ export const taskRecordSchema = z
     executionIdempotent: z.boolean(),
     title: z.string().min(1).max(200),
     description: z.string().max(4_000),
+    input: boundedTaskInputSchema.optional(),
     priority: z.number().int().min(0).max(100),
     status: taskStatusSchema,
     dispatchBotId: identifierSchema.nullable().default(null),

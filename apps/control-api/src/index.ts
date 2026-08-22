@@ -40,6 +40,15 @@ export {
 export { toPublicBotDetail, toPublicBotSummary } from "./public-view.js";
 export { ConnectionLimiter, FixedWindowRateLimiter } from "./rate-limit.js";
 export {
+  TaskHistorySourceError,
+  type TaskHistoryDetailRequest,
+  type TaskHistoryDetailResult,
+  type TaskHistoryListRequest,
+  type TaskHistoryReadContext,
+  type TaskHistorySource,
+  type TaskHistorySourceErrorCode,
+} from "./task-history-source.js";
+export {
   ControlApiServer,
   type ControlApiAddress,
   type ControlApiLogger,

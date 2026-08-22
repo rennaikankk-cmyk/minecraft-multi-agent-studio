@@ -8,12 +8,17 @@ import {
   controlLinkGoalRequestV1Schema,
   controlLinkServerProofInput,
   controlLinkStopRequestV1Schema,
+  controlLinkTaskDetailRequestV1Schema,
+  controlLinkTaskListRequestV1Schema,
   parseControlLinkServerMessage,
   type BotHeartbeatV1,
   type BotStatusV1,
   type ControlLinkChallengeV1,
+  type ControlLinkGoalErrorCode,
+  type ControlLinkGoalRequestV1,
   type ControlLinkProofContext,
   type ControlLinkServerMessageV1,
+  type GoalDispatchResultV1,
 } from "@minecraft-studio/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
@@ -21,7 +26,12 @@ import WebSocket from "ws";
 import {
   BotRegistry,
   ControlLinkServer,
+  durableGoalFingerprint,
+  GoalLifecycleStoreError,
   LocalPlannerError,
+  type GoalLifecycleSnapshot,
+  type GoalLifecycleStore,
+  type TaskHistoryReader,
 } from "../src/index.js";
 
 const NOW = new Date("2026-08-07T10:00:00.000Z");
@@ -81,6 +91,214 @@ describe("Coordinator Control Link server", () => {
       type: "control.link.state-upsert.v1",
       payload: { streamSequence: 2, bot: { botId: BOT_ID } },
     });
+  });
+
+  it("serves authorized task history list and detail over Control Link", async () => {
+    const taskId = testUuid(905);
+    const summary = {
+      taskId,
+      taskType: "coordinator.goal",
+      title: "Submitted goal",
+      status: "completed" as const,
+      priority: 50,
+      riskLevel: "R1" as const,
+      botId: BOT_ID,
+      failureReason: null,
+      createdAt: NOW.toISOString(),
+      updatedAt: NOW.toISOString(),
+      startedAt: NOW.toISOString(),
+      finishedAt: NOW.toISOString(),
+      revision: 3,
+    };
+    const listTaskHistory = vi.fn(async () => ({
+      generatedAt: NOW.toISOString(),
+      tasks: [summary],
+      nextCursor: null,
+    }));
+    const getTaskDetail = vi.fn(async () => ({
+      generatedAt: NOW.toISOString(),
+      task: { ...summary, operatorGoal: "Collect nearby wood" },
+    }));
+    const { url } = await startServer({
+      taskHistoryReader: { listTaskHistory, getTaskDetail },
+    });
+    const { socket, reader } = await authenticate(url);
+    await readSnapshot(reader);
+
+    const listOperationId = testUuid(906);
+    socket.send(
+      JSON.stringify(
+        controlLinkTaskListRequestV1Schema.parse({
+          schemaVersion: "1.0",
+          messageId: testUuid(907),
+          timestamp: NOW.toISOString(),
+          type: "control.link.task-list-request.v1",
+          payload: {
+            coordinatorInstanceId: "coordinator-test",
+            clientId: CLIENT_ID,
+            controlApiInstanceId: CONTROL_API_INSTANCE_ID,
+            operationId: listOperationId,
+            actorId: "operator-01",
+            query: { limit: 10, cursor: null, status: null, botId: null },
+            issuedAt: NOW.toISOString(),
+            expiresAt: new Date(NOW.getTime() + 5_000).toISOString(),
+          },
+        }),
+      ),
+    );
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.task-list-response.v1",
+      ok: true,
+      payload: {
+        operationId: listOperationId,
+        result: { tasks: [{ taskId }] },
+      },
+    });
+    expect(listTaskHistory).toHaveBeenCalledWith({
+      limit: 10,
+      cursor: null,
+      status: null,
+      botId: null,
+    });
+
+    const detailOperationId = testUuid(908);
+    socket.send(
+      JSON.stringify(
+        controlLinkTaskDetailRequestV1Schema.parse({
+          schemaVersion: "1.0",
+          messageId: testUuid(909),
+          timestamp: NOW.toISOString(),
+          type: "control.link.task-detail-request.v1",
+          payload: {
+            coordinatorInstanceId: "coordinator-test",
+            clientId: CLIENT_ID,
+            controlApiInstanceId: CONTROL_API_INSTANCE_ID,
+            operationId: detailOperationId,
+            actorId: "operator-01",
+            taskId,
+            issuedAt: NOW.toISOString(),
+            expiresAt: new Date(NOW.getTime() + 5_000).toISOString(),
+          },
+        }),
+      ),
+    );
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.task-detail-response.v1",
+      ok: true,
+      payload: {
+        operationId: detailOperationId,
+        result: { task: { taskId, operatorGoal: "Collect nearby wood" } },
+      },
+    });
+    expect(getTaskDetail).toHaveBeenCalledWith(taskId);
+  });
+
+  it("fails task history reads closed when permission or storage is absent", async () => {
+    const listTaskHistory = vi.fn(async () => emptyTaskHistoryPage());
+    const denied = await startServer({
+      taskHistoryReader: {
+        listTaskHistory,
+        getTaskDetail: async () => null,
+      },
+      taskReadCapability: false,
+    });
+    const deniedSession = await authenticate(denied.url);
+    await readSnapshot(deniedSession.reader);
+    deniedSession.socket.send(
+      JSON.stringify(taskListRequest(testUuid(1200), testUuid(1201))),
+    );
+    await expect(deniedSession.reader.next()).resolves.toMatchObject({
+      type: "control.link.task-list-response.v1",
+      ok: false,
+      payload: {
+        operationId: testUuid(1200),
+        errorCode: "AUTHORIZATION_REJECTED",
+      },
+    });
+    expect(listTaskHistory).not.toHaveBeenCalled();
+
+    const unavailable = await startServer({ taskReadCapability: true });
+    const unavailableSession = await authenticate(unavailable.url);
+    await readSnapshot(unavailableSession.reader);
+    unavailableSession.socket.send(
+      JSON.stringify(taskListRequest(testUuid(1202), testUuid(1203))),
+    );
+    await expect(unavailableSession.reader.next()).resolves.toMatchObject({
+      type: "control.link.task-list-response.v1",
+      ok: false,
+      payload: {
+        operationId: testUuid(1202),
+        errorCode: "TASK_HISTORY_UNAVAILABLE",
+      },
+    });
+  });
+
+  it("returns a stable not-found error for an absent task detail", async () => {
+    const { url } = await startServer({
+      taskHistoryReader: {
+        listTaskHistory: async () => emptyTaskHistoryPage(),
+        getTaskDetail: async () => null,
+      },
+    });
+    const { socket, reader } = await authenticate(url);
+    await readSnapshot(reader);
+    socket.send(
+      JSON.stringify(
+        taskDetailRequest(testUuid(1210), testUuid(1211), testUuid(1212)),
+      ),
+    );
+
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.task-detail-response.v1",
+      ok: false,
+      payload: {
+        operationId: testUuid(1210),
+        errorCode: "TASK_NOT_FOUND",
+      },
+    });
+  });
+
+  it("bounds concurrent task reads even when message IDs are reused", async () => {
+    const releases: Array<() => void> = [];
+    const listTaskHistory = vi.fn(async () => {
+      if (releases.length < 2) {
+        await new Promise<void>((resolve) => releases.push(resolve));
+      }
+      return emptyTaskHistoryPage();
+    });
+    const { url } = await startServer({
+      taskHistoryReader: {
+        listTaskHistory,
+        getTaskDetail: async () => null,
+      },
+      maxPendingTaskReads: 2,
+    });
+    const { socket, reader } = await authenticate(url);
+    await readSnapshot(reader);
+    const reusedMessageId = testUuid(1220);
+
+    socket.send(
+      JSON.stringify(taskListRequest(testUuid(1221), reusedMessageId)),
+    );
+    await vi.waitFor(() => expect(listTaskHistory).toHaveBeenCalledTimes(1));
+    socket.send(
+      JSON.stringify(taskListRequest(testUuid(1222), reusedMessageId)),
+    );
+    await vi.waitFor(() => expect(listTaskHistory).toHaveBeenCalledTimes(2));
+    socket.send(
+      JSON.stringify(taskListRequest(testUuid(1223), reusedMessageId)),
+    );
+
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.task-list-response.v1",
+      ok: false,
+      payload: {
+        operationId: testUuid(1223),
+        errorCode: "CONTROL_LINK_BACKPRESSURE",
+      },
+    });
+    expect(listTaskHistory).toHaveBeenCalledTimes(2);
+    for (const release of releases) release();
   });
 
   it("rebuilds trusted stop authorization from the authenticated client", async () => {
@@ -439,6 +657,76 @@ describe("Coordinator Control Link server", () => {
     expect(planAndDispatch).toHaveBeenCalledTimes(1);
   });
 
+  it("does not acknowledge success when the terminal result is not durable", async () => {
+    const baseStore = testGoalStore();
+    const recordResult = vi.fn(async () => {
+      throw new GoalLifecycleStoreError(
+        "CONTROL_LINK_INTERNAL_ERROR",
+        "injected terminal write failure",
+      );
+    });
+    const recordError = vi.fn(async () => {
+      throw new GoalLifecycleStoreError(
+        "CONTROL_LINK_INTERNAL_ERROR",
+        "injected fallback write failure",
+      );
+    });
+    const planAndDispatch = vi.fn(async (request: any) => ({
+      action: "noop" as const,
+      reasonCode: "NO_SAFE_SKILL",
+      ai: {
+        requestId: request.requestId,
+        botId: request.botId,
+        priority: 30,
+        value: { content: "{}", model: "local-test", usage: {} },
+        attempts: 1,
+        enqueuedAt: NOW.toISOString(),
+        startedAt: NOW.toISOString(),
+        completedAt: NOW.toISOString(),
+        queueTimeMs: 2,
+        executionTimeMs: 98,
+        totalTimeMs: 100,
+      },
+    }));
+    const { url } = await startServer({
+      goalPlanner: { planAndDispatch },
+      goalStore: { ...baseStore, recordResult, recordError },
+    });
+    const { socket, reader } = await authenticate(url);
+    await readSnapshot(reader);
+    const operationId = testUuid(975);
+    socket.send(JSON.stringify(controlLinkGoalRequestV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: testUuid(976),
+      timestamp: NOW.toISOString(),
+      type: "control.link.goal-request.v1",
+      payload: {
+        coordinatorInstanceId: "coordinator-test",
+        clientId: CLIENT_ID,
+        controlApiInstanceId: CONTROL_API_INSTANCE_ID,
+        operationId,
+        taskId: operationId,
+        botId: BOT_ID,
+        actorId: "operator-01",
+        operatorGoal: "采集附近的木材",
+        timeoutMs: 30_000,
+        issuedAt: NOW.toISOString(),
+        expiresAt: new Date(NOW.getTime() + 35_000).toISOString(),
+      },
+    })));
+
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.goal-response.v1",
+      ok: false,
+      payload: {
+        operationId,
+        errorCode: "CONTROL_LINK_INTERNAL_ERROR",
+      },
+    });
+    expect(recordResult).toHaveBeenCalledTimes(1);
+    expect(recordError).toHaveBeenCalledTimes(1);
+  });
+
   it("streams the submitted task ID from running through completion", async () => {
     let finishGoal!: (value: any) => void;
     const planAndDispatch = vi.fn(
@@ -601,6 +889,8 @@ describe("Coordinator Control Link server", () => {
 
   it("aborts an active goal when the Coordinator stops", async () => {
     let receivedSignal: AbortSignal | undefined;
+    const baseStore = testGoalStore();
+    const recordError = vi.fn(baseStore.recordError);
     const planAndDispatch = vi.fn(
       async (request: any) =>
         new Promise((_resolve, reject) => {
@@ -614,6 +904,7 @@ describe("Coordinator Control Link server", () => {
     );
     const { server, url } = await startServer({
       goalPlanner: { planAndDispatch },
+      goalStore: { ...baseStore, recordError },
     });
     const { socket, reader } = await authenticate(url);
     await readSnapshot(reader);
@@ -645,6 +936,11 @@ describe("Coordinator Control Link server", () => {
     await server.stop();
 
     expect(receivedSignal?.aborted).toBe(true);
+    expect(recordError).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: testUuid(990) }),
+      "CONTROL_LINK_STOPPED",
+      "cancelled",
+    );
   });
 });
 
@@ -654,6 +950,10 @@ async function startServer(
     maxPendingStops: number;
     stopController: { requestStop: (...args: any[]) => Promise<any> };
     goalPlanner: { planAndDispatch: (...args: any[]) => Promise<any> };
+    goalStore: GoalLifecycleStore;
+    taskHistoryReader: TaskHistoryReader;
+    taskReadCapability: boolean;
+    maxPendingTaskReads: number;
   }> = {},
 ): Promise<{ registry: BotRegistry; server: ControlLinkServer; url: string }> {
   const registry = new BotRegistry({ staleAfterMs: 15_000, now: () => NOW });
@@ -671,16 +971,27 @@ async function startServer(
         clientId: CLIENT_ID,
         keyId: KEY_ID,
         secretSha256: SECRET_SHA256,
-        capabilities: overrides.goalPlanner
-          ? ["bot.read", "bot.stop", "goal.submit"]
-          : ["bot.read", "bot.stop"],
+        capabilities: [
+          "bot.read",
+          "bot.stop",
+          ...(overrides.goalPlanner ? (["goal.submit"] as const) : []),
+          ...(overrides.taskReadCapability ?? overrides.taskHistoryReader
+            ? (["task.read"] as const)
+            : []),
+        ],
       },
     ],
     registry,
     stopController,
     ...(overrides.goalPlanner === undefined
       ? {}
-      : { goalPlanner: overrides.goalPlanner }),
+      : {
+          goalPlanner: overrides.goalPlanner,
+          goalStore: overrides.goalStore ?? testGoalStore(),
+        }),
+    ...(overrides.taskHistoryReader === undefined
+      ? {}
+      : { taskHistoryReader: overrides.taskHistoryReader }),
     logger,
     now: () => NOW,
     randomId: uuidSequence(1),
@@ -691,6 +1002,9 @@ async function startServer(
     ...(overrides.maxPendingStops === undefined
       ? {}
       : { maxPendingStops: overrides.maxPendingStops }),
+    ...(overrides.maxPendingTaskReads === undefined
+      ? {}
+      : { maxPendingTaskReads: overrides.maxPendingTaskReads }),
   });
   servers.push(server);
   const address = await server.start();
@@ -698,6 +1012,70 @@ async function startServer(
     registry,
     server,
     url: `ws://127.0.0.1:${address.port}/v1/control-link`,
+  };
+}
+
+function testGoalStore(): GoalLifecycleStore {
+  const requests = new Map<string, ControlLinkGoalRequestV1>();
+  const states = new Map<string, GoalLifecycleSnapshot>();
+  const state = (
+    request: ControlLinkGoalRequestV1,
+    status: GoalLifecycleSnapshot["status"],
+    result: GoalDispatchResultV1 | null,
+    errorCode: ControlLinkGoalErrorCode | null,
+  ): GoalLifecycleSnapshot => ({
+    operationId: request.payload.operationId,
+    taskId: request.payload.taskId,
+    botId: request.payload.botId,
+    fingerprint: durableGoalFingerprint(request),
+    title: "Submitted goal",
+    status,
+    startedAt: NOW.toISOString(),
+    updatedAt: NOW.toISOString(),
+    result,
+    errorCode,
+  });
+  return {
+    initialize: async () => [],
+    refresh: async () => [...states.values()],
+    begin: async (request) => {
+      requests.set(request.payload.taskId, request);
+      const snapshot = state(request, "running", null, null);
+      states.set(request.payload.operationId, snapshot);
+      return {
+        kind: "execute",
+        lease: {
+          taskId: request.payload.taskId,
+          leaseOwner: "goal-test-lease",
+          revision: 2,
+        },
+        snapshot,
+      };
+    },
+    recordResult: async (lease, result) => {
+      const request = requests.get(lease.taskId);
+      if (!request) throw new Error("goal_test_request_missing");
+      const status =
+        result.action === "noop"
+          ? "failed"
+          : result.outcome === "completed"
+            ? "completed"
+            : result.outcome === "cancelled"
+              ? "cancelled"
+              : result.outcome === "timed_out"
+                ? "expired"
+                : "failed";
+      const snapshot = state(request, status, result, null);
+      states.set(request.payload.operationId, snapshot);
+      return snapshot;
+    },
+    recordError: async (lease, errorCode, status) => {
+      const request = requests.get(lease.taskId);
+      if (!request) throw new Error("goal_test_request_missing");
+      const snapshot = state(request, status, null, errorCode);
+      states.set(request.payload.operationId, snapshot);
+      return snapshot;
+    },
   };
 }
 
@@ -867,6 +1245,56 @@ function stopRequest(operationId: string, messageId: string) {
       expiresAt: new Date(NOW.getTime() + 30_000).toISOString(),
     },
   });
+}
+
+function taskListRequest(operationId: string, messageId: string) {
+  return controlLinkTaskListRequestV1Schema.parse({
+    schemaVersion: "1.0",
+    messageId,
+    timestamp: NOW.toISOString(),
+    type: "control.link.task-list-request.v1",
+    payload: {
+      coordinatorInstanceId: "coordinator-test",
+      clientId: CLIENT_ID,
+      controlApiInstanceId: CONTROL_API_INSTANCE_ID,
+      operationId,
+      actorId: "operator-01",
+      query: { limit: 10, cursor: null, status: null, botId: null },
+      issuedAt: NOW.toISOString(),
+      expiresAt: new Date(NOW.getTime() + 5_000).toISOString(),
+    },
+  });
+}
+
+function taskDetailRequest(
+  operationId: string,
+  messageId: string,
+  taskId: string,
+) {
+  return controlLinkTaskDetailRequestV1Schema.parse({
+    schemaVersion: "1.0",
+    messageId,
+    timestamp: NOW.toISOString(),
+    type: "control.link.task-detail-request.v1",
+    payload: {
+      coordinatorInstanceId: "coordinator-test",
+      clientId: CLIENT_ID,
+      controlApiInstanceId: CONTROL_API_INSTANCE_ID,
+      operationId,
+      actorId: "operator-01",
+      taskId,
+      issuedAt: NOW.toISOString(),
+      expiresAt: new Date(NOW.getTime() + 5_000).toISOString(),
+    },
+  });
+}
+
+function emptyTaskHistoryPage() {
+  return {
+    generatedAt: NOW.toISOString(),
+    tasks: [],
+    nextCursor: null,
+  };
 }
 
 function rejectedWebSocketStatus(url: string, origin?: string): Promise<number> {

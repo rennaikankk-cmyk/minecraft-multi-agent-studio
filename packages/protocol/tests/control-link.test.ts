@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   CONTROL_LINK_MAX_BOTS,
   CONTROL_LINK_MAX_PAYLOAD_BYTES,
+  CONTROL_LINK_MAX_TASK_HISTORY_ITEMS,
   CONTROL_LINK_PATH,
   CONTROL_LINK_SUBPROTOCOL,
   controlLinkAcceptedV1Schema,
@@ -19,6 +20,10 @@ import {
   controlLinkStateUpsertV1Schema,
   controlLinkStopRequestV1Schema,
   controlLinkStopResponseV1Schema,
+  controlLinkTaskDetailRequestV1Schema,
+  controlLinkTaskDetailResponseV1Schema,
+  controlLinkTaskListRequestV1Schema,
+  controlLinkTaskListResponseV1Schema,
   parseControlLinkClientMessage,
   parseControlLinkServerMessage,
 } from "../src/index.js";
@@ -177,6 +182,169 @@ describe("Control Link protocol", () => {
         },
       }).payload.streamSequence,
     ).toBe(9);
+  });
+
+  it("validates authenticated task list and detail request-response pairs", () => {
+    const identity = {
+      coordinatorInstanceId: "coordinator-01",
+      clientId: "control-api",
+      controlApiInstanceId: "control-api-01",
+      operationId: OPERATION_ID,
+      actorId: "dashboard",
+      issuedAt: NOW,
+      expiresAt: "2026-08-07T10:00:10.000Z",
+    };
+    const listRequest = {
+      schemaVersion: "1.0",
+      messageId: CHALLENGE_ID,
+      timestamp: NOW,
+      type: "control.link.task-list-request.v1",
+      payload: {
+        ...identity,
+        query: { limit: 25, cursor: null, status: null, botId: null },
+      },
+    } as const;
+    expect(controlLinkTaskListRequestV1Schema.parse(listRequest)).toEqual(listRequest);
+    expect(parseControlLinkClientMessage(listRequest)).toEqual(listRequest);
+
+    const summary = {
+      taskId: OPERATION_ID,
+      taskType: "planner.goal",
+      title: "Collect nearby wood",
+      status: "completed" as const,
+      priority: 50,
+      riskLevel: "R1" as const,
+      botId: "worker-01",
+      failureReason: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+      startedAt: NOW,
+      finishedAt: NOW,
+      revision: 2,
+    };
+    const listResponse = {
+      schemaVersion: "1.0",
+      messageId: AUTHENTICATE_ID,
+      timestamp: NOW,
+      type: "control.link.task-list-response.v1",
+      ok: true,
+      payload: {
+        coordinatorInstanceId: identity.coordinatorInstanceId,
+        requestMessageId: listRequest.messageId,
+        operationId: identity.operationId,
+        result: { generatedAt: NOW, tasks: [summary], nextCursor: null },
+      },
+    } as const;
+    expect(controlLinkTaskListResponseV1Schema.parse(listResponse)).toEqual(listResponse);
+    expect(parseControlLinkServerMessage(listResponse)).toEqual(listResponse);
+
+    const detailRequest = {
+      ...listRequest,
+      type: "control.link.task-detail-request.v1",
+      payload: { ...identity, taskId: OPERATION_ID },
+    } as const;
+    expect(controlLinkTaskDetailRequestV1Schema.parse(detailRequest)).toEqual(detailRequest);
+    const detailResponse = {
+      ...listResponse,
+      type: "control.link.task-detail-response.v1",
+      payload: {
+        ...listResponse.payload,
+        requestMessageId: detailRequest.messageId,
+        result: {
+          generatedAt: NOW,
+          task: { ...summary, operatorGoal: "采集附近的木材" },
+        },
+      },
+    } as const;
+    expect(controlLinkTaskDetailResponseV1Schema.parse(detailResponse)).toEqual(detailResponse);
+    expect(
+      controlLinkTaskListRequestV1Schema.safeParse({
+        ...listRequest,
+        payload: { ...listRequest.payload, expiresAt: LATER },
+      }).success,
+    ).toBe(false);
+    expect(
+      controlLinkTaskListResponseV1Schema.safeParse({
+        ...listResponse,
+        timestamp: `2026-08-07T10:00:00.${"1".repeat(10)}+14:00`,
+      }).success,
+    ).toBe(false);
+    expect(
+      controlLinkTaskListRequestV1Schema.safeParse({
+        ...listRequest,
+        payload: {
+          ...listRequest.payload,
+          query: { ...listRequest.payload.query, internal: true },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      controlLinkTaskListResponseV1Schema.safeParse({
+        ...listResponse,
+        payload: {
+          ...listResponse.payload,
+          result: { ...listResponse.payload.result, source: "database" },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      controlLinkTaskDetailResponseV1Schema.safeParse({
+        ...detailResponse,
+        payload: {
+          ...detailResponse.payload,
+          result: {
+            ...detailResponse.payload.result,
+            task: { ...detailResponse.payload.result.task, rawResult: true },
+          },
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("keeps a worst-case 32-task response below one Control Link frame", () => {
+    const maxTimestamp = "9999-12-31T23:59:59.999999999+14:00";
+    const maxUuid = "ffffffff-ffff-4fff-bfff-ffffffffffff";
+    const maxSummary = {
+      taskId: maxUuid,
+      taskType: "a".repeat(128),
+      // JSON escapes each code unit to six bytes, which is larger than any
+      // valid UTF-8 scalar and makes this the encoded title worst case.
+      title: "\u0000".repeat(200),
+      status: "cancelled" as const,
+      priority: 100,
+      riskLevel: "R4" as const,
+      botId: "b".repeat(128),
+      failureReason: "F".repeat(128),
+      createdAt: maxTimestamp,
+      updatedAt: maxTimestamp,
+      startedAt: maxTimestamp,
+      finishedAt: maxTimestamp,
+      revision: Number.MAX_SAFE_INTEGER,
+    };
+    const response = controlLinkTaskListResponseV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: maxUuid,
+      timestamp: maxTimestamp,
+      type: "control.link.task-list-response.v1",
+      ok: true,
+      payload: {
+        coordinatorInstanceId: "c".repeat(128),
+        requestMessageId: maxUuid,
+        operationId: maxUuid,
+        result: {
+          generatedAt: maxTimestamp,
+          tasks: Array.from(
+            { length: CONTROL_LINK_MAX_TASK_HISTORY_ITEMS },
+            () => maxSummary,
+          ),
+          nextCursor: "A".repeat(512),
+        },
+      },
+    });
+    const encodedBytes = new TextEncoder().encode(JSON.stringify(response)).byteLength;
+
+    expect(encodedBytes).toBeGreaterThan(64_000);
+    expect(encodedBytes).toBeLessThan(CONTROL_LINK_MAX_PAYLOAD_BYTES);
   });
 
   it("accepts only the minimal delegated graceful-stop request", () => {

@@ -8,6 +8,10 @@ import {
   VLLMAdapter,
 } from "@minecraft-studio/ai-router";
 import { createStructuredLogger } from "@minecraft-studio/observability";
+import {
+  PgTaskPoolAdapter,
+  PostgresTaskRepository,
+} from "@minecraft-studio/task-system";
 
 import { BotRegistry } from "./bot-registry.js";
 import {
@@ -23,6 +27,12 @@ import { RuntimeLinkServer } from "./runtime-link-server.js";
 import { InMemoryStopAuditSink, StopController } from "./stop-controller.js";
 import { LocalAIConfigError, loadLocalAIConfig } from "./local-ai-config.js";
 import { CoordinatorLocalPlanner } from "./local-planner.js";
+import {
+  GoalPersistenceConfigError,
+  loadGoalPersistenceConfig,
+} from "./goal-persistence-config.js";
+import { PostgresGoalLifecycleStore } from "./goal-lifecycle-store.js";
+import { PostgresTaskHistoryReader } from "./task-history-reader.js";
 
 const instanceId = `coordinator-${randomUUID()}`;
 const logger = createStructuredLogger({ service: "coordinator", instanceId });
@@ -31,6 +41,17 @@ async function main(): Promise<void> {
   const runtimeConfig = loadRuntimeLinkConfig();
   const controlConfig = loadControlLinkConfig();
   const localAIConfig = loadLocalAIConfig();
+  const goalPersistenceConfig = loadGoalPersistenceConfig();
+  if (
+    localAIConfig.enabled &&
+    localAIConfig.baseUrl &&
+    localAIConfig.model &&
+    !goalPersistenceConfig
+  ) {
+    throw new GoalPersistenceConfigError(
+      "Local goal planning requires COORDINATOR_TASK_POSTGRES_URL.",
+    );
+  }
   const registry = new BotRegistry({
     staleAfterMs: runtimeConfig.botStaleAfterMs,
   });
@@ -52,6 +73,9 @@ async function main(): Promise<void> {
   let aiScheduler: AIRequestScheduler | null = null;
   let aiRouter: AIRouter | null = null;
   let localPlanner: CoordinatorLocalPlanner | undefined;
+  let taskPool: PgTaskPoolAdapter | null = null;
+  let goalStore: PostgresGoalLifecycleStore | undefined;
+  let taskHistoryReader: PostgresTaskHistoryReader | undefined;
   if (localAIConfig.enabled && localAIConfig.baseUrl && localAIConfig.model) {
     aiRouter = new AIRouter();
     aiRouter.register(
@@ -83,6 +107,23 @@ async function main(): Promise<void> {
       coordinatorInstanceId: instanceId,
     });
   }
+  if (goalPersistenceConfig) {
+    taskPool = new PgTaskPoolAdapter({
+      connectionString: goalPersistenceConfig.postgresUrl,
+      options: `-c search_path=${goalPersistenceConfig.schemaName}`,
+      application_name: "minecraft-studio-coordinator",
+    });
+    const taskRepository = new PostgresTaskRepository(taskPool, {
+      dispatchSourceInstanceId: instanceId,
+    });
+    goalStore = new PostgresGoalLifecycleStore({
+      repository: taskRepository,
+      coordinatorInstanceId: instanceId,
+    });
+    taskHistoryReader = new PostgresTaskHistoryReader({
+      repository: taskRepository,
+    });
+  }
   const controlServer = new ControlLinkServer({
     host: controlConfig.host,
     port: controlConfig.port,
@@ -91,11 +132,14 @@ async function main(): Promise<void> {
     registry,
     stopController,
     ...(localPlanner ? { goalPlanner: localPlanner } : {}),
+    ...(goalStore ? { goalStore } : {}),
+    ...(taskHistoryReader ? { taskHistoryReader } : {}),
     logger,
   });
   let staleTimer: ReturnType<typeof setInterval> | null = null;
 
   try {
+    await taskPool?.verifyConnection();
     const runtimeAddress = await runtimeServer.start();
     const controlAddress = await controlServer.start();
     staleTimer = setInterval(() => {
@@ -127,6 +171,7 @@ async function main(): Promise<void> {
   } catch (cause) {
     if (staleTimer) clearInterval(staleTimer);
     await Promise.allSettled([controlServer.stop(), runtimeServer.stop()]);
+    if (taskPool) await Promise.allSettled([taskPool.close()]);
     throw cause;
   }
 
@@ -138,6 +183,15 @@ async function main(): Promise<void> {
     aiScheduler?.close("coordinator shutdown");
     logger.info("coordinator_stopping", { signal });
     await Promise.allSettled([controlServer.stop(), runtimeServer.stop()]);
+    if (taskPool) {
+      try {
+        await taskPool.close();
+      } catch {
+        logger.error("coordinator_task_pool_close_failed", {
+          code: "POSTGRES_CLOSE_FAILED",
+        });
+      }
+    }
   };
   process.once("SIGINT", () => void stop("SIGINT"));
   process.once("SIGTERM", () => void stop("SIGTERM"));
@@ -147,7 +201,8 @@ void main().catch((cause: unknown) => {
   const code =
     cause instanceof RuntimeLinkConfigError ||
       cause instanceof ControlLinkConfigError ||
-      cause instanceof LocalAIConfigError
+      cause instanceof LocalAIConfigError ||
+      cause instanceof GoalPersistenceConfigError
       ? cause.code
       : "COORDINATOR_START_FAILED";
   logger.error("coordinator_start_failed", { code });

@@ -344,6 +344,69 @@ describe("task state and lease boundaries", () => {
     });
   });
 
+  it("persists a bounded outcome on a failed terminal transition", () => {
+    const failed = transitionTask(
+      task({
+        status: "running",
+        assignedBotId: "worker-01",
+        leaseOwner: "coordinator-lease-01",
+        leaseExpiresAt: "2026-07-27T12:01:00.000Z",
+        startedAt: "2026-07-27T11:59:30.000Z",
+        revision: 2,
+      }),
+      {
+        ...operationBase("89898989-8989-4989-8989-898989898989", 2),
+        to: "failed",
+        reasonCode: "GOAL_RESULT_RECORDED",
+        leaseOwner: "coordinator-lease-01",
+        failureReason: "GOAL_RESULT_FAILED",
+        result: { action: "noop", reasonCode: "NO_SAFE_ACTION" },
+        evidence: [],
+      },
+      NOW,
+    );
+
+    expect(failed).toMatchObject({
+      status: "failed",
+      failureReason: "GOAL_RESULT_FAILED",
+      result: { action: "noop", reasonCode: "NO_SAFE_ACTION" },
+      finishedAt: NOW.toISOString(),
+    });
+  });
+
+  it("clears the prior attempt result when a failed task is retried", () => {
+    const retried = transitionTask(
+      task({
+        status: "failed",
+        failureReason: "GOAL_RESULT_FAILED",
+        result: { action: "noop", reasonCode: "NO_SAFE_ACTION" },
+        finishedAt: "2026-07-27T11:59:30.000Z",
+        retryCount: 0,
+        maxRetries: 1,
+        revision: 3,
+      }),
+      {
+        ...operationBase("90909090-9090-4090-8090-909090909090", 3),
+        to: "queued",
+        reasonCode: "TASK_RETRY_REQUESTED",
+        leaseOwner: null,
+        failureReason: null,
+        result: null,
+        evidence: [],
+      },
+      NOW,
+    );
+
+    expect(retried).toMatchObject({
+      status: "queued",
+      failureReason: null,
+      result: null,
+      finishedAt: null,
+      retryCount: 1,
+      revision: 4,
+    });
+  });
+
   it("keeps R3 and R4 tasks unassigned until trusted approval exists", () => {
     expect(() =>
       acquireTaskLease(

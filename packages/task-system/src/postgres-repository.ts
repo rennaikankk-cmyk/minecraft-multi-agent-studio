@@ -75,6 +75,27 @@ export type PostgresTaskRepositoryOptions = Readonly<{
   dispatchSourceInstanceId?: string;
 }>;
 
+export type TaskLifecycleListOptions = Readonly<{
+  taskType: string;
+  terminalUpdatedAfter: string;
+  limit?: number;
+}>;
+
+export type TaskHistoryListOptions = Readonly<{
+  limit: number;
+  status?: TaskRecord["status"] | null;
+  botId?: string | null;
+  before?: Readonly<{
+    createdAt: string;
+    taskId: string;
+  }> | null;
+}>;
+
+export type TaskHistoryPage = Readonly<{
+  tasks: readonly TaskRecord[];
+  hasMore: boolean;
+}>;
+
 export type TaskOutboxClaimOptions = Readonly<{
   claimerId: string;
   limit?: number;
@@ -145,6 +166,8 @@ export type ResolveTaskCancellationResult = Readonly<{
 }>;
 
 export const MAX_EXPIRED_LEASE_BATCH_SIZE = 100;
+export const MAX_TASK_LIFECYCLE_BATCH_SIZE = 1_000;
+export const MAX_TASK_HISTORY_BATCH_SIZE = 100;
 
 const TRANSACTION_LOCK_TIMEOUT_SQL =
   "SET LOCAL lock_timeout = '3000ms'";
@@ -288,6 +311,9 @@ function mapTaskRow(
     executionIdempotent: row.execution_idempotent,
     title: row.title,
     description: row.description,
+    ...(row.task_input === null || row.task_input === undefined
+      ? {}
+      : { input: row.task_input }),
     priority: integer(row.priority),
     status: row.status,
     dispatchBotId: nullableText(row.dispatch_bot_id),
@@ -333,6 +359,7 @@ function createdTask(
     executionIdempotent: command.executionIdempotent,
     title: command.title,
     description: command.description,
+    ...(command.input === undefined ? {} : { input: command.input }),
     priority: command.priority,
     status: "queued",
     dispatchBotId,
@@ -584,16 +611,16 @@ export class PostgresTaskRepository {
         `INSERT INTO studio_tasks (
           task_id, schema_version, idempotency_scope, idempotency_key,
           request_fingerprint, task_type, handler_version,
-          execution_idempotent, title, description, priority, status,
+          execution_idempotent, title, description, task_input, priority, status,
           dispatch_bot_id, assigned_bot_id, required_skills, required_items, target,
           parent_task_id, deadline, timeout_ms, retry_count, max_retries,
           lease_owner, lease_expires_at, risk_level, failure_reason, result,
           evidence, trace_id, revision, created_at, updated_at, started_at,
           finished_at
         ) VALUES (
-          $1, '1.0', $2, $3, $4, $5, $6, $7, $8, $9, $10, 'queued',
-          $11, NULL, $12::jsonb, $13::jsonb, $14::jsonb, $15, $16, $17, 0, $18,
-          NULL, NULL, $19, NULL, NULL, '[]'::jsonb, $20, 0, $21, $21, NULL,
+          $1, '1.0', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'queued',
+          $12, NULL, $13::jsonb, $14::jsonb, $15::jsonb, $16, $17, $18, 0, $19,
+          NULL, NULL, $20, NULL, NULL, '[]'::jsonb, $21, 0, $22, $22, NULL,
           NULL
         )
         ON CONFLICT (idempotency_scope, idempotency_key) DO NOTHING
@@ -608,6 +635,7 @@ export class PostgresTaskRepository {
           command.executionIdempotent,
           command.title,
           command.description,
+          command.input === undefined ? null : JSON.stringify(command.input),
           command.priority,
           dispatchBotId,
           JSON.stringify(command.requiredSkills),
@@ -799,6 +827,167 @@ export class PostgresTaskRepository {
     const client = await this.pool.connect();
     try {
       return await this.databaseNow(client);
+    } catch (error) {
+      throw this.persistenceError(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  async verifyGoalLifecycleSchema(): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query<{ ready: unknown }>(
+        `SELECT (
+           to_regclass('studio_tasks') IS NOT NULL
+           AND EXISTS (
+             SELECT 1
+             FROM information_schema.columns
+             WHERE table_schema = current_schema()
+               AND table_name = 'studio_tasks'
+               AND column_name = 'task_input'
+               AND data_type = 'jsonb'
+           )
+           AND EXISTS (
+             SELECT 1
+             FROM pg_constraint
+             WHERE conrelid = to_regclass('studio_tasks')
+               AND conname = 'studio_tasks_input_size_check'
+           )
+           AND to_regclass('studio_tasks_type_status_updated_idx') IS NOT NULL
+         ) AS ready`,
+      );
+      if (result.rows[0]?.ready !== true) {
+        throw new TaskSystemError(
+          "TASK_PERSISTENCE_FAILED",
+          "PostgreSQL task schema does not support durable goal lifecycle input.",
+        );
+      }
+    } catch (error) {
+      throw this.persistenceError(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  async listTaskLifecycle(
+    input: TaskLifecycleListOptions,
+  ): Promise<readonly TaskRecord[]> {
+    const taskType = taskCreateCommandSchema.shape.taskType.parse(input.taskType);
+    const terminalUpdatedAfter = new Date(input.terminalUpdatedAfter);
+    if (!Number.isFinite(terminalUpdatedAfter.getTime())) {
+      throw new TypeError("Task lifecycle lower-bound timestamp is invalid.");
+    }
+    const limit = input.limit ?? MAX_TASK_LIFECYCLE_BATCH_SIZE;
+    if (
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > MAX_TASK_LIFECYCLE_BATCH_SIZE
+    ) {
+      throw new RangeError(
+        `Task lifecycle batch limit must be between 1 and ${MAX_TASK_LIFECYCLE_BATCH_SIZE}.`,
+      );
+    }
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(
+        `SELECT *
+         FROM studio_tasks
+         WHERE task_type = $1
+           AND (
+             status IN ('queued', 'assigned', 'running', 'blocked', 'waiting', 'paused')
+             OR (status = 'failed' AND retry_count < max_retries)
+             OR updated_at >= $2::timestamptz
+           )
+         ORDER BY
+           CASE
+             WHEN status IN ('queued', 'assigned', 'running', 'blocked', 'waiting', 'paused')
+               OR (status = 'failed' AND retry_count < max_retries)
+             THEN 0 ELSE 1
+           END ASC,
+           updated_at DESC,
+           task_id ASC
+         LIMIT $3`,
+        [taskType, terminalUpdatedAfter.toISOString(), limit],
+      );
+      const tasks: TaskRecord[] = [];
+      for (const row of result.rows) {
+        const taskId = text(row.task_id);
+        tasks.push(
+          mapTaskRow(row, await this.loadDependencyIds(client, taskId)),
+        );
+      }
+      return tasks;
+    } catch (error) {
+      throw this.persistenceError(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  async listTaskHistory(
+    input: TaskHistoryListOptions,
+  ): Promise<TaskHistoryPage> {
+    if (
+      !Number.isInteger(input.limit) ||
+      input.limit < 1 ||
+      input.limit > MAX_TASK_HISTORY_BATCH_SIZE
+    ) {
+      throw new RangeError(
+        `Task history page size must be between 1 and ${MAX_TASK_HISTORY_BATCH_SIZE}.`,
+      );
+    }
+    const status = input.status === null || input.status === undefined
+      ? null
+      : taskRecordSchema.shape.status.parse(input.status);
+    const botId = input.botId === null || input.botId === undefined
+      ? null
+      : identifierSchema.parse(input.botId);
+    const before = input.before ?? null;
+    const beforeCreatedAt = before === null ? null : iso(before.createdAt);
+    const beforeTaskId = before === null
+      ? null
+      : taskCreateCommandSchema.shape.taskId.parse(before.taskId);
+    if (before !== null && beforeCreatedAt === null) {
+      throw new TypeError("Task history cursor timestamp is invalid.");
+    }
+
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(
+        `SELECT task.*
+         FROM studio_tasks AS task
+         WHERE ($1::text IS NULL OR task.status = $1::text)
+           AND (
+             $2::text IS NULL
+             OR task.dispatch_bot_id = $2::text
+             OR task.assigned_bot_id = $2::text
+             OR task.task_input ->> 'botId' = $2::text
+           )
+           AND (
+             $3::timestamptz IS NULL
+             OR (task.created_at, task.task_id) <
+                ($3::timestamptz, $4::uuid)
+           )
+         ORDER BY task.created_at DESC, task.task_id DESC
+         LIMIT $5`,
+        [
+          status,
+          botId,
+          beforeCreatedAt,
+          beforeTaskId,
+          input.limit + 1,
+        ],
+      );
+      const rows = result.rows.slice(0, input.limit);
+      const tasks: TaskRecord[] = [];
+      for (const row of rows) {
+        const taskId = text(row.task_id);
+        tasks.push(
+          mapTaskRow(row, await this.loadDependencyIds(client, taskId)),
+        );
+      }
+      return { tasks, hasMore: result.rows.length > input.limit };
     } catch (error) {
       throw this.persistenceError(error);
     } finally {

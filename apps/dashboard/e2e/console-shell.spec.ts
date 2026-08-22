@@ -1,7 +1,9 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type Route } from "@playwright/test";
 
 const NOW = "2026-08-08T08:00:00.000Z";
 const UUID = "44444444-4444-4444-8444-444444444444";
+const TASK_A_ID = "11111111-1111-4111-8111-111111111111";
+const TASK_B_ID = "22222222-2222-4222-8222-222222222222";
 
 test("console navigation reaches every page", async ({ page }) => {
   await routeEmptyBots(page);
@@ -222,6 +224,93 @@ test("tasks page bounds the recent submission list", async ({ page }) => {
   await expect(page.getByTestId("goal-recent-list").getByText("目标 1", { exact: true })).toHaveCount(0);
 });
 
+test("task detail keeps the newest request and error panels can close", async ({ page }) => {
+  await routeEmptyBots(page);
+  await page.route(/\/api\/tasks\?/, async (route) => {
+    await fulfillTaskList(route, [taskSummary(TASK_A_ID, "任务 A"), taskSummary(TASK_B_ID, "任务 B")]);
+  });
+  let taskARequests = 0;
+  await page.route(new RegExp(`/api/tasks/${TASK_A_ID}$`), async (route) => {
+    taskARequests += 1;
+    if (taskARequests === 1) {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(taskDetailResponse(TASK_A_ID, "任务 A")),
+      }).catch(() => undefined);
+      return;
+    }
+    await route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        error: {
+          code: "TASK_HISTORY_UNAVAILABLE",
+          message: "任务详情后端当前不可用。",
+        },
+      }),
+    });
+  });
+  await page.route(new RegExp(`/api/tasks/${TASK_B_ID}$`), async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(taskDetailResponse(TASK_B_ID, "任务 B")),
+    });
+  });
+
+  await page.goto("/tasks");
+  const items = page.getByTestId("task-history-item");
+  await items.filter({ hasText: "任务 A" }).getByRole("button", { name: "查看详情" }).click();
+  await items.filter({ hasText: "任务 B" }).getByRole("button", { name: "查看详情" }).click();
+  await expect(page.getByTestId("task-detail")).toContainText(TASK_B_ID);
+  await page.waitForTimeout(250);
+  await expect(page.getByTestId("task-detail")).toContainText(TASK_B_ID);
+  await expect(page.getByTestId("task-detail")).not.toContainText(TASK_A_ID);
+  await page.getByTestId("task-detail").getByRole("button", { name: "关闭" }).click();
+  await expect(page.getByTestId("task-detail")).toHaveCount(0);
+
+  await items.filter({ hasText: "任务 A" }).getByRole("button", { name: "查看详情" }).click();
+  await expect(page.getByTestId("task-detail").getByRole("alert")).toContainText(
+    "任务详情后端当前不可用",
+  );
+  await page.getByTestId("task-detail").getByRole("button", { name: "关闭" }).click();
+  await expect(page.getByTestId("task-detail")).toHaveCount(0);
+});
+
+test("task history polling preserves pages that the operator loaded", async ({ page }) => {
+  await page.clock.install({ time: new Date(NOW) });
+  await routeEmptyBots(page);
+  let firstPageRequests = 0;
+  await page.route(/\/api\/tasks\?/, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("cursor") === "task_cursor_page_2") {
+      await fulfillTaskList(route, [taskSummary(TASK_B_ID, "历史任务 B")], null);
+      return;
+    }
+    firstPageRequests += 1;
+    await fulfillTaskList(
+      route,
+      [taskSummary(TASK_A_ID, firstPageRequests === 1 ? "当前任务 A" : "当前任务 A（已刷新）")],
+      "task_cursor_page_2",
+    );
+  });
+
+  await page.goto("/tasks");
+  await expect(page.getByText("当前任务 A", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "加载更多" }).click();
+  await expect(page.getByText("历史任务 B", { exact: true })).toBeVisible();
+
+  await page.clock.fastForward(5_000);
+  await expect.poll(() => firstPageRequests).toBeGreaterThanOrEqual(2);
+  await expect(page.getByText("当前任务 A（已刷新）", { exact: true })).toBeVisible();
+  await expect(page.getByText("历史任务 B", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("task-history-item")).toHaveCount(2);
+});
+
 test("bots page falls back to explicit polling when the stream is unavailable", async ({ page }) => {
   await routeEmptyBots(page);
   await page.route(/\/api\/bots\/stream$/, async (route) => {
@@ -339,6 +428,57 @@ async function routeEmptyBots(page: Page) {
       }),
     });
   });
+}
+
+async function fulfillTaskList(
+  route: Route,
+  tasks: ReturnType<typeof taskSummary>[],
+  nextCursor: string | null = null,
+) {
+  await route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      schemaVersion: "1.0",
+      requestId: UUID,
+      data: {
+        source: "control-api",
+        generatedAt: NOW,
+        tasks,
+        nextCursor,
+      },
+    }),
+  });
+}
+
+function taskSummary(taskId: string, title: string) {
+  return {
+    taskId,
+    taskType: "operator.goal",
+    title,
+    status: "running" as const,
+    priority: 50,
+    riskLevel: "R1" as const,
+    botId: "worker-01",
+    failureReason: null,
+    createdAt: NOW,
+    updatedAt: NOW,
+    startedAt: NOW,
+    finishedAt: null,
+    revision: 1,
+  };
+}
+
+function taskDetailResponse(taskId: string, title: string) {
+  return {
+    schemaVersion: "1.0",
+    requestId: UUID,
+    data: {
+      source: "control-api",
+      generatedAt: NOW,
+      task: { ...taskSummary(taskId, title), operatorGoal: `执行${title}` },
+    },
+  };
 }
 
 function onlineBot(

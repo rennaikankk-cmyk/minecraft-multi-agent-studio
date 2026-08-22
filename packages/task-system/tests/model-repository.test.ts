@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   MAX_EXPIRED_LEASE_BATCH_SIZE,
+  MAX_TASK_HISTORY_BATCH_SIZE,
+  MAX_TASK_LIFECYCLE_BATCH_SIZE,
   PostgresTaskRepository,
   taskCreateCommandSchema,
   taskOperationFingerprint,
@@ -141,8 +143,10 @@ function taskRow(task: TaskRecord): Record<string, unknown> {
     execution_idempotent: task.executionIdempotent,
     title: task.title,
     description: task.description,
+    task_input: task.input ?? null,
     priority: task.priority,
     status: task.status,
+    dispatch_bot_id: task.dispatchBotId,
     assigned_bot_id: task.assignedBotId,
     required_skills: task.requiredSkills,
     required_items: task.requiredItems,
@@ -189,12 +193,38 @@ describe("task model and PostgreSQL boundary", () => {
     ).toBe("2026-07-27T13:00:00.000Z");
   });
 
+  it("accepts bounded structured task input and rejects null or oversized input", () => {
+    expect(
+      taskCreateCommandSchema.parse({
+        ...command,
+        input: { kind: "coordinator.goal.v1", operatorGoal: "Collect wood" },
+      }).input,
+    ).toEqual({
+      kind: "coordinator.goal.v1",
+      operatorGoal: "Collect wood",
+    });
+    expect(() =>
+      taskCreateCommandSchema.parse({ ...command, input: null }),
+    ).toThrow();
+    expect(() =>
+      taskCreateCommandSchema.parse({
+        ...command,
+        input: { payload: "x".repeat(33 * 1_024) },
+      }),
+    ).toThrow();
+  });
+
   it("uses a deterministic canonical operation fingerprint", () => {
     expect(taskOperationFingerprint({ b: 2, a: { d: 4, c: 3 } })).toBe(
       taskOperationFingerprint({ a: { c: 3, d: 4 }, b: 2 }),
     );
     expect(taskOperationFingerprint({ value: 1 })).not.toBe(
       taskOperationFingerprint({ value: 2 }),
+    );
+    expect(
+      taskOperationFingerprint({ ...command, input: { operatorGoal: "A" } }),
+    ).not.toBe(
+      taskOperationFingerprint({ ...command, input: { operatorGoal: "B" } }),
     );
   });
 
@@ -285,6 +315,25 @@ describe("task model and PostgreSQL boundary", () => {
     ).toBe(true);
     expect(client.statements.at(-1)).toBe("COMMIT");
     expect(client.released).toBe(true);
+  });
+
+  it("stores structured task input in the task row", async () => {
+    const client = new RecordingClient();
+    const repository = new PostgresTaskRepository(new RecordingPool(client));
+    const input = {
+      kind: "coordinator.goal.v1",
+      botId: "worker-01",
+      operatorGoal: "Collect wood",
+    };
+
+    const result = await repository.createTask({ ...command, input });
+
+    expect(result.task.input).toEqual(input);
+    const insert = client.calls.find(({ text }) =>
+      text.includes("INSERT INTO studio_tasks"),
+    );
+    expect(insert?.text).toContain("task_input");
+    expect(insert?.values[9]).toBe(JSON.stringify(input));
   });
 
   it("returns the persisted snapshot for an exact operation replay", async () => {
@@ -462,6 +511,202 @@ describe("task model and PostgreSQL boundary", () => {
     expect(invalidClientReleased).toBe(true);
   });
 
+  it("verifies the durable goal schema and releases its client", async () => {
+    let released = false;
+    let verificationSql = "";
+    const repository = new PostgresTaskRepository({
+      connect: async () => ({
+        async query<
+          TRow extends Record<string, unknown> = Record<string, unknown>,
+        >(text: string): Promise<SqlQueryResult<TRow>> {
+          verificationSql = text;
+          return {
+            rows: [{ ready: true } as unknown as TRow],
+            rowCount: 1,
+          };
+        },
+        release() {
+          released = true;
+        },
+      }),
+    });
+
+    await expect(
+      repository.verifyGoalLifecycleSchema(),
+    ).resolves.toBeUndefined();
+    expect(released).toBe(true);
+    expect(verificationSql).toContain("data_type = 'jsonb'");
+    expect(verificationSql).toContain("studio_tasks_input_size_check");
+    expect(verificationSql).toContain(
+      "studio_tasks_type_status_updated_idx",
+    );
+
+    const missing = new PostgresTaskRepository({
+      connect: async () => ({
+        async query<
+          TRow extends Record<string, unknown> = Record<string, unknown>,
+        >(): Promise<SqlQueryResult<TRow>> {
+          return {
+            rows: [{ ready: false } as unknown as TRow],
+            rowCount: 1,
+          };
+        },
+        release() {},
+      }),
+    });
+    await expect(missing.verifyGoalLifecycleSchema()).rejects.toMatchObject({
+      code: "TASK_PERSISTENCE_FAILED",
+    });
+  });
+
+  it("lists a bounded goal lifecycle projection with task input", async () => {
+    const lifecycleTask = taskRecordSchema.parse({
+      ...replayTask(),
+      taskType: "coordinator.goal",
+      input: {
+        schemaVersion: "1.0",
+        kind: "coordinator.goal.v1",
+        operationId: command.operationId,
+      },
+    });
+    const calls: Array<{ text: string; values: readonly unknown[] }> = [];
+    const repository = new PostgresTaskRepository({
+      connect: async () => ({
+        async query<
+          TRow extends Record<string, unknown> = Record<string, unknown>,
+        >(
+          text: string,
+          values: readonly unknown[] = [],
+        ): Promise<SqlQueryResult<TRow>> {
+          calls.push({ text, values });
+          if (text.includes("FROM studio_tasks")) {
+            return {
+              rows: [
+                {
+                  ...taskRow(lifecycleTask),
+                  task_input: lifecycleTask.input,
+                } as unknown as TRow,
+              ],
+              rowCount: 1,
+            };
+          }
+          return { rows: [], rowCount: 0 };
+        },
+        release() {},
+      }),
+    });
+    const lowerBound = "2026-07-27T11:55:00.000Z";
+
+    await expect(
+      repository.listTaskLifecycle({
+        taskType: "coordinator.goal",
+        terminalUpdatedAfter: lowerBound,
+        limit: 25,
+      }),
+    ).resolves.toEqual([lifecycleTask]);
+    expect(calls[0]?.values).toEqual([
+      "coordinator.goal",
+      lowerBound,
+      25,
+    ]);
+    expect(calls[0]?.text).toContain("updated_at >= $2::timestamptz");
+    expect(calls[0]?.text).toContain("LIMIT $3");
+    await expect(
+      repository.listTaskLifecycle({
+        taskType: "coordinator.goal",
+        terminalUpdatedAfter: "not-a-time",
+      }),
+    ).rejects.toThrow(TypeError);
+    await expect(
+      repository.listTaskLifecycle({
+        taskType: "coordinator.goal",
+        terminalUpdatedAfter: lowerBound,
+        limit: MAX_TASK_LIFECYCLE_BATCH_SIZE + 1,
+      }),
+    ).rejects.toThrow(RangeError);
+  });
+
+  it("lists task history with bounded keyset pagination and bot input lookup", async () => {
+    const historyTasks = [
+      ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1", "09:03:00"],
+      ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2", "09:02:00"],
+      ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3", "09:01:00"],
+    ].map(([taskId, time], index) =>
+      taskRecordSchema.parse({
+        ...replayTask(),
+        taskId,
+        idempotencyKey: `history-task-${index}`,
+        taskType: "coordinator.goal",
+        input: { botId: "worker-01", sequence: index },
+        status: "completed",
+        createdAt: `2026-07-27T${time}.000Z`,
+        updatedAt: `2026-07-27T${time}.000Z`,
+        finishedAt: `2026-07-27T${time}.000Z`,
+        deadline: null,
+      }),
+    );
+    const calls: Array<{ text: string; values: readonly unknown[] }> = [];
+    let released = false;
+    const repository = new PostgresTaskRepository({
+      connect: async () => ({
+        async query<
+          TRow extends Record<string, unknown> = Record<string, unknown>,
+        >(
+          text: string,
+          values: readonly unknown[] = [],
+        ): Promise<SqlQueryResult<TRow>> {
+          calls.push({ text, values });
+          if (text.includes("SELECT task.*")) {
+            return {
+              rows: historyTasks.map((task) =>
+                taskRow(task) as unknown as TRow,
+              ),
+              rowCount: historyTasks.length,
+            };
+          }
+          return { rows: [], rowCount: 0 };
+        },
+        release() {
+          released = true;
+        },
+      }),
+    });
+    const cursorTaskId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+    await expect(
+      repository.listTaskHistory({
+        limit: 2,
+        status: "completed",
+        botId: "worker-01",
+        before: {
+          createdAt: "2026-07-27T17:04:00.000+08:00",
+          taskId: cursorTaskId,
+        },
+      }),
+    ).resolves.toEqual({
+      tasks: historyTasks.slice(0, 2),
+      hasMore: true,
+    });
+    expect(calls[0]?.values).toEqual([
+      "completed",
+      "worker-01",
+      "2026-07-27T09:04:00.000Z",
+      cursorTaskId,
+      3,
+    ]);
+    expect(calls[0]?.text).toContain("task.status = $1::text");
+    expect(calls[0]?.text).toContain("task.task_input ->> 'botId' = $2::text");
+    expect(calls[0]?.text).toContain("(task.created_at, task.task_id) <");
+    expect(calls[0]?.text).toContain("LIMIT $5");
+    expect(released).toBe(true);
+
+    await expect(
+      repository.listTaskHistory({
+        limit: MAX_TASK_HISTORY_BATCH_SIZE + 1,
+      }),
+    ).rejects.toThrow(RangeError);
+  });
+
   it("lists only a bounded PostgreSQL-clock expired lease recovery batch", async () => {
     const expired = taskRecordSchema.parse({
       ...replayTask(),
@@ -533,5 +778,18 @@ describe("task model and PostgreSQL boundary", () => {
     expect(hardeningMigration).toContain(
       "status NOT IN ('assigned', 'running')",
     );
+
+    const goalInputMigration = readFileSync(
+      new URL("../migrations/0005_task_goal_input.sql", import.meta.url),
+      "utf8",
+    );
+    expect(goalInputMigration).toContain(
+      "ADD COLUMN IF NOT EXISTS task_input JSONB",
+    );
+    expect(goalInputMigration).toContain("studio_tasks_input_size_check");
+    expect(goalInputMigration).toContain("task_input::text) <= 65536");
+    expect(goalInputMigration).toContain("studio_tasks_type_status_updated_idx");
+    expect(goalInputMigration).toContain("studio_tasks_history_created_idx");
+    expect(goalInputMigration).toContain("studio_tasks_goal_bot_idx");
   });
 });

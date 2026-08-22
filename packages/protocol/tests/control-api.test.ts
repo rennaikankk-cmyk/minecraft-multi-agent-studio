@@ -15,6 +15,12 @@ import {
   stopBotHttpResponseV1Schema,
   submitGoalHttpRequestV1Schema,
   submitGoalHttpResponseV1Schema,
+  dashboardTaskDetailResponseV1Schema,
+  dashboardTaskListResponseV1Schema,
+  publicTaskDetailV1Schema,
+  publicTaskSummaryV1Schema,
+  taskDetailResponseV1Schema,
+  taskListResponseV1Schema,
 } from "../src/index.js";
 
 const UUID = "11111111-1111-4111-8111-111111111111";
@@ -36,6 +42,21 @@ const detail = {
   position: null,
   positionRedacted: true,
   minecraftVersion: null,
+};
+const taskSummary = {
+  taskId: UUID,
+  taskType: "planner.goal",
+  title: "Collect nearby wood",
+  status: "completed" as const,
+  priority: 50,
+  riskLevel: "R1" as const,
+  botId: "worker-01",
+  failureReason: null,
+  createdAt: NOW,
+  updatedAt: NOW,
+  startedAt: NOW,
+  finishedAt: NOW,
+  revision: 3,
 };
 
 describe("Control API v1 protocol", () => {
@@ -283,6 +304,90 @@ describe("Control API v1 protocol", () => {
         schemaVersion: "1.0",
         requestId: UUID,
         data: { ...failed, errorCode: "not-stable" },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("validates redacted task history summaries and bounded details", () => {
+    expect(publicTaskSummaryV1Schema.parse(taskSummary)).toEqual(taskSummary);
+    for (const forbidden of ["description", "target", "result", "evidence"] as const) {
+      expect(
+        publicTaskSummaryV1Schema.safeParse({
+          ...taskSummary,
+          [forbidden]: forbidden === "evidence" ? [] : "secret",
+        }).success,
+      ).toBe(false);
+    }
+    const task = { ...taskSummary, operatorGoal: "采集附近的木材" };
+    expect(publicTaskDetailV1Schema.parse(task)).toEqual(task);
+    expect(
+      publicTaskDetailV1Schema.safeParse({ ...task, result: { raw: true } }).success,
+    ).toBe(false);
+
+    const page = {
+      generatedAt: NOW,
+      tasks: [taskSummary],
+      nextCursor: "eyJjcmVhdGVkQXQiOiIyMDI2In0",
+    };
+    expect(
+      taskListResponseV1Schema.parse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: page,
+      }).data.tasks,
+    ).toEqual([taskSummary]);
+    expect(
+      taskDetailResponseV1Schema.parse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: { generatedAt: NOW, task },
+      }).data.task.operatorGoal,
+    ).toBe(task.operatorGoal);
+    expect(
+      dashboardTaskListResponseV1Schema.parse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: { source: "control-api", ...page },
+      }).data.source,
+    ).toBe("control-api");
+    expect(
+      dashboardTaskDetailResponseV1Schema.parse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: { source: "control-api", generatedAt: NOW, task },
+      }).data.task.taskId,
+    ).toBe(UUID);
+    expect(
+      taskListResponseV1Schema.safeParse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: { ...page, source: "database" },
+      }).success,
+    ).toBe(false);
+    expect(
+      taskDetailResponseV1Schema.safeParse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: { generatedAt: NOW, task, internal: true },
+      }).success,
+    ).toBe(false);
+    expect(
+      dashboardTaskListResponseV1Schema.safeParse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: { source: "simulated", ...page },
+      }).success,
+    ).toBe(false);
+    expect(
+      dashboardTaskDetailResponseV1Schema.safeParse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: {
+          source: "control-api",
+          generatedAt: NOW,
+          task,
+          rawResult: true,
+        },
       }).success,
     ).toBe(false);
   });

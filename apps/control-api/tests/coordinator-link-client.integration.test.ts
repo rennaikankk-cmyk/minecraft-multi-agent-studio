@@ -3,8 +3,11 @@ import { createHash } from "node:crypto";
 import {
   BotRegistry,
   ControlLinkServer,
+  durableGoalFingerprint,
   InMemoryStopAuditSink,
   StopController,
+  type GoalLifecycleSnapshot,
+  type GoalLifecycleStore,
   type StopBotRequest,
 } from "@minecraft-studio/coordinator";
 import type {
@@ -12,6 +15,8 @@ import type {
   BotStopResultV1,
   ControlLinkStopRequestV1,
   ControlLinkStopResponseV1,
+  ControlLinkTaskDetailResponseV1,
+  ControlLinkTaskListResponseV1,
   StopBotCommandV1,
 } from "@minecraft-studio/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -45,6 +50,159 @@ afterEach(async () => {
 });
 
 describe("Control API Coordinator Link client", () => {
+  it("round-trips strict task history reads over an authenticated session", async () => {
+    const client = new CoordinatorLinkClient({
+      config: {
+        url: "ws://127.0.0.1:3221/v1/control-link",
+        clientId: "control-api-test",
+        keyId: "control-key-test",
+        secret: SECRET,
+        handshakeTimeoutMs: 2_000,
+        livenessTimeoutMs: 75_000,
+        stopTimeoutMs: 3_000,
+        reconnect: { baseDelayMs: 10, maxDelayMs: 50 },
+        maxPendingStops: 8,
+        maxSocketBufferedBytes: 256 * 1_024,
+      },
+      instanceId: "control-api-task-test",
+      logger,
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+    const sent: string[] = [];
+    const internals = client as unknown as {
+      ready: boolean;
+      authenticated: boolean;
+      coordinatorInstanceId: string | null;
+      socket: { readyState: number; bufferedAmount: number; send(value: string): void } | null;
+      pendingTaskLists: Map<string, { message: { messageId: string } }>;
+      pendingTaskDetails: Map<string, { message: { messageId: string } }>;
+      handleTaskListResponse(message: ControlLinkTaskListResponseV1): void;
+      handleTaskDetailResponse(message: ControlLinkTaskDetailResponseV1): void;
+    };
+    internals.ready = true;
+    internals.authenticated = true;
+    internals.coordinatorInstanceId = "coordinator-task-test";
+    internals.socket = {
+      readyState: WebSocket.OPEN,
+      bufferedAmount: 0,
+      send: (value) => sent.push(value),
+    };
+
+    const listOperationId = "14141414-1414-4414-8414-141414141414";
+    const list = client.listTaskHistory({
+      operationId: listOperationId,
+      actorId: "task-reader-01",
+      query: { limit: 25, cursor: null, status: null, botId: null },
+      issuedAt: NOW,
+      expiresAt: new Date(NOW.getTime() + 10_000),
+    });
+    const listMessage = internals.pendingTaskLists.get(listOperationId)?.message;
+    if (!listMessage) throw new Error("task_list_request_missing");
+    const summary = publicTaskSummary(listOperationId);
+    internals.handleTaskListResponse({
+      schemaVersion: "1.0",
+      messageId: "15151515-1515-4515-8515-151515151515",
+      timestamp: NOW.toISOString(),
+      type: "control.link.task-list-response.v1",
+      ok: true,
+      payload: {
+        coordinatorInstanceId: "coordinator-task-test",
+        requestMessageId: listMessage.messageId,
+        operationId: listOperationId,
+        result: { generatedAt: NOW.toISOString(), tasks: [summary], nextCursor: null },
+      },
+    });
+    await expect(list).resolves.toEqual({
+      generatedAt: NOW.toISOString(),
+      tasks: [summary],
+      nextCursor: null,
+    });
+
+    const detailOperationId = "16161616-1616-4616-8616-161616161616";
+    const detail = client.getTaskDetail({
+      operationId: detailOperationId,
+      actorId: "task-reader-01",
+      taskId: listOperationId,
+      issuedAt: NOW,
+      expiresAt: new Date(NOW.getTime() + 10_000),
+    });
+    const detailMessage = internals.pendingTaskDetails.get(detailOperationId)?.message;
+    if (!detailMessage) throw new Error("task_detail_request_missing");
+    internals.handleTaskDetailResponse({
+      schemaVersion: "1.0",
+      messageId: "17171717-1717-4717-8717-171717171717",
+      timestamp: NOW.toISOString(),
+      type: "control.link.task-detail-response.v1",
+      ok: true,
+      payload: {
+        coordinatorInstanceId: "coordinator-task-test",
+        requestMessageId: detailMessage.messageId,
+        operationId: detailOperationId,
+        result: {
+          generatedAt: NOW.toISOString(),
+          task: { ...summary, operatorGoal: "采集附近的木材" },
+        },
+      },
+    });
+    await expect(detail).resolves.toMatchObject({
+      task: { taskId: listOperationId, operatorGoal: "采集附近的木材" },
+    });
+
+    const boundOperationId = "18181818-1818-4818-8818-181818181818";
+    const boundDetail = client.getTaskDetail({
+      operationId: boundOperationId,
+      actorId: "task-reader-01",
+      taskId: listOperationId,
+      issuedAt: NOW,
+      expiresAt: new Date(NOW.getTime() + 10_000),
+    });
+    const boundMessage = internals.pendingTaskDetails.get(boundOperationId)?.message;
+    if (!boundMessage) throw new Error("bound_task_detail_request_missing");
+    const response = {
+      schemaVersion: "1.0",
+      messageId: "19191919-1919-4919-8919-191919191919",
+      timestamp: NOW.toISOString(),
+      type: "control.link.task-detail-response.v1",
+      ok: true,
+      payload: {
+        coordinatorInstanceId: "coordinator-task-test",
+        requestMessageId: boundMessage.messageId,
+        operationId: boundOperationId,
+        result: {
+          generatedAt: NOW.toISOString(),
+          task: { ...summary, operatorGoal: "采集附近的木材" },
+        },
+      },
+    } as const;
+    expect(() =>
+      internals.handleTaskDetailResponse({
+        ...response,
+        payload: {
+          ...response.payload,
+          result: {
+            ...response.payload.result,
+            task: {
+              ...response.payload.result.task,
+              taskId: "20202020-2020-4020-8020-202020202020",
+            },
+          },
+        },
+      }),
+    ).toThrowError(
+      expect.objectContaining({ code: "COORDINATOR_LINK_IDENTITY_MISMATCH" }),
+    );
+    internals.handleTaskDetailResponse(response);
+    await expect(boundDetail).resolves.toMatchObject({
+      task: { taskId: listOperationId },
+    });
+    expect(sent.map((value) => JSON.parse(value).type)).toEqual([
+      "control.link.task-list-request.v1",
+      "control.link.task-detail-request.v1",
+      "control.link.task-detail-request.v1",
+    ]);
+  });
+
   it("authenticates, mirrors authoritative state, confirms a stop, and clears on disconnect", async () => {
     const registry = new BotRegistry({ staleAfterMs: 15_000, now: () => NOW });
     registry.ingest(heartbeat(1), NOW);
@@ -184,6 +342,7 @@ describe("Control API Coordinator Link client", () => {
         }),
       },
       goalPlanner: { planAndDispatch },
+      goalStore: inMemoryGoalStore(),
       logger,
       now: () => NOW,
     });
@@ -864,6 +1023,73 @@ function stopRequest(operationId: string): StopBotRequest {
   };
 }
 
+function inMemoryGoalStore(): GoalLifecycleStore {
+  const requests = new Map<
+    string,
+    Parameters<GoalLifecycleStore["begin"]>[0]
+  >();
+  const snapshots = new Map<string, GoalLifecycleSnapshot>();
+  const snapshot = (
+    request: Parameters<GoalLifecycleStore["begin"]>[0],
+    status: GoalLifecycleSnapshot["status"],
+    result: GoalLifecycleSnapshot["result"],
+    errorCode: GoalLifecycleSnapshot["errorCode"],
+  ): GoalLifecycleSnapshot => ({
+    operationId: request.payload.operationId,
+    taskId: request.payload.taskId,
+    botId: request.payload.botId,
+    fingerprint: durableGoalFingerprint(request),
+    title: "Submitted goal",
+    status,
+    startedAt: NOW.toISOString(),
+    updatedAt: NOW.toISOString(),
+    result,
+    errorCode,
+  });
+  return {
+    initialize: async () => [],
+    refresh: async () => [...snapshots.values()],
+    begin: async (request) => {
+      requests.set(request.payload.taskId, request);
+      const running = snapshot(request, "running", null, null);
+      snapshots.set(request.payload.operationId, running);
+      return {
+        kind: "execute",
+        lease: {
+          taskId: request.payload.taskId,
+          leaseOwner: "goal-control-api-test",
+          revision: 2,
+        },
+        snapshot: running,
+      };
+    },
+    recordResult: async (lease, result) => {
+      const request = requests.get(lease.taskId);
+      if (!request) throw new Error("goal_test_request_missing");
+      const status =
+        result.action === "noop"
+          ? "failed"
+          : result.outcome === "completed"
+            ? "completed"
+            : result.outcome === "cancelled"
+              ? "cancelled"
+              : result.outcome === "timed_out"
+                ? "expired"
+                : "failed";
+      const terminal = snapshot(request, status, result, null);
+      snapshots.set(request.payload.operationId, terminal);
+      return terminal;
+    },
+    recordError: async (lease, errorCode, status) => {
+      const request = requests.get(lease.taskId);
+      if (!request) throw new Error("goal_test_request_missing");
+      const terminal = snapshot(request, status, null, errorCode);
+      snapshots.set(request.payload.operationId, terminal);
+      return terminal;
+    },
+  };
+}
+
 function confirmedStopResult(request: StopBotRequest): BotStopResultV1 {
   return {
     schemaVersion: "1.0",
@@ -923,6 +1149,29 @@ function heartbeat(sequence: number): BotHeartbeatV1 {
       currentTaskId: null,
     },
   };
+}
+
+function publicTaskSummary(taskId: string) {
+  return {
+    taskId,
+    taskType: "planner.goal",
+    title: "Collect nearby wood",
+    status: "completed" as const,
+    priority: 50,
+    riskLevel: "R1" as const,
+    botId: BOT_ID,
+    failureReason: null,
+    createdAt: NOW.toISOString(),
+    updatedAt: NOW.toISOString(),
+    startedAt: NOW.toISOString(),
+    finishedAt: NOW.toISOString(),
+    revision: 2,
+  };
+}
+
+function uuidSequence(): () => string {
+  let value = 20_000;
+  return () => `00000000-0000-4000-8000-${(++value).toString(16).padStart(12, "0")}`;
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {

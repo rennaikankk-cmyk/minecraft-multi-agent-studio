@@ -25,6 +25,8 @@ export {
   stopBotHttpResponseV1Schema,
   submitGoalHttpRequestV1Schema,
   submitGoalHttpResponseV1Schema,
+  taskDetailResponseV1Schema,
+  taskListResponseV1Schema,
   type BotDetailResponseV1,
   type BotListResponseV1,
   type BotStreamEventV1,
@@ -39,6 +41,8 @@ export {
   type StopBotHttpResponseV1,
   type SubmitGoalHttpRequestV1,
   type SubmitGoalHttpResponseV1,
+  type TaskDetailResponseV1,
+  type TaskListResponseV1,
 } from "./control-api.js";
 
 export {
@@ -49,6 +53,8 @@ export {
   dashboardGoalResponseV1Schema,
   dashboardStopRequestV1Schema,
   dashboardStopResponseV1Schema,
+  dashboardTaskDetailResponseV1Schema,
+  dashboardTaskListResponseV1Schema,
   type DashboardApiErrorCode,
   type DashboardApiErrorV1,
   type DashboardBotListResponseV1,
@@ -56,7 +62,23 @@ export {
   type DashboardGoalResponseV1,
   type DashboardStopRequestV1,
   type DashboardStopResponseV1,
+  type DashboardTaskDetailResponseV1,
+  type DashboardTaskListResponseV1,
 } from "./dashboard-api.js";
+
+export {
+  CONTROL_LINK_MAX_TASK_HISTORY_ITEMS,
+  publicTaskDetailV1Schema,
+  publicTaskSummaryV1Schema,
+  taskHistoryCursorSchema,
+  taskHistoryListPageV1Schema,
+  taskHistoryListQueryV1Schema,
+  taskRiskLevelSchema,
+  type PublicTaskDetailV1,
+  type PublicTaskSummaryV1,
+  type TaskHistoryListPageV1,
+  type TaskHistoryListQueryV1,
+} from "./task-history.js";
 
 export {
   ProtocolAuthorizationError,
@@ -165,6 +187,11 @@ export {
   controlLinkStopErrorCodeSchema,
   controlLinkStopRequestV1Schema,
   controlLinkStopResponseV1Schema,
+  controlLinkTaskDetailRequestV1Schema,
+  controlLinkTaskDetailResponseV1Schema,
+  controlLinkTaskListRequestV1Schema,
+  controlLinkTaskListResponseV1Schema,
+  controlLinkTaskReadErrorCodeSchema,
   parseControlLinkClientMessage,
   parseControlLinkServerMessage,
   type ControlLinkAcceptedV1,
@@ -186,6 +213,11 @@ export {
   type ControlLinkStopErrorCode,
   type ControlLinkStopRequestV1,
   type ControlLinkStopResponseV1,
+  type ControlLinkTaskDetailRequestV1,
+  type ControlLinkTaskDetailResponseV1,
+  type ControlLinkTaskListRequestV1,
+  type ControlLinkTaskListResponseV1,
+  type ControlLinkTaskReadErrorCode,
 } from "./control-link.js";
 
 export {

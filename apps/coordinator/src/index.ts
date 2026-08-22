@@ -55,6 +55,32 @@ export {
 } from "./control-link-server.js";
 
 export {
+  GoalLifecycleStoreError,
+  PostgresGoalLifecycleStore,
+  durableGoalFingerprint,
+  type GoalExecutionLease,
+  type GoalLifecycleBeginResult,
+  type GoalLifecycleSnapshot,
+  type GoalLifecycleStore,
+  type PostgresGoalLifecycleStoreOptions,
+} from "./goal-lifecycle-store.js";
+
+export {
+  GoalPersistenceConfigError,
+  loadGoalPersistenceConfig,
+  type GoalPersistenceConfig,
+} from "./goal-persistence-config.js";
+
+export {
+  PostgresTaskHistoryReader,
+  TaskHistoryReaderError,
+  type PostgresTaskHistoryReaderOptions,
+  type TaskHistoryDetailResult,
+  type TaskHistoryReader,
+  type TaskHistoryReaderErrorCode,
+} from "./task-history-reader.js";
+
+export {
   ExpiredLeaseRecoveryController,
   type ExpiredLeaseRecoveryOptions,
   type ExpiredLeaseRecoveryRepository,

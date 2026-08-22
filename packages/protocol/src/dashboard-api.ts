@@ -5,6 +5,10 @@ import {
   goalDispatchResultV1Schema,
   publicBotDetailV1Schema,
 } from "./control-api.js";
+import {
+  publicTaskDetailV1Schema,
+  taskHistoryListPageV1Schema,
+} from "./task-history.js";
 
 const timestampSchema = z.string().datetime({ offset: true });
 
@@ -76,6 +80,30 @@ export const dashboardGoalResponseV1Schema = z
   })
   .strict();
 
+export const dashboardTaskListResponseV1Schema = z
+  .object({
+    schemaVersion: z.literal("1.0"),
+    requestId: z.string().uuid(),
+    data: taskHistoryListPageV1Schema.extend({
+      source: z.literal("control-api"),
+    }).strict(),
+  })
+  .strict();
+
+export const dashboardTaskDetailResponseV1Schema = z
+  .object({
+    schemaVersion: z.literal("1.0"),
+    requestId: z.string().uuid(),
+    data: z
+      .object({
+        source: z.literal("control-api"),
+        generatedAt: timestampSchema,
+        task: publicTaskDetailV1Schema,
+      })
+      .strict(),
+  })
+  .strict();
+
 export const dashboardApiErrorCodeSchema = z.enum([
   "DASHBOARD_CONTROL_NOT_CONFIGURED",
   "CONTROL_API_UNAVAILABLE",
@@ -86,6 +114,8 @@ export const dashboardApiErrorCodeSchema = z.enum([
   "RATE_LIMITED",
   "STOP_FAILED",
   "GOAL_FAILED",
+  "TASK_HISTORY_UNAVAILABLE",
+  "TASK_NOT_FOUND",
 ]);
 
 export const dashboardApiErrorV1Schema = z
@@ -115,6 +145,12 @@ export type DashboardGoalRequestV1 = z.infer<
 >;
 export type DashboardGoalResponseV1 = z.infer<
   typeof dashboardGoalResponseV1Schema
+>;
+export type DashboardTaskListResponseV1 = z.infer<
+  typeof dashboardTaskListResponseV1Schema
+>;
+export type DashboardTaskDetailResponseV1 = z.infer<
+  typeof dashboardTaskDetailResponseV1Schema
 >;
 export type DashboardApiErrorCode = z.infer<typeof dashboardApiErrorCodeSchema>;
 export type DashboardApiErrorV1 = z.infer<typeof dashboardApiErrorV1Schema>;

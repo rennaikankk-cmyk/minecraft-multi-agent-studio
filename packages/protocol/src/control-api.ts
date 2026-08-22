@@ -15,6 +15,10 @@ import {
   skillIdentifierSchema,
   skillVersionSchema,
 } from "./skill-identifiers.js";
+import {
+  publicTaskDetailV1Schema,
+  taskHistoryListPageV1Schema,
+} from "./task-history.js";
 
 const timestampSchema = z.string().datetime({ offset: true });
 
@@ -23,6 +27,7 @@ export const controlApiPermissionSchema = z.enum([
   "bot.position.read",
   "bot.stop",
   "goal.submit",
+  "task.read",
 ]);
 
 const reasonCodeSchema = z
@@ -223,17 +228,40 @@ export const botDetailResponseV1Schema = z
   })
   .strict();
 
+export const taskListResponseV1Schema = z
+  .object({
+    schemaVersion: z.literal("1.0"),
+    requestId: z.string().uuid(),
+    data: taskHistoryListPageV1Schema,
+  })
+  .strict();
+
+export const taskDetailResponseV1Schema = z
+  .object({
+    schemaVersion: z.literal("1.0"),
+    requestId: z.string().uuid(),
+    data: z
+      .object({
+        generatedAt: timestampSchema,
+        task: publicTaskDetailV1Schema,
+      })
+      .strict(),
+  })
+  .strict();
+
 export const controlApiErrorCodeSchema = z.enum([
   "AUTH_REQUIRED",
   "PERMISSION_DENIED",
   "RATE_LIMITED",
   "INVALID_REQUEST",
   "BOT_NOT_FOUND",
+  "TASK_NOT_FOUND",
   "ROUTE_NOT_FOUND",
   "METHOD_NOT_ALLOWED",
   "UNSUPPORTED_SCHEMA_VERSION",
   "BOT_NOT_STOPPABLE",
   "CONTROL_UNAVAILABLE",
+  "TASK_HISTORY_UNAVAILABLE",
   "STOP_TIMEOUT",
   "STOP_FAILED",
   "AI_UNAVAILABLE",
@@ -317,6 +345,8 @@ export type PublicBotSummaryV1 = z.infer<typeof publicBotSummaryV1Schema>;
 export type PublicBotDetailV1 = z.infer<typeof publicBotDetailV1Schema>;
 export type BotListResponseV1 = z.infer<typeof botListResponseV1Schema>;
 export type BotDetailResponseV1 = z.infer<typeof botDetailResponseV1Schema>;
+export type TaskListResponseV1 = z.infer<typeof taskListResponseV1Schema>;
+export type TaskDetailResponseV1 = z.infer<typeof taskDetailResponseV1Schema>;
 export type ControlApiErrorCode = z.infer<typeof controlApiErrorCodeSchema>;
 export type ControlApiErrorV1 = z.infer<typeof controlApiErrorV1Schema>;
 export type BotStreamSnapshotV1 = z.infer<typeof botStreamSnapshotV1Schema>;

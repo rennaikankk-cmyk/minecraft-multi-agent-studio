@@ -15,12 +15,15 @@ import {
   type BotStateSource,
   type ControlApiLogger,
   type GoalSubmitter,
+  TaskHistorySourceError,
+  type TaskHistorySource,
 } from "../src/index.js";
 
 const READER_TOKEN = "control-api-reader-token-000000000001";
 const POSITION_TOKEN = "control-api-position-token-000000001";
 const DENIED_TOKEN = "control-api-position-only-token-00000001";
 const OPERATOR_TOKEN = "control-api-stop-operator-token-00000001";
+const TASK_READER_TOKEN = "control-api-task-reader-token-0000000001";
 
 const principals: ApiPrincipalConfig[] = [
   {
@@ -42,6 +45,11 @@ const principals: ApiPrincipalConfig[] = [
     subject: "operator-01",
     tokenSha256: hash(OPERATOR_TOKEN),
     permissions: ["bot.read", "bot.position.read", "bot.stop", "goal.submit"],
+  },
+  {
+    subject: "task-reader-01",
+    tokenSha256: hash(TASK_READER_TOKEN),
+    permissions: ["task.read"],
   },
 ];
 
@@ -336,6 +344,113 @@ describe("Control API HTTP and WebSocket integration", () => {
     expect((await response.json()).error.code).toBe("CONTROL_UNAVAILABLE");
   });
 
+  it("protects task history and returns only strict public projections", async () => {
+    const summary = taskSummary(testUuid(2_020));
+    const listTaskHistory = vi.fn<TaskHistorySource["listTaskHistory"]>(
+      async () => ({
+        generatedAt: summary.updatedAt,
+        tasks: [summary],
+        nextCursor: null,
+      }),
+    );
+    const getTaskDetail = vi.fn<TaskHistorySource["getTaskDetail"]>(async () => ({
+      generatedAt: summary.updatedAt,
+      task: { ...summary, operatorGoal: "采集附近的木材" },
+    }));
+    const taskHistorySource: TaskHistorySource = {
+      isTaskHistoryReady: () => true,
+      listTaskHistory,
+      getTaskDetail,
+    };
+    const { baseUrl } = await startServer({ taskHistorySource });
+
+    const denied = await authenticatedFetch(`${baseUrl}/v1/tasks`, READER_TOKEN);
+    expect(denied.status).toBe(403);
+    expect((await denied.json()).error.code).toBe("PERMISSION_DENIED");
+
+    const list = await authenticatedFetch(
+      `${baseUrl}/v1/tasks?limit=25&status=completed&botId=worker-01`,
+      TASK_READER_TOKEN,
+    );
+    expect(list.status).toBe(200);
+    const listBody = await list.json();
+    expect(listBody.data.tasks).toEqual([summary]);
+    expect(JSON.stringify(listBody)).not.toMatch(/description|operatorGoal|target|result|evidence/u);
+    expect(listTaskHistory).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorId: "task-reader-01",
+        query: {
+          limit: 25,
+          cursor: null,
+          status: "completed",
+          botId: "worker-01",
+        },
+      }),
+    );
+
+    const detail = await authenticatedFetch(
+      `${baseUrl}/v1/tasks/${summary.taskId}`,
+      TASK_READER_TOKEN,
+    );
+    expect(detail.status).toBe(200);
+    const detailBody = await detail.json();
+    expect(detailBody.data.task.operatorGoal).toBe("采集附近的木材");
+    expect(JSON.stringify(detailBody)).not.toMatch(/target|result|evidence/u);
+    expect(getTaskDetail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorId: "task-reader-01",
+        taskId: summary.taskId,
+      }),
+    );
+  });
+
+  it("fails closed when task history is missing, unavailable, or queried invalidly", async () => {
+    const withoutSource = await startServer();
+    const missing = await authenticatedFetch(
+      `${withoutSource.baseUrl}/v1/tasks`,
+      TASK_READER_TOKEN,
+    );
+    expect(missing.status).toBe(503);
+    expect((await missing.json()).error.code).toBe("TASK_HISTORY_UNAVAILABLE");
+
+    const taskHistorySource: TaskHistorySource = {
+      isTaskHistoryReady: () => true,
+      listTaskHistory: async () => {
+        throw new TaskHistorySourceError(
+          "TASK_HISTORY_UNAVAILABLE",
+          "database details must stay private",
+        );
+      },
+      getTaskDetail: async () => {
+        throw new TaskHistorySourceError("TASK_NOT_FOUND", "private detail");
+      },
+    };
+    const available = await startServer({ taskHistorySource });
+    const unavailable = await authenticatedFetch(
+      `${available.baseUrl}/v1/tasks`,
+      TASK_READER_TOKEN,
+    );
+    expect(unavailable.status).toBe(503);
+    const unavailableBody = await unavailable.json();
+    expect(unavailableBody.error).toEqual({
+      code: "TASK_HISTORY_UNAVAILABLE",
+      message: "Task history is unavailable.",
+    });
+    expect(JSON.stringify(unavailableBody)).not.toContain("database details");
+
+    const invalid = await authenticatedFetch(
+      `${available.baseUrl}/v1/tasks?limit=25&limit=50`,
+      TASK_READER_TOKEN,
+    );
+    expect(invalid.status).toBe(400);
+    const notFound = await authenticatedFetch(
+      `${available.baseUrl}/v1/tasks/${testUuid(2_021)}`,
+      TASK_READER_TOKEN,
+    );
+    expect(notFound.status).toBe(404);
+    expect((await notFound.json()).error.code).toBe("TASK_NOT_FOUND");
+  });
+
   it("returns 503 when the Coordinator mirror drops while reading a stop body", async () => {
     let ready = true;
     const isReady = vi.fn(() => ready);
@@ -422,6 +537,7 @@ async function startServer(
     stateSource: BotStateSource;
     maxConnectionsPerSubject: number;
     goalController: GoalSubmitter;
+    taskHistorySource: TaskHistorySource;
   }> = {},
 ): Promise<{
   server: ControlApiServer;
@@ -448,6 +564,9 @@ async function startServer(
     ...(overrides.goalController === undefined
       ? {}
       : { goalController: overrides.goalController }),
+    ...(overrides.taskHistorySource === undefined
+      ? {}
+      : { taskHistorySource: overrides.taskHistorySource }),
     ...(overrides.maxConnectionsPerSubject === undefined
       ? {}
       : { maxConnectionsPerSubject: overrides.maxConnectionsPerSubject }),
@@ -698,6 +817,25 @@ function stopResult(
 function uuidSequence(): () => string {
   let value = 1_000;
   return () => testUuid(++value);
+}
+
+function taskSummary(taskId: string) {
+  const timestamp = "2026-08-22T10:00:00.000Z";
+  return {
+    taskId,
+    taskType: "planner.goal",
+    title: "Collect nearby wood",
+    status: "completed" as const,
+    priority: 50,
+    riskLevel: "R1" as const,
+    botId: "worker-01",
+    failureReason: null,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    startedAt: timestamp,
+    finishedAt: timestamp,
+    revision: 2,
+  };
 }
 
 function testUuid(value: number): string {

@@ -22,8 +22,12 @@ import {
   submitGoalHttpResponseV1Schema,
   stopBotHttpRequestV1Schema,
   stopBotHttpResponseV1Schema,
+  taskDetailResponseV1Schema,
+  taskHistoryListQueryV1Schema,
+  taskListResponseV1Schema,
   type ControlApiErrorCode,
   type GoalDispatchResultV1,
+  type TaskHistoryListQueryV1,
 } from "@minecraft-studio/protocol";
 import { WebSocket, WebSocketServer } from "ws";
 
@@ -50,8 +54,13 @@ import {
 } from "./coordinator-link-client.js";
 import { toPublicBotDetail, toPublicBotSummary } from "./public-view.js";
 import { ConnectionLimiter, FixedWindowRateLimiter } from "./rate-limit.js";
+import {
+  TaskHistorySourceError,
+  type TaskHistorySource,
+} from "./task-history-source.js";
 
 const BOT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const TASK_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const JSON_HEADERS = {
   "Cache-Control": "no-store",
   "Content-Type": "application/json; charset=utf-8",
@@ -86,6 +95,7 @@ export type ControlApiServerOptions = Readonly<{
   registry: BotRegistry | BotStateSource;
   stopController?: BotStopRequester;
   goalController?: GoalSubmitter;
+  taskHistorySource?: TaskHistorySource;
   principals: readonly ApiPrincipalConfig[];
   logger: ControlApiLogger;
   requestLimitPerMinute?: number;
@@ -339,10 +349,11 @@ export class ControlApiServer {
       this.writeError(response, 400, requestId, "INVALID_REQUEST", "Request URL is invalid.");
       return;
     }
-    if (url.searchParams.size !== 0) {
+    if (url.searchParams.size !== 0 && url.pathname !== "/v1/tasks") {
       this.writeError(response, 400, requestId, "INVALID_REQUEST", "Unexpected request input.");
       return;
     }
+
     const principal = this.authenticator.authenticate(request);
     if (!principal) {
       this.writeError(response, 401, requestId, "AUTH_REQUIRED", "Authentication is required.", {
@@ -354,6 +365,17 @@ export class ControlApiServer {
       this.writeError(response, 429, requestId, "RATE_LIMITED", "Request rate limit exceeded.", {
         "Retry-After": "60",
       });
+      return;
+    }
+    if (url.pathname === "/v1/tasks") {
+      await this.handleTaskListRequest(
+        request,
+        response,
+        requestId,
+        now,
+        principal,
+        url,
+      );
       return;
     }
     if (url.pathname === "/v1/bots") {
@@ -444,6 +466,24 @@ export class ControlApiServer {
       return;
     }
 
+    const taskDetailMatch = /^\/v1\/tasks\/([^/]+)$/u.exec(url.pathname);
+    if (taskDetailMatch) {
+      const taskId = decodePathSegment(taskDetailMatch[1]);
+      if (!taskId || !TASK_ID_PATTERN.test(taskId)) {
+        this.writeError(response, 400, requestId, "INVALID_REQUEST", "Task identifier is invalid.");
+        return;
+      }
+      await this.handleTaskDetailRequest(
+        request,
+        response,
+        requestId,
+        now,
+        principal,
+        taskId,
+      );
+      return;
+    }
+
     const detailMatch = /^\/v1\/bots\/([^/]+)$/u.exec(url.pathname);
     if (!detailMatch) {
       this.writeError(response, 404, requestId, "ROUTE_NOT_FOUND", "API route was not found.");
@@ -491,6 +531,176 @@ export class ControlApiServer {
       },
     });
     this.writeJson(response, 200, body);
+  }
+
+  private async handleTaskListRequest(
+    request: IncomingMessage,
+    response: ServerResponse,
+    requestId: string,
+    now: Date,
+    principal: ApiPrincipal,
+    url: URL,
+  ): Promise<void> {
+    if (request.method !== "GET") {
+      this.writeError(
+        response,
+        405,
+        requestId,
+        "METHOD_NOT_ALLOWED",
+        "This endpoint only accepts GET.",
+        { Allow: "GET" },
+      );
+      return;
+    }
+    if (hasRequestBody(request)) {
+      this.writeError(response, 400, requestId, "INVALID_REQUEST", "Unexpected request input.");
+      return;
+    }
+    if (!principal.permissions.has("task.read")) {
+      this.writeError(response, 403, requestId, "PERMISSION_DENIED", "Task read permission is required.");
+      return;
+    }
+    const query = parseTaskListQuery(url);
+    if (!query) {
+      this.writeError(response, 400, requestId, "INVALID_REQUEST", "Task list query is invalid.");
+      return;
+    }
+    const source = this.options.taskHistorySource;
+    if (!source?.isTaskHistoryReady()) {
+      this.writeTaskHistoryUnavailable(response, requestId);
+      return;
+    }
+
+    this.options.logger.info("control_api_task_list_requested", {
+      traceId: requestId,
+      taskId: null,
+      botId: query.botId,
+      skillId: null,
+      modelName: null,
+      actorId: principal.subject,
+    });
+    try {
+      const data = await source.listTaskHistory({
+        operationId: requestId,
+        actorId: principal.subject,
+        query,
+        issuedAt: now,
+        expiresAt: new Date(now.getTime() + 10_000),
+      });
+      const body = taskListResponseV1Schema.parse({
+        schemaVersion: "1.0",
+        requestId,
+        data,
+      });
+      this.writeJson(response, 200, body);
+    } catch (cause) {
+      this.writeTaskReadError(response, requestId, null, cause);
+    }
+  }
+
+  private async handleTaskDetailRequest(
+    request: IncomingMessage,
+    response: ServerResponse,
+    requestId: string,
+    now: Date,
+    principal: ApiPrincipal,
+    taskId: string,
+  ): Promise<void> {
+    if (request.method !== "GET") {
+      this.writeError(
+        response,
+        405,
+        requestId,
+        "METHOD_NOT_ALLOWED",
+        "This endpoint only accepts GET.",
+        { Allow: "GET" },
+      );
+      return;
+    }
+    if (hasRequestBody(request)) {
+      this.writeError(response, 400, requestId, "INVALID_REQUEST", "Unexpected request input.");
+      return;
+    }
+    if (!principal.permissions.has("task.read")) {
+      this.writeError(response, 403, requestId, "PERMISSION_DENIED", "Task read permission is required.");
+      return;
+    }
+    const source = this.options.taskHistorySource;
+    if (!source?.isTaskHistoryReady()) {
+      this.writeTaskHistoryUnavailable(response, requestId);
+      return;
+    }
+
+    this.options.logger.info("control_api_task_detail_requested", {
+      traceId: requestId,
+      taskId,
+      botId: null,
+      skillId: null,
+      modelName: null,
+      actorId: principal.subject,
+    });
+    try {
+      const data = await source.getTaskDetail({
+        operationId: requestId,
+        actorId: principal.subject,
+        taskId,
+        issuedAt: now,
+        expiresAt: new Date(now.getTime() + 10_000),
+      });
+      const body = taskDetailResponseV1Schema.parse({
+        schemaVersion: "1.0",
+        requestId,
+        data,
+      });
+      this.writeJson(response, 200, body);
+    } catch (cause) {
+      this.writeTaskReadError(response, requestId, taskId, cause);
+    }
+  }
+
+  private writeTaskReadError(
+    response: ServerResponse,
+    requestId: string,
+    taskId: string | null,
+    cause: unknown,
+  ): void {
+    const code = cause instanceof TaskHistorySourceError
+      ? cause.code
+      : "TASK_HISTORY_UNAVAILABLE";
+    this.options.logger.warn("control_api_task_read_failed", {
+      traceId: requestId,
+      taskId,
+      botId: null,
+      skillId: null,
+      modelName: null,
+      code,
+    });
+    if (code === "TASK_NOT_FOUND") {
+      this.writeError(response, 404, requestId, "TASK_NOT_FOUND", "Task was not found.");
+      return;
+    }
+    if (code === "AUTHORIZATION_REJECTED") {
+      this.writeError(response, 403, requestId, "PERMISSION_DENIED", "Task read authorization was rejected.");
+      return;
+    }
+    if (code === "REQUEST_INVALID") {
+      this.writeError(response, 400, requestId, "INVALID_REQUEST", "Task read request was rejected.");
+      return;
+    }
+    this.writeTaskHistoryUnavailable(response, requestId);
+  }
+
+  private writeTaskHistoryUnavailable(
+    response: ServerResponse,
+    requestId: string,
+  ): void {
+    this.writeError(
+      response,
+      503,
+      requestId,
+      "TASK_HISTORY_UNAVAILABLE",
+      "Task history is unavailable.",
+    );
   }
 
   private async handleStopRequest(
@@ -1034,6 +1244,22 @@ const HTTP_STATUS_TEXT: Readonly<Record<number, string>> = {
   500: "Internal Server Error",
   503: "Service Unavailable",
 };
+
+function parseTaskListQuery(url: URL): TaskHistoryListQueryV1 | null {
+  const allowed = new Set(["limit", "cursor", "status", "botId"]);
+  for (const key of url.searchParams.keys()) {
+    if (!allowed.has(key) || url.searchParams.getAll(key).length !== 1) return null;
+  }
+  const rawLimit = url.searchParams.get("limit");
+  if (rawLimit !== null && !/^[1-9][0-9]{0,2}$/u.test(rawLimit)) return null;
+  const parsed = taskHistoryListQueryV1Schema.safeParse({
+    limit: rawLimit === null ? 25 : Number(rawLimit),
+    cursor: url.searchParams.get("cursor"),
+    status: url.searchParams.get("status"),
+    botId: url.searchParams.get("botId"),
+  });
+  return parsed.success ? parsed.data : null;
+}
 
 function safeUrl(value: string | undefined): URL | null {
   if (!value || value.length > 2_048) return null;

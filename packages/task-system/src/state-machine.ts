@@ -236,7 +236,14 @@ export function transitionTask(
         : command.to === "queued"
           ? null
           : task.failureReason,
-    result: command.to === "completed" ? command.result : task.result,
+    // A durable caller must be able to replay the exact bounded outcome even
+    // when the lifecycle status is failed, cancelled, or expired.
+    result:
+      becomesTerminal
+        ? command.result
+        : task.status === "failed" && command.to === "queued"
+          ? null
+          : task.result,
     evidence:
       command.evidence.length > 0 ? command.evidence : task.evidence,
     ...(releasesLease

@@ -55,10 +55,12 @@ pnpm install
 ## 启动
 
 ```powershell
-pnpm dev
+pnpm start
 ```
 
-浏览器打开 `http://localhost:3000`。
+该命令先构建工作区，再通过 `scripts/start-studio.mjs` 自动接线并启动本机
+Coordinator、Control API 和 Dashboard。浏览器打开 `http://127.0.0.1:3000`。
+`pnpm dev` 只启动 Dashboard 开发服务器，不代表控制链路已连接。
 
 ## 检查
 
@@ -359,6 +361,17 @@ Dashboard 的 Bot 卡片显示真实 L0 状态。旧 Runtime 未上报该字段�
 
 `@minecraft-studio/task-system` 提供任务 Schema、状态机、重试预算、创建幂等、操作重放、租约、参数化 PostgreSQL 仓库、`pg` 连接适配器、BullMQ 队列和 Worker。迁移文件位于 `packages/task-system/migrations`，不会由普通启动命令自动执行。
 
+Coordinator 可把 `/v1/goals` 的完整生命周期写入 PostgreSQL，并通过已认证的 Control Link 向 Control API 提供受 `task.read` 保护的分页列表与详情。Dashboard 的任务页从该读路径恢复刷新前的历史；列表只返回任务摘要，详情只额外返回经授权的 operator goal，不返回 `target`、原始输入、证据或任意结果对象。未配置数据库、连接失败或 schema 未应用到 `0005_task_goal_input.sql` 时，历史明确显示不可用；开启 Local AI 目标执行却没有配置永久事实源时，Coordinator 拒绝启动。
+
+启用前由人工或受控迁移流程依次应用 `0001` 至 `0005`，然后配置：
+
+```dotenv
+COORDINATOR_TASK_POSTGRES_URL=postgresql://<user>:<password>@<approved-host>:5432/<database>
+COORDINATOR_TASK_POSTGRES_SCHEMA=public
+```
+
+连接 URL 只放在进程环境中，不写入仓库。普通启动只校验连接与现有 schema，不创建数据库、不执行迁移，也不把 PostgreSQL 替换为 Redis 或进程内历史。
+
 Worker 只接受 `TaskDispatchV1` 严格消息和预先注册的精确版本任务处理器；任务、派发和注册表中的处理器版本与幂等策略必须完全一致。消息中的文本、代码、Shell、URL 或未知字段不会执行。PostgreSQL 是任务事实源，Redis 只保存队列和临时 Worker 状态。BullMQ 自身不代替领域重试预算。
 
 取消请求先以不可覆盖的操作身份写入 PostgreSQL；持有租约的 Worker 轮询、确认并传播 `AbortSignal`，任务完成、失败、截止时间和租约恢复在同一任务行锁之后必须让已持久化的取消优先。发起取消的 Worker 不需要拥有执行租约；原 Worker 失联且租约过期后，调用方或 Coordinator 恢复循环可完成取消。超时和截止时间同样按数据库权威时间持久化终态。
@@ -374,7 +387,7 @@ $env:TASK_INFRA_TEST_NAMESPACE='studio_test_local_unique01'
 pnpm test:task-infra
 ```
 
-三个变量缺少任意一个时命令会失败，不会静默跳过。测试会构建并启动独立 `task-worker` 子进程，但强制注入 `TASK_WORKER_PURPOSE=isolated-test` 与 `TASK_WORKER_HANDLER_PROFILE=isolated-acceptance`，不会连接 Minecraft。GitHub Actions 使用固定摘要的临时 PostgreSQL/Redis 服务完成同一组测试；2026-08-14 运行 `31793333384` 的 20 项真实基础设施场景全部通过，包括跨 Worker 与独立进程取消。该边界不代表生产基础设施在线；Coordinator 任务启动编排、生产任务处理器、任务 Control API 和 Dashboard 任务看板仍待后续模块接入。
+三个变量缺少任意一个时命令会失败，不会静默跳过。测试会构建并启动独立 `task-worker` 子进程，但强制注入 `TASK_WORKER_PURPOSE=isolated-test` 与 `TASK_WORKER_HANDLER_PROFILE=isolated-acceptance`，不会连接 Minecraft。GitHub Actions 使用固定摘要的临时 PostgreSQL/Redis 服务完成同一组测试；2026-08-14 运行 `31793333384` 的 20 项真实基础设施场景全部通过，包括跨 Worker 与独立进程取消。该边界不代表当前机器的生产基础设施在线；生产任务处理器和部署审批仍保持未接入状态。
 
 ## 安全说明
 

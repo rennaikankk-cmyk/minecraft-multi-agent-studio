@@ -5,6 +5,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   DashboardControlError,
   fetchDashboardBots,
+  fetchDashboardTaskDetail,
+  fetchDashboardTasks,
   loadDashboardControlConfig,
   requestDashboardBotStop,
   requestDashboardGoal,
@@ -72,6 +74,106 @@ describe("Dashboard Control API client", () => {
     });
     await expect(fetchDashboardBots(config(), fetcher)).rejects.toMatchObject({
       code: "INVALID_CONTROL_RESPONSE",
+    });
+  });
+
+  it("reads a bounded task page without exposing redacted task fields", async () => {
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      expect(String(input)).toBe(
+        "http://127.0.0.1:3210/v1/tasks?limit=25&status=running&botId=worker-01",
+      );
+      expect(init?.headers).toMatchObject({
+        Authorization: `Bearer ${TOKEN}`,
+        "X-Studio-Schema-Version": "1.0",
+      });
+      return jsonResponse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: {
+          generatedAt: NOW,
+          tasks: [taskSummary()],
+          nextCursor: null,
+        },
+      });
+    });
+
+    await expect(fetchDashboardTasks(config(), {
+      limit: 25,
+      cursor: null,
+      status: "running",
+      botId: "worker-01",
+    }, fetcher)).resolves.toEqual({
+      generatedAt: NOW,
+      tasks: [taskSummary()],
+      nextCursor: null,
+    });
+  });
+
+  it("reads task detail and rejects a mismatched task identity", async () => {
+    const validFetcher = vi.fn<typeof fetch>(async () => jsonResponse({
+      schemaVersion: "1.0",
+      requestId: UUID,
+      data: {
+        generatedAt: NOW,
+        task: { ...taskSummary(), operatorGoal: "采集附近的木材" },
+      },
+    }));
+    await expect(
+      fetchDashboardTaskDetail(config(), UUID, validFetcher),
+    ).resolves.toMatchObject({
+      task: { taskId: UUID, operatorGoal: "采集附近的木材" },
+    });
+
+    const mismatchFetcher = vi.fn<typeof fetch>(async () => jsonResponse({
+      schemaVersion: "1.0",
+      requestId: UUID,
+      data: {
+        generatedAt: NOW,
+        task: {
+          ...taskSummary(),
+          taskId: "22222222-2222-4222-8222-222222222222",
+          operatorGoal: null,
+        },
+      },
+    }));
+    await expect(
+      fetchDashboardTaskDetail(config(), UUID, mismatchFetcher),
+    ).rejects.toMatchObject({ code: "INVALID_CONTROL_RESPONSE" });
+  });
+
+  it("maps explicit task-history availability and not-found errors", async () => {
+    const unavailableFetcher = vi.fn<typeof fetch>(async () => jsonResponse({
+      schemaVersion: "1.0",
+      requestId: UUID,
+      error: {
+        code: "TASK_HISTORY_UNAVAILABLE",
+        message: "private upstream detail",
+      },
+    }, 503));
+    await expect(fetchDashboardTasks(config(), {
+      limit: 25,
+      cursor: null,
+      status: null,
+      botId: null,
+    }, unavailableFetcher)).rejects.toMatchObject({
+      code: "TASK_HISTORY_UNAVAILABLE",
+      httpStatus: 503,
+      upstreamCode: "TASK_HISTORY_UNAVAILABLE",
+      message: "任务历史后端当前不可用。",
+    });
+
+    const notFoundFetcher = vi.fn<typeof fetch>(async () => jsonResponse({
+      schemaVersion: "1.0",
+      requestId: UUID,
+      error: { code: "TASK_NOT_FOUND", message: "private upstream detail" },
+    }, 404));
+    await expect(
+      fetchDashboardTaskDetail(config(), UUID, notFoundFetcher),
+    ).rejects.toMatchObject({
+      code: "TASK_NOT_FOUND",
+      httpStatus: 404,
+      upstreamCode: "TASK_NOT_FOUND",
+      message: "未找到该任务。",
     });
   });
 
@@ -241,6 +343,24 @@ function detail() {
     position: { x: 1, y: 64, z: 2, dimension: "minecraft:overworld" },
     positionRedacted: false,
     minecraftVersion: null,
+  };
+}
+
+function taskSummary() {
+  return {
+    taskId: UUID,
+    taskType: "operator.goal",
+    title: "采集木材",
+    status: "running" as const,
+    priority: 50,
+    riskLevel: "R1" as const,
+    botId: "worker-01",
+    failureReason: null,
+    createdAt: NOW,
+    updatedAt: NOW,
+    startedAt: NOW,
+    finishedAt: null,
+    revision: 1,
   };
 }
 

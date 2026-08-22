@@ -40,6 +40,8 @@ export {
 } from "./model.js";
 export {
   MAX_EXPIRED_LEASE_BATCH_SIZE,
+  MAX_TASK_HISTORY_BATCH_SIZE,
+  MAX_TASK_LIFECYCLE_BATCH_SIZE,
   MAX_TASK_OUTBOX_ATTEMPTS,
   MAX_TASK_OUTBOX_BATCH_SIZE,
   PostgresTaskRepository,
@@ -60,6 +62,9 @@ export {
   type TaskOutboxClaimOptions,
   type TaskOutboxRetryOptions,
   type TaskOutboxFailureRecord,
+  type TaskLifecycleListOptions,
+  type TaskHistoryListOptions,
+  type TaskHistoryPage,
 } from "./postgres-repository.js";
 export {
   TaskOutboxReconciler,
