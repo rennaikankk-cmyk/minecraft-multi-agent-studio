@@ -320,6 +320,19 @@ describe("planRecovery advances the ladder by attempt", () => {
   });
 });
 
+describe("non-idempotent replay protection", () => {
+  it("escalates an uncertain operation result without retrying", () => {
+    expect(classifyFailure("NON_IDEMPOTENT_RESULT_UNCERTAIN")).toMatchObject({
+      category: "CONTRACT_BUG",
+      source: "table",
+    });
+    expect(planRecovery("NON_IDEMPOTENT_RESULT_UNCERTAIN", 1)).toMatchObject({
+      action: "ESCALATE_TO_OPERATOR",
+      terminal: true,
+    });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // "装不下"与"缺东西"是互为反面的两种失败。合成一类会让满背包走上
 // ACQUIRE_RESOURCES_THEN_RETRY —— 也就是"再去弄更多东西回来" —— 方向正好相反,

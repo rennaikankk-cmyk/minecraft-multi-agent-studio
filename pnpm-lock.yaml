@@ -99,6 +99,9 @@ importers:
       '@minecraft-studio/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+      '@minecraft-studio/skills':
+        specifier: workspace:*
+        version: link:../../packages/skills
       '@minecraft-studio/task-system':
         specifier: workspace:*
         version: link:../../packages/task-system

@@ -22,6 +22,7 @@
     "@minecraft-studio/ai-router": "workspace:*",
     "@minecraft-studio/observability": "workspace:*",
     "@minecraft-studio/protocol": "workspace:*",
+    "@minecraft-studio/skills": "workspace:*",
     "@minecraft-studio/task-system": "workspace:*",
     "ws": "8.21.1",
     "zod": "4.4.3"

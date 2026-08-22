@@ -21,6 +21,7 @@ import {
   type ControlAuthorizationContext,
   type RuntimeLinkAuthenticateV1,
   type RuntimeLinkChallengeV1,
+  type RuntimeLinkStateRequestV1,
   type SkillCancellationV1,
   type SkillExecutionResultV1,
   type SkillInvocationV1,
@@ -297,6 +298,10 @@ export class RuntimeLinkClient {
         this.rejectSocket(socket, "authentication_required");
         return;
       }
+      if (message.type === "runtime.link.state-request.v1") {
+        this.handleStateRequest(socket, message);
+        return;
+      }
       if (message.type === "runtime.link.telemetry-ack.v1") {
         this.handleTelemetryAck(socket, message);
         return;
@@ -312,6 +317,32 @@ export class RuntimeLinkClient {
       void this.handleStopCommand(socket, message);
     } catch {
       this.rejectSocket(socket, "client_state_invalid");
+    }
+  }
+
+  private handleStateRequest(
+    socket: WebSocket,
+    request: RuntimeLinkStateRequestV1,
+  ): void {
+    const now = validNow(this.now());
+    if (
+      request.source.service !== "coordinator" ||
+      !this.coordinatorInstanceId ||
+      request.source.instanceId !== this.coordinatorInstanceId ||
+      request.botId !== this.options.botId ||
+      request.payload.expectedRuntimeInstanceId !==
+        this.options.runtimeInstanceId ||
+      !timestampWithinSkew(request.timestamp, now, MAX_CLOCK_SKEW_MS) ||
+      now.getTime() > Date.parse(request.payload.expiresAt)
+    ) {
+      this.rejectSocket(socket, "state_request_rejected");
+      return;
+    }
+
+    try {
+      this.options.publishCurrentState();
+    } catch {
+      this.rejectSocket(socket, "state_publish_failed");
     }
   }
 

@@ -9,6 +9,7 @@ import {
   runtimeLinkChallengeV1Schema,
   runtimeLinkClientProofInput,
   runtimeLinkServerProofInput,
+  runtimeLinkStateRequestV1Schema,
   runtimeLinkTelemetryAckV1Schema,
   skillExecutionResultV1Schema,
   skillInvocationV1Schema,
@@ -40,6 +41,24 @@ const authenticate = {
     runtimeInstanceId: "runtime-01",
     keyId: "runtime-key-01",
     clientProof: "C".repeat(43),
+  },
+} as const;
+
+const stateRequest = {
+  schemaVersion: "1.0",
+  messageId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  traceId: "trace-state-request",
+  timestamp: "2026-08-07T00:00:03.000Z",
+  source: {
+    service: "coordinator",
+    instanceId: "coordinator-01",
+  },
+  botId: "studio-bot-01",
+  type: "runtime.link.state-request.v1",
+  payload: {
+    expectedRuntimeInstanceId: "runtime-01",
+    afterStatusSequence: 42,
+    expiresAt: "2026-08-07T00:01:03.000Z",
   },
 } as const;
 
@@ -107,6 +126,103 @@ describe("Runtime Link protocol", () => {
       runtimeLinkTelemetryAckV1Schema.parse({
         ...ack,
         payload: { ...ack.payload, reason: "duplicate_message" },
+      }),
+    ).toThrow();
+  });
+
+  it("strictly parses a versioned request for fresh runtime state", () => {
+    expect(runtimeLinkStateRequestV1Schema.parse(stateRequest)).toEqual(
+      stateRequest,
+    );
+    expect(parseRuntimeLinkServerMessage(stateRequest)).toEqual(stateRequest);
+    expect(() =>
+      runtimeLinkStateRequestV1Schema.parse({
+        ...stateRequest,
+        executable: "publishCurrentState",
+      }),
+    ).toThrow();
+    expect(() =>
+      runtimeLinkStateRequestV1Schema.parse({
+        ...stateRequest,
+        payload: { ...stateRequest.payload, rawAction: "bot.entity" },
+      }),
+    ).toThrow();
+  });
+
+  it("rejects invalid runtime state request identities and sequences", () => {
+    expect(() =>
+      runtimeLinkStateRequestV1Schema.parse({
+        ...stateRequest,
+        traceId: "invalid trace",
+      }),
+    ).toThrow();
+    expect(() =>
+      runtimeLinkStateRequestV1Schema.parse({
+        ...stateRequest,
+        source: { ...stateRequest.source, service: "bot-runtime" },
+      }),
+    ).toThrow();
+    expect(() =>
+      runtimeLinkStateRequestV1Schema.parse({
+        ...stateRequest,
+        source: { ...stateRequest.source, instanceId: "invalid identity" },
+      }),
+    ).toThrow();
+    expect(() =>
+      runtimeLinkStateRequestV1Schema.parse({
+        ...stateRequest,
+        botId: "",
+      }),
+    ).toThrow();
+    expect(() =>
+      runtimeLinkStateRequestV1Schema.parse({
+        ...stateRequest,
+        payload: {
+          ...stateRequest.payload,
+          expectedRuntimeInstanceId: " runtime-01",
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      runtimeLinkStateRequestV1Schema.parse({
+        ...stateRequest,
+        payload: { ...stateRequest.payload, afterStatusSequence: -1 },
+      }),
+    ).toThrow();
+    expect(() =>
+      runtimeLinkStateRequestV1Schema.parse({
+        ...stateRequest,
+        payload: { ...stateRequest.payload, afterStatusSequence: 1.5 },
+      }),
+    ).toThrow();
+    expect(() =>
+      runtimeLinkStateRequestV1Schema.parse({
+        ...stateRequest,
+        payload: {
+          ...stateRequest.payload,
+          afterStatusSequence: Number.MAX_SAFE_INTEGER + 1,
+        },
+      }),
+    ).toThrow();
+  });
+
+  it("bounds runtime state requests to a positive 60 second lifetime", () => {
+    expect(runtimeLinkStateRequestV1Schema.parse(stateRequest)).toEqual(
+      stateRequest,
+    );
+    expect(() =>
+      runtimeLinkStateRequestV1Schema.parse({
+        ...stateRequest,
+        payload: { ...stateRequest.payload, expiresAt: stateRequest.timestamp },
+      }),
+    ).toThrow();
+    expect(() =>
+      runtimeLinkStateRequestV1Schema.parse({
+        ...stateRequest,
+        payload: {
+          ...stateRequest.payload,
+          expiresAt: "2026-08-07T00:01:03.001Z",
+        },
       }),
     ).toThrow();
   });

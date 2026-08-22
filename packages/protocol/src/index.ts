@@ -126,6 +126,7 @@ export {
   runtimeLinkClientProofInput,
   runtimeLinkServerMessageV1Schema,
   runtimeLinkServerProofInput,
+  runtimeLinkStateRequestV1Schema,
   runtimeLinkTelemetryAckReasonSchema,
   runtimeLinkTelemetryAckV1Schema,
   type RuntimeLinkAcceptedV1,
@@ -135,6 +136,7 @@ export {
   type RuntimeLinkProofContext,
   type RuntimeLinkServerMessageV1,
   type RuntimeLinkServerProofContext,
+  type RuntimeLinkStateRequestV1,
   type RuntimeLinkTelemetryAckReason,
   type RuntimeLinkTelemetryAckV1,
 } from "./runtime-link.js";

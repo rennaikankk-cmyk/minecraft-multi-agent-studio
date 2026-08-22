@@ -9,6 +9,7 @@ import {
   runtimeLinkClientProofInput,
   runtimeLinkServerProofInput,
   type BotHeartbeatV1,
+  type BotStatusV1,
   type ControlAuthorizationContext,
   type RuntimeLinkChallengeV1,
   type RuntimeLinkProofContext,
@@ -171,6 +172,119 @@ describe("Coordinator Runtime Link server", () => {
         outcome: "completed",
       },
     });
+  });
+
+  it("requests and waits for a strictly newer status from the same Runtime", async () => {
+    const { registry, server, url } = await startServer();
+    const unsubscribe = trackRegistryUnsubscribe(registry);
+    const socket = await authenticateAndActivate(url);
+    const initialStatus = statusMessage(2);
+    const initialAck = nextServerMessage(socket);
+    socket.send(JSON.stringify(initialStatus));
+    await initialAck;
+
+    const received = nextServerMessage(socket);
+    const pending = server.requestFreshStatus(
+      BOT_ID,
+      RUNTIME_ID,
+      initialStatus.payload.sequence,
+      "trace-fresh-status",
+      new AbortController().signal,
+    );
+    await expect(received).resolves.toMatchObject({
+      type: "runtime.link.state-request.v1",
+      traceId: "trace-fresh-status",
+      source: { service: "coordinator", instanceId: "coordinator-test" },
+      botId: BOT_ID,
+      payload: {
+        expectedRuntimeInstanceId: RUNTIME_ID,
+        afterStatusSequence: initialStatus.payload.sequence,
+        expiresAt: new Date(NOW.getTime() + 30_000).toISOString(),
+      },
+    });
+
+    let settled = false;
+    void pending.then(() => {
+      settled = true;
+    });
+    const heartbeatAck = nextServerMessage(socket);
+    socket.send(JSON.stringify(heartbeatMessage(3)));
+    await heartbeatAck;
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    const freshStatus = statusMessage(4);
+    const freshAck = nextServerMessage(socket);
+    socket.send(JSON.stringify(freshStatus));
+    await freshAck;
+    await expect(pending).resolves.toBeUndefined();
+    expect(registry.get(BOT_ID, NOW)?.currentStatus?.sequence).toBe(4);
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects or cleans a fresh-status wait on identity mismatch, abort, and disconnect", async () => {
+    const { registry, server, url } = await startServer();
+    const unsubscribe = trackRegistryUnsubscribe(registry);
+    const socket = await authenticateAndActivate(url);
+
+    await expect(
+      server.requestFreshStatus(
+        BOT_ID,
+        "different-runtime",
+        1,
+        "trace-runtime-mismatch",
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ code: "RUNTIME_LINK_UNAVAILABLE" });
+
+    const abortController = new AbortController();
+    const abortReceived = nextServerMessage(socket);
+    const aborted = server.requestFreshStatus(
+      BOT_ID,
+      RUNTIME_ID,
+      1,
+      "trace-status-abort",
+      abortController.signal,
+    );
+    await abortReceived;
+    abortController.abort();
+    await expect(aborted).rejects.toMatchObject({ code: "RUNTIME_LINK_ABORTED" });
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+
+    const disconnectReceived = nextServerMessage(socket);
+    const disconnected = server.requestFreshStatus(
+      BOT_ID,
+      RUNTIME_ID,
+      1,
+      "trace-status-disconnect",
+      new AbortController().signal,
+    );
+    await disconnectReceived;
+    socket.terminate();
+    await expect(disconnected).rejects.toMatchObject({
+      code: "RUNTIME_LINK_UNAVAILABLE",
+    });
+    expect(unsubscribe).toHaveBeenCalledTimes(2);
+  });
+
+  it("cleans a fresh-status wait when the Runtime Link server stops", async () => {
+    const { registry, server, url } = await startServer();
+    const unsubscribe = trackRegistryUnsubscribe(registry);
+    const socket = await authenticateAndActivate(url);
+    const received = nextServerMessage(socket);
+    const pending = server.requestFreshStatus(
+      BOT_ID,
+      RUNTIME_ID,
+      1,
+      "trace-status-stop",
+      new AbortController().signal,
+    );
+    await received;
+
+    const stopped = server.stop();
+    await expect(pending).rejects.toMatchObject({ code: "RUNTIME_LINK_STOPPED" });
+    await stopped;
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
   });
 
   it("propagates caller cancellation to an active Runtime skill", async () => {
@@ -460,6 +574,43 @@ function heartbeatMessage(sequence: number): BotHeartbeatV1 {
   };
 }
 
+function statusMessage(sequence: number): BotStatusV1 {
+  return {
+    schemaVersion: "1.0",
+    messageId: testUuid(1_000 + sequence),
+    traceId: "trace-runtime-status",
+    timestamp: NOW.toISOString(),
+    source: { service: "bot-runtime", instanceId: RUNTIME_ID },
+    botId: BOT_ID,
+    type: "bot.status.v1",
+    payload: {
+      serverProfileId: "isolated-test",
+      runtimeInstanceId: RUNTIME_ID,
+      sequence,
+      observedAt: NOW.toISOString(),
+      connectionState: "online",
+      health: { current: 20, maximum: 20 },
+      food: { level: 20, saturation: 5 },
+      armorPoints: 0,
+      position: {
+        x: 0,
+        y: 64,
+        z: 0,
+        dimension: "minecraft:overworld",
+      },
+      latencyMs: null,
+      currentTask: null,
+      safety: {
+        mode: "monitoring",
+        normalTasksPaused: false,
+        activeRisks: [],
+        lastDecisionId: null,
+        lastAction: null,
+      },
+    },
+  };
+}
+
 function stopCommand(commandId: string, traceId: string): StopBotCommandV1 {
   return {
     schemaVersion: "1.0",
@@ -556,6 +707,19 @@ function authorizationContext(
     permissions: new Set(["bot.stop"]),
     now: NOW,
   };
+}
+
+function trackRegistryUnsubscribe(registry: BotRegistry) {
+  const unsubscribe = vi.fn();
+  const subscribe = registry.subscribe.bind(registry);
+  vi.spyOn(registry, "subscribe").mockImplementation((listener) => {
+    const remove = subscribe(listener);
+    return () => {
+      unsubscribe();
+      remove();
+    };
+  });
+  return unsubscribe;
 }
 
 function hmac(value: string): string {

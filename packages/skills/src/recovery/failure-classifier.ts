@@ -176,6 +176,10 @@ const EXPLICIT: Readonly<Record<string, FailureCategory>> = Object.freeze({
   // pathfinder 抛错常是一次性的（区块没加载、目标瞬时被占）：先原样重试。
   PATHFINDER_GOTO_FAILED: "TRANSIENT",
 
+  // A non-idempotent operation returned an outcome that cannot be proved safe
+  // to replay. Never route this through a retry rung.
+  NON_IDEMPOTENT_RESULT_UNCERTAIN: "CONTRACT_BUG",
+
   // —— 契约/接线问题：重试一万次也一样 ——
   SKILL_CAPABILITY_UNSUPPORTED: "UNSUPPORTED",
   SKILL_CAPABILITY_UNAVAILABLE: "UNSUPPORTED",
@@ -392,5 +396,4 @@ export function isRecoverableFailure(errorCode: string): boolean {
 export function recoveryLadderFor(category: FailureCategory): readonly RecoveryAction[] {
   return LADDERS[category];
 }
-
 

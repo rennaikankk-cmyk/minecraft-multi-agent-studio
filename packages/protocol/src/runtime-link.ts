@@ -110,6 +110,50 @@ export const runtimeLinkTelemetryAckV1Schema = z
     }
   });
 
+export const runtimeLinkStateRequestV1Schema = z
+  .object({
+    ...runtimeLinkEnvelopeShape,
+    traceId: identifierSchema,
+    source: z
+      .object({
+        service: z.literal("coordinator"),
+        instanceId: identifierSchema,
+      })
+      .strict(),
+    botId: identifierSchema,
+    type: z.literal("runtime.link.state-request.v1"),
+    payload: z
+      .object({
+        expectedRuntimeInstanceId: identifierSchema,
+        afterStatusSequence: z
+          .number()
+          .int()
+          .nonnegative()
+          .max(Number.MAX_SAFE_INTEGER),
+        expiresAt: timestampSchema,
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((message, context) => {
+    const requestedAt = Date.parse(message.timestamp);
+    const expiresAt = Date.parse(message.payload.expiresAt);
+    if (expiresAt <= requestedAt) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "expiresAt"],
+        message: "Runtime state request expiry must follow its timestamp.",
+      });
+    }
+    if (expiresAt - requestedAt > 60_000) {
+      context.addIssue({
+        code: "custom",
+        path: ["payload", "expiresAt"],
+        message: "Runtime state request lifetime cannot exceed 60 seconds.",
+      });
+    }
+  });
+
 export const runtimeLinkClientMessageV1Schema = z.union([
   runtimeLinkAuthenticateV1Schema,
   botTelemetryMessageV1Schema,
@@ -121,6 +165,7 @@ export const runtimeLinkServerMessageV1Schema = z.union([
   runtimeLinkChallengeV1Schema,
   runtimeLinkAcceptedV1Schema,
   runtimeLinkTelemetryAckV1Schema,
+  runtimeLinkStateRequestV1Schema,
   stopBotCommandV1Schema,
   skillCancellationV1Schema,
   skillInvocationV1Schema,
@@ -138,6 +183,9 @@ export type RuntimeLinkTelemetryAckReason = z.infer<
 >;
 export type RuntimeLinkTelemetryAckV1 = z.infer<
   typeof runtimeLinkTelemetryAckV1Schema
+>;
+export type RuntimeLinkStateRequestV1 = z.infer<
+  typeof runtimeLinkStateRequestV1Schema
 >;
 export type RuntimeLinkClientMessageV1 = z.infer<
   typeof runtimeLinkClientMessageV1Schema

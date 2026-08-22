@@ -2,6 +2,10 @@ import type {
   AIScheduledResult,
   GenerateResult,
 } from "@minecraft-studio/ai-router";
+import type {
+  SkillExecutionResultV1,
+  SkillJsonValue,
+} from "@minecraft-studio/protocol";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
@@ -290,6 +294,358 @@ describe("CoordinatorLocalPlanner", () => {
     expect(sendSkillInvocation).not.toHaveBeenCalled();
   });
 
+  it("reobserves and safely retries a pre-execution rejection with fresh authorization", async () => {
+    const planning = planningRegistry();
+    const initial = planning.get(BOT_ID, NOW)!;
+    expect(initial).toMatchObject({
+      connectionState: "online",
+      currentStatus: { safety: { normalTasksPaused: false } },
+    });
+    let statusSequence = initial.currentStatus!.sequence;
+    const calls: string[] = [];
+    let rejectedOakPlanks = false;
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => {
+      const key = invocation.payload.skillId;
+      calls.push(key);
+      if (
+        key === "craft.item" &&
+        inputField(invocation.payload.input, "itemName") === "oak_planks" &&
+        !rejectedOakPlanks
+      ) {
+        rejectedOakPlanks = true;
+        return skillResult(
+          invocation,
+          "rejected",
+          "SKILL_PRECONDITION_FAILED",
+          0,
+        );
+      }
+      return skillResult(invocation, "completed");
+    });
+    const requestFreshStatus = vi.fn<
+      NonNullable<SkillInvocationTransport["requestFreshStatus"]>
+    >(async (_botId, _runtimeInstanceId, afterStatusSequence) => {
+      expect(afterStatusSequence).toBe(statusSequence);
+      statusSequence += 1;
+    });
+    const get = vi.fn(() => ({
+      ...initial,
+      currentStatus: {
+        ...initial.currentStatus!,
+        sequence: statusSequence,
+      },
+    }));
+    const generate = vi.fn(async (options) =>
+      aiResult(
+        JSON.stringify({
+          action: "plan_items",
+          botId: BOT_ID,
+          taskId: "task-01",
+          goals: [{ itemName: "crafting_table", count: 1 }],
+          reasonCode: "ADVANCE_TASK",
+        }),
+        options.requestId,
+      ),
+    );
+    const planner = new CoordinatorLocalPlanner({
+      ai: { generate },
+      registry: { get },
+      transport: {
+        sendSkillInvocation,
+        requestFreshStatus,
+      },
+      coordinatorInstanceId: "coordinator-01",
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    const result = await planner.planAndDispatch({
+      ...planRequest(),
+      operatorGoal: "Craft one crafting_table from nearby resources.",
+    });
+
+    expect(result).toMatchObject({
+      action: "skill_result",
+      result: { payload: { outcome: "completed" } },
+    });
+    expect(calls).toEqual([
+      "collect.block",
+      "craft.item",
+      "craft.item",
+      "craft.item",
+    ]);
+    expect(new Set(sendSkillInvocation.mock.calls.map(([invocation]) =>
+      invocation.payload.invocationId,
+    )).size).toBe(4);
+    expect(new Set(sendSkillInvocation.mock.calls.map(([invocation]) =>
+      invocation.payload.authorization.decisionId,
+    )).size).toBe(4);
+    expect(get).toHaveBeenCalledTimes(7);
+    expect(requestFreshStatus).toHaveBeenCalledTimes(1);
+    expect(sendSkillInvocation.mock.calls[0]![0].payload.input).toMatchObject({
+      blockName: "oak_log",
+      maxCount: 1,
+      maxDistance: 16,
+      dimension: "minecraft:overworld",
+      serverProfileId: "isolated-test",
+    });
+    expect(sendSkillInvocation.mock.calls[1]![0].payload.input).toMatchObject({
+      itemName: "oak_planks",
+      count: 1,
+      craftingTable: null,
+      serverProfileId: "isolated-test",
+    });
+    const generationSchema = z.toJSONSchema(generate.mock.calls[0]![0].schema);
+    expect(generationSchema.oneOf?.some(
+      (branch) => branch.properties?.action?.const === "plan_items",
+    )).toBe(true);
+  });
+
+  it("accepts a grounded Chinese single-item goal without exposing aliases to the model", async () => {
+    const planning = planningRegistry();
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => skillResult(invocation, "completed"));
+    const planner = resourcePlanner(planning, { sendSkillInvocation });
+
+    await expect(
+      planner.planAndDispatch({
+        ...resourcePlanRequest(),
+        operatorGoal: "用附近的原木制作一个工作台",
+      }),
+    ).resolves.toMatchObject({
+      action: "skill_result",
+      result: { payload: { outcome: "completed" } },
+    });
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    [[{ itemName: "crafting_table", count: 32 }]],
+    [[
+      { itemName: "crafting_table", count: 1 },
+      { itemName: "crafting_table", count: 1 },
+    ]],
+  ] as const)("rejects model-amplified resource goals before dispatch", async (goals) => {
+    const planning = planningRegistry();
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >();
+    const planner = resourcePlanner(
+      planning,
+      { sendSkillInvocation },
+      goals,
+    );
+
+    await expect(
+      planner.planAndDispatch(resourcePlanRequest()),
+    ).rejects.toMatchObject({ code: "PLANNER_DECISION_INVALID" });
+    expect(sendSkillInvocation).not.toHaveBeenCalled();
+  });
+
+  it("does not accept a completed collect result that produced no items", async () => {
+    const planning = planningRegistry();
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) =>
+      skillResult(invocation, "completed", undefined, 1, {
+        blockName: "oak_log",
+        targetsFound: 0,
+        itemsCollected: 0,
+      }),
+    );
+    const planner = resourcePlanner(planning, { sendSkillInvocation });
+
+    await expect(
+      planner.planAndDispatch(resourcePlanRequest()),
+    ).rejects.toMatchObject({ code: "PLANNER_GOAL_EXECUTION_FAILED" });
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not accept a completed craft result with partial output", async () => {
+    const planning = planningRegistry();
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => {
+      if (
+        invocation.payload.skillId === "craft.item" &&
+        inputField(invocation.payload.input, "itemName") === "oak_planks"
+      ) {
+        return skillResult(invocation, "completed", undefined, 1, {
+          itemName: "oak_planks",
+          requestedCount: 1,
+          craftedCount: 1,
+          usedCraftingTable: false,
+        });
+      }
+      return skillResult(invocation, "completed");
+    });
+    const planner = resourcePlanner(planning, { sendSkillInvocation });
+
+    await expect(
+      planner.planAndDispatch(resourcePlanRequest()),
+    ).rejects.toMatchObject({ code: "PLANNER_GOAL_EXECUTION_FAILED" });
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ["failed", "SKILL_CAPABILITY_FAILED", 1],
+    ["timed_out", "SKILL_TIMEOUT", 1],
+    ["cancelled", "SKILL_CANCELLED", 1],
+    ["rejected", "SKILL_PRECONDITION_FAILED", 1],
+  ] as const)(
+    "does not replay a non-idempotent %s result after execution may have started",
+    async (outcome, errorCode, attempts) => {
+      const planning = planningRegistry();
+      const sendSkillInvocation = vi.fn<
+        SkillInvocationTransport["sendSkillInvocation"]
+      >(async (invocation) => {
+        if (
+          invocation.payload.skillId === "craft.item" &&
+          inputField(invocation.payload.input, "itemName") === "oak_planks"
+        ) {
+          return skillResult(invocation, outcome, errorCode, attempts);
+        }
+        return skillResult(invocation, "completed");
+      });
+      const planner = resourcePlanner(planning, { sendSkillInvocation });
+
+      await expect(
+        planner.planAndDispatch(resourcePlanRequest()),
+      ).rejects.toMatchObject({ code: "PLANNER_GOAL_EXECUTION_FAILED" });
+      expect(sendSkillInvocation).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("fails closed when a non-idempotent transport outcome is unknown", async () => {
+    const planning = planningRegistry();
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => {
+      if (invocation.payload.skillId === "craft.item") {
+        throw new Error("injected_unknown_transport_outcome");
+      }
+      return skillResult(invocation, "completed");
+    });
+    const planner = resourcePlanner(planning, { sendSkillInvocation });
+
+    await expect(
+      planner.planAndDispatch(resourcePlanRequest()),
+    ).rejects.toMatchObject({ code: "PLANNER_GOAL_EXECUTION_FAILED" });
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not turn a non-idempotent dispatch timeout into a fresh invocation", async () => {
+    const planning = planningRegistry();
+    const current = planning.get(BOT_ID, NOW)!;
+    const timeoutRegistry = {
+      get: () => ({
+        ...current,
+        skillCatalog: {
+          ...current.skillCatalog!,
+          skills: current.skillCatalog!.skills.map((skill) =>
+            skill.skillId === "craft.item"
+              ? { ...skill, timeoutMs: 10 }
+              : skill,
+          ),
+        },
+      }),
+    };
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation, _runtimeInstanceId, signal) => {
+      if (invocation.payload.skillId !== "craft.item") {
+        return skillResult(invocation, "completed");
+      }
+      await new Promise<void>((_resolve, reject) => {
+        const rejectAborted = () => reject(new Error("dispatch_timed_out"));
+        if (signal.aborted) {
+          rejectAborted();
+          return;
+        }
+        signal.addEventListener("abort", rejectAborted, { once: true });
+      });
+      throw new Error("unreachable_dispatch_completion");
+    });
+    const planner = resourcePlanner(timeoutRegistry, { sendSkillInvocation });
+
+    await expect(
+      planner.planAndDispatch(resourcePlanRequest()),
+    ).rejects.toMatchObject({ code: "PLANNER_GOAL_EXECUTION_FAILED" });
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not report an earlier successful step when a later target cannot be bound", async () => {
+    const planning = planningRegistry();
+    const initial = planning.get(BOT_ID, NOW)!;
+    let statusSequence = initial.currentStatus!.sequence;
+    let firstStepCompleted = false;
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => {
+      firstStepCompleted = true;
+      return skillResult(invocation, "completed");
+    });
+    const planner = new CoordinatorLocalPlanner({
+      ai: {
+        generate: async (options) =>
+          aiResult(JSON.stringify({
+            action: "plan_items",
+            botId: BOT_ID,
+            taskId: "task-01",
+            goals: [{ itemName: "crafting_table", count: 1 }],
+            reasonCode: "ADVANCE_TASK",
+          }), options.requestId),
+      },
+      registry: {
+        get: () => {
+          const current = {
+            ...initial,
+            currentStatus: {
+              ...initial.currentStatus!,
+              sequence: statusSequence,
+            },
+          };
+          return firstStepCompleted
+            ? {
+                ...current,
+                currentStatus: {
+                  ...current.currentStatus!,
+                  position: null,
+                },
+              }
+            : current;
+        },
+      },
+      transport: {
+        sendSkillInvocation,
+        requestFreshStatus: async (
+          _botId,
+          _runtimeInstanceId,
+          afterStatusSequence,
+        ) => {
+          expect(afterStatusSequence).toBe(statusSequence);
+          statusSequence += 1;
+        },
+      },
+      coordinatorInstanceId: "coordinator-01",
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    await expect(
+      planner.planAndDispatch({
+        ...planRequest(),
+        operatorGoal: "Craft one crafting_table from nearby resources.",
+      }),
+    ).rejects.toMatchObject({
+      code: "STEP_TARGET_NOT_FOUND",
+    });
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(1);
+  });
+
   it("fails closed before model use when L0 safety pauses normal actions", async () => {
     const current = registry.get(BOT_ID, NOW)!;
     const pausedRegistry = {
@@ -305,10 +661,11 @@ describe("CoordinatorLocalPlanner", () => {
       }),
     };
     const generate = vi.fn();
+    const sendSkillInvocation = vi.fn();
     const planner = new CoordinatorLocalPlanner({
       ai: { generate },
       registry: pausedRegistry,
-      transport: { sendSkillInvocation: vi.fn() },
+      transport: { sendSkillInvocation },
       coordinatorInstanceId: "coordinator-01",
       now: () => NOW,
       randomId: uuidSequence(),
@@ -318,6 +675,32 @@ describe("CoordinatorLocalPlanner", () => {
       code: "PLANNER_SAFETY_PAUSED",
     });
     expect(generate).not.toHaveBeenCalled();
+    expect(sendSkillInvocation).not.toHaveBeenCalled();
+  });
+
+  it("fails closed before model use when the bot is offline", async () => {
+    const current = registry.get(BOT_ID, NOW)!;
+    const generate = vi.fn();
+    const sendSkillInvocation = vi.fn();
+    const planner = new CoordinatorLocalPlanner({
+      ai: { generate },
+      registry: {
+        get: () => ({
+          ...current,
+          connectionState: "offline" as const,
+        }),
+      },
+      transport: { sendSkillInvocation },
+      coordinatorInstanceId: "coordinator-01",
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    await expect(planner.planAndDispatch(planRequest())).rejects.toMatchObject({
+      code: "PLANNER_BOT_UNAVAILABLE",
+    });
+    expect(generate).not.toHaveBeenCalled();
+    expect(sendSkillInvocation).not.toHaveBeenCalled();
   });
 
   it("fails closed before model use when the advertised catalog exceeds the prompt limit", async () => {
@@ -374,6 +757,42 @@ function plannerWith(
     now: () => NOW,
     randomId: uuidSequence(),
   });
+}
+
+function resourcePlanner(
+  planning: Pick<BotRegistry, "get">,
+  transport: SkillInvocationTransport,
+  goals: readonly Readonly<{ itemName: string; count: number }>[] = [
+    { itemName: "crafting_table", count: 1 },
+  ],
+): CoordinatorLocalPlanner {
+  return new CoordinatorLocalPlanner({
+    ai: {
+      generate: async (options) =>
+        aiResult(
+          JSON.stringify({
+            action: "plan_items",
+            botId: BOT_ID,
+            taskId: "task-01",
+            goals,
+            reasonCode: "ADVANCE_TASK",
+          }),
+          options.requestId,
+        ),
+    },
+    registry: { get: () => planning.get(BOT_ID, NOW) },
+    transport,
+    coordinatorInstanceId: "coordinator-01",
+    now: () => NOW,
+    randomId: uuidSequence(),
+  });
+}
+
+function resourcePlanRequest(): LocalPlanRequest {
+  return {
+    ...planRequest(),
+    operatorGoal: "Craft one crafting_table from nearby resources.",
+  };
 }
 
 function planRequest(): LocalPlanRequest {
@@ -465,6 +884,83 @@ function readyRegistry(): BotRegistry {
   return registry;
 }
 
+function planningRegistry(): BotRegistry {
+  const planning = readyRegistry();
+  const now = NOW.toISOString();
+  planning.ingest({
+    schemaVersion: "1.0",
+    messageId: uuid(3),
+    traceId: "trace-registry",
+    timestamp: now,
+    source: { service: "bot-runtime", instanceId: RUNTIME_ID },
+    botId: BOT_ID,
+    type: "bot.skill-catalog.v1",
+    payload: {
+      serverProfileId: "isolated-test",
+      runtimeInstanceId: RUNTIME_ID,
+      sequence: 3,
+      observedAt: now,
+      minecraftVersion: "1.21.11",
+      protocolVersion: 774,
+      skills: [
+        catalogEntry("collect.block", {
+          type: "object",
+          properties: {
+            blockName: { type: "string" },
+            maxCount: { type: "integer", minimum: 1, maximum: 32 },
+            maxDistance: { type: "integer", minimum: 2, maximum: 32 },
+            dimension: { type: "string" },
+            serverProfileId: { type: "string" },
+          },
+          required: ["blockName", "maxCount", "maxDistance", "dimension", "serverProfileId"],
+          additionalProperties: false,
+        }),
+        catalogEntry("craft.item", {
+          type: "object",
+          properties: {
+            itemName: { type: "string" },
+            count: { type: "integer", minimum: 1, maximum: 64 },
+            craftingTable: {
+              anyOf: [
+                { type: "null" },
+                {
+                  type: "object",
+                  properties: {
+                    x: { type: "integer" },
+                    y: { type: "integer" },
+                    z: { type: "integer" },
+                  },
+                  required: ["x", "y", "z"],
+                  additionalProperties: false,
+                },
+              ],
+            },
+            dimension: { type: "string" },
+            serverProfileId: { type: "string" },
+          },
+          required: ["itemName", "count", "craftingTable", "dimension", "serverProfileId"],
+          additionalProperties: false,
+        }),
+      ],
+    },
+  }, NOW);
+  return planning;
+}
+
+function catalogEntry(skillId: string, inputSchema: Record<string, unknown>) {
+  return {
+    skillId,
+    skillVersion: "1.0.0",
+    availability: "available" as const,
+    verification: "unverified" as const,
+    inputSchema,
+    timeoutMs: 20_000,
+    idempotent: false,
+    selectedVariantId: "portable",
+    unavailableReasons: [],
+  };
+}
+
 function aiResult(
   content: string,
   requestId: string,
@@ -482,6 +978,94 @@ function aiResult(
     executionTimeMs: 10,
     totalTimeMs: 10,
   };
+}
+
+function skillResult(
+  invocation: {
+    traceId: string;
+    botId: string;
+    taskId: string;
+    payload: {
+      invocationId: string;
+      skillId: string;
+      skillVersion: string;
+      input?: SkillJsonValue;
+    };
+  },
+  outcome: SkillExecutionResultV1["payload"]["outcome"],
+  errorCode = "SKILL_HANDLER_FAILED",
+  attempts = outcome === "rejected" ? 0 : 1,
+  completedOutput = completedOutputForInvocation(invocation),
+): SkillExecutionResultV1 {
+  return {
+    schemaVersion: "1.0" as const,
+    messageId: uuid(
+      500 +
+        ["completed", "rejected", "failed", "cancelled", "timed_out"].indexOf(
+          outcome,
+        ),
+    ),
+    traceId: invocation.traceId,
+    timestamp: NOW.toISOString(),
+    source: { service: "bot-runtime" as const, instanceId: RUNTIME_ID },
+    botId: invocation.botId,
+    taskId: invocation.taskId,
+    type: "skill.result.v1" as const,
+    payload:
+      outcome === "completed"
+        ? {
+            invocationId: invocation.payload.invocationId,
+            skillId: invocation.payload.skillId,
+            skillVersion: invocation.payload.skillVersion,
+            completedAt: NOW.toISOString(),
+            outcome: "completed" as const,
+            attempts,
+            output: completedOutput,
+          }
+        : {
+            invocationId: invocation.payload.invocationId,
+            skillId: invocation.payload.skillId,
+            skillVersion: invocation.payload.skillVersion,
+            completedAt: NOW.toISOString(),
+            outcome,
+            attempts,
+            errorCode,
+          },
+  };
+}
+
+function completedOutputForInvocation(
+  invocation: Parameters<typeof skillResult>[0],
+): SkillJsonValue {
+  if (invocation.payload.skillId === "collect.block") {
+    const blockName = inputField(invocation.payload.input, "blockName");
+    const maxCount = Number(inputField(invocation.payload.input, "maxCount"));
+    return {
+      blockName: String(blockName),
+      targetsFound: maxCount,
+      itemsCollected: maxCount,
+    };
+  }
+  if (invocation.payload.skillId === "craft.item") {
+    const itemName = String(inputField(invocation.payload.input, "itemName"));
+    const requestedCount = Number(inputField(invocation.payload.input, "count"));
+    return {
+      itemName,
+      requestedCount,
+      craftedCount:
+        itemName === "oak_planks" ? requestedCount * 4 : requestedCount,
+      usedCraftingTable:
+        inputField(invocation.payload.input, "craftingTable") !== null,
+    };
+  }
+  return {};
+}
+
+function inputField(input: unknown, key: string): unknown {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return undefined;
+  }
+  return (input as Record<string, unknown>)[key];
 }
 
 function uuidSequence(): () => string {

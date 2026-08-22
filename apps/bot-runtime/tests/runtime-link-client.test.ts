@@ -9,12 +9,14 @@ import {
   runtimeLinkChallengeV1Schema,
   runtimeLinkClientProofInput,
   runtimeLinkServerProofInput,
+  runtimeLinkStateRequestV1Schema,
   runtimeLinkTelemetryAckV1Schema,
   skillInvocationV1Schema,
   stopBotCommandV1Schema,
   type BotStopResultV1,
   type BotTelemetryMessageV1,
   type RuntimeLinkAuthenticateV1,
+  type RuntimeLinkStateRequestV1,
   type SkillExecutionResultV1,
   type SkillInvocationV1,
   type StopBotCommandV1,
@@ -161,6 +163,189 @@ describe("RuntimeLinkClient", () => {
       expect(handled).toHaveBeenCalledWith(invocation, COORDINATOR_ID);
       expect(testServer.skillResults).toEqual([skillResult(invocation)]);
     });
+    await client.close();
+  });
+
+  it("publishes current state for a valid authenticated state request", async () => {
+    const testServer = await createTestServer();
+    const publishCurrentState = vi.fn();
+    const failClosed = vi.fn();
+    const client = runtimeLinkClient(testServer.url, {
+      publishCurrentState,
+      failClosed,
+    });
+
+    await client.start();
+    const socket = await testServer.authenticated;
+    socket.send(JSON.stringify(stateRequest()));
+
+    await vi.waitFor(() => {
+      expect(publishCurrentState).toHaveBeenCalledTimes(1);
+    });
+    expect(client.isAuthenticated()).toBe(true);
+    expect(failClosed).not.toHaveBeenCalled();
+    await client.close();
+  });
+
+  it.each([
+    [
+      "Coordinator",
+      (request: RuntimeLinkStateRequestV1) => ({
+        ...request,
+        source: { ...request.source, instanceId: "coordinator-other-01" },
+      }),
+    ],
+    [
+      "Bot",
+      (request: RuntimeLinkStateRequestV1) => ({
+        ...request,
+        botId: "studio-bot-other-01",
+      }),
+    ],
+    [
+      "Runtime",
+      (request: RuntimeLinkStateRequestV1) => ({
+        ...request,
+        payload: {
+          ...request.payload,
+          expectedRuntimeInstanceId: "runtime-other-01",
+        },
+      }),
+    ],
+  ])(
+    "rejects a state request with a mismatched %s identity without publishing",
+    async (_identity, mutate) => {
+      const testServer = await createTestServer();
+      const publishCurrentState = vi.fn();
+      const client = runtimeLinkClient(
+        testServer.url,
+        { publishCurrentState },
+        {
+          reconnect: {
+            maxAttempts: 2,
+            baseDelayMs: 1_000,
+            maxDelayMs: 1_000,
+          },
+        },
+      );
+
+      await client.start();
+      const socket = await testServer.authenticated;
+      const closed = new Promise<{ code: number; reason: string }>((resolve) => {
+        socket.once("close", (code, reason) => {
+          resolve({ code, reason: reason.toString("utf8") });
+        });
+      });
+      socket.send(JSON.stringify(mutate(stateRequest())));
+
+      await expect(closed).resolves.toEqual({
+        code: 1008,
+        reason: "state_request_rejected",
+      });
+      expect(publishCurrentState).not.toHaveBeenCalled();
+      await client.close();
+    },
+  );
+
+  it("rejects an expired state request without publishing", async () => {
+    const testServer = await createTestServer();
+    const publishCurrentState = vi.fn();
+    const client = runtimeLinkClient(
+      testServer.url,
+      { publishCurrentState },
+      {
+        reconnect: {
+          maxAttempts: 2,
+          baseDelayMs: 1_000,
+          maxDelayMs: 1_000,
+        },
+      },
+    );
+
+    await client.start();
+    const socket = await testServer.authenticated;
+    const closed = new Promise<{ code: number; reason: string }>((resolve) => {
+      socket.once("close", (code, reason) => {
+        resolve({ code, reason: reason.toString("utf8") });
+      });
+    });
+    socket.send(
+      JSON.stringify(stateRequest(new Date(Date.now() - 10_000), 5_000)),
+    );
+
+    await expect(closed).resolves.toEqual({
+      code: 1008,
+      reason: "state_request_rejected",
+    });
+    expect(publishCurrentState).not.toHaveBeenCalled();
+    await client.close();
+  });
+
+  it("rejects a state request beyond the allowed future clock skew", async () => {
+    const testServer = await createTestServer();
+    const publishCurrentState = vi.fn();
+    const client = runtimeLinkClient(
+      testServer.url,
+      { publishCurrentState },
+      {
+        reconnect: {
+          maxAttempts: 2,
+          baseDelayMs: 1_000,
+          maxDelayMs: 1_000,
+        },
+      },
+    );
+
+    await client.start();
+    const socket = await testServer.authenticated;
+    const closed = new Promise<{ code: number; reason: string }>((resolve) => {
+      socket.once("close", (code, reason) => {
+        resolve({ code, reason: reason.toString("utf8") });
+      });
+    });
+    socket.send(
+      JSON.stringify(stateRequest(new Date(Date.now() + 60_000), 5_000)),
+    );
+
+    await expect(closed).resolves.toEqual({
+      code: 1008,
+      reason: "state_request_rejected",
+    });
+    expect(publishCurrentState).not.toHaveBeenCalled();
+    await client.close();
+  });
+
+  it("rejects a stale state request even when its expiry is still in the future", async () => {
+    const testServer = await createTestServer();
+    const publishCurrentState = vi.fn();
+    const client = runtimeLinkClient(
+      testServer.url,
+      { publishCurrentState },
+      {
+        reconnect: {
+          maxAttempts: 2,
+          baseDelayMs: 1_000,
+          maxDelayMs: 1_000,
+        },
+      },
+    );
+
+    await client.start();
+    const socket = await testServer.authenticated;
+    const closed = new Promise<{ code: number; reason: string }>((resolve) => {
+      socket.once("close", (code, reason) => {
+        resolve({ code, reason: reason.toString("utf8") });
+      });
+    });
+    socket.send(
+      JSON.stringify(stateRequest(new Date(Date.now() - 40_000), 60_000)),
+    );
+
+    await expect(closed).resolves.toEqual({
+      code: 1008,
+      reason: "state_request_rejected",
+    });
+    expect(publishCurrentState).not.toHaveBeenCalled();
     await client.close();
   });
 
@@ -509,6 +694,26 @@ function stopCommand(): StopBotCommandV1 {
         issuedAt: new Date(requestedAt.getTime() - 1_000).toISOString(),
         expiresAt: new Date(requestedAt.getTime() + 5_000).toISOString(),
       },
+    },
+  });
+}
+
+function stateRequest(
+  requestedAt = new Date(),
+  lifetimeMs = 5_000,
+): RuntimeLinkStateRequestV1 {
+  return runtimeLinkStateRequestV1Schema.parse({
+    schemaVersion: "1.0",
+    messageId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    traceId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    timestamp: requestedAt.toISOString(),
+    source: { service: "coordinator", instanceId: COORDINATOR_ID },
+    botId: BOT_ID,
+    type: "runtime.link.state-request.v1",
+    payload: {
+      expectedRuntimeInstanceId: RUNTIME_ID,
+      afterStatusSequence: 7,
+      expiresAt: new Date(requestedAt.getTime() + lifetimeMs).toISOString(),
     },
   });
 }

@@ -21,6 +21,7 @@ import {
   runtimeLinkChallengeV1Schema,
   runtimeLinkClientProofInput,
   runtimeLinkServerProofInput,
+  runtimeLinkStateRequestV1Schema,
   runtimeLinkTelemetryAckV1Schema,
   skillCancellationV1Schema,
   type BotStopResultV1,
@@ -34,7 +35,11 @@ import {
 } from "@minecraft-studio/protocol";
 import { WebSocket, WebSocketServer } from "ws";
 
-import { BotRegistry, CoordinatorTelemetryError } from "./bot-registry.js";
+import {
+  BotRegistry,
+  CoordinatorTelemetryError,
+  type BotRegistryRecord,
+} from "./bot-registry.js";
 import type { RuntimeLinkPeerConfig } from "./runtime-link-config.js";
 import type { StopCommandTransport } from "./stop-controller.js";
 
@@ -109,6 +114,17 @@ type PendingSkill = {
   removeAbortListener: () => void;
 };
 
+type PendingFreshStatus = {
+  botId: string;
+  expectedRuntimeInstanceId: string;
+  afterStatusSequence: number;
+  session: RuntimeSession;
+  resolve: () => void;
+  reject: (error: Error) => void;
+  unsubscribe: () => void;
+  removeAbortListener: () => void;
+};
+
 export class RuntimeLinkServer implements StopCommandTransport {
   private readonly now: () => Date;
   private readonly randomId: () => string;
@@ -118,6 +134,7 @@ export class RuntimeLinkServer implements StopCommandTransport {
   private readonly activeSessions = new Map<string, RuntimeSession>();
   private readonly pendingStops = new Map<string, PendingStop>();
   private readonly pendingSkills = new Map<string, PendingSkill>();
+  private readonly pendingFreshStatuses = new Set<PendingFreshStatus>();
   private readonly httpServer: HttpServer;
   private readonly webSocketServer: WebSocketServer;
   private readonly maxSessions: number;
@@ -258,6 +275,9 @@ export class RuntimeLinkServer implements StopCommandTransport {
     for (const pending of [...this.pendingSkills.values()]) {
       this.sendSkillCancellation(pending, "coordinator_shutdown");
       this.rejectPendingSkill(pending, error);
+    }
+    for (const pending of [...this.pendingFreshStatuses]) {
+      this.rejectPendingFreshStatus(pending, error);
     }
     const sessionClosures = [...this.sessions].map((session) => {
       clearTimeout(session.handshakeTimer);
@@ -438,6 +458,95 @@ export class RuntimeLinkServer implements StopCommandTransport {
           );
         }
       });
+    });
+  }
+
+  requestFreshStatus(
+    botId: string,
+    expectedRuntimeInstanceId: string,
+    afterStatusSequence: number,
+    traceId: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    let request: ReturnType<typeof runtimeLinkStateRequestV1Schema.parse>;
+    try {
+      const timestamp = validNow(this.now());
+      request = runtimeLinkStateRequestV1Schema.parse({
+        schemaVersion: "1.0",
+        messageId: this.randomId(),
+        traceId,
+        timestamp: timestamp.toISOString(),
+        source: { service: "coordinator", instanceId: this.options.instanceId },
+        botId,
+        type: "runtime.link.state-request.v1",
+        payload: {
+          expectedRuntimeInstanceId,
+          afterStatusSequence,
+          expiresAt: new Date(timestamp.getTime() + 30_000).toISOString(),
+        },
+      });
+    } catch (cause) {
+      return Promise.reject(cause);
+    }
+
+    const session = this.activeSessions.get(botId);
+    if (
+      !session ||
+      !session.authenticated ||
+      session.socket.readyState !== WebSocket.OPEN ||
+      session.runtimeInstanceId !== expectedRuntimeInstanceId
+    ) {
+      return Promise.reject(
+        new RuntimeLinkTransportError(
+          "RUNTIME_LINK_UNAVAILABLE",
+          "The authenticated target Runtime Link session is unavailable.",
+        ),
+      );
+    }
+    if (signal.aborted) {
+      return Promise.reject(abortedError("fresh status request"));
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      const abort = () => {
+        this.rejectPendingFreshStatus(
+          pending,
+          abortedError("fresh status request"),
+        );
+      };
+      const pending: PendingFreshStatus = {
+        botId,
+        expectedRuntimeInstanceId,
+        afterStatusSequence,
+        session,
+        resolve,
+        reject,
+        unsubscribe: () => undefined,
+        removeAbortListener: () => signal.removeEventListener("abort", abort),
+      };
+      pending.unsubscribe = this.options.registry.subscribe((record) => {
+        if (this.isFreshStatus(pending, record)) {
+          this.resolvePendingFreshStatus(pending);
+        }
+      });
+      signal.addEventListener("abort", abort, { once: true });
+      this.pendingFreshStatuses.add(pending);
+
+      this.sendFrame(session.socket, request, (error) => {
+        if (!error || !this.pendingFreshStatuses.has(pending)) return;
+        this.rejectPendingFreshStatus(
+          pending,
+          new RuntimeLinkTransportError(
+            "RUNTIME_LINK_SEND_FAILED",
+            "The fresh status request could not be sent to Bot Runtime.",
+          ),
+        );
+      });
+
+      const current = this.options.registry.get(botId, validNow(this.now()));
+      if (current && this.isFreshStatus(pending, current)) {
+        this.resolvePendingFreshStatus(pending);
+      }
     });
   }
 
@@ -815,6 +924,11 @@ export class RuntimeLinkServer implements StopCommandTransport {
     for (const pending of [...this.pendingSkills.values()]) {
       if (pending.session === session) this.rejectPendingSkill(pending, error);
     }
+    for (const pending of [...this.pendingFreshStatuses]) {
+      if (pending.session === session) {
+        this.rejectPendingFreshStatus(pending, error);
+      }
+    }
   }
 
   private rejectPending(pending: PendingStop, error: Error): void {
@@ -829,6 +943,37 @@ export class RuntimeLinkServer implements StopCommandTransport {
     const invocationId = pending.invocation.payload.invocationId;
     if (this.pendingSkills.get(invocationId) !== pending) return;
     this.pendingSkills.delete(invocationId);
+    pending.removeAbortListener();
+    pending.reject(error);
+  }
+
+  private isFreshStatus(
+    pending: PendingFreshStatus,
+    record: BotRegistryRecord,
+  ): boolean {
+    return (
+      record.botId === pending.botId &&
+      record.runtimeInstanceId === pending.expectedRuntimeInstanceId &&
+      record.currentStatus !== null &&
+      record.currentStatus.runtimeInstanceId ===
+        pending.expectedRuntimeInstanceId &&
+      record.currentStatus.sequence > pending.afterStatusSequence
+    );
+  }
+
+  private resolvePendingFreshStatus(pending: PendingFreshStatus): void {
+    if (!this.pendingFreshStatuses.delete(pending)) return;
+    pending.unsubscribe();
+    pending.removeAbortListener();
+    pending.resolve();
+  }
+
+  private rejectPendingFreshStatus(
+    pending: PendingFreshStatus,
+    error: Error,
+  ): void {
+    if (!this.pendingFreshStatuses.delete(pending)) return;
+    pending.unsubscribe();
     pending.removeAbortListener();
     pending.reject(error);
   }
