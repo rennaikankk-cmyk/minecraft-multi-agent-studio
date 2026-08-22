@@ -31,6 +31,8 @@
     "benchmark:bot-supervisor": "pnpm build:packages && pnpm --filter @minecraft-studio/bot-runtime benchmark:supervisor",
     "audit:spark": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/audit-dgx-spark.ps1",
     "benchmark:spark": "node scripts/benchmark-spark-openai.mjs",
+    "benchmark:planner-models": "node scripts/run-planner-model-benchmark.mjs",
+    "test:planner-benchmark": "node --test scripts/run-planner-model-benchmark.test.mjs",
     "validate:phase2-host": "pnpm check && pnpm test:cpu-resource-manager:node && pnpm benchmark:cpu-scheduler && pnpm benchmark:bot-supervisor && pnpm hardware:profile",
     "test:four-process": "pnpm build && node scripts/run-four-process-acceptance.mjs",
     "test:minecraft-skills": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-isolated-minecraft-test.ps1",

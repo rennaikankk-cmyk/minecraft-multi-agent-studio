@@ -26,34 +26,77 @@ import {
   LOCAL_PLANNER_SYSTEM_PROMPT,
 } from "./planner-prompts.js";
 
-const reasonCodeSchema = z
-  .string()
-  .min(3)
-  .max(64)
-  .regex(/^[A-Z][A-Z0-9_]*$/u);
+export const LOCAL_PLANNER_REASON_CODES = Object.freeze([
+  "ADVANCE_TASK",
+  "MISSING_REQUIRED_INPUT",
+  "NO_MATCHING_SKILL",
+  "NO_SAFE_SKILL",
+  "POLICY_RESTRICTED",
+  "RAW_ACTION_FORBIDDEN",
+  "UNGROUNDED_INPUT",
+  "UNSUPPORTED_ACTION",
+] as const);
+const reasonCodeSchema = z.enum(LOCAL_PLANNER_REASON_CODES);
 const TRUSTED_SERVER_PROFILE_PLACEHOLDER = "$CURRENT_SERVER_PROFILE";
 
-export const localPlannerDecisionSchema = z.discriminatedUnion("action", [
-  z
-    .object({
-      action: z.literal("noop"),
-      botId: identifierSchema,
-      taskId: identifierSchema,
-      reasonCode: reasonCodeSchema,
-    })
-    .strict(),
-  z
+const localPlannerNoopDecisionSchema = z
+  .object({
+    action: z.literal("noop"),
+    botId: identifierSchema,
+    taskId: identifierSchema,
+    reasonCode: reasonCodeSchema,
+  })
+  .strict();
+
+function localPlannerInvokeDecisionSchema(
+  skillIdSchema: z.ZodType<string>,
+  skillVersionValueSchema: z.ZodType<string>,
+) {
+  return z
     .object({
       action: z.literal("invoke_skill"),
       botId: identifierSchema,
       taskId: identifierSchema,
-      skillId: skillIdentifierSchema,
-      skillVersion: skillVersionSchema,
+      skillId: skillIdSchema,
+      skillVersion: skillVersionValueSchema,
       input: skillJsonValueSchema,
       reasonCode: reasonCodeSchema,
     })
-    .strict(),
+    .strict();
+}
+
+export const localPlannerDecisionSchema = z.discriminatedUnion("action", [
+  localPlannerNoopDecisionSchema,
+  localPlannerInvokeDecisionSchema(skillIdentifierSchema, skillVersionSchema),
 ]);
+
+/**
+ * Ollama's grammar compiler cannot parse the full SemVer regex used by the
+ * protocol schema. Generation can be narrower than the protocol: advertise
+ * only exact catalog IDs and versions, then parse the response again with the
+ * complete protocol-backed schema before dispatch.
+ */
+export function buildLocalPlannerGenerationSchema(
+  availableSkills: readonly Pick<
+    BotSkillCatalogEntryV1,
+    "skillId" | "skillVersion"
+  >[],
+) {
+  const skillIds = [...new Set(availableSkills.map(({ skillId }) => skillId))];
+  const skillVersions = [
+    ...new Set(availableSkills.map(({ skillVersion }) => skillVersion)),
+  ];
+  if (skillIds.length === 0 || skillVersions.length === 0) {
+    throw new LocalPlannerError(
+      "PLANNER_SKILL_CATALOG_UNAVAILABLE",
+      "Bot Runtime has no versions available for constrained generation.",
+    );
+  }
+  return z.discriminatedUnion("action", [
+    localPlannerNoopDecisionSchema,
+    localPlannerInvokeDecisionSchema(z.enum(skillIds), z.enum(skillVersions)),
+  ]);
+}
 
 export type LocalPlannerDecision = z.infer<typeof localPlannerDecisionSchema>;
 
@@ -149,6 +192,7 @@ export class CoordinatorLocalPlanner {
       );
     }
     const operatorGoal = safeOperatorGoal(request.operatorGoal, record);
+    const generationSchema = buildLocalPlannerGenerationSchema(availableSkills);
 
     let prompt: string;
     try {
@@ -187,7 +231,7 @@ export class CoordinatorLocalPlanner {
       supersedeKey: `plan:${request.taskId}`,
       prompt,
       systemPrompt: LOCAL_PLANNER_SYSTEM_PROMPT,
-      schema: localPlannerDecisionSchema,
+      schema: generationSchema,
       maxTokens: 512,
       temperature: 0,
       timeoutMs: request.timeoutMs,

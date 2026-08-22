@@ -3,6 +3,7 @@ import type {
   GenerateResult,
 } from "@minecraft-studio/ai-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 
 import { BotRegistry } from "../src/bot-registry.js";
 import {
@@ -89,6 +90,17 @@ describe("CoordinatorLocalPlanner", () => {
     expect(JSON.parse(options.prompt).promptVersion).toBe(LOCAL_PLANNER_PROMPT_VERSION);
     expect(options.temperature).toBe(0);
     expect(options.schema).toBeDefined();
+    const generationSchema = z.toJSONSchema(options.schema);
+    const invokeSchema = generationSchema.oneOf?.find(
+      (branch) => branch.properties?.action?.const === "invoke_skill",
+    );
+    expect(invokeSchema?.properties?.skillId).toMatchObject({
+      enum: ["movement.goto"],
+    });
+    expect(invokeSchema?.properties?.skillVersion).toMatchObject({
+      enum: ["1.0.0"],
+    });
+    expect(invokeSchema?.properties?.skillVersion).not.toHaveProperty("pattern");
     expect(sendSkillInvocation).toHaveBeenCalledWith(
       expect.objectContaining({
         botId: BOT_ID,
@@ -114,7 +126,7 @@ describe("CoordinatorLocalPlanner", () => {
         action: "noop",
         botId: "other-bot",
         taskId: "task-01",
-        reasonCode: "NO_ACTION",
+        reasonCode: "NO_SAFE_SKILL",
       }),
       JSON.stringify({
         action: "invoke_skill",
@@ -123,7 +135,7 @@ describe("CoordinatorLocalPlanner", () => {
         skillId: "combat.raw_attack",
         skillVersion: "1.0.0",
         input: {},
-        reasonCode: "ATTACK",
+        reasonCode: "ADVANCE_TASK",
       }),
     ];
     const expectedCodes = [

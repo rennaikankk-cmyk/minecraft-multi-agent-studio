@@ -71,6 +71,8 @@ export {
 export {
   CoordinatorLocalPlanner,
   LocalPlannerError,
+  LOCAL_PLANNER_REASON_CODES,
+  buildLocalPlannerGenerationSchema,
   localPlannerDecisionSchema,
   type CoordinatorLocalPlannerOptions,
   type LocalPlanRequest,
