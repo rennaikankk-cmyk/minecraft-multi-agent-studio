@@ -59,7 +59,7 @@ describe("CombatIdentityRegistry", () => {
     expect(registry.whitelistSize).toBe(2);
   });
 
-  it("classifies mobs deterministically and unknown kinds as hostile", () => {
+  it("classifies only players and non-enderman monsters as hostile", () => {
     const registry = CombatIdentityRegistry.fromOperatorConfig(source());
     expect(
       registry.classify(entity({ kind: "monster", username: null }), SERVER),
@@ -70,13 +70,38 @@ describe("CombatIdentityRegistry", () => {
     expect(
       registry.classify(entity({ kind: "object", username: null }), SERVER),
     ).toBe("neutral");
-    // 认不出类型不是"无害"：fail-closed 到敌对。
+    // 未知实体不属于玩家/怪物，不能因识别失败而误伤。
     expect(
       registry.classify(entity({ kind: "unknown", username: null }), SERVER),
-    ).toBe("hostile");
-    // 用户名与 UUID 全缺的玩家无法核实身份，同样敌对。
+    ).toBe("neutral");
+    // 玩家即使没有用户名和 UUID，仍按玩家类型进入敌对集合。
     expect(
-      registry.classify(entity({ username: null, uuid: null }), SERVER),
+      registry.classify(
+        entity({ kind: "player", username: null, uuid: null }),
+        SERVER,
+      ),
+    ).toBe("hostile");
+  });
+
+  it("keeps calm or unknown endermen neutral and attacks only angry endermen", () => {
+    const registry = CombatIdentityRegistry.fromOperatorConfig(source());
+    const enderman = { kind: "monster", username: null, mobType: "enderman" } as const;
+
+    expect(registry.classify(entity({ ...enderman, endermanState: "calm" }), SERVER)).toBe(
+      "neutral",
+    );
+    expect(registry.classify(entity({ ...enderman, endermanState: "unknown" }), SERVER)).toBe(
+      "neutral",
+    );
+    expect(registry.classify(entity({ ...enderman }), SERVER)).toBe("neutral");
+    expect(registry.classify(entity({ ...enderman, endermanState: "angry" }), SERVER)).toBe(
+      "hostile",
+    );
+    expect(
+      registry.classify(
+        entity({ ...enderman, mobType: "minecraft:enderman", endermanState: "angry" }),
+        SERVER,
+      ),
     ).toBe("hostile");
   });
 

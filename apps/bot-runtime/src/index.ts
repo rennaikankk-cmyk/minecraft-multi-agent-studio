@@ -56,6 +56,11 @@ export {
   createMineflayerOptions,
 } from "./mineflayer-client.js";
 export {
+  combatEntityFromMineflayer,
+  type MineflayerCombatEntityView,
+  type MineflayerCombatRegistryView,
+} from "./combat-entity-adapter.js";
+export {
   BotRuntimeHost,
   type BotRuntimeHostOptions,
 } from "./runtime-host.js";

@@ -5,8 +5,9 @@
  *   1. **白名单只能由用户显式配置。** `provenance` 必须逐字是
  *      `"operator-config"`；任何其它来源（含模型输出、运行时推断）在构造期
  *      就被拒绝，AI 无权增删条目。注册表构造后不可变，没有 add/remove。
- *   2. **白名单之外的一切玩家/实体一律视为敌对。** 认不出身份（用户名与 UUID
- *      都缺失、或实体类型未知）也算敌对，不会因为"看不清"而当成友军。
+ *   2. **只有玩家和怪物会进入敌对集合。** 动物和普通物件是资源/环境，保持中立；
+ *      未知类型也保持中立，不能因为识别失败就误伤无威胁实体。末影人只有明确观测到
+ *      激怒状态才算敌对，正常或未知状态都按中立处理，以尽量避免主动激怒它。
  *   3. **白名单按 serverProfileId 硬隔离。** A 服的白名单在 B 服无效；服号不
  *      匹配时**拒绝分类**（抛错），而不是把队友当敌人——这是 fail-closed 的
  *      正确方向：宁可不打，也不能误伤自己人。
@@ -29,6 +30,10 @@ export type CombatEntity = Readonly<{
   username: string | null;
   /** 实体 UUID，带不带连字符都接受；认不出时为 null。 */
   uuid: string | null;
+  /** Mineflayer 的生物名称（例如 `zombie`、`enderman`），非生物时为 null。 */
+  mobType?: string | null;
+  /** 末影人的确定性状态；状态缺失时必须按中立处理。 */
+  endermanState?: "calm" | "angry" | "unknown" | null;
 }>;
 
 /**
@@ -156,14 +161,20 @@ export class CombatIdentityRegistry {
     if (folded !== null && this.usernames.has(folded)) return "whitelisted";
     if (normalized !== null && this.uuids.has(normalized)) return "whitelisted";
 
-    switch (entity.kind) {
-      case "animal":
-      case "object":
-        return "neutral";
-      // 玩家、怪物、以及**认不出类型的实体**都落在这里：白名单外一律敌对。
-      default:
-        return "hostile";
+    if (entity.kind === "player") return "hostile";
+
+    if (entity.kind === "monster") {
+      const mobType = entity.mobType?.toLowerCase();
+      const isEnderman =
+        mobType === "enderman" || mobType === "minecraft:enderman";
+      if (!isEnderman) return "hostile";
+
+      // Enderman 状态必须由实体观测明确提供。未知/缺失时不主动攻击，
+      // 避免把普通末影人升级成战斗目标并意外激怒它。
+      return entity.endermanState === "angry" ? "hostile" : "neutral";
     }
+
+    return "neutral";
   }
 
   isHostile(entity: CombatEntity, serverProfileId: string): boolean {

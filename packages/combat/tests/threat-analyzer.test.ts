@@ -80,6 +80,56 @@ describe("ThreatAnalyzer", () => {
     });
   });
 
+  it("ignores animals and calm endermen but reports an angry enderman", () => {
+    const neutralAssessment = analyzer().assess(
+      snapshot({
+        entities: [
+          observation({
+            entity: {
+              entityId: 2,
+              kind: "animal",
+              username: null,
+              uuid: null,
+            },
+            position: { x: 1, y: 64, z: 0 },
+          }),
+          observation({
+            entity: {
+              entityId: 3,
+              kind: "monster",
+              username: null,
+              uuid: null,
+              mobType: "enderman",
+              endermanState: "calm",
+            },
+            position: { x: 1, y: 64, z: 1 },
+          }),
+        ],
+      }),
+    );
+    expect(neutralAssessment.hostileCount).toBe(0);
+
+    const angryAssessment = analyzer().assess(
+      snapshot({
+        entities: [
+          observation({
+            entity: {
+              entityId: 4,
+              kind: "monster",
+              username: null,
+              uuid: null,
+              mobType: "minecraft:enderman",
+              endermanState: "angry",
+            },
+            position: { x: 2, y: 64, z: 0 },
+          }),
+        ],
+      }),
+    );
+    expect(angryAssessment.hostileCount).toBe(1);
+    expect(angryAssessment.threats[0]?.entityId).toBe(4);
+  });
+
   it("escalates to critical for an armed hostile inside crystal range", () => {
     const assessment = analyzer().assess(
       snapshot({

@@ -25,6 +25,9 @@ importers:
 
   apps/bot-runtime:
     dependencies:
+      '@minecraft-studio/combat':
+        specifier: workspace:*
+        version: link:../../packages/combat
       '@minecraft-studio/cpu-resource-manager':
         specifier: workspace:*
         version: link:../../packages/cpu-resource-manager
