@@ -709,6 +709,7 @@ function stateRequest(
     timestamp: requestedAt.toISOString(),
     source: { service: "coordinator", instanceId: COORDINATOR_ID },
     botId: BOT_ID,
+    taskId: "task-state-request",
     type: "runtime.link.state-request.v1",
     payload: {
       expectedRuntimeInstanceId: RUNTIME_ID,

@@ -189,6 +189,7 @@ describe("Coordinator Runtime Link server", () => {
       RUNTIME_ID,
       initialStatus.payload.sequence,
       "trace-fresh-status",
+      "task-fresh-status",
       new AbortController().signal,
     );
     await expect(received).resolves.toMatchObject({
@@ -196,6 +197,7 @@ describe("Coordinator Runtime Link server", () => {
       traceId: "trace-fresh-status",
       source: { service: "coordinator", instanceId: "coordinator-test" },
       botId: BOT_ID,
+      taskId: "task-fresh-status",
       payload: {
         expectedRuntimeInstanceId: RUNTIME_ID,
         afterStatusSequence: initialStatus.payload.sequence,
@@ -226,13 +228,17 @@ describe("Coordinator Runtime Link server", () => {
     const { registry, server, url } = await startServer();
     const unsubscribe = trackRegistryUnsubscribe(registry);
     const socket = await authenticateAndActivate(url);
+    const statusAck = nextServerMessage(socket);
+    socket.send(JSON.stringify(statusMessage(2)));
+    await statusAck;
 
     await expect(
       server.requestFreshStatus(
         BOT_ID,
         "different-runtime",
-        1,
+        2,
         "trace-runtime-mismatch",
+        "task-runtime-mismatch",
         new AbortController().signal,
       ),
     ).rejects.toMatchObject({ code: "RUNTIME_LINK_UNAVAILABLE" });
@@ -242,8 +248,9 @@ describe("Coordinator Runtime Link server", () => {
     const aborted = server.requestFreshStatus(
       BOT_ID,
       RUNTIME_ID,
-      1,
+      2,
       "trace-status-abort",
+      "task-status-abort",
       abortController.signal,
     );
     await abortReceived;
@@ -255,8 +262,9 @@ describe("Coordinator Runtime Link server", () => {
     const disconnected = server.requestFreshStatus(
       BOT_ID,
       RUNTIME_ID,
-      1,
+      2,
       "trace-status-disconnect",
+      "task-status-disconnect",
       new AbortController().signal,
     );
     await disconnectReceived;
@@ -271,12 +279,16 @@ describe("Coordinator Runtime Link server", () => {
     const { registry, server, url } = await startServer();
     const unsubscribe = trackRegistryUnsubscribe(registry);
     const socket = await authenticateAndActivate(url);
+    const statusAck = nextServerMessage(socket);
+    socket.send(JSON.stringify(statusMessage(2)));
+    await statusAck;
     const received = nextServerMessage(socket);
     const pending = server.requestFreshStatus(
       BOT_ID,
       RUNTIME_ID,
-      1,
+      2,
       "trace-status-stop",
+      "task-status-stop",
       new AbortController().signal,
     );
     await received;
@@ -285,6 +297,25 @@ describe("Coordinator Runtime Link server", () => {
     await expect(pending).rejects.toMatchObject({ code: "RUNTIME_LINK_STOPPED" });
     await stopped;
     expect(unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a fresh-status request with an outdated baseline", async () => {
+    const { server, url } = await startServer();
+    const socket = await authenticateAndActivate(url);
+    const statusAck = nextServerMessage(socket);
+    socket.send(JSON.stringify(statusMessage(2)));
+    await statusAck;
+
+    await expect(
+      server.requestFreshStatus(
+        BOT_ID,
+        RUNTIME_ID,
+        1,
+        "trace-status-stale-baseline",
+        "task-status-stale-baseline",
+        new AbortController().signal,
+      ),
+    ).rejects.toMatchObject({ code: "RUNTIME_LINK_STATUS_BASELINE_STALE" });
   });
 
   it("propagates caller cancellation to an active Runtime skill", async () => {

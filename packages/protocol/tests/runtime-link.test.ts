@@ -54,6 +54,7 @@ const stateRequest = {
     instanceId: "coordinator-01",
   },
   botId: "studio-bot-01",
+  taskId: "task-state-request",
   type: "runtime.link.state-request.v1",
   payload: {
     expectedRuntimeInstanceId: "runtime-01",
@@ -172,6 +173,12 @@ describe("Runtime Link protocol", () => {
       runtimeLinkStateRequestV1Schema.parse({
         ...stateRequest,
         botId: "",
+      }),
+    ).toThrow();
+    expect(() =>
+      runtimeLinkStateRequestV1Schema.parse({
+        ...stateRequest,
+        taskId: "invalid task",
       }),
     ).toThrow();
     expect(() =>

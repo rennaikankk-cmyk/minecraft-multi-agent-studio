@@ -121,6 +121,7 @@ export const runtimeLinkStateRequestV1Schema = z
       })
       .strict(),
     botId: identifierSchema,
+    taskId: identifierSchema,
     type: z.literal("runtime.link.state-request.v1"),
     payload: z
       .object({

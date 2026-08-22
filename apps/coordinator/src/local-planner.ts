@@ -198,6 +198,7 @@ export type SkillInvocationTransport = Readonly<{
     expectedRuntimeInstanceId: string,
     afterStatusSequence: number,
     traceId: string,
+    taskId: string,
     signal: AbortSignal,
   ) => Promise<void>;
 }>;
@@ -593,6 +594,7 @@ export class CoordinatorLocalPlanner {
             before.runtimeInstanceId,
             beforeSequence,
             request.traceId,
+            request.taskId,
             boundedAbortSignal(
               request.signal,
               Math.min(REOBSERVE_TIMEOUT_MS, remainingMs),

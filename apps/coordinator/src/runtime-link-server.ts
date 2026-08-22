@@ -73,6 +73,7 @@ export type RuntimeLinkTransportErrorCode =
   | "RUNTIME_LINK_COMMAND_CONFLICT"
   | "RUNTIME_LINK_ABORTED"
   | "RUNTIME_LINK_BACKPRESSURE"
+  | "RUNTIME_LINK_STATUS_BASELINE_STALE"
   | "RUNTIME_LINK_SEND_FAILED"
   | "RUNTIME_LINK_STOPPED";
 
@@ -466,6 +467,7 @@ export class RuntimeLinkServer implements StopCommandTransport {
     expectedRuntimeInstanceId: string,
     afterStatusSequence: number,
     traceId: string,
+    taskId: string,
     signal: AbortSignal,
   ): Promise<void> {
     let request: ReturnType<typeof runtimeLinkStateRequestV1Schema.parse>;
@@ -478,6 +480,7 @@ export class RuntimeLinkServer implements StopCommandTransport {
         timestamp: timestamp.toISOString(),
         source: { service: "coordinator", instanceId: this.options.instanceId },
         botId,
+        taskId,
         type: "runtime.link.state-request.v1",
         payload: {
           expectedRuntimeInstanceId,
@@ -505,6 +508,20 @@ export class RuntimeLinkServer implements StopCommandTransport {
     }
     if (signal.aborted) {
       return Promise.reject(abortedError("fresh status request"));
+    }
+    const current = this.options.registry.get(botId, validNow(this.now()));
+    if (
+      !current ||
+      current.runtimeInstanceId !== expectedRuntimeInstanceId ||
+      current.currentStatus === null ||
+      current.currentStatus.sequence !== afterStatusSequence
+    ) {
+      return Promise.reject(
+        new RuntimeLinkTransportError(
+          "RUNTIME_LINK_STATUS_BASELINE_STALE",
+          "The fresh status request baseline does not match current Runtime state.",
+        ),
+      );
     }
 
     return new Promise<void>((resolve, reject) => {
