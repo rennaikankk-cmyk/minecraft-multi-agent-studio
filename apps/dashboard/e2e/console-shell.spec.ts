@@ -28,6 +28,7 @@ test("tasks page shows no fabricated task data", async ({ page }) => {
 });
 
 test("tasks page renders a real goal result and preserves failed styling", async ({ page }) => {
+  let submittedTaskId = "";
   await page.route(/\/api\/bots$/, async (route) => {
     await route.fulfill({
       status: 200,
@@ -59,6 +60,8 @@ test("tasks page renders a real goal result and preserves failed styling", async
     });
   });
   await page.route(/\/api\/goals$/, async (route) => {
+    const input = route.request().postDataJSON() as { requestId: string };
+    submittedTaskId = input.requestId;
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -68,7 +71,7 @@ test("tasks page renders a real goal result and preserves failed styling", async
         data: {
           action: "skill_result",
           botId: "worker-01",
-          taskId: UUID,
+          taskId: input.requestId,
           reasonCode: "SKILL_EXECUTION_FAILED",
           skillId: "movement.wander",
           skillVersion: "1.0.0",
@@ -80,12 +83,143 @@ test("tasks page renders a real goal result and preserves failed styling", async
     });
   });
   await page.goto("/tasks");
-  await page.getByLabel("目标").fill("采集附近的木材");
+  await page.getByRole("textbox", { name: "目标" }).fill("采集附近的木材");
   await page.getByRole("button", { name: "提交目标" }).click();
   await expect(page.getByTestId("goal-result-state")).toHaveText("failed");
   await expect(page.getByTestId("goal-result-state")).toHaveClass(/unavailable/);
-  await expect(page.getByText(UUID)).toBeVisible();
+  await expect(page.getByTestId("goal-recent-item").first()).toHaveAttribute(
+    "data-task-id",
+    submittedTaskId,
+  );
   await expect(page.getByText("PATH_BLOCKED")).toBeVisible();
+});
+
+test("tasks page follows the submitted task through real Bot status to its terminal result", async ({ page }) => {
+  let currentTask: {
+    taskId: string;
+    title: string;
+    status: "running" | "completed";
+    startedAt: string;
+  } | null = {
+    taskId: "other-task",
+    title: "其他任务",
+    status: "running",
+    startedAt: NOW,
+  };
+
+  await page.route(/\/api\/bots$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: {
+          source: "control-api",
+          generatedAt: NOW,
+          capabilities: { stopConfirmationConfigured: false },
+          bots: [onlineBot("worker-01", currentTask)],
+        },
+      }),
+    });
+  });
+  await page.route(/\/api\/goals$/, async (route) => {
+    const input = route.request().postDataJSON() as {
+      requestId: string;
+      botId: string;
+      operatorGoal: string;
+    };
+    currentTask = {
+      taskId: input.requestId,
+      title: "采集附近的木材",
+      status: "running",
+      startedAt: NOW,
+    };
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+    currentTask = { ...currentTask, status: "completed" };
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: {
+          action: "skill_result",
+          botId: input.botId,
+          taskId: input.requestId,
+          reasonCode: "SKILL_COMPLETED",
+          skillId: "collect.block",
+          skillVersion: "1.0.0",
+          outcome: "completed",
+          ai: { attempts: 1, queueTimeMs: 1, executionTimeMs: 4, totalTimeMs: 5 },
+        },
+      }),
+    });
+  });
+
+  await page.goto("/tasks");
+  await page.getByRole("textbox", { name: "目标" }).fill("采集附近的木材");
+  await page.getByRole("button", { name: "提交目标" }).click();
+
+  await expect(page.getByTestId("goal-live-status")).toHaveText("等待状态");
+  await expect(page.getByTestId("goal-lifecycle")).toContainText("Bot 当前任务与此提交不同");
+  await expect(page.getByTestId("goal-live-status")).toHaveText("执行中", {
+    timeout: 4_500,
+  });
+  await expect(page.getByTestId("goal-lifecycle")).toContainText("采集附近的木材");
+  await expect(page.getByTestId("goal-lifecycle")).toContainText("Bot 状态：执行中");
+  await expect(page.getByTestId("goal-live-status")).toHaveText("已完成", {
+    timeout: 3_000,
+  });
+  await expect(page.getByTestId("goal-lifecycle")).toContainText("执行结果：已完成");
+});
+
+test("tasks page bounds the recent submission list", async ({ page }) => {
+  await page.route(/\/api\/bots$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: {
+          source: "control-api",
+          generatedAt: NOW,
+          capabilities: { stopConfirmationConfigured: false },
+          bots: [onlineBot("worker-01", null)],
+        },
+      }),
+    });
+  });
+  await page.route(/\/api\/goals$/, async (route) => {
+    const input = route.request().postDataJSON() as { requestId: string; botId: string };
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: {
+          action: "noop",
+          botId: input.botId,
+          taskId: input.requestId,
+          reasonCode: "NO_SAFE_SKILL",
+          ai: { attempts: 1, queueTimeMs: 1, executionTimeMs: 1, totalTimeMs: 2 },
+        },
+      }),
+    });
+  });
+
+  await page.goto("/tasks");
+  for (let index = 1; index <= 9; index += 1) {
+    await page.getByRole("textbox", { name: "目标" }).fill(`目标 ${index}`);
+    await page.getByRole("button", { name: "提交目标" }).click();
+    await expect(page.getByRole("button", { name: "提交目标" })).toBeEnabled();
+  }
+
+  await expect(page.getByTestId("goal-recent-item")).toHaveCount(8);
+  await expect(page.getByTestId("goal-recent-item").first()).toContainText("目标 9");
+  await expect(page.getByTestId("goal-recent-list").getByText("目标 1", { exact: true })).toHaveCount(0);
 });
 
 test("bots page falls back to explicit polling when the stream is unavailable", async ({ page }) => {
@@ -205,4 +339,30 @@ async function routeEmptyBots(page: Page) {
       }),
     });
   });
+}
+
+function onlineBot(
+  botId: string,
+  currentTask: {
+    taskId: string;
+    title: string;
+    status: "running" | "completed";
+    startedAt: string;
+  } | null,
+) {
+  return {
+    botId,
+    connectionState: "online",
+    lastMessageAt: NOW,
+    lastHeartbeatAt: NOW,
+    lastStatusAt: NOW,
+    health: { current: 20, maximum: 20 },
+    food: { level: 20, saturation: 5 },
+    armorPoints: 20,
+    latencyMs: 20,
+    currentTask,
+    position: null,
+    positionRedacted: true,
+    minecraftVersion: null,
+  };
 }

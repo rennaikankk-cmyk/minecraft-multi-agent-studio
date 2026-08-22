@@ -76,6 +76,11 @@ import type {
 import { unsupportedVersionCompatibility } from "./version-compatibility.js";
 
 type TimerHandle = ReturnType<typeof setTimeout>;
+type RuntimeCurrentTask = NonNullable<BotStatusV1["payload"]["currentTask"]>;
+type ActiveCoordinatorTask = Readonly<{
+  task: RuntimeCurrentTask;
+  order: number;
+}>;
 
 export type RuntimeDependencies = {
   createClient: BotClientFactory;
@@ -244,6 +249,9 @@ export class SingleBotRuntime {
     null;
   private skillCompatibilityCatalog: readonly SkillCompatibilityResolution[] =
     [];
+  private currentTask: RuntimeCurrentTask | null = null;
+  private readonly activeCoordinatorTasks = new Map<string, ActiveCoordinatorTask>();
+  private coordinatorTaskOrder = 0;
   private versionUnsupported = false;
   private stopPromise: Promise<RuntimeStopOutcome> | null = null;
   private safetyActionQueue: Promise<void> = Promise.resolve();
@@ -563,6 +571,26 @@ export class SingleBotRuntime {
       invocation.payload.skillId,
       invocation.payload.skillVersion,
     );
+    const matchingActiveTask = [...this.activeCoordinatorTasks.values()].find(
+      ({ task }) => task.taskId === invocation.taskId,
+    )?.task;
+    const task: RuntimeCurrentTask = {
+      taskId: invocation.taskId,
+      title: invocation.payload.skillId,
+      status: "running",
+      startedAt:
+        matchingActiveTask?.startedAt ??
+        (this.currentTask?.taskId === invocation.taskId
+          ? this.currentTask.startedAt
+          : this.now().toISOString()),
+    };
+    this.coordinatorTaskOrder += 1;
+    this.activeCoordinatorTasks.set(invocation.payload.invocationId, {
+      task,
+      order: this.coordinatorTaskOrder,
+    });
+    this.currentTask = task;
+    this.publishCurrentTaskState();
     const authorization: SkillExecutionAuthorization = {
       decisionId: invocation.payload.authorization.decisionId,
       actorId: invocation.payload.authorization.actorId,
@@ -587,8 +615,26 @@ export class SingleBotRuntime {
       result,
     });
     void result.then(
-      () => this.trimSkillExecutions(),
-      () => this.trimSkillExecutions(),
+      (completed) => {
+        this.finishCoordinatorInvocation(
+          invocation.payload.invocationId,
+          completed.payload.outcome === "completed"
+            ? "completed"
+            : completed.payload.outcome === "cancelled"
+              ? "cancelled"
+              : completed.payload.outcome === "timed_out"
+                ? "expired"
+                : "failed",
+        );
+        this.trimSkillExecutions();
+      },
+      () => {
+        this.finishCoordinatorInvocation(
+          invocation.payload.invocationId,
+          "failed",
+        );
+        this.trimSkillExecutions();
+      },
     );
     return result;
   }
@@ -599,6 +645,9 @@ export class SingleBotRuntime {
   ): Promise<RuntimeStopOutcome> {
     this.stopping = true;
 
+    if (this.cancelRunningCoordinatorTasks()) {
+      this.emitStatus(this.generation, false);
+    }
     this.cancelActiveSkills();
     this.metrics.increment("bot_stop_requests_total", {
       bot_id: this.profile.botId,
@@ -858,6 +907,9 @@ export class SingleBotRuntime {
     info: BotDisconnectInfo,
   ): void {
     if (generation !== this.generation) return;
+    if (this.cancelRunningCoordinatorTasks()) {
+      this.emitStatus(generation, false);
+    }
     this.cancelActiveSkills();
     this.client = null;
     this.clearTimer("heartbeat");
@@ -950,7 +1002,7 @@ export class SingleBotRuntime {
     );
   }
 
-  private emitStatus(generation: number): void {
+  private emitStatus(generation: number, evaluateSafety = true): void {
     if (generation !== this.generation || this.state !== "online" || !this.client) {
       return;
     }
@@ -958,7 +1010,7 @@ export class SingleBotRuntime {
 
     try {
       const snapshot = this.client.snapshot();
-      this.evaluateSafetySnapshot(generation, snapshot);
+      if (evaluateSafety) this.evaluateSafetySnapshot(generation, snapshot);
       const sequence = this.nextSequence();
       const observedAt = this.now().toISOString();
       const message: BotStatusV1 = botStatusV1Schema.parse({
@@ -974,7 +1026,7 @@ export class SingleBotRuntime {
           armorPoints: snapshot.armorPoints,
           position: snapshot.position,
           latencyMs: snapshot.latencyMs,
-          currentTask: null,
+          currentTask: this.currentTask,
           safety: this.safetyStatus,
           ...(this.minecraftVersionCompatibility
             ? { minecraftVersion: this.minecraftVersionCompatibility }
@@ -1187,7 +1239,7 @@ export class SingleBotRuntime {
         connectionState: this.state,
         uptimeMs: Math.max(0, Math.round(process.uptime() * 1000)),
         lastStatusSequence: this.lastStatusSequence,
-        currentTaskId: null,
+        currentTaskId: this.currentTask?.taskId ?? null,
       },
     });
     this.metrics.increment("bot_heartbeats_total", {
@@ -1316,6 +1368,36 @@ export class SingleBotRuntime {
     for (const controller of this.activeSkillControllers.values()) {
       controller.abort();
     }
+  }
+
+  private finishCoordinatorInvocation(
+    invocationId: string,
+    status: RuntimeCurrentTask["status"],
+  ): void {
+    const completed = this.activeCoordinatorTasks.get(invocationId);
+    if (!completed) return;
+    this.activeCoordinatorTasks.delete(invocationId);
+    const next = [...this.activeCoordinatorTasks.values()].reduce<
+      ActiveCoordinatorTask | null
+    >(
+      (latest, candidate) =>
+        latest === null || candidate.order > latest.order ? candidate : latest,
+      null,
+    );
+    this.currentTask = next?.task ?? { ...completed.task, status };
+    this.publishCurrentTaskState();
+  }
+
+  private cancelRunningCoordinatorTasks(): boolean {
+    this.activeCoordinatorTasks.clear();
+    if (this.currentTask?.status !== "running") return false;
+    this.currentTask = { ...this.currentTask, status: "cancelled" };
+    return true;
+  }
+
+  private publishCurrentTaskState(): void {
+    this.emitStatus(this.generation);
+    this.emitHeartbeat();
   }
 
   private clearTimer(

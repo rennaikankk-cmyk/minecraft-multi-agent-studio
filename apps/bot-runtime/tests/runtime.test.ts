@@ -665,6 +665,213 @@ describe("SingleBotRuntime", () => {
     await runtime.stop("test_cleanup");
   });
 
+  it("publishes the authenticated Coordinator task lifecycle in status and heartbeat", async () => {
+    const messages: BotTelemetryMessageV1[] = [];
+    const client = new FakeBotClient();
+    let completeCapability!: (value: unknown) => void;
+    vi.spyOn(client, "invokeSkillCapability").mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          completeCapability = resolve;
+        }),
+    );
+    const runtime = new SingleBotRuntime(profile, {
+      createClient: () => client,
+      messageSink: (message) => messages.push(message),
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+    runtime.start();
+    client.spawn();
+    messages.length = 0;
+
+    const invocation = movementInvocation();
+    const pending = runtime.handleCoordinatorSkillInvocation(
+      invocation,
+      invocation.source.instanceId,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "bot.status.v1",
+        payload: expect.objectContaining({
+          currentTask: {
+            taskId: invocation.taskId,
+            title: invocation.payload.skillId,
+            status: "running",
+            startedAt: "2026-07-19T10:00:00.000Z",
+          },
+        }),
+      }),
+    );
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "bot.heartbeat.v1",
+        payload: expect.objectContaining({ currentTaskId: invocation.taskId }),
+      }),
+    );
+
+    completeCapability({
+      reached: true,
+      finalPosition: invocation.payload.input.target,
+      distanceToTarget: 0,
+    });
+    await expect(pending).resolves.toMatchObject({
+      taskId: invocation.taskId,
+      payload: { outcome: "completed" },
+    });
+
+    const statuses = messages.filter(
+      (message): message is Extract<BotTelemetryMessageV1, { type: "bot.status.v1" }> =>
+        message.type === "bot.status.v1",
+    );
+    expect(statuses.at(-1)?.payload.currentTask).toEqual({
+      taskId: invocation.taskId,
+      title: invocation.payload.skillId,
+      status: "completed",
+      startedAt: "2026-07-19T10:00:00.000Z",
+    });
+    await runtime.stop("test_cleanup");
+  });
+
+  it("keeps another active Coordinator invocation running when results finish out of order", async () => {
+    const messages: BotTelemetryMessageV1[] = [];
+    const client = new FakeBotClient();
+    const completions: Array<(value: unknown) => void> = [];
+    vi.spyOn(client, "invokeSkillCapability").mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          completions.push(resolve);
+        }),
+    );
+    const runtime = new SingleBotRuntime(profile, {
+      createClient: () => client,
+      messageSink: (message) => messages.push(message),
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+    runtime.start();
+    client.spawn();
+    messages.length = 0;
+
+    const firstInvocation = movementInvocation();
+    const secondInvocation: SkillInvocationV1 = {
+      ...firstInvocation,
+      messageId: "66666666-6666-4666-8666-666666666666",
+      taskId: "task-pathfinder-runtime-second",
+      payload: {
+        ...firstInvocation.payload,
+        invocationId: "77777777-7777-4777-8777-777777777777",
+        authorization: {
+          ...firstInvocation.payload.authorization,
+          decisionId: "88888888-8888-4888-8888-888888888888",
+        },
+      },
+    };
+    const first = runtime.handleCoordinatorSkillInvocation(
+      firstInvocation,
+      firstInvocation.source.instanceId,
+    );
+    const second = runtime.handleCoordinatorSkillInvocation(
+      secondInvocation,
+      secondInvocation.source.instanceId,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(completions).toHaveLength(2);
+
+    completions[1]?.({
+      reached: true,
+      finalPosition: {
+        x: 12,
+        y: 64,
+        z: -20,
+        dimension: "minecraft:overworld",
+        serverProfileId: profile.id,
+      },
+      distanceToTarget: 0,
+    });
+    await second;
+    const statusesAfterSecond = messages.filter(
+      (message): message is Extract<BotTelemetryMessageV1, { type: "bot.status.v1" }> =>
+        message.type === "bot.status.v1",
+    );
+    expect(statusesAfterSecond.at(-1)?.payload.currentTask).toMatchObject({
+      taskId: firstInvocation.taskId,
+      status: "running",
+    });
+
+    completions[0]?.({
+      reached: true,
+      finalPosition: {
+        x: 12,
+        y: 64,
+        z: -20,
+        dimension: "minecraft:overworld",
+        serverProfileId: profile.id,
+      },
+      distanceToTarget: 0,
+    });
+    await first;
+    const terminalStatuses = messages.filter(
+      (message): message is Extract<BotTelemetryMessageV1, { type: "bot.status.v1" }> =>
+        message.type === "bot.status.v1",
+    );
+    expect(terminalStatuses.at(-1)?.payload.currentTask).toMatchObject({
+      taskId: firstInvocation.taskId,
+      status: "completed",
+    });
+    await runtime.stop("test_cleanup");
+  });
+
+  it("publishes a cancelled task snapshot before an unexpected disconnect", async () => {
+    const messages: BotTelemetryMessageV1[] = [];
+    const client = new FakeBotClient();
+    vi.spyOn(client, "invokeSkillCapability").mockImplementation(
+      (request) =>
+        new Promise((_resolve, reject) => {
+          request.signal.addEventListener(
+            "abort",
+            () => reject(new Error("disconnected")),
+            { once: true },
+          );
+        }),
+    );
+    const runtime = new SingleBotRuntime(profile, {
+      createClient: () => client,
+      messageSink: (message) => messages.push(message),
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+    runtime.start();
+    client.spawn();
+    messages.length = 0;
+    const invocation = movementInvocation();
+    const pending = runtime.handleCoordinatorSkillInvocation(
+      invocation,
+      invocation.source.instanceId,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    client.disconnect({ reason: "network_error", expected: false });
+    await expect(pending).resolves.toMatchObject({
+      payload: { outcome: "cancelled" },
+    });
+    const statuses = messages.filter(
+      (message): message is Extract<BotTelemetryMessageV1, { type: "bot.status.v1" }> =>
+        message.type === "bot.status.v1",
+    );
+    expect(statuses.at(-1)?.payload.currentTask).toMatchObject({
+      taskId: invocation.taskId,
+      status: "cancelled",
+    });
+    expect(messages.at(-1)).toMatchObject({ type: "bot.disconnected.v1" });
+    await runtime.stop("test_cleanup");
+  });
+
   it("cancels an active Pathfinder skill when L0 takes control", async () => {
     const client = new FakeBotClient();
     vi.spyOn(client, "invokeSkillCapability").mockImplementation(

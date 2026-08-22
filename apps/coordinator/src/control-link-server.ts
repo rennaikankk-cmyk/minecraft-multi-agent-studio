@@ -59,6 +59,7 @@ const MAX_RESPONDERS_PER_STOP = 4;
 const MAX_RESPONDERS_PER_GOAL = 4;
 const COMPLETED_GOAL_TTL_MS = 5 * 60_000;
 const MAX_COMPLETED_GOALS = 512;
+const MAX_TRACKED_GOALS = 1_000;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 
@@ -133,6 +134,19 @@ type CompletedGoal = Readonly<{
     | Readonly<{ result: null; errorCode: ControlLinkGoalErrorCode }>
   );
 
+type PublicCurrentTask = NonNullable<PublicBotDetailV1["currentTask"]>;
+
+type TrackedGoalTask = PublicCurrentTask & {
+  operationId: string;
+  botId: string;
+  order: number;
+  expiresAtMs: number | null;
+  baselineRuntimeTask: Readonly<{
+    taskId: string;
+    startedAt: string | null;
+  }> | null;
+};
+
 export class ControlLinkServer {
   private readonly now: () => Date;
   private readonly randomId: () => string;
@@ -143,6 +157,7 @@ export class ControlLinkServer {
   private readonly pendingStops = new Map<string, PendingStop>();
   private readonly pendingGoals = new Map<string, PendingGoal>();
   private readonly completedGoals = new Map<string, CompletedGoal>();
+  private readonly trackedGoals = new Map<string, TrackedGoalTask>();
   private readonly httpServer: HttpServer;
   private readonly webSocketServer: WebSocketServer;
   private readonly unsubscribeRegistry: () => void;
@@ -151,6 +166,7 @@ export class ControlLinkServer {
   private readonly maxBufferedSnapshotEvents: number;
   private readonly pingIntervalMs: number;
   private streamSequence = 0;
+  private trackedGoalOrder = 0;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private started = false;
   private stopped = false;
@@ -312,6 +328,7 @@ export class ControlLinkServer {
     }
     this.pendingGoals.clear();
     this.completedGoals.clear();
+    this.trackedGoals.clear();
     const closures = [...this.sessions].map((session) => {
       this.revokeSession(session);
       return closeWebSocket(session.socket);
@@ -558,11 +575,13 @@ export class ControlLinkServer {
 
   private sendSnapshot(session: ControlSession): void {
     if (session.closing || !session.authenticated) return;
+    const snapshotNow = validNow(this.now());
+    this.pruneTrackedGoals(snapshotNow.getTime());
     let bots: PublicBotDetailV1[];
     try {
       bots = this.options.registry
-        .list(validNow(this.now()))
-        .map(projectBotState);
+        .list(snapshotNow)
+        .map((record) => this.projectBotState(record));
     } catch {
       this.closeSession(session, 1011, "snapshot_failed");
       return;
@@ -574,7 +593,7 @@ export class ControlLinkServer {
     const snapshotId = this.randomId();
     const baseSequence = this.streamSequence;
     session.snapshotBaseSequence = baseSequence;
-    const now = validNow(this.now()).toISOString();
+    const now = snapshotNow.toISOString();
     let frames: ControlLinkServerMessageV1[];
     try {
       frames = [
@@ -672,18 +691,20 @@ export class ControlLinkServer {
       }
       return;
     }
+    const now = validNow(this.now());
+    this.pruneTrackedGoals(now.getTime());
     this.streamSequence += 1;
     let event: ControlLinkStateUpsertV1;
     try {
       event = controlLinkStateUpsertV1Schema.parse({
         schemaVersion: "1.0",
         messageId: this.randomId(),
-        timestamp: validNow(this.now()).toISOString(),
+        timestamp: now.toISOString(),
         type: "control.link.state-upsert.v1",
         payload: {
           coordinatorInstanceId: this.options.instanceId,
           streamSequence: this.streamSequence,
-          bot: projectBotState(record),
+          bot: this.projectBotState(record),
         },
       });
     } catch {
@@ -964,6 +985,7 @@ export class ControlLinkServer {
       controller: new AbortController(),
     };
     this.pendingGoals.set(operationId, pending);
+    this.trackGoalStarted(request, now);
     void this.executeGoal(pending);
   }
 
@@ -997,6 +1019,7 @@ export class ControlLinkServer {
         result,
         expiresAtMs: validNow(this.now()).getTime() + COMPLETED_GOAL_TTL_MS,
       });
+      this.trackGoalFinished(request, goalTaskStatus(result));
       for (const responder of pending.responders.values()) {
         this.sendGoalSuccess(responder, request, result);
       }
@@ -1018,6 +1041,14 @@ export class ControlLinkServer {
         errorCode,
         expiresAtMs: validNow(this.now()).getTime() + COMPLETED_GOAL_TTL_MS,
       });
+      this.trackGoalFinished(
+        request,
+        errorCode === "AI_TIMEOUT"
+          ? "expired"
+          : controller.signal.aborted
+            ? "cancelled"
+            : "failed",
+      );
       for (const responder of pending.responders.values()) {
         this.sendGoalFailure(
           responder.session,
@@ -1054,6 +1085,112 @@ export class ControlLinkServer {
   private pruneCompletedGoals(nowMs: number): void {
     for (const [operationId, completed] of this.completedGoals) {
       if (completed.expiresAtMs <= nowMs) this.completedGoals.delete(operationId);
+    }
+  }
+
+  private trackGoalStarted(request: ControlLinkGoalRequestV1, now: Date): void {
+    this.trackedGoalOrder += 1;
+    const operationId = request.payload.operationId;
+    const runtimeTask = this.options.registry.get(request.payload.botId, now)
+      ?.currentStatus?.currentTask ?? null;
+    this.trackedGoals.delete(operationId);
+    this.trackedGoals.set(operationId, {
+      operationId,
+      taskId: request.payload.taskId,
+      botId: request.payload.botId,
+      title: "Submitted goal",
+      status: "running",
+      startedAt: now.toISOString(),
+      order: this.trackedGoalOrder,
+      expiresAtMs: null,
+      baselineRuntimeTask: runtimeTask
+        ? { taskId: runtimeTask.taskId, startedAt: runtimeTask.startedAt }
+        : null,
+    });
+    this.trimTrackedGoals();
+    this.publishBotTaskState(request.payload.botId, now);
+  }
+
+  private trackGoalFinished(
+    request: ControlLinkGoalRequestV1,
+    status: PublicCurrentTask["status"],
+  ): void {
+    const operationId = request.payload.operationId;
+    const tracked = this.trackedGoals.get(operationId);
+    if (!tracked) return;
+    const now = validNow(this.now());
+    this.trackedGoals.set(operationId, {
+      ...tracked,
+      status,
+      expiresAtMs: now.getTime() + COMPLETED_GOAL_TTL_MS,
+    });
+    this.publishBotTaskState(request.payload.botId, now);
+  }
+
+  private publishBotTaskState(botId: string, now: Date): void {
+    const record = this.options.registry.get(botId, now);
+    if (record) this.publishRecord(record);
+  }
+
+  private projectBotState(record: BotRegistryRecord): PublicBotDetailV1 {
+    const tracked = this.currentTrackedGoal(record.botId);
+    const runtimeTask = record.currentStatus?.currentTask ?? null;
+    const runtimeTaskReplacedBaseline =
+      tracked !== null &&
+      runtimeTask !== null &&
+      runtimeTask.taskId !== tracked.taskId &&
+      (tracked.baselineRuntimeTask?.taskId !== runtimeTask.taskId ||
+        tracked.baselineRuntimeTask?.startedAt !== runtimeTask.startedAt);
+    const currentTask = tracked &&
+      !(tracked.status !== "running" && runtimeTaskReplacedBaseline)
+      ? {
+          taskId: tracked.taskId,
+          title:
+            runtimeTask?.taskId === tracked.taskId
+              ? runtimeTask.title
+              : tracked.title,
+          status: tracked.status,
+          startedAt: tracked.startedAt,
+        }
+      : runtimeTask;
+    return projectBotState(record, currentTask);
+  }
+
+  private currentTrackedGoal(botId: string): TrackedGoalTask | null {
+    let selected: TrackedGoalTask | null = null;
+    for (const tracked of this.trackedGoals.values()) {
+      if (tracked.botId !== botId) continue;
+      if (!selected) {
+        selected = tracked;
+        continue;
+      }
+      const trackedActive = tracked.status === "running";
+      const selectedActive = selected.status === "running";
+      if (
+        (trackedActive && !selectedActive) ||
+        (trackedActive === selectedActive && tracked.order > selected.order)
+      ) {
+        selected = tracked;
+      }
+    }
+    return selected;
+  }
+
+  private pruneTrackedGoals(nowMs: number): void {
+    for (const [operationId, tracked] of this.trackedGoals) {
+      if (tracked.expiresAtMs !== null && tracked.expiresAtMs <= nowMs) {
+        this.trackedGoals.delete(operationId);
+      }
+    }
+  }
+
+  private trimTrackedGoals(): void {
+    while (this.trackedGoals.size > MAX_TRACKED_GOALS) {
+      const oldestTerminal = [...this.trackedGoals.entries()].find(
+        ([, tracked]) => tracked.status !== "running",
+      )?.[0];
+      if (!oldestTerminal) break;
+      this.trackedGoals.delete(oldestTerminal);
     }
   }
 
@@ -1255,7 +1392,10 @@ export class ControlLinkServer {
   }
 }
 
-function projectBotState(record: BotRegistryRecord): PublicBotDetailV1 {
+function projectBotState(
+  record: BotRegistryRecord,
+  currentTask: PublicCurrentTask | null = record.currentStatus?.currentTask ?? null,
+): PublicBotDetailV1 {
   const status = record.currentStatus;
   return {
     botId: record.botId,
@@ -1267,7 +1407,7 @@ function projectBotState(record: BotRegistryRecord): PublicBotDetailV1 {
     food: status?.food ?? null,
     armorPoints: status?.armorPoints ?? null,
     latencyMs: status?.latencyMs ?? null,
-    currentTask: status?.currentTask ?? null,
+    currentTask,
     position: status?.position ?? null,
     positionRedacted: false,
     minecraftVersion: record.minecraftVersion,
@@ -1400,6 +1540,16 @@ function publicGoalResult(
   return payload.outcome === "completed"
     ? base
     : { ...base, errorCode: payload.errorCode };
+}
+
+function goalTaskStatus(
+  result: GoalDispatchResultV1,
+): PublicCurrentTask["status"] {
+  if (result.action === "noop") return "failed";
+  if (result.outcome === "completed") return "completed";
+  if (result.outcome === "cancelled") return "cancelled";
+  if (result.outcome === "timed_out") return "expired";
+  return "failed";
 }
 
 function goalErrorCode(

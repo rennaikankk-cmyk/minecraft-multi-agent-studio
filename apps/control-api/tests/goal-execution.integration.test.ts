@@ -104,6 +104,18 @@ describe("goal execution across the production control path", () => {
       "craft.item:oak_planks",
       "craft.item:crafting_table",
     ]);
+    const detailResponse = await fetch(
+      `${stack.baseUrl}/v1/bots/${encodeURIComponent(BOT_ID)}`,
+      { headers: { Authorization: `Bearer ${OPERATOR_TOKEN}` } },
+    );
+    const detailBody = await detailResponse.json();
+    expect(detailResponse.status).toBe(200);
+    expect(detailBody.data.bot.currentTask).toEqual({
+      taskId: requestId,
+      title: "craft.item",
+      status: "completed",
+      startedAt: expect.any(String),
+    });
     assertInvocationChain(stack, 3);
   });
 

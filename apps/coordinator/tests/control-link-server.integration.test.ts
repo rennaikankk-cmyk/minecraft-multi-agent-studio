@@ -18,7 +18,11 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 
-import { BotRegistry, ControlLinkServer } from "../src/index.js";
+import {
+  BotRegistry,
+  ControlLinkServer,
+  LocalPlannerError,
+} from "../src/index.js";
 
 const NOW = new Date("2026-08-07T10:00:00.000Z");
 const BOT_ID = "worker-01";
@@ -306,6 +310,24 @@ describe("Coordinator Control Link server", () => {
     releaseFirst?.();
   });
 
+  it("trims terminal goal history before any still-running goal", async () => {
+    const { server } = await startServer();
+    const internals = server as unknown as {
+      trackedGoals: Map<string, { status: string }>;
+      trimTrackedGoals(): void;
+    };
+    internals.trackedGoals.set("running-goal", { status: "running" });
+    for (let index = 0; index < 1_000; index += 1) {
+      internals.trackedGoals.set(`terminal-${index}`, { status: "completed" });
+    }
+
+    internals.trimTrackedGoals();
+
+    expect(internals.trackedGoals.size).toBe(1_000);
+    expect(internals.trackedGoals.has("running-goal")).toBe(true);
+    expect(internals.trackedGoals.has("terminal-0")).toBe(false);
+  });
+
   it("executes an authenticated goal through the guarded planner", async () => {
     const planAndDispatch = vi.fn(async (request: any) => ({
       action: "noop" as const,
@@ -415,6 +437,166 @@ describe("Coordinator Control Link server", () => {
       payload: { requestMessageId: testUuid(983), errorCode: "GOAL_ID_CONFLICT" },
     });
     expect(planAndDispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("streams the submitted task ID from running through completion", async () => {
+    let finishGoal!: (value: any) => void;
+    const planAndDispatch = vi.fn(
+      (request: any) =>
+        new Promise((resolve) => {
+          finishGoal = resolve;
+        }),
+    );
+    const { registry, url } = await startServer({
+      goalPlanner: { planAndDispatch },
+    });
+    registry.ingest(statusMessage(1), NOW);
+    const { socket, reader } = await authenticate(url);
+    await readSnapshot(reader);
+    const operationId = testUuid(985);
+    const goalMessage = controlLinkGoalRequestV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: testUuid(986),
+      timestamp: NOW.toISOString(),
+      type: "control.link.goal-request.v1",
+      payload: {
+        coordinatorInstanceId: "coordinator-test",
+        clientId: CLIENT_ID,
+        controlApiInstanceId: CONTROL_API_INSTANCE_ID,
+        operationId,
+        taskId: operationId,
+        botId: BOT_ID,
+        actorId: "operator-01",
+        operatorGoal: "采集附近的木材",
+        timeoutMs: 30_000,
+        issuedAt: NOW.toISOString(),
+        expiresAt: new Date(NOW.getTime() + 35_000).toISOString(),
+      },
+    });
+    socket.send(JSON.stringify(goalMessage));
+
+    await vi.waitFor(() => expect(planAndDispatch).toHaveBeenCalledTimes(1));
+    const running = await reader.next();
+    expect(running).toMatchObject({
+      type: "control.link.state-upsert.v1",
+      payload: {
+        bot: {
+          botId: BOT_ID,
+          currentTask: {
+            taskId: operationId,
+            title: "Submitted goal",
+            status: "running",
+            startedAt: NOW.toISOString(),
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(running)).not.toContain(goalMessage.payload.operatorGoal);
+
+    finishGoal({
+      action: "skill_result",
+      reasonCode: "GOAL_COMPLETED",
+      result: {
+        payload: {
+          skillId: "collect.block",
+          skillVersion: "1.0.0",
+          outcome: "completed",
+        },
+      },
+      ai: {
+        attempts: 1,
+        queueTimeMs: 2,
+        executionTimeMs: 98,
+        totalTimeMs: 100,
+      },
+    });
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.state-upsert.v1",
+      payload: {
+        bot: {
+          botId: BOT_ID,
+          currentTask: {
+            taskId: operationId,
+            status: "completed",
+          },
+        },
+      },
+    });
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.goal-response.v1",
+      ok: true,
+      payload: {
+        operationId,
+        taskId: operationId,
+        result: { action: "skill_result", outcome: "completed" },
+      },
+    });
+
+    const laterTaskId = "task-runtime-follow-up";
+    registry.ingest(statusMessage(2, {
+      taskId: laterTaskId,
+      title: "movement.goto",
+      status: "running",
+      startedAt: NOW.toISOString(),
+    }), NOW);
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.state-upsert.v1",
+      payload: {
+        bot: {
+          currentTask: {
+            taskId: laterTaskId,
+            title: "movement.goto",
+            status: "running",
+          },
+        },
+      },
+    });
+  });
+
+  it("projects planner timeouts as an expired task before the error response", async () => {
+    const planAndDispatch = vi.fn(async () => {
+      throw new LocalPlannerError("PLANNER_TIMEOUT", "injected timeout");
+    });
+    const { registry, url } = await startServer({
+      goalPlanner: { planAndDispatch },
+    });
+    registry.ingest(statusMessage(1), NOW);
+    const { socket, reader } = await authenticate(url);
+    await readSnapshot(reader);
+    const operationId = testUuid(987);
+    socket.send(JSON.stringify(controlLinkGoalRequestV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: testUuid(988),
+      timestamp: NOW.toISOString(),
+      type: "control.link.goal-request.v1",
+      payload: {
+        coordinatorInstanceId: "coordinator-test",
+        clientId: CLIENT_ID,
+        controlApiInstanceId: CONTROL_API_INSTANCE_ID,
+        operationId,
+        taskId: operationId,
+        botId: BOT_ID,
+        actorId: "operator-01",
+        operatorGoal: "采集附近的木材",
+        timeoutMs: 30_000,
+        issuedAt: NOW.toISOString(),
+        expiresAt: new Date(NOW.getTime() + 35_000).toISOString(),
+      },
+    })));
+
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.state-upsert.v1",
+      payload: { bot: { currentTask: { taskId: operationId, status: "running" } } },
+    });
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.state-upsert.v1",
+      payload: { bot: { currentTask: { taskId: operationId, status: "expired" } } },
+    });
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.goal-response.v1",
+      ok: false,
+      payload: { operationId, taskId: operationId, errorCode: "AI_TIMEOUT" },
+    });
   });
 
   it("aborts an active goal when the Coordinator stops", async () => {
@@ -618,7 +800,10 @@ class MessageReader {
   }
 }
 
-function statusMessage(sequence: number): BotStatusV1 {
+function statusMessage(
+  sequence: number,
+  currentTask: BotStatusV1["payload"]["currentTask"] = null,
+): BotStatusV1 {
   return {
     schemaVersion: "1.0",
     messageId: testUuid(400 + sequence),
@@ -638,7 +823,7 @@ function statusMessage(sequence: number): BotStatusV1 {
       armorPoints: 0,
       position: { x: 1, y: 64, z: 2, dimension: "minecraft:overworld" },
       latencyMs: 10,
-      currentTask: null,
+      currentTask,
     },
   };
 }
