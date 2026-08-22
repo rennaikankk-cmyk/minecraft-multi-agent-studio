@@ -756,8 +756,20 @@ export class MineflayerBotClient implements BotClient {
     // 的职责，且必须显式授权。
     this.bot.collectBlock.chestLocations = [];
     const movements = configureSafePathfinderMovements(new Movements(this.bot));
-    // 采集必须能挖目标方块本身。
+    const targetBlockKeys = new Set(
+      targets.map(
+        ({ position, type }) =>
+          `${type}:${position.x},${position.y},${position.z}`,
+      ),
+    );
+    // 只放行本次已选定的目标坐标。不能直接清空排除区，否则
+    // collectblock 使用 Pathfinder 接近目标时也可以随意挖路。
     movements.canDig = true;
+    movements.exclusionAreasBreak = [({ position, type }) =>
+      targetBlockKeys.has(`${type}:${position.x},${position.y},${position.z}`)
+        ? 0
+        : 100
+    ];
     this.bot.collectBlock.movements = movements;
 
     const inventoryBefore = this.countInventoryTotal();
