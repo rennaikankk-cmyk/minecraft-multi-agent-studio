@@ -156,6 +156,8 @@ const SAFE_FOOD_NAMES = new Set([
   "sweet_berries",
 ]);
 
+const COLLECT_INVENTORY_SYNC_TIMEOUT_MS = 1_000;
+
 type SafetyEntityState = Readonly<{
   isInWater?: unknown;
   isInLava?: unknown;
@@ -701,6 +703,43 @@ export class MineflayerBotClient implements BotClient {
       .reduce((total, item) => total + item.count, 0);
   }
 
+  private async waitForCollectedInventorySync(
+    inventoryBefore: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (this.countInventoryTotal() > inventoryBefore || signal.aborted) return;
+
+    const inventory = this.bot.inventory;
+    if (
+      typeof inventory.on !== "function" ||
+      typeof inventory.off !== "function"
+    ) {
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      let timeout: ReturnType<typeof setTimeout> | null = null;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (timeout !== null) clearTimeout(timeout);
+        inventory.off("updateSlot", onUpdate);
+        signal.removeEventListener("abort", finish);
+        resolve();
+      };
+      const onUpdate = () => {
+        if (this.countInventoryTotal() > inventoryBefore) finish();
+      };
+
+      inventory.on("updateSlot", onUpdate);
+      signal.addEventListener("abort", finish, { once: true });
+      timeout = setTimeout(finish, COLLECT_INVENTORY_SYNC_TIMEOUT_MS);
+      // Close the listener-registration race if the slot packet arrived just
+      // after the initial check but before updateSlot was bound.
+      onUpdate();
+    });
+  }
+
   private assertDimensionMatch(requestedDimension: string): void {
     const current = normalizeDimension(String(this.bot.game.dimension));
     if (requestedDimension !== current) {
@@ -797,6 +836,10 @@ export class MineflayerBotClient implements BotClient {
         this.activePathInvocationId = null;
       }
     }
+
+    // collectblock resolves when the dropped entity disappears. Mineflayer can
+    // receive that packet before the corresponding inventory slot update.
+    await this.waitForCollectedInventorySync(inventoryBefore, request.signal);
 
     const itemsCollected = Math.max(
       0,
@@ -1074,10 +1117,13 @@ export class MineflayerBotClient implements BotClient {
     if (request.signal.aborted) {
       throw new SkillFault("SKILL_CANCELLED");
     }
-    const before = this.countInventoryItem(input.data.itemName);
+    let before: number | null = null;
     let window: Awaited<ReturnType<Bot["openContainer"]>> | null = null;
     try {
       window = await this.bot.openContainer(containerBlock);
+      // Opening the window synchronizes pending inventory slot updates from
+      // earlier actions. Use that acknowledged state as the transfer baseline.
+      before = this.countInventoryItem(input.data.itemName);
       if (request.signal.aborted) {
         throw new SkillFault("SKILL_CANCELLED");
       }
@@ -1092,9 +1138,13 @@ export class MineflayerBotClient implements BotClient {
         throw new SkillFault("SKILL_CANCELLED");
       }
       // deposit/withdraw 在数量不足时抛错——读回增量如实上报部分成功。
-      const partial = Math.abs(
-        this.countInventoryItem(input.data.itemName) - before,
-      );
+      const partial = before === null
+        ? 0
+        : this.transferredItemCount(
+            input.data.direction,
+            before,
+            this.countInventoryItem(input.data.itemName),
+          );
       if (partial > 0) {
         return containerTransferCapabilityOutputSchema.parse({
           direction: input.data.direction,
@@ -1112,8 +1162,10 @@ export class MineflayerBotClient implements BotClient {
       }
     }
 
-    const movedCount = Math.abs(
-      this.countInventoryItem(input.data.itemName) - before,
+    const movedCount = this.transferredItemCount(
+      input.data.direction,
+      before ?? this.countInventoryItem(input.data.itemName),
+      this.countInventoryItem(input.data.itemName),
     );
     return containerTransferCapabilityOutputSchema.parse({
       direction: input.data.direction,
@@ -1121,6 +1173,16 @@ export class MineflayerBotClient implements BotClient {
       requestedCount: input.data.count,
       movedCount,
     });
+  }
+
+  private transferredItemCount(
+    direction: "deposit" | "withdraw",
+    before: number,
+    after: number,
+  ): number {
+    return direction === "deposit"
+      ? Math.max(0, before - after)
+      : Math.max(0, after - before);
   }
 
   versionCompatibility() {

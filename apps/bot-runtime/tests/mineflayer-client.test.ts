@@ -150,6 +150,71 @@ describe("MineflayerBotClient lifecycle", () => {
     });
   });
 
+  it("waits for the collected item slot update before reporting inventory delta", async () => {
+    const emitter = new EventEmitter();
+    const inventory = new EventEmitter() as EventEmitter & {
+      items: () => Array<{ name: string; count: number }>;
+    };
+    const bot = emitter as unknown as Bot;
+    const targetPosition = new Vec3(2, 64, 0);
+    const targetBlock = { position: targetPosition, type: 1 };
+    let itemCount = 0;
+    inventory.items = () =>
+      itemCount > 0 ? [{ name: "oak_log", count: itemCount }] : [];
+    const collectBlock = {
+      chestLocations: [] as Vec3[],
+      movements: null as Movements | null,
+      collect: vi.fn(async () => {
+        setTimeout(() => {
+          itemCount = 1;
+          inventory.emit("updateSlot", 9, null, {
+            name: "oak_log",
+            count: 1,
+          });
+        }, 0);
+      }),
+      cancelTask: vi.fn(async () => undefined),
+    };
+    Object.assign(bot, {
+      game: { dimension: "overworld" },
+      registry: { blocksByName: { oak_log: { id: 1 } } },
+      inventory,
+      findBlocks: vi.fn(() => [targetPosition]),
+      blockAt: vi.fn(() => targetBlock),
+      collectBlock,
+    });
+    const client = new MineflayerBotClient(
+      bot,
+      "auto",
+      "isolated-test-profile",
+    );
+
+    await expect(
+      client.invokeSkillCapability({
+        invocationId: "invocation-collect-delayed-slot",
+        traceId: "trace-collect-delayed-slot",
+        taskId: "task-collect-delayed-slot",
+        botId: "bot-collect-delayed-slot",
+        skillId: "collect.block",
+        skillVersion: "1.0.0",
+        capability: "world.interact",
+        operation: "collect.blocks-safe",
+        input: {
+          blockName: "oak_log",
+          maxCount: 1,
+          maxDistance: 4,
+          dimension: "minecraft:overworld",
+          serverProfileId: "isolated-test-profile",
+        },
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toMatchObject({
+      blockName: "oak_log",
+      targetsFound: 1,
+      itemsCollected: 1,
+    });
+  });
+
   it("exposes negotiated protocol, feature, and registry facts to skills", () => {
     const emitter = new EventEmitter();
     const bot = emitter as unknown as Bot;
@@ -177,6 +242,59 @@ describe("MineflayerBotClient lifecycle", () => {
     expect(facts.hasResource("item", "mace")).toBe(true);
     expect(facts.hasResource("block", "log")).toBe(false);
     expect(facts.serverCapability("combat.mace-enabled")).toBeUndefined();
+  });
+
+  it("measures a container deposit from the inventory state synchronized on open", async () => {
+    const emitter = new EventEmitter();
+    const bot = emitter as unknown as Bot;
+    let cobblestoneCount = 5;
+    const deposit = vi.fn(async (_type: number, _metadata: number | null, count: number) => {
+      cobblestoneCount -= count;
+    });
+    Object.assign(bot, {
+      game: { dimension: "overworld" },
+      registry: { itemsByName: { cobblestone: { id: 1 } } },
+      inventory: {
+        items: () =>
+          cobblestoneCount > 0
+            ? [{ name: "cobblestone", count: cobblestoneCount }]
+            : [],
+      },
+      blockAt: vi.fn(() => ({ name: "chest" })),
+      openContainer: vi.fn(async () => {
+        // Simulate the prior place-block slot update arriving with window sync.
+        cobblestoneCount = 4;
+        return { deposit, withdraw: vi.fn(), close: vi.fn() };
+      }),
+    });
+    const client = new MineflayerBotClient(
+      bot,
+      "auto",
+      "isolated-test-profile",
+    );
+
+    await expect(
+      client.invokeSkillCapability({
+        invocationId: "invocation-container-1",
+        traceId: "trace-container-1",
+        taskId: "task-container-1",
+        botId: "bot-container-1",
+        skillId: "container.transfer",
+        skillVersion: "1.0.0",
+        capability: "container.write",
+        operation: "container.transfer-safe",
+        input: {
+          direction: "deposit",
+          itemName: "cobblestone",
+          count: 4,
+          container: { x: 5, y: 65, z: -2 },
+          dimension: "minecraft:overworld",
+          serverProfileId: "isolated-test-profile",
+        },
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toMatchObject({ requestedCount: 4, movedCount: 4 });
+    expect(deposit).toHaveBeenCalledWith(1, null, 4);
   });
 });
 

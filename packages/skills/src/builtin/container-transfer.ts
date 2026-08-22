@@ -81,7 +81,16 @@ export const containerTransferOutputSchema = z
     // 少于请求量（箱子满/物品不够）如实上报，由上层决定下一步。
     movedCount: z.number().int().min(0).max(TRANSFER_MAX_COUNT),
   })
-  .strict();
+  .strict()
+  .superRefine((output, context) => {
+    if (output.movedCount > output.requestedCount) {
+      context.addIssue({
+        code: "custom",
+        path: ["movedCount"],
+        message: "movedCount cannot exceed requestedCount.",
+      });
+    }
+  });
 
 export const containerTransferCapabilityInputSchema =
   containerTransferInputSchema;

@@ -5,6 +5,7 @@ import {
   baselineServerPolicy,
   blockCenterDistance,
   collectBlockSkill,
+  containerTransferCapabilityOutputSchema,
   containerTransferSkill,
   craftItemSkill,
   placeBlockSkill,
@@ -376,6 +377,17 @@ describe("container.transfer@1.0.0", () => {
     serverProfileId: SERVER,
   };
 
+  it("rejects capability output that reports moving more than requested", () => {
+    expect(() =>
+      containerTransferCapabilityOutputSchema.parse({
+        direction: "deposit",
+        itemName: "cobblestone",
+        requestedCount: 4,
+        movedCount: 5,
+      }),
+    ).toThrow();
+  });
+
   it("transfers via container.write and reports the actual moved count", async () => {
     const adapter = vi.fn(async () => ({
       direction: "deposit",
@@ -659,4 +671,3 @@ describe("skill reach reads the active ServerPolicy", () => {
     expect(seen).toEqual([SERVER]);
   });
 });
-
