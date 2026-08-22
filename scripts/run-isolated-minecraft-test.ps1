@@ -49,6 +49,28 @@ function Assert-NoReparsePointInPath {
   }
 }
 
+function Assert-NoReparsePointUnderRoot {
+  param(
+    [Parameter(Mandatory = $true)][string]$Root,
+    [Parameter(Mandatory = $true)][string]$Label
+  )
+
+  Assert-NoReparsePointInPath -Path $Root -Label $Label
+  $pending = [Collections.Generic.Stack[string]]::new()
+  $pending.Push([IO.Path]::GetFullPath($Root))
+  while ($pending.Count -gt 0) {
+    $directory = $pending.Pop()
+    foreach ($item in Get-ChildItem -LiteralPath $directory -Force) {
+      if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "$Label contains a reparse point: $($item.FullName)"
+      }
+      if ($item.PSIsContainer) {
+        $pending.Push($item.FullName)
+      }
+    }
+  }
+}
+
 $runtimeRoot = Assert-ContainedPath -Candidate $runtimeRoot -Root $projectRoot -Label "Runtime directory"
 Assert-NoReparsePointInPath -Path $runtimeRoot -Label "Runtime directory"
 if (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) {
@@ -85,7 +107,7 @@ if (-not [IO.Path]::IsPathRooted($ServerProfilePath)) {
 }
 $ServerDirectory = Assert-ContainedPath -Candidate $ServerDirectory -Root $runtimeRoot -Label "Server directory"
 $ServerProfilePath = Assert-ContainedPath -Candidate $ServerProfilePath -Root (Join-Path $projectRoot "configs\servers") -Label "ServerProfile"
-Assert-NoReparsePointInPath -Path $ServerDirectory -Label "Server directory"
+Assert-NoReparsePointUnderRoot -Root $ServerDirectory -Label "Server directory"
 Assert-NoReparsePointInPath -Path $ServerProfilePath -Label "ServerProfile"
 $serverJar = Join-Path $ServerDirectory "server.jar"
 $eulaPath = Join-Path $ServerDirectory "eula.txt"
@@ -145,6 +167,12 @@ $requiredProperties = @{
   "enable-rcon" = "false"
   "enable-query" = "false"
   "enforce-secure-profile" = "false"
+  "level-name" = "world"
+  "force-gamemode" = "true"
+  "gamemode" = "survival"
+  "spawn-animals" = "false"
+  "spawn-monsters" = "false"
+  "spawn-npcs" = "false"
 }
 foreach ($entry in $requiredProperties.GetEnumerator()) {
   if ($properties[$entry.Key] -ne $entry.Value) {
@@ -263,11 +291,13 @@ try {
       $fixtureLogBaseline = Get-Content -LiteralPath $latestServerLog -Raw -ErrorAction Stop
       foreach ($command in @(
         "forceload add -8 -6 10 6",
+        "gamemode survival StudioBot",
         "clear StudioBot",
         "effect clear StudioBot",
-        "fill -8 60 -6 10 70 6 minecraft:air replace",
-        "fill -8 64 -6 10 64 6 minecraft:stone replace",
-        "kill @e[type=minecraft:item,x=-8,y=60,z=-6,dx=18,dy=10,dz=12]",
+        "fill -8 60 -6 10 100 6 minecraft:air replace",
+        "fill -8 64 -6 10 70 6 minecraft:barrier outline",
+        "fill -7 64 -5 9 64 5 minecraft:stone replace",
+        "kill @e[type=!minecraft:player,x=-8,y=60,z=-6,dx=18,dy=40,dz=12]",
         "tp StudioBot 0 65 0",
         "setblock 5 65 0 minecraft:oak_log replace",
         "setblock 5 65 2 minecraft:air replace",
@@ -281,7 +311,7 @@ try {
         "give StudioBot minecraft:iron_boots 1",
         "give StudioBot minecraft:raw_iron 1",
         "give StudioBot minecraft:coal 1",
-        "execute if entity @a[name=StudioBot,x=0,y=65,z=0,distance=..1] if block 5 65 0 minecraft:oak_log if block 5 65 2 minecraft:air if block 5 65 -2 minecraft:chest if block 3 65 -2 minecraft:furnace run say $fixtureSentinel",
+        "execute if entity @a[name=StudioBot,gamemode=survival,x=0,y=65,z=0,distance=..1] if block -8 70 -6 minecraft:barrier if block 5 65 0 minecraft:oak_log if block 5 65 2 minecraft:air if block 5 65 -2 minecraft:chest if block 3 65 -2 minecraft:furnace run say $fixtureSentinel",
         "forceload remove -8 -6 10 6"
       )) {
         $serverProcess.StandardInput.WriteLine($command)

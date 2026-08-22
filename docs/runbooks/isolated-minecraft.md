@@ -49,6 +49,12 @@ Get-Content .\configs\servers\isolated-test.local.json
 - `enable-rcon=false`
 - `enable-query=false`
 - `enforce-secure-profile=false`
+- `level-name=world`
+- `force-gamemode=true`
+- `gamemode=survival`
+- `spawn-animals=false`
+- `spawn-monsters=false`
+- `spawn-npcs=false`
 
 ## 执行与判定
 

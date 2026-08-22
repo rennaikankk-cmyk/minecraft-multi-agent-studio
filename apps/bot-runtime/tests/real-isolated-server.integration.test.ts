@@ -238,7 +238,7 @@ integrationDescribe("real isolated Minecraft 1.21.8 server", () => {
           encoding: "utf8",
           flag: "wx",
         });
-        await waitForFile(setupReady, 10_000);
+        await waitForFile(setupReady, 45_000);
         await new Promise((resolve) => setTimeout(resolve, 1_000));
 
         const dimension = status.payload.position.dimension;
