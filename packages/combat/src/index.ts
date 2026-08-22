@@ -63,6 +63,20 @@ export {
   type CombatMovementSnapshot,
 } from "./movement-controller.js";
 export {
+  DEFAULT_MINE_POLICY,
+  MAX_CONCURRENT_MINE,
+  PacketMineController,
+  type CombatMineAssignment,
+  type CombatMineCandidate,
+  type CombatMineExclusion,
+  type CombatMineExclusionCode,
+  type CombatMineHand,
+  type CombatMinePlan,
+  type CombatMinePolicy,
+  type CombatMineRefusalCode,
+  type CombatMineSnapshot,
+} from "./packetmine-controller.js";
+export {
   DEFAULT_PREDICTION_POLICY,
   PredictionEngine,
   type CombatMotionSample,
