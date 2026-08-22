@@ -13,6 +13,12 @@
  * 硬闸门任意一条不过，就返回 null 目标 + 拒绝原因码，交由上层撤退。
  */
 
+import {
+  DEFAULT_SURVIVAL_STANCE,
+  totemAbsenceForcesRetreat,
+  validateSurvivalStance,
+  type CombatSurvivalStance,
+} from "./survival-stance.js";
 import type { CombatThreat, CombatThreatAssessment } from "./threat-analyzer.js";
 
 export type CombatEngagementPolicy = Readonly<{
@@ -24,7 +30,20 @@ export type CombatEngagementPolicy = Readonly<{
   maximumHostileCount: number;
   /** 超过此距离不视为可交战目标（格）。 */
   maximumEngageDistance: number;
+  /**
+   * 存活立场。`expendable` 时跳过图腾余量闸门 —— 否则一个立场已经设成可弃、
+   * 却忘了把 `minimumTotemCount` 改成 0 的 bot 仍然一枪都开不出来，这种"改了
+   * 一半"的配置比直接报错更难查。血量与人数闸门不受立场影响。
+   */
+  stance: CombatSurvivalStance;
 }>;
+
+/** 有确定性数值边界的策略字段。`stance` 是枚举，单独校验。 */
+type CombatEngagementPolicyNumericKey =
+  | "minimumEngageHealth"
+  | "minimumTotemCount"
+  | "maximumHostileCount"
+  | "maximumEngageDistance";
 
 export type CombatTargetRefusalCode =
   | "NO_HOSTILE_IN_RANGE"
@@ -58,6 +77,7 @@ export const DEFAULT_ENGAGEMENT_POLICY: CombatEngagementPolicy = {
   minimumTotemCount: 1,
   maximumHostileCount: 3,
   maximumEngageDistance: 24,
+  stance: DEFAULT_SURVIVAL_STANCE,
 };
 
 export class CombatPolicyError extends Error {
@@ -73,7 +93,7 @@ export function validateEngagementPolicy(
   policy: CombatEngagementPolicy,
 ): CombatEngagementPolicy {
   for (const [key, bounds] of Object.entries(POLICY_BOUNDS)) {
-    const value = policy[key as keyof CombatEngagementPolicy];
+    const value = policy[key as CombatEngagementPolicyNumericKey];
     if (
       !Number.isFinite(value) ||
       value < bounds.minimum ||
@@ -84,6 +104,10 @@ export function validateEngagementPolicy(
       );
     }
   }
+  if (policy.stance !== "preserve-life" && policy.stance !== "expendable") {
+    throw new CombatPolicyError("交战策略 stance 越界，拒绝使用该策略。");
+  }
+  validateSurvivalStance(policy.stance);
   return policy;
 }
 
@@ -128,7 +152,10 @@ export class TargetSelector {
     if (selfHealth < this.policy.minimumEngageHealth) {
       return decision(null, "HEALTH_BELOW_ENGAGE_FLOOR");
     }
-    if (totemCount < this.policy.minimumTotemCount) {
+    if (
+      totemAbsenceForcesRetreat(this.policy.stance) &&
+      totemCount < this.policy.minimumTotemCount
+    ) {
       return decision(null, "TOTEM_RESERVE_INSUFFICIENT");
     }
     if (engageable.length > this.policy.maximumHostileCount) {

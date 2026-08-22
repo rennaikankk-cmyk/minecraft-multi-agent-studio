@@ -3,7 +3,9 @@
  *
  * 这是战斗侧的"保命优先"落点。docs/combat-tactics-reference.md §1/§4 的两条
  * 纪律在这里成为硬规则：
- *   - **背包无图腾 → 立即撤退/断线**，不继续战斗（§1 失败降级）。
+ *   - **背包无图腾 → 立即撤退/断线**，不继续战斗（§1 失败降级）。被显式配置成
+ *     `expendable` 的 bot 例外：对它们「没图腾」不是降级信号，见
+ *     survival-stance.ts。生命、寡不敌众、水晶三条闸门对两种立场一律生效。
  *   - **撤退优先级高于 surround、高于进攻**（§4 与移动的冲突）。
  *
  * 与 L0SafetyController 的分工：L0 管非战斗生存（岩浆、溺水、饥饿），本模块管
@@ -14,6 +16,12 @@
  * 返回 null 而不是瞎给一个向量。
  */
 
+import {
+  DEFAULT_SURVIVAL_STANCE,
+  totemAbsenceForcesRetreat,
+  validateSurvivalStance,
+  type CombatSurvivalStance,
+} from "./survival-stance.js";
 import type { CombatThreatAssessment } from "./threat-analyzer.js";
 import type { CombatVector3 } from "./threat-analyzer.js";
 
@@ -40,6 +48,11 @@ export type CombatRetreatPolicy = Readonly<{
   outnumberedAbove: number;
   /** 无图腾时是否允许断线保命。false 则只做移动脱离。 */
   allowDisconnect: boolean;
+  /**
+   * 存活立场。`expendable` 时图腾耗尽不再作为撤退原因参与判定 —— 既不进
+   * `reasons`，也就不会升级成 emergency、不会压制进攻。血量与人数照旧。
+   */
+  stance: CombatSurvivalStance;
 }>;
 
 export const DEFAULT_RETREAT_POLICY: CombatRetreatPolicy = {
@@ -47,6 +60,7 @@ export const DEFAULT_RETREAT_POLICY: CombatRetreatPolicy = {
   withdrawHealth: 12,
   outnumberedAbove: 3,
   allowDisconnect: true,
+  stance: DEFAULT_SURVIVAL_STANCE,
 };
 
 export type CombatRetreatDecision = Readonly<{
@@ -90,6 +104,7 @@ export class RetreatController {
     ) {
       throw new TypeError("撤退策略越界，拒绝使用该策略。");
     }
+    validateSurvivalStance(policy.stance);
     this.policy = policy;
   }
 
@@ -108,8 +123,13 @@ export class RetreatController {
     }
 
     const detected = new Set<CombatRetreatReason>();
-    // 无图腾是最高优先级降级信号，与敌人多少无关。
-    if (assessment.totemDepleted) detected.add("TOTEM_DEPLETED");
+    // 无图腾是最高优先级降级信号，与敌人多少无关 —— 但对可弃 bot 不成立。
+    if (
+      assessment.totemDepleted &&
+      totemAbsenceForcesRetreat(this.policy.stance)
+    ) {
+      detected.add("TOTEM_DEPLETED");
+    }
     if (selfHealth < this.policy.emergencyHealth) detected.add("HEALTH_CRITICAL");
     else if (selfHealth < this.policy.withdrawHealth) detected.add("HEALTH_LOW");
     if (assessment.hostileCount > this.policy.outnumberedAbove) {

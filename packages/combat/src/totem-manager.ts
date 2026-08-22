@@ -12,7 +12,10 @@
  *   2. **事件驱动，不轮询**。调用方在副手槽变化 / 生命骤降事件上调用本模块；
  *      本模块只做纯判定，不自己起定时器、不读时钟（`nowMs` 由调用方给）。
  *   3. **没图腾就撤，不硬撑**。背包也没有 → 返回 RETREAT 意图交给
- *      RetreatController / L0 存活逻辑，不返回"继续战斗"。
+ *      RetreatController / L0 存活逻辑，不返回"继续战斗"。**除非**该 bot 被显式
+ *      配置成 `expendable`（见 survival-stance.ts）：服务器上确实存在从不带图腾、
+ *      允许送死的 bot，对它们来说「没图腾」是常态而不是失败降级，硬判撤退会让
+ *      它永远开不出第一枪。默认仍是 `preserve-life`。
  *   4. **预防性补位**。生命低于阈值时即便副手已有图腾也确认一次，避免刚被打空
  *      就吃第二次致命伤。
  */
@@ -21,6 +24,12 @@ import {
   CombatReflexNotClearedError,
   type CombatReflexDecision,
 } from "./reflex-clearance.js";
+import {
+  DEFAULT_SURVIVAL_STANCE,
+  totemAbsenceForcesRetreat,
+  validateSurvivalStance,
+  type CombatSurvivalStance,
+} from "./survival-stance.js";
 
 export type CombatTotemSnapshot = Readonly<{
   nowMs: number;
@@ -41,6 +50,11 @@ export type CombatTotemPolicy = Readonly<{
    * 存在的意义是防止事件风暴把同一次消耗重复补位多次。
    */
   minimumReequipIntervalMs: number;
+  /**
+   * 存活立场。`expendable` 时「完全没有图腾」不再触发 RETREAT，而是当作常态
+   * 放行。**只影响这一条**：有图腾时的补位与预防性确认逻辑完全不变。
+   */
+  stance: CombatSurvivalStance;
 }>;
 
 export const DEFAULT_TOTEM_POLICY: CombatTotemPolicy = {
@@ -48,6 +62,8 @@ export const DEFAULT_TOTEM_POLICY: CombatTotemPolicy = {
   preemptiveHealthThreshold: 10,
   // 一个 tick：同一帧内的重复事件不应触发两次补位。
   minimumReequipIntervalMs: 50,
+  // 保命是默认值，不是可选项。
+  stance: DEFAULT_SURVIVAL_STANCE,
 };
 
 export type CombatTotemAction = "NONE" | "REEQUIP_OFFHAND" | "RETREAT";
@@ -56,6 +72,7 @@ export type CombatTotemReason =
   | "OFFHAND_EMPTY"
   | "PREEMPTIVE_CHECK"
   | "NO_TOTEM_AVAILABLE"
+  | "FIGHTING_WITHOUT_TOTEM"
   | "ALREADY_HELD"
   | "THROTTLED";
 
@@ -83,6 +100,7 @@ export class TotemManager {
     ) {
       throw new TypeError("图腾策略越界，拒绝使用该策略。");
     }
+    validateSurvivalStance(policy.stance);
     this.policy = policy;
   }
 
@@ -102,6 +120,16 @@ export class TotemManager {
 
     if (!snapshot.offhandIsTotem) {
       if (!hasSpare) {
+        if (!totemAbsenceForcesRetreat(this.policy.stance)) {
+          // 可弃 bot：没图腾是常态，不抢占、不撤退，让攻击链正常往下走。
+          // 仍然如实报出原因码，运维能在遥测里看见"它现在裸着打"。
+          return {
+            action: "NONE",
+            reason: "FIGHTING_WITHOUT_TOTEM",
+            preempts: false,
+            totemsRemainingAfter: 0,
+          };
+        }
         // 背包也空了：这是 §1 的失败降级，交给撤退/L0，不假装还能打。
         return {
           action: "RETREAT",

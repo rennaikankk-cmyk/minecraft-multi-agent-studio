@@ -40,6 +40,12 @@ export {
   type CombatCrystalSelfState,
 } from "./crystal-engine.js";
 export {
+  DEFAULT_SURVIVAL_STANCE,
+  totemAbsenceForcesRetreat,
+  validateSurvivalStance,
+  type CombatSurvivalStance,
+} from "./survival-stance.js";
+export {
   DEFAULT_TOTEM_POLICY,
   TotemManager,
   type CombatTotemAction,
