@@ -46,7 +46,10 @@ export const safeMovementGotoStateSchema = z
     serverProfileId: identifierSchema,
     position: observedPositionSchema.nullable(),
   })
-  .strict();
+  // 运行时下发的是一份共享 state（还带着背包占用等本技能用不到的字段）。
+  // 未知键剥掉而不是 strict 拒绝，否则任何一个技能新增观测字段都会让这里
+  // 报 SKILL_STATE_INVALID —— 与 equipArmorStateSchema 同一处理。
+  .strip();
 
 export const safeMovementGotoOutputSchema = z
   .object({

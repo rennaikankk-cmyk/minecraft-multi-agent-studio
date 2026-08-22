@@ -25,6 +25,14 @@ export const failureCategories = [
   "OUT_OF_REACH",
   /** 缺材料或缺工具，要先补齐——这一类会回灌给 GoalPlanner 生成子任务。 */
   "MISSING_RESOURCE",
+  /**
+   * 背包/容器装不下了，要先腾地方。
+   *
+   * 刻意不并入 MISSING_RESOURCE：那条阶梯第一级是 ACQUIRE_RESOURCES_THEN_RETRY，
+   * 也就是"再去弄更多东西回来"——对一个已经装满的背包来说方向正好相反，会把
+   * 卡死变成刷任务。装不下与缺东西是互为反面的两种失败，必须分开。
+   */
+  "INVENTORY_FULL",
   /** ServerPolicy 拦下的动作：要降速/收紧，重试同样的时序只会再被拦。 */
   "POLICY_BLOCKED",
   /** L0 安全层或取消：不算技能坏，等恢复而不是修。 */
@@ -44,6 +52,8 @@ export const recoveryActions = [
   "REOBSERVE_THEN_RETRY",
   "MOVE_CLOSER_THEN_RETRY",
   "ACQUIRE_RESOURCES_THEN_RETRY",
+  /** 腾出背包空间（存箱子/丢垃圾）再重试。宿主没有这个能力就如实走终止级。 */
+  "FREE_INVENTORY_THEN_RETRY",
   "SLOW_DOWN_THEN_RETRY",
   "WAIT_FOR_SAFETY_CLEAR",
   "ESCALATE_TO_OPERATOR",
@@ -65,6 +75,12 @@ const LADDERS: Readonly<Record<FailureCategory, readonly RecoveryAction[]>> =
     OUT_OF_REACH: ladder("MOVE_CLOSER_THEN_RETRY", "REOBSERVE_THEN_RETRY", "ABORT"),
     MISSING_RESOURCE: ladder(
       "ACQUIRE_RESOURCES_THEN_RETRY",
+      "REOBSERVE_THEN_RETRY",
+      "ABORT",
+    ),
+    // 先腾空间，再重新观察（可能是别人拿走了东西已经腾开了），最后放弃。
+    INVENTORY_FULL: ladder(
+      "FREE_INVENTORY_THEN_RETRY",
       "REOBSERVE_THEN_RETRY",
       "ABORT",
     ),
@@ -125,6 +141,9 @@ const EXPLICIT: Readonly<Record<string, FailureCategory>> = Object.freeze({
   SKILL_PRECONDITION_EVALUATION_FAILED: "CONTRACT_BUG",
 
   // —— 距离：先走近 ——
+  // 背包装不下：形态规则也认得 "_FULL"，这里显式登记是因为它是最常见的一个，
+  // 不该依赖兜底层——显式表出问题时兜底会静默改判，而这条必须稳定。
+  INVENTORY_FULL: "INVENTORY_FULL",
   TARGET_OUT_OF_REACH: "OUT_OF_REACH",
   CRAFTING_TABLE_OUT_OF_REACH: "OUT_OF_REACH",
   CONTAINER_OUT_OF_REACH: "OUT_OF_REACH",
@@ -231,6 +250,25 @@ const SHAPE_RULES: readonly ShapeRule[] = Object.freeze([
   {
     when: (code) => has(code, "OUT_OF_REACH", "OUT_OF_RANGE", "TOO_FAR"),
     category: "OUT_OF_REACH",
+  },
+  // "装不下"必须排在 MISSING_RESOURCE 之前，卡点是 "INSUFFICIENT_SPACE"：
+  // 缺料规则认裸 "INSUFFICIENT"，所以 SHULKER_INSUFFICIENT_SPACE 这类码顺序一颠倒
+  // 就会被判成缺料，让 bot 背着装不下的东西再去采更多。空间不足与材料不足语义相反，
+  // 必须由这条更具体的规则先认领。
+  //
+  // 只认容器语义的 FULL/SPACE/SLOT，不认裸 "_FULL"——AI_QUEUE_FULL
+  // （ai-router 调度队列溢出）与背包无关，不该套用腾空间的阶梯。
+  {
+    when: (code) =>
+      has(
+        code,
+        "INVENTORY_FULL",
+        "CONTAINER_FULL",
+        "NO_SPACE",
+        "INSUFFICIENT_SPACE",
+        "NO_FREE_SLOT",
+      ),
+    category: "INVENTORY_FULL",
   },
   {
     when: (code) =>

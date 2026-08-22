@@ -1,6 +1,11 @@
 import { identifierSchema } from "@minecraft-studio/protocol";
 import { z } from "zod";
 
+import {
+  MINIMUM_INCOMING_SLOTS,
+  inventoryHasRoomFor,
+  observedInventorySchema,
+} from "./inventory-space.js";
 import { defineSkill } from "../types.js";
 
 // ---------------------------------------------------------------------------
@@ -51,6 +56,8 @@ export const collectBlockStateSchema = z
     normalActionsAllowed: z.boolean(),
     serverProfileId: identifierSchema,
     position: observedPositionSchema.nullable(),
+    // 观测不到时为 null，前置条件按"没位置"拒绝（fail-closed）。
+    inventory: observedInventorySchema.nullable(),
   })
   .strip();
 
@@ -109,6 +116,14 @@ export const collectBlockSkill = defineSkill({
       failureCode: "TARGET_DIMENSION_MISMATCH",
       check: (input, state) =>
         state.position !== null && input.dimension === state.position.dimension,
+    },
+    {
+      // 背包满了就别开工：采集器会照样挖满 60 秒，掉落物落地无人捡，
+      // 技能却报成功。宁可现在拒绝，让上层先去存箱子。
+      id: "inventory.has-room",
+      failureCode: "INVENTORY_FULL",
+      check: (_input, state) =>
+        inventoryHasRoomFor(state.inventory, MINIMUM_INCOMING_SLOTS),
     },
   ],
   execute: async (context, input) =>

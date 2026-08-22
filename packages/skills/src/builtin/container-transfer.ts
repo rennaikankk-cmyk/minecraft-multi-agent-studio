@@ -1,6 +1,11 @@
 import { identifierSchema } from "@minecraft-studio/protocol";
 import { z } from "zod";
 
+import {
+  MINIMUM_INCOMING_SLOTS,
+  inventoryHasRoomFor,
+  observedInventorySchema,
+} from "./inventory-space.js";
 import { blockWithinPolicyReach } from "./reach.js";
 import { defineSkill } from "../types.js";
 
@@ -62,6 +67,8 @@ export const containerTransferStateSchema = z
     normalActionsAllowed: z.boolean(),
     serverProfileId: identifierSchema,
     position: observedPositionSchema.nullable(),
+    // 只有 withdraw 方向用得上；deposit 不占新槽，见 inventory.has-room。
+    inventory: observedInventorySchema.nullable(),
   })
   .strip();
 
@@ -133,6 +140,17 @@ export const containerTransferSkill = defineSkill({
       check: (input, state, policy) =>
         state.position !== null &&
         blockWithinPolicyReach(input.container, state.position, policy),
+    },
+    {
+      // 取货才需要背包位置；存货是往外放，永远放行（incomingSlots 传 0）。
+      // 方向敏感是刻意的：一刀切会让"背包满了去存箱子"这条唯一自救路径也被拦死。
+      id: "inventory.has-room",
+      failureCode: "INVENTORY_FULL",
+      check: (input, state) =>
+        inventoryHasRoomFor(
+          state.inventory,
+          input.direction === "withdraw" ? MINIMUM_INCOMING_SLOTS : 0,
+        ),
     },
   ],
   execute: async (context, input) => {

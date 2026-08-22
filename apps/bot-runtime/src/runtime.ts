@@ -1262,14 +1262,20 @@ export class SingleBotRuntime {
     let position: (BotClientSnapshot["position"] & {
       serverProfileId: string;
     }) | null = null;
+    // 背包占用与 position 同源同帧：分两次读会让"够不着"和"装不下"基于两个
+    // 不同时刻的世界状态，前置条件就不再是一致快照的纯判断了。
+    let inventory: BotClientSnapshot["safety"]["inventory"] | null = null;
     if (this.state === "online" && this.client) {
       try {
+        const snapshot = this.client.snapshot();
         position = {
-          ...this.client.snapshot().position,
+          ...snapshot.position,
           serverProfileId: this.profile.id,
         };
+        inventory = snapshot.safety.inventory;
       } catch {
         position = null;
+        inventory = null;
       }
     }
     return {
@@ -1277,6 +1283,7 @@ export class SingleBotRuntime {
       normalActionsAllowed: this.canAcceptNormalActions(),
       serverProfileId: this.profile.id,
       position,
+      inventory,
     };
   }
 

@@ -48,6 +48,13 @@ export {
   type ObservedCoordinate,
 } from "./builtin/reach.js";
 export {
+  MINIMUM_INCOMING_SLOTS,
+  freeInventorySlots,
+  inventoryHasRoomFor,
+  observedInventorySchema,
+  type ObservedInventory,
+} from "./builtin/inventory-space.js";
+export {
   CRAFT_ITEM_TIMEOUT_MS,
   CRAFT_MAX_COUNT,
   craftItemCapabilityInputSchema,

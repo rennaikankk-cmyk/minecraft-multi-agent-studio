@@ -32,6 +32,7 @@ const state = {
     dimension: DIMENSION,
     serverProfileId: SERVER,
   },
+  inventory: { usedSlots: 4, totalSlots: 36 },
 };
 
 function makeInvocation(
@@ -184,6 +185,40 @@ describe("collect.block@1.0.0", () => {
         )
       ).payload.errorCode,
     ).toBe("TARGET_DIMENSION_MISMATCH");
+    expect(run.invoke).not.toHaveBeenCalled();
+  });
+
+  it("refuses to start a collect into a full backpack", async () => {
+    const run = makeExecutor();
+    const invocation = makeInvocation("collect.block", input);
+
+    expect(
+      (
+        await run.executor.execute(
+          invocation,
+          makeAuthorization(invocation, ["world.interact"]),
+          { ...state, inventory: { usedSlots: 36, totalSlots: 36 } },
+        )
+      ).payload.errorCode,
+    ).toBe("INVENTORY_FULL");
+    // 关键点不只是报错码，而是**一次 capability 都没打出去**：否则采集器仍会
+    // 跑满超时，掉落物落地无人捡。
+    expect(run.invoke).not.toHaveBeenCalled();
+  });
+
+  it("refuses a collect when the backpack was never observed", async () => {
+    const run = makeExecutor();
+    const invocation = makeInvocation("collect.block", input);
+
+    expect(
+      (
+        await run.executor.execute(
+          invocation,
+          makeAuthorization(invocation, ["world.interact"]),
+          { ...state, inventory: null },
+        )
+      ).payload.errorCode,
+    ).toBe("INVENTORY_FULL");
     expect(run.invoke).not.toHaveBeenCalled();
   });
 });
@@ -400,6 +435,85 @@ describe("container.transfer@1.0.0", () => {
         )
       ).payload.errorCode,
     ).toBe("NORMAL_ACTIONS_PAUSED");
+    expect(run.invoke).not.toHaveBeenCalled();
+  });
+
+  // 方向敏感的背包闸门。这一对断言是整条自救路径的关键：存货必须在背包满时
+  // 仍然放行，否则"背包满了 → 去存箱子"这条唯一的出路也被自己拦死，bot 卡到人工介入。
+  it("still deposits when the backpack is full", async () => {
+    const adapter = vi.fn(async () => ({
+      direction: "deposit",
+      itemName: "cobblestone",
+      requestedCount: 32,
+      movedCount: 32,
+    }));
+    const run = makeExecutor(adapter);
+    const invocation = makeInvocation("container.transfer", input);
+
+    const result = await run.executor.execute(
+      invocation,
+      makeAuthorization(invocation, ["container.read", "container.write"]),
+      { ...state, inventory: { usedSlots: 36, totalSlots: 36 } },
+    );
+
+    expect(result.payload.outcome).toBe("completed");
+    expect(adapter).toHaveBeenCalledTimes(1);
+  });
+
+  it("still deposits when the backpack was never observed", async () => {
+    const adapter = vi.fn(async () => ({
+      direction: "deposit",
+      itemName: "cobblestone",
+      requestedCount: 32,
+      movedCount: 32,
+    }));
+    const run = makeExecutor(adapter);
+    const invocation = makeInvocation("container.transfer", input);
+
+    const result = await run.executor.execute(
+      invocation,
+      makeAuthorization(invocation, ["container.read", "container.write"]),
+      { ...state, inventory: null },
+    );
+
+    expect(result.payload.outcome).toBe("completed");
+  });
+
+  it("refuses a withdraw into a full backpack", async () => {
+    const run = makeExecutor();
+    const invocation = makeInvocation("container.transfer", {
+      ...input,
+      direction: "withdraw" as const,
+    });
+
+    expect(
+      (
+        await run.executor.execute(
+          invocation,
+          makeAuthorization(invocation, ["container.read", "container.write"]),
+          { ...state, inventory: { usedSlots: 36, totalSlots: 36 } },
+        )
+      ).payload.errorCode,
+    ).toBe("INVENTORY_FULL");
+    expect(run.invoke).not.toHaveBeenCalled();
+  });
+
+  it("refuses a withdraw when the backpack was never observed", async () => {
+    const run = makeExecutor();
+    const invocation = makeInvocation("container.transfer", {
+      ...input,
+      direction: "withdraw" as const,
+    });
+
+    expect(
+      (
+        await run.executor.execute(
+          invocation,
+          makeAuthorization(invocation, ["container.read", "container.write"]),
+          { ...state, inventory: null },
+        )
+      ).payload.errorCode,
+    ).toBe("INVENTORY_FULL");
     expect(run.invoke).not.toHaveBeenCalled();
   });
 });

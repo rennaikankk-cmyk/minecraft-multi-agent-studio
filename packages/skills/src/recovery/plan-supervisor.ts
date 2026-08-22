@@ -116,6 +116,8 @@ export type RecoveryEffects = Readonly<{
   moveCloser?: (step: PlanStep) => void | Promise<void>;
   slowDown?: (step: PlanStep) => void | Promise<void>;
   waitForSafetyClear?: (step: PlanStep) => void | Promise<void>;
+  /** 腾出背包空间（存箱子/丢垃圾）。没有这个能力的宿主不提供即可。 */
+  freeInventory?: (step: PlanStep) => void | Promise<void>;
 }>;
 
 /** 恢复动作 → 对应钩子名。ACQUIRE 与终止级不走钩子，单独处理。 */
@@ -124,6 +126,7 @@ const EFFECT_FOR_ACTION: Readonly<
 > = Object.freeze({
   REOBSERVE_THEN_RETRY: "reobserve",
   MOVE_CLOSER_THEN_RETRY: "moveCloser",
+  FREE_INVENTORY_THEN_RETRY: "freeInventory",
   SLOW_DOWN_THEN_RETRY: "slowDown",
   WAIT_FOR_SAFETY_CLEAR: "waitForSafetyClear",
 });

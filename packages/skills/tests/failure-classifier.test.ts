@@ -321,6 +321,81 @@ describe("planRecovery advances the ladder by attempt", () => {
 });
 
 // ---------------------------------------------------------------------------
+// "装不下"与"缺东西"是互为反面的两种失败。合成一类会让满背包走上
+// ACQUIRE_RESOURCES_THEN_RETRY —— 也就是"再去弄更多东西回来" —— 方向正好相反,
+// 把一次卡死变成无限刷任务。这一组盯的就是这个反向。
+// ---------------------------------------------------------------------------
+describe("a full backpack gets the opposite ladder from a missing item", () => {
+  it("frees space first, then re-observes, then gives up", () => {
+    // 中间那级不是凑数:别人可能刚把箱子里的东西拿走,空间自己就腾开了。
+    expect(walk("INVENTORY_FULL", 3)).toEqual([
+      "FREE_INVENTORY_THEN_RETRY",
+      "REOBSERVE_THEN_RETRY",
+      "ABORT",
+    ]);
+  });
+
+  it("never routes a full backpack into resource acquisition", () => {
+    const decision = planRecovery("INVENTORY_FULL", 1);
+    expect(decision.category).toBe("INVENTORY_FULL");
+    expect(decision.action).not.toBe("ACQUIRE_RESOURCES_THEN_RETRY");
+    expect(walk("INVENTORY_FULL", 6)).not.toContain(
+      "ACQUIRE_RESOURCES_THEN_RETRY",
+    );
+  });
+
+  it("classifies INVENTORY_FULL from the explicit table, not the shape fallback", () => {
+    // 最常见的一个码不该依赖兜底层:兜底一旦改动会静默改判,而这条必须稳定。
+    expect(classifyFailure("INVENTORY_FULL")).toMatchObject({
+      category: "INVENTORY_FULL",
+      source: "table",
+    });
+  });
+
+  it("beats the missing-resource rule on codes that contain both signatures", () => {
+    // 卡点是 INSUFFICIENT_SPACE:缺料规则认裸 "INSUFFICIENT",两条规则顺序颠倒
+    // 就会把"装不下"判成"缺东西",于是 bot 背着装不下的货再去采更多。
+    for (const code of [
+      "CHEST_INVENTORY_FULL",
+      "TARGET_CONTAINER_FULL",
+      "SHULKER_NO_SPACE",
+      "SHULKER_INSUFFICIENT_SPACE",
+      "BARREL_INSUFFICIENT_SPACE",
+      "HOTBAR_NO_FREE_SLOT",
+    ]) {
+      expect(classifyFailure(code)).toMatchObject({
+        category: "INVENTORY_FULL",
+        source: "shape",
+      });
+      expect(planRecovery(code, 1).action).toBe("FREE_INVENTORY_THEN_RETRY");
+    }
+  });
+
+  it("leaves a genuinely missing item on the acquisition ladder", () => {
+    // 反向对照:含 "INVENTORY" 但语义是缺料的码不能被新规则抢走。
+    for (const code of ["ITEM_NOT_IN_INVENTORY", "ARMOR_ITEM_NOT_IN_INVENTORY"]) {
+      expect(classifyFailure(code).category).toBe("MISSING_RESOURCE");
+      expect(planRecovery(code, 1).action).toBe("ACQUIRE_RESOURCES_THEN_RETRY");
+    }
+  });
+
+  it("does not apply the free-space ladder to unrelated queue overflow", () => {
+    // AI_QUEUE_FULL(ai-router 的调度队列溢出)与背包无关。裸 "_FULL" 形态规则
+    // 会把它拖进腾背包的阶梯,让恢复层去清一个根本不存在的背包。
+    expect(classifyFailure("AI_QUEUE_FULL").category).not.toBe("INVENTORY_FULL");
+    expect(planRecovery("AI_QUEUE_FULL", 1).action).not.toBe(
+      "FREE_INVENTORY_THEN_RETRY",
+    );
+  });
+
+  it("still ends the ladder on a terminal rung", () => {
+    const ladder = recoveryLadderFor("INVENTORY_FULL");
+    expect(isTerminalRecoveryAction(ladder[ladder.length - 1]!)).toBe(true);
+    expect(isRecoverableFailure("INVENTORY_FULL")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 从源码里**扫**出实际会落到技能结果上的错误码，而不是手抄一份清单。
 //
 // 手抄过一次，代价已经付了：适配器那批码整体漏收，PATH_TARGET_NOT_REACHED

@@ -120,6 +120,53 @@ describe("PlanSupervisor recovery ladder", () => {
     ).toBe(true);
   });
 
+  it("frees inventory space instead of acquiring more when the backpack is full", async () => {
+    const steps = planFor("oak_log");
+    let freed = 0;
+    let acquired = 0;
+    const result = await new PlanSupervisor().run(
+      steps,
+      (_step, attempt) =>
+        attempt <= 1
+          ? ({ ok: false, errorCode: "INVENTORY_FULL" } as const)
+          : ok,
+      {},
+      {
+        freeInventory: () => {
+          freed += 1;
+        },
+        // 采集类钩子记一笔：满背包若走上补料阶梯,这里会被打中,
+        // 那正是"卡死变刷任务"的现场。
+        reobserve: () => {
+          acquired += 1;
+        },
+      },
+    );
+
+    expect(freed).toBe(1);
+    expect(acquired).toBe(0);
+    expect(result.completed).toBe(true);
+    expect(recoveryActionNeedsEffect("FREE_INVENTORY_THEN_RETRY")).toBe(true);
+  });
+
+  it("does not pretend it emptied a backpack it has no way to empty", async () => {
+    // 宿主没有存箱子/丢垃圾的能力时,必须如实走到终止级,而不是静默当成腾好了。
+    const steps = planFor("oak_log");
+    const result = await new PlanSupervisor().run(steps, () =>
+      ({ ok: false, errorCode: "INVENTORY_FULL" }) as const,
+    );
+
+    expect(result.completed).toBe(false);
+    expect(
+      kinds(result.events, "repair-rejected").some(
+        (event) =>
+          event.reason === "EFFECT_UNAVAILABLE" &&
+          event.action === "FREE_INVENTORY_THEN_RETRY",
+      ),
+    ).toBe(true);
+    expect(result.failure?.category).toBe("INVENTORY_FULL");
+  });
+
   it("stops immediately on a safety interrupt rather than retrying", async () => {
     const steps = planFor("oak_log");
     let calls = 0;
