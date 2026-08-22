@@ -73,6 +73,9 @@ export {
 export {
   DEFAULT_WEAPON_POLICY,
   WeaponManager,
+  isRangedWeapon,
+  type CombatRangedAction,
+  type CombatRangedDecision,
   type CombatSwingDecision,
   type CombatWeaponCandidate,
   type CombatWeaponKind,
