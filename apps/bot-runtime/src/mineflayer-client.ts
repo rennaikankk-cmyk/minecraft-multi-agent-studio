@@ -811,6 +811,34 @@ export class MineflayerBotClient implements BotClient {
     ];
     this.bot.collectBlock.movements = movements;
 
+    if (process.env.MC_DEBUG_COLLECT === "1") {
+      const target = targets[0];
+      const pathfinderTarget = target
+        ? movements.getBlock(target.position, 0, 0, 0)
+        : null;
+      console.error("MC_DEBUG_COLLECT_BEFORE", {
+        position: this.bot.entity?.position,
+        heldItem: this.bot.heldItem?.name,
+        target: target && pathfinderTarget
+          ? {
+              name: target.name,
+              type: target.type,
+              position: target.position,
+              safeToBreak: movements.safeToBreak(pathfinderTarget),
+              exclusionBreak: movements.exclusionAreasBreak.map((check) =>
+                check(pathfinderTarget),
+              ),
+            }
+          : null,
+      });
+      this.bot.once("diggingCompleted", (block) => {
+        console.error("MC_DEBUG_COLLECT_DIGGING_COMPLETED", {
+          name: block.name,
+          position: block.position,
+        });
+      });
+    }
+
     const inventoryBefore = this.countInventoryTotal();
     this.activePathInvocationId = request.invocationId;
     const stopOnAbort = () => {
@@ -824,6 +852,21 @@ export class MineflayerBotClient implements BotClient {
         throw new SkillFault("SKILL_CANCELLED");
       }
       await this.bot.collectBlock.collect(targets, { ignoreNoPath: false });
+      if (process.env.MC_DEBUG_COLLECT === "1") {
+        const target = targets[0];
+        const pathfinderTarget = target
+          ? movements.getBlock(target.position, 0, 0, 0)
+          : null;
+        console.error("MC_DEBUG_COLLECT_AFTER", {
+          position: this.bot.entity?.position,
+          target: target && pathfinderTarget
+            ? {
+                name: this.bot.blockAt(target.position)?.name,
+                safeToBreak: movements.safeToBreak(pathfinderTarget),
+              }
+            : null,
+        });
+      }
     } catch (error) {
       if (error instanceof SkillFault) throw error;
       if (request.signal.aborted) {

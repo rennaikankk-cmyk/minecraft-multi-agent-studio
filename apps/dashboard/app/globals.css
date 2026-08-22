@@ -755,6 +755,76 @@ footer { display: flex; justify-content: space-between; gap: 20px; margin-top: 3
 .roleCard p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.65; }
 .roleCard .roleTag { display: inline-block; margin-bottom: 10px; padding: 3px 9px; border-radius: var(--r-pill); background: var(--accent-soft); color: var(--accent); font-size: 11px; font-weight: 700; letter-spacing: 0.06em; font-family: var(--font-mono); }
 
+.combatStatusSection { margin: 8px 0 48px; }
+.combatSummary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0 0 14px;
+  border: var(--bw) solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  overflow: hidden;
+}
+.combatSummary > div { min-width: 0; padding: 15px 18px; border-right: var(--bw) solid var(--line); }
+.combatSummary > div:last-child { border-right: 0; }
+.combatSummary dt { color: var(--muted); font-size: 11px; }
+.combatSummary dd { margin: 7px 0 0; font: 700 24px var(--font-mono); }
+.combatSummary .engaging dd { color: var(--danger); }
+.combatSummary .retreating dd { color: var(--warn); }
+.combatSummary .cleared dd { color: var(--ok); }
+
+.combatTableViewport {
+  overflow-x: auto;
+  border: var(--bw) solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.combatTable { width: 100%; min-width: 820px; border-collapse: collapse; table-layout: fixed; }
+.combatTable th, .combatTable td {
+  padding: 15px 14px;
+  border-bottom: var(--bw) solid var(--line);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.combatTable thead th {
+  color: var(--muted);
+  background: var(--chip-bg);
+  font-size: 10px;
+  font-weight: 700;
+}
+.combatTable tbody tr:last-child th, .combatTable tbody tr:last-child td { border-bottom: 0; }
+.combatTable tbody th { display: grid; gap: 7px; font-size: 13px; }
+.combatTable tbody td { color: var(--text); font-size: 12px; line-height: 1.5; }
+.combatTable th:nth-child(1) { width: 17%; }
+.combatTable th:nth-child(2) { width: 13%; }
+.combatTable th:nth-child(3) { width: 16%; }
+.combatTable th:nth-child(4) { width: 31%; }
+.combatTable th:nth-child(5) { width: 23%; }
+.combatConnection { color: var(--muted); font-size: 10px; font-weight: 500; }
+.combatConnection.online { color: var(--ok); }
+.combatConnection.connecting, .combatConnection.stale { color: var(--warn); }
+.combatConnection.error { color: var(--danger); }
+.combatStance, .combatProbe {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: var(--r-pill);
+  background: var(--chip-bg);
+  white-space: nowrap;
+}
+.combatStance.engaging { color: var(--danger); background: var(--danger-soft); }
+.combatStance.retreating, .combatProbe.denied, .combatProbe.notRun { color: var(--warn); background: var(--warn-soft); }
+.combatProbe.cleared { color: var(--ok); background: var(--ok-soft); }
+.combatProbe code { color: inherit; font-size: 9px; }
+.combatCode, .combatRefusal code { font-family: var(--font-mono); }
+.combatRefusal { display: grid; gap: 4px; }
+.combatRefusal code { color: var(--warn); font-size: 10px; }
+.combatRefusal time { color: var(--muted); font-size: 10px; }
+.combatMissing { color: var(--warn); font-weight: 700; }
+.combatMuted { color: var(--muted); }
+
 .drawerBackdrop {
   position: fixed;
   inset: 0;
@@ -795,6 +865,15 @@ footer { display: flex; justify-content: space-between; gap: 20px; margin-top: 3
   .botOverviewStrip { flex-direction: column; align-items: start; gap: 10px; }
   .consoleNavInner { flex-wrap: wrap; padding: 8px 0; }
   .themeSwitcher { margin-left: 0; }
+  .combatSummary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .combatSummary > div:nth-child(2) { border-right: 0; }
+  .combatSummary > div:nth-child(-n + 2) { border-bottom: var(--bw) solid var(--line); }
+}
+
+@media (max-width: 480px) {
+  .combatSummary { grid-template-columns: 1fr; }
+  .combatSummary > div { border-right: 0; border-bottom: var(--bw) solid var(--line); }
+  .combatSummary > div:last-child { border-bottom: 0; }
 }
 
 .botCardActions { display: flex; gap: 8px; }

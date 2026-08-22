@@ -118,6 +118,18 @@ describe("Control API HTTP and WebSocket integration", () => {
         activeRisks: [],
         normalTasksPaused: false,
       },
+      combat: {
+        schemaVersion: "1.0",
+        stance: "retreating",
+        target: { entityId: 91, kind: "monster" },
+        latestRefusal: {
+          reasonCode: "HEALTH_BELOW_ENGAGE_FLOOR",
+        },
+        reflexProbe: {
+          status: "denied",
+          denial: "P99_ABOVE_BUDGET",
+        },
+      },
     });
     expect(JSON.stringify(redactedBody)).not.toContain("isolated-test");
 
@@ -131,6 +143,19 @@ describe("Control API HTTP and WebSocket integration", () => {
       z: -5,
       dimension: "minecraft:overworld",
     });
+  });
+
+  it("projects missing runtime combat telemetry as explicit null", async () => {
+    const { registry, baseUrl } = await startServer();
+    registry.ingest(statusMessage(1, false), new Date());
+
+    const response = await authenticatedFetch(
+      `${baseUrl}/v1/bots/worker-01`,
+      READER_TOKEN,
+    );
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.data.bot).toHaveProperty("combat", null);
   });
 
   it("rejects invalid input, unknown bots, and protocol mismatch", async () => {
@@ -730,7 +755,7 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   }
 }
 
-function statusMessage(sequence: number): BotStatusV1 {
+function statusMessage(sequence: number, includeCombat = true): BotStatusV1 {
   const now = new Date().toISOString();
   return {
     schemaVersion: "1.0",
@@ -759,6 +784,23 @@ function statusMessage(sequence: number): BotStatusV1 {
         lastDecisionId: "l0-api-test",
         lastAction: null,
       },
+      ...(includeCombat
+        ? {
+            combat: {
+              schemaVersion: "1.0" as const,
+              stance: "retreating" as const,
+              target: { entityId: 91, kind: "monster" as const },
+              latestRefusal: {
+                reasonCode: "HEALTH_BELOW_ENGAGE_FLOOR",
+                observedAt: now,
+              },
+              reflexProbe: {
+                status: "denied" as const,
+                denial: "P99_ABOVE_BUDGET" as const,
+              },
+            },
+          }
+        : {}),
       minecraftVersion: {
         selection: "auto",
         requestedVersion: null,

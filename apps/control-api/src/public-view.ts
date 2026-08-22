@@ -41,6 +41,7 @@ export function toPublicBotDetail(
     latencyMs: status?.latencyMs ?? null,
     currentTask: status?.currentTask ?? null,
     safety: status?.safety ?? null,
+    combat: status?.combat ?? null,
     position: status && canReadPosition ? status.position : null,
     positionRedacted: status !== null && !canReadPosition,
     minecraftVersion: record.minecraftVersion,

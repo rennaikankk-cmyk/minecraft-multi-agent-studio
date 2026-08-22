@@ -59,6 +59,10 @@ describe("classifyFailure uses the explicit table for known codes", () => {
     ["SKILL_CANCELLED", "SAFETY_INTERRUPT"],
     ["RUNTIME_STOPPING", "SAFETY_INTERRUPT"],
     ["BOT_NOT_ONLINE", "SAFETY_INTERRUPT"],
+    ["COMBAT_OBSERVATION_UNAVAILABLE", "STALE_WORLD"],
+    ["COMBAT_DRIVER_UNAVAILABLE", "UNSUPPORTED"],
+    ["COMBAT_REFLEX_NOT_CLEARED", "UNSUPPORTED"],
+    ["COMBAT_EXECUTION_RECEIPT_INVALID", "CONTRACT_BUG"],
     ["PLACE_TARGET_OCCUPIED", "STALE_WORLD"],
     ["CRAFTING_TABLE_NOT_FOUND", "STALE_WORLD"],
     ["SKILL_PRECONDITION_FAILED", "STALE_WORLD"],
@@ -261,6 +265,20 @@ describe("planRecovery advances the ladder by attempt", () => {
       "WAIT_FOR_SAFETY_CLEAR",
       "ABORT",
     ]);
+  });
+
+  it("refreshes combat observations but never retries around driver or reflex gates", () => {
+    expect(walk("COMBAT_OBSERVATION_UNAVAILABLE", 2)).toEqual([
+      "REOBSERVE_THEN_RETRY",
+      "ABORT",
+    ]);
+    for (const code of ["COMBAT_DRIVER_UNAVAILABLE", "COMBAT_REFLEX_NOT_CLEARED"]) {
+      expect(planRecovery(code, 1)).toMatchObject({
+        category: "UNSUPPORTED",
+        action: "ESCALATE_TO_OPERATOR",
+        terminal: true,
+      });
+    }
   });
 
   it("escalates contract bugs on the first failure — retrying cannot help", () => {

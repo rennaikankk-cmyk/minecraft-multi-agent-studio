@@ -237,6 +237,7 @@ function botResponse(state: "online" | "offline" | "stale") {
             supportLevel: "tested",
             supportedRange: { oldest: "1.8.8", latest: "1.21.11" },
           },
+          combat: null,
         },
       ],
     },

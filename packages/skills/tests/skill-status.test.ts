@@ -108,14 +108,26 @@ describe("builtin skill status catalog", () => {
     }
   });
 
-  it("reports every builtin skill as Partial with the two real-server gates pending", () => {
-    // 诚实基线：没有隔离测试服结果，就不许有任何技能显示成 Stable。
+  it("keeps unwired combat skills Experimental and wired skills Partial", () => {
+    // 诚实基线：没有运行时接线或隔离服结果，就不许显示成 Partial/Stable。
     for (const entry of builtinSkillStatusCatalog) {
-      expect(entry.status).toBe("Partial");
       expect(entry.evidence.isolatedServerScenarios).toBe(false);
       expect(entry.evidence.crossVersionMatrix).toBe(false);
       expect(evidenceSupportsVerifiedClaim(entry.evidence)).toBe(false);
-      expect(entry.pendingGates).toEqual(["isolated-server-scenarios", "cross-version-matrix"]);
+      if (entry.skillId.startsWith("combat.")) {
+        expect(entry.status).toBe("Experimental");
+        expect(entry.pendingGates).toEqual([
+          "runtime-wiring",
+          "isolated-server-scenarios",
+          "cross-version-matrix",
+        ]);
+      } else {
+        expect(entry.status).toBe("Partial");
+        expect(entry.pendingGates).toEqual([
+          "isolated-server-scenarios",
+          "cross-version-matrix",
+        ]);
+      }
     }
   });
 

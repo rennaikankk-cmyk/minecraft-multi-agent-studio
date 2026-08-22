@@ -343,6 +343,7 @@ function detail() {
     position: { x: 1, y: 64, z: 2, dimension: "minecraft:overworld" },
     positionRedacted: false,
     minecraftVersion: null,
+    combat: null,
   };
 }
 

@@ -1785,6 +1785,7 @@ function projectBotState(
     positionRedacted: false,
     minecraftVersion: record.minecraftVersion,
     safety: status?.safety ?? null,
+    combat: status?.combat ?? null,
   };
 }
 

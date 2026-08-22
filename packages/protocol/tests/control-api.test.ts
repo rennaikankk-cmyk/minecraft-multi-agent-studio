@@ -42,6 +42,7 @@ const detail = {
   position: null,
   positionRedacted: true,
   minecraftVersion: null,
+  combat: null,
 };
 const taskSummary = {
   taskId: UUID,
@@ -75,6 +76,31 @@ describe("Control API v1 protocol", () => {
         data: { generatedAt: NOW, bot: detail },
       }).data.bot.positionRedacted,
     ).toBe(true);
+    expect(
+      botDetailResponseV1Schema.parse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: {
+          generatedAt: NOW,
+          bot: {
+            ...detail,
+            combat: {
+              schemaVersion: "1.0",
+              stance: "retreating",
+              target: { entityId: 19, kind: "monster" },
+              latestRefusal: {
+                reasonCode: "HEALTH_BELOW_ENGAGE_FLOOR",
+                observedAt: NOW,
+              },
+              reflexProbe: {
+                status: "not-run",
+                denial: "NO_PROBE_DATA",
+              },
+            },
+          },
+        },
+      }).data.bot.combat?.stance,
+    ).toBe("retreating");
   });
 
   it("rejects unknown response fields and protocol versions", () => {

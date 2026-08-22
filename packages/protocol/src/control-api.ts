@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   botConnectionStateSchema,
   botPositionSchema,
+  combatRuntimeStatusV1Schema,
   identifierSchema,
   l0SafetyStatusSchema,
   minecraftVersionCompatibilitySchema,
@@ -199,6 +200,7 @@ export const publicBotDetailV1Schema = publicBotSummaryV1Schema
     positionRedacted: z.boolean(),
     minecraftVersion: minecraftVersionCompatibilitySchema.nullable(),
     safety: l0SafetyStatusSchema.nullable().optional(),
+    combat: combatRuntimeStatusV1Schema.nullable(),
   })
   .strict();
 

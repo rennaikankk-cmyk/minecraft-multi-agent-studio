@@ -80,6 +80,7 @@ function successBody() {
           position: null,
           positionRedacted: true,
           minecraftVersion: null,
+          combat: null,
         },
       ],
     },

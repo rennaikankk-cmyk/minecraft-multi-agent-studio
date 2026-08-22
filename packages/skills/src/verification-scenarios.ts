@@ -132,6 +132,8 @@ function scenario(
  */
 const baseInputs: Readonly<Record<string, z.infer<typeof skillJsonValueSchema>>> = {
   "movement.goto": { target: { x: 4, y: 64, z: 0, dimension, serverProfileId: server }, radius: 1 },
+  "combat.engage": { serverProfileId: server },
+  "combat.disengage": { serverProfileId: server },
   "collect.block": { blockName: "oak_log", maxCount: 4, maxDistance: 16, dimension, serverProfileId: server },
   "craft.item": { itemName: "crafting_table", count: 1, craftingTable: null, dimension, serverProfileId: server },
   "world.place-block": { itemName: "cobblestone", referenceBlock: { x: 1, y: 63, z: 0 }, face: { x: 0, y: 1, z: 0 }, dimension, serverProfileId: server },

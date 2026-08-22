@@ -50,6 +50,7 @@ const bot = {
   positionRedacted: false,
   minecraftVersion: null,
   safety: null,
+  combat: null,
 };
 
 const challenge = {

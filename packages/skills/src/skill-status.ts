@@ -151,6 +151,14 @@ const EVIDENCE: Readonly<Record<string, SkillEvidence>> = Object.freeze({
     offlineTests: true, runtimeWiring: true,
     isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
   },
+  "combat.engage": {
+    offlineTests: true, runtimeWiring: false,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
+  "combat.disengage": {
+    offlineTests: true, runtimeWiring: false,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
   "collect.block": {
     offlineTests: true, runtimeWiring: true,
     isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],

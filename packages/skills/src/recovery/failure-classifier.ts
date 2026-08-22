@@ -115,6 +115,11 @@ const EXPLICIT: Readonly<Record<string, FailureCategory>> = Object.freeze({
   // 能力执行期间掉线/被 L0 暂停：等恢复，不是技能坏了。
   SKILL_EXECUTION_INTERRUPTED: "SAFETY_INTERRUPT",
 
+  COMBAT_OBSERVATION_UNAVAILABLE: "STALE_WORLD",
+  COMBAT_DRIVER_UNAVAILABLE: "UNSUPPORTED",
+  COMBAT_REFLEX_NOT_CLEARED: "UNSUPPORTED",
+  COMBAT_EXECUTION_RECEIPT_INVALID: "CONTRACT_BUG",
+
   // —— 世界状态过期：重新观察，别原样重试 ——
   REFERENCE_BLOCK_NOT_FOUND: "STALE_WORLD",
   PLACE_TARGET_OCCUPIED: "STALE_WORLD",
@@ -396,4 +401,3 @@ export function isRecoverableFailure(errorCode: string): boolean {
 export function recoveryLadderFor(category: FailureCategory): readonly RecoveryAction[] {
   return LADDERS[category];
 }
-

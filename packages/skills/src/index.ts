@@ -5,6 +5,21 @@ export {
   type SkillFrameworkErrorCode,
 } from "./errors.js";
 export {
+  COMBAT_CONTROL_TIMEOUT_MS,
+  combatControlActualActionSchema,
+  combatControlDispositionSchema,
+  combatControlInputSchema,
+  combatControlStateSchema,
+  combatDisengageCapabilityInputSchema,
+  combatDisengageCapabilityOutputSchema,
+  combatDisengageOutputSchema,
+  combatDisengageSkill,
+  combatEngageCapabilityInputSchema,
+  combatEngageCapabilityOutputSchema,
+  combatEngageOutputSchema,
+  combatEngageSkill,
+} from "./builtin/combat-control.js";
+export {
   movementGotoSkill,
   SAFE_PATH_MAX_DISTANCE,
   SAFE_PATH_TIMEOUT_MS,

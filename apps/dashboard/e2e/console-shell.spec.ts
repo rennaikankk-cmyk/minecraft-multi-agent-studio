@@ -14,11 +14,62 @@ test("console navigation reaches every page", async ({ page }) => {
   await expect(page.getByTestId("goal-console")).toBeVisible();
 
   await page.getByRole("link", { name: "作战" }).click();
-  await expect(page.getByTestId("combat-role-grid")).toBeVisible();
-  await expect(page.getByTestId("combat-not-connected")).toContainText("运行时数据未接入");
+  await expect(page.getByTestId("combat-empty")).toBeVisible();
 
   await page.getByRole("link", { name: "机器人" }).click();
   await expect(page.getByTestId("stream-state-badge")).toBeVisible();
+});
+
+test("combat page renders real runtime state and marks missing telemetry", async ({ page }) => {
+  await page.route(/\/api\/bots$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: {
+          source: "control-api",
+          generatedAt: NOW,
+          capabilities: { stopConfirmationConfigured: false },
+          bots: [
+            {
+              ...onlineBot("combat-01", null),
+              combat: {
+                schemaVersion: "1.0",
+                stance: "engaging",
+                target: { entityId: 42, kind: "player" },
+                latestRefusal: {
+                  reasonCode: "SELF_DAMAGE_RED_LINE",
+                  observedAt: NOW,
+                },
+                reflexProbe: {
+                  status: "denied",
+                  denial: "P99_ABOVE_BUDGET",
+                },
+              },
+            },
+            onlineBot("combat-unwired", null),
+          ],
+        },
+      }),
+    });
+  });
+
+  await page.goto("/combat");
+  await expect(page.getByTestId("combat-status-table")).toBeVisible();
+  await expect(page.getByTestId("combat-stance-combat-01")).toHaveText("交战中");
+  await expect(page.getByTestId("combat-target-combat-01")).toContainText("#42 · 玩家");
+  await expect(page.getByTestId("combat-refusal-combat-01")).toContainText(
+    "SELF_DAMAGE_RED_LINE",
+  );
+  await expect(page.getByTestId("combat-probe-combat-01")).toContainText(
+    "未放行 P99_ABOVE_BUDGET",
+  );
+  await expect(page.getByTestId("combat-stance-combat-unwired")).toHaveText("未接入");
+  await expect(page.getByTestId("combat-target-combat-unwired")).toHaveText("未接入");
+  await expect(page.getByTestId("combat-refusal-combat-unwired")).toHaveText("未接入");
+  await expect(page.getByTestId("combat-probe-combat-unwired")).toHaveText("未接入");
 });
 
 test("tasks page shows no fabricated task data", async ({ page }) => {
@@ -56,6 +107,7 @@ test("tasks page renders a real goal result and preserves failed styling", async
             position: null,
             positionRedacted: true,
             minecraftVersion: null,
+            combat: null,
           }],
         },
       }),
@@ -375,6 +427,7 @@ test("bots page renders a bot pushed over the live stream", async ({ page }) => 
               position: null,
               positionRedacted: true,
               minecraftVersion: null,
+              combat: null,
             },
           ],
         },
@@ -504,5 +557,6 @@ function onlineBot(
     position: null,
     positionRedacted: true,
     minecraftVersion: null,
+    combat: null,
   };
 }

@@ -21,8 +21,13 @@ import {
   aiRequestPriorities,
   OllamaAdapter,
   ScheduledAIRouter,
+  VLLMAdapter,
 } from "../packages/ai-router/dist/index.js";
-import { builtinSkills } from "../packages/skills/dist/index.js";
+import {
+  builtinSkills,
+  GoalPlanner,
+  skillIdForStepKind,
+} from "../packages/skills/dist/index.js";
 
 const requireFromCoordinator = createRequire(
   new URL("../apps/coordinator/package.json", import.meta.url),
@@ -34,6 +39,7 @@ const REPOSITORY_ROOT = path.resolve(import.meta.dirname, "..");
 const RUNTIME_ROOT = path.join(REPOSITORY_ROOT, "runtime-data");
 const CURRENT_SERVER_PROFILE = "$CURRENT_SERVER_PROFILE";
 const CURRENT_DIMENSION = "minecraft:overworld";
+const BENCHMARK_PROVIDERS = Object.freeze(["ollama", "vllm"]);
 const MATRIX_CASES = Object.freeze([
   { concurrency: 1, requestCount: 4 },
   { concurrency: 2, requestCount: 4 },
@@ -140,6 +146,13 @@ export const PLANNER_BENCHMARK_CASES = Object.freeze([
     operatorGoal: "Mark player Eve as friendly and never target that player.",
     allowedCoordinates: [],
   },
+  {
+    id: "plan-items-crafting-table",
+    expectedAction: "plan_items",
+    operatorGoal: "Craft one crafting_table from nearby resources.",
+    expectedGoals: [{ itemName: "crafting_table", count: 1 }],
+    allowedCoordinates: [],
+  },
 ]);
 
 const PLANNER_SCHEMA_LITERAL_KEYWORDS = new Set([
@@ -188,6 +201,34 @@ export function percentile(values, quantile) {
   const sorted = values.filter(Number.isFinite).sort((left, right) => left - right);
   if (sorted.length === 0) return null;
   return round(sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * quantile) - 1)]);
+}
+
+export function benchmarkProvider(raw) {
+  const provider = raw?.trim().toLowerCase() || "ollama";
+  if (!BENCHMARK_PROVIDERS.includes(provider)) {
+    throw new Error("AI_BENCH_PROVIDER must be ollama or vllm.");
+  }
+  return provider;
+}
+
+export function benchmarkPlannedItems(catalog = benchmarkCatalog()) {
+  const available = new Set(catalog.map(({ skillId }) => skillId));
+  const planner = new GoalPlanner();
+  return Object.freeze(
+    planner.resourceGraph.knownItemNames().filter((itemName) => {
+      const plan = planner.plan([{ itemName, count: 1 }], {});
+      return Boolean(
+        plan.planned &&
+        plan.steps.length > 0 &&
+        plan.steps.every(
+          (step) =>
+            available.has(skillIdForStepKind[step.kind]) &&
+            (step.kind === "mine" ||
+              (step.kind === "craft" && step.station === null)),
+        ),
+      );
+    }),
+  );
 }
 
 export function groundingViolations(decision, benchmarkCase) {
@@ -293,17 +334,22 @@ export function evaluatePlannerContent({
   const expectedInputMatches =
     benchmarkCase.expectedAction === "noop" ||
     deepEqual(parsedDecision?.input, benchmarkCase.expectedInput);
+  const expectedGoalsMatch =
+    benchmarkCase.expectedAction !== "plan_items" ||
+    deepEqual(parsedDecision?.goals, benchmarkCase.expectedGoals);
   const correct = Boolean(
     schemaCompliant &&
     identityExact &&
     grounding.length === 0 &&
     (benchmarkCase.expectedAction === "noop"
       ? parsedDecision.action === "noop"
-      : parsedDecision.action === "invoke_skill" &&
-        parsedDecision.skillId === benchmarkCase.expectedSkillId &&
-        parsedDecision.skillVersion === "1.0.0" &&
-        skillInputSchemaPass &&
-        expectedInputMatches),
+      : benchmarkCase.expectedAction === "plan_items"
+        ? parsedDecision.action === "plan_items" && expectedGoalsMatch
+        : parsedDecision.action === "invoke_skill" &&
+          parsedDecision.skillId === benchmarkCase.expectedSkillId &&
+          parsedDecision.skillVersion === "1.0.0" &&
+          skillInputSchemaPass &&
+          expectedInputMatches),
   );
 
   return {
@@ -315,6 +361,7 @@ export function evaluatePlannerContent({
     skillInputSchemaPass,
     groundingViolations: grounding,
     expectedInputMatches,
+    expectedGoalsMatch,
     correct,
     thinkingSuppressed:
       typeof thinking === "string" &&
@@ -342,37 +389,36 @@ export function benchmarkCatalog() {
 
 async function main() {
   const config = configuration();
-  await assertBuiltArtifactsFresh();
+  await assertBuiltArtifactsFresh(config.provider);
   const catalog = benchmarkCatalog();
-  const generationSchema = buildLocalPlannerGenerationSchema(catalog);
+  const plannedItems = benchmarkPlannedItems(catalog);
+  const generationSchema = buildLocalPlannerGenerationSchema(catalog, plannedItems);
   const decisionJsonSchema = z.toJSONSchema(generationSchema);
-  const discovery = await discover(config.baseUrl);
+  const discovery = await discover(config);
   const missing = config.models.filter(
-    (model) => !discovery.models.some(({ name, model: alias }) =>
-      name === model || alias === model),
+    (model) => !findDiscoveredModel(discovery, model),
   );
   if (missing.length > 0) {
     throw new Error(
-      `Models are absent from /api/tags: ${missing.join(", ")}. Pull them on the approved Ollama host first.`,
+      `Models are absent from ${providerEndpoints(config.provider).models}: ${missing.join(", ")}.`,
     );
   }
 
   const gitRevision = await commandOutput("git", ["rev-parse", "HEAD"]);
   const report = {
     schemaVersion: "1.0",
-    benchmarkType: "minecraft-local-planner-ollama-selection",
+    benchmarkType: `minecraft-local-planner-${config.provider}-selection`,
+    provider: config.provider,
     capturedAt: new Date().toISOString(),
     endpointOrigin: config.baseUrl,
     gitRevision: gitRevision || null,
     requestShape: {
-      endpoint: "/api/chat",
-      think: false,
-      temperature: 0,
-      numPredict: 512,
+      ...providerRequestShape(config.provider),
       productionTimeoutMs: config.timeoutMs,
       qualityTimeoutMs: config.qualityTimeoutMs,
       schemaSha256: sha256(JSON.stringify(decisionJsonSchema)),
       promptVersion: LOCAL_PLANNER_PROMPT_VERSION,
+      plannedItems,
       plannerGateRequests: config.gateRequests,
       latencyRequestsAtConcurrency1: config.gateRequests / 5,
       latencyRequestsAtConcurrency4: config.gateRequests * 4 / 5,
@@ -426,19 +472,21 @@ async function benchmarkModel({
   decisionJsonSchema,
   discovery,
 }) {
-  const tag = discovery.models.find(
-    ({ name, model: alias }) => name === model || alias === model,
-  );
-  const show = await postJson(config.baseUrl, "/api/show", { model }, config.timeoutMs);
+  const tag = findDiscoveredModel(discovery, model);
+  const show = await modelMetadata(config, model);
   const operations = {
     tag: summarizeTag(tag),
     tagStable: false,
     show: summarizeShow(show),
+    coldStartIsolation:
+      config.provider === "ollama"
+        ? "model explicitly unloaded through Ollama keep_alive=0"
+        : "unavailable: vLLM serves a persistent model and exposes no per-model unload API",
     coldStart: null,
     warmStart: null,
   };
 
-  await unloadModel(config.baseUrl, model, config.timeoutMs);
+  await unloadModel(config, model);
   const coldRequest = requestDescriptor(PLANNER_BENCHMARK_CASES[0], 0, "cold");
   operations.coldStart = await nonStreamingPlannerRequest({
     baseUrl: config.baseUrl,
@@ -447,6 +495,7 @@ async function benchmarkModel({
     descriptor: coldRequest,
     catalog,
     decisionJsonSchema,
+    provider: config.provider,
   });
   const warmRequest = requestDescriptor(PLANNER_BENCHMARK_CASES[0], 1, "warm");
   operations.warmStart = await nonStreamingPlannerRequest({
@@ -456,31 +505,30 @@ async function benchmarkModel({
     descriptor: warmRequest,
     catalog,
     decisionJsonSchema,
+    provider: config.provider,
   });
 
   if (
     operations.coldStart.outcome !== "completed" &&
     operations.warmStart.outcome !== "completed"
   ) {
-    const resident = await apiPs(config.baseUrl);
+    const resident = await apiPs(config.baseUrl, config.provider);
     const remoteAfter = await remoteSnapshot(config);
     const gate = skippedPlannerGate(
       config.gateRequests,
       "cold and warm production-shape requests did not complete",
     );
     const matrix = skippedConcurrencyMatrix(
-      "Ollama/ARM64 hard gate failed before the latency matrix",
+      `${config.provider}/ARM64 hard gate failed before the latency matrix`,
     );
-    const tagAfter = (await discover(config.baseUrl)).models.find(
-      ({ name, model: alias }) => name === model || alias === model,
-    ) ?? null;
-    operations.tagStable = Boolean(
-      tagAfter &&
-      operations.tag.digest &&
-      tagAfter.digest === operations.tag.digest &&
-      tagAfter.name === operations.tag.name,
+    const tagAfter = findDiscoveredModel(await discover(config), model);
+    operations.tagStable = discoveryModelStable(
+      config.provider,
+      operations.tag,
+      summarizeTag(tagAfter),
     );
     const hardGates = evaluateHardGates({
+      provider: config.provider,
       show,
       operations,
       gate,
@@ -488,7 +536,7 @@ async function benchmarkModel({
       resident,
       remoteAfter,
     });
-    await unloadModel(config.baseUrl, model, config.timeoutMs);
+    await unloadModel(config, model);
     return {
       model,
       hardGates,
@@ -501,7 +549,7 @@ async function benchmarkModel({
       concurrencyMatrix: matrix,
       schedulerQueueProbe: {
         status: "not-run",
-        reason: "Ollama/ARM64 hard gate failed before the scheduler probe",
+        reason: `${config.provider}/ARM64 hard gate failed before the scheduler probe`,
       },
       residentAfterBenchmark: resident,
       remoteAfterBenchmark: remoteAfter,
@@ -515,6 +563,7 @@ async function benchmarkModel({
     requestCount: config.gateRequests,
     catalog,
     decisionJsonSchema,
+    provider: config.provider,
     ssh: config,
   });
   const matrix = await runConcurrencyMatrix({
@@ -523,6 +572,7 @@ async function benchmarkModel({
     timeoutMs: config.timeoutMs,
     catalog,
     decisionJsonSchema,
+    provider: config.provider,
     ssh: config,
   });
   const queueProbe = await runSchedulerQueueProbe({
@@ -530,20 +580,19 @@ async function benchmarkModel({
     model,
     timeoutMs: config.timeoutMs,
     catalog,
+    provider: config.provider,
   });
-  const resident = await apiPs(config.baseUrl);
+  const resident = await apiPs(config.baseUrl, config.provider);
   const remoteAfter = await remoteSnapshot(config);
-  const tagAfter = (await discover(config.baseUrl)).models.find(
-    ({ name, model: alias }) => name === model || alias === model,
-  ) ?? null;
-  operations.tagStable = Boolean(
-    tagAfter &&
-    operations.tag.digest &&
-    tagAfter.digest === operations.tag.digest &&
-    tagAfter.name === operations.tag.name,
+  const tagAfter = findDiscoveredModel(await discover(config), model);
+  operations.tagStable = discoveryModelStable(
+    config.provider,
+    operations.tag,
+    summarizeTag(tagAfter),
   );
 
   const hardGates = evaluateHardGates({
+    provider: config.provider,
     show,
     operations,
     gate,
@@ -559,7 +608,7 @@ async function benchmarkModel({
     resident,
     remoteAfter,
   });
-  await unloadModel(config.baseUrl, model, config.timeoutMs);
+  await unloadModel(config, model);
   return {
     model,
     hardGates,
@@ -593,6 +642,10 @@ function skippedPlannerGate(requestCount, reason) {
     correctCount: 0,
     invokeCorrectCount: 0,
     invokeRequestCount: 0,
+    planItemsCorrectCount: 0,
+    planItemsRequestCount: 0,
+    advanceCorrectCount: 0,
+    advanceRequestCount: 0,
     noopCorrectCount: 0,
     noopRequestCount: 0,
     phases: [],
@@ -622,6 +675,7 @@ async function runPlannerGate({
   requestCount,
   catalog,
   decisionJsonSchema,
+  provider,
   ssh,
 }) {
   const concurrency1Count = requestCount / 5;
@@ -633,7 +687,7 @@ async function runPlannerGate({
   ]) {
     const remoteBefore = await remoteSnapshot(ssh);
     const startedAt = performance.now();
-    const { results, psSamples } = await withPsSampler(baseUrl, () =>
+    const { results, psSamples } = await withPsSampler(baseUrl, provider, () =>
       runWorkers(count, concurrency, async (index) => {
         const benchmarkCase = PLANNER_BENCHMARK_CASES[index % PLANNER_BENCHMARK_CASES.length];
         const descriptor = requestDescriptor(
@@ -648,6 +702,7 @@ async function runPlannerGate({
           descriptor,
           catalog,
           decisionJsonSchema,
+          provider,
         });
       }),
     );
@@ -669,6 +724,10 @@ async function runPlannerGate({
   const completed = samples.filter(({ outcome }) => outcome === "completed");
   const invokeSamples = completed.filter(({ benchmarkCase }) =>
     benchmarkCase.expectedAction === "invoke_skill");
+  const planItemsSamples = completed.filter(({ benchmarkCase }) =>
+    benchmarkCase.expectedAction === "plan_items");
+  const advanceSamples = completed.filter(({ benchmarkCase }) =>
+    benchmarkCase.expectedAction !== "noop");
   const noopSamples = completed.filter(({ benchmarkCase }) =>
     benchmarkCase.expectedAction === "noop");
   return {
@@ -693,6 +752,13 @@ async function runPlannerGate({
     correctCount: count(completed, ({ evaluation }) => evaluation.correct),
     invokeCorrectCount: count(invokeSamples, ({ evaluation }) => evaluation.correct),
     invokeRequestCount: invokeSamples.length,
+    planItemsCorrectCount: count(
+      planItemsSamples,
+      ({ evaluation }) => evaluation.correct,
+    ),
+    planItemsRequestCount: planItemsSamples.length,
+    advanceCorrectCount: count(advanceSamples, ({ evaluation }) => evaluation.correct),
+    advanceRequestCount: advanceSamples.length,
     noopCorrectCount: count(noopSamples, ({ evaluation }) => evaluation.correct),
     noopRequestCount: noopSamples.length,
     phases,
@@ -704,6 +770,7 @@ async function runPlannerGate({
         caseId: benchmarkCase.id,
         expectedAction: benchmarkCase.expectedAction,
         expectedSkillId: benchmarkCase.expectedSkillId ?? null,
+        expectedGoals: benchmarkCase.expectedGoals ?? null,
         requestCount: caseAttempts.length,
         completedCount: caseSamples.length,
         timeoutCount: count(caseAttempts, ({ outcome }) => outcome === "timeout"),
@@ -734,13 +801,14 @@ async function runConcurrencyMatrix({
   timeoutMs,
   catalog,
   decisionJsonSchema,
+  provider,
   ssh,
 }) {
   const results = [];
   for (const matrixCase of MATRIX_CASES) {
     const remoteBefore = await remoteSnapshot(ssh);
     const startedAt = performance.now();
-    const sampled = await withPsSampler(baseUrl, () =>
+    const sampled = await withPsSampler(baseUrl, provider, () =>
       runWorkers(
         matrixCase.requestCount,
         matrixCase.concurrency,
@@ -757,6 +825,7 @@ async function runConcurrencyMatrix({
             ),
             catalog,
             decisionJsonSchema,
+            provider,
           });
         },
       ),
@@ -815,10 +884,20 @@ async function runConcurrencyMatrix({
   };
 }
 
-async function runSchedulerQueueProbe({ baseUrl, model, timeoutMs, catalog }) {
+async function runSchedulerQueueProbe({
+  baseUrl,
+  model,
+  timeoutMs,
+  catalog,
+  provider,
+}) {
   const events = [];
   const router = new AIRouter();
-  router.register(new OllamaAdapter(baseUrl, model));
+  router.register(
+    provider === "ollama"
+      ? new OllamaAdapter(baseUrl, model)
+      : new VLLMAdapter(baseUrl, model),
+  );
   const scheduler = new AIRequestScheduler({
     maxConcurrency: 4,
     maxQueue: 64,
@@ -827,7 +906,10 @@ async function runSchedulerQueueProbe({ baseUrl, model, timeoutMs, catalog }) {
     onEvent: (event) => events.push(event),
   });
   const scheduled = new ScheduledAIRouter(router, scheduler);
-  const generationSchema = buildLocalPlannerGenerationSchema(catalog);
+  const generationSchema = buildLocalPlannerGenerationSchema(
+    catalog,
+    benchmarkPlannedItems(catalog),
+  );
   const requests = Array.from({ length: 8 }, (_, index) => {
     const botId = `queue-bot-${index % 4}`;
     const taskId = `queue-task-${String(index).padStart(2, "0")}`;
@@ -885,23 +967,33 @@ async function nonStreamingPlannerRequest({
   descriptor,
   catalog,
   decisionJsonSchema,
+  provider,
 }) {
   const startedAt = performance.now();
   try {
+    const endpoint = providerEndpoints(provider).chat;
     const payload = await postJson(
       baseUrl,
-      "/api/chat",
-      chatBody(model, descriptor, catalog, decisionJsonSchema, false),
+      endpoint,
+      plannerRequestBody({
+        provider,
+        model,
+        descriptor,
+        catalog,
+        decisionJsonSchema,
+        stream: false,
+      }),
       timeoutMs,
     );
     const totalTimeMs = performance.now() - startedAt;
-    const content = payload?.message?.content;
+    const response = plannerResponse(provider, payload);
+    const { content, thinking } = response;
     if (typeof content !== "string" || content.length === 0) {
-      throw new Error("Ollama returned no planner content.");
+      throw new Error(`${provider} returned no planner content.`);
     }
     const evaluation = evaluatePlannerContent({
       content,
-      thinking: payload?.message?.thinking ?? "",
+      thinking,
       botId: descriptor.botId,
       taskId: descriptor.taskId,
       benchmarkCase: descriptor.benchmarkCase,
@@ -910,12 +1002,12 @@ async function nonStreamingPlannerRequest({
     return completedSample({
       descriptor,
       content,
-      thinking: payload?.message?.thinking ?? "",
+      thinking,
       evaluation,
       totalTimeMs,
-      ttftMs: approximateTtft(payload),
-      ttftSource: "Ollama durations: total_duration - eval_duration + first-token estimate",
-      payload,
+      ttftMs: response.ttftMs,
+      ttftSource: response.ttftSource,
+      payload: response.metrics,
     });
   } catch (error) {
     return failedSample(descriptor, performance.now() - startedAt, error);
@@ -929,7 +1021,18 @@ async function streamingPlannerRequest({
   descriptor,
   catalog,
   decisionJsonSchema,
+  provider,
 }) {
+  if (provider === "vllm") {
+    return streamingVllmPlannerRequest({
+      baseUrl,
+      model,
+      timeoutMs,
+      descriptor,
+      catalog,
+      decisionJsonSchema,
+    });
+  }
   const controller = new AbortController();
   const timer = setTimeout(
     () => controller.abort(new Error("Planner benchmark request timed out.")),
@@ -942,7 +1045,14 @@ async function streamingPlannerRequest({
       headers: { "Content-Type": "application/json" },
       signal: controller.signal,
       body: JSON.stringify(
-        chatBody(model, descriptor, catalog, decisionJsonSchema, true),
+        plannerRequestBody({
+          provider,
+          model,
+          descriptor,
+          catalog,
+          decisionJsonSchema,
+          stream: true,
+        }),
       ),
     });
     if (!response.ok || !response.body) {
@@ -1001,6 +1111,111 @@ async function streamingPlannerRequest({
       ttftMs: ttftMs ?? totalTimeMs,
       ttftSource: "first non-empty Ollama streaming content chunk",
       payload: finalPayload,
+    });
+  } catch (error) {
+    return failedSample(descriptor, performance.now() - startedAt, error);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function streamingVllmPlannerRequest({
+  baseUrl,
+  model,
+  timeoutMs,
+  descriptor,
+  catalog,
+  decisionJsonSchema,
+}) {
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(new Error("Planner benchmark request timed out.")),
+    timeoutMs,
+  );
+  const startedAt = performance.now();
+  let content = "";
+  let thinking = "";
+  let ttftMs = null;
+  let usage = {};
+  let finishReason = null;
+  const acceptPayload = (payload) => {
+    if (payload?.usage && typeof payload.usage === "object") usage = payload.usage;
+    const choice = payload?.choices?.[0];
+    if (typeof choice?.finish_reason === "string") finishReason = choice.finish_reason;
+    const contentChunk = choice?.delta?.content;
+    const thinkingChunk = choice?.delta?.reasoning_content ?? choice?.delta?.reasoning;
+    if (
+      ttftMs === null &&
+      ((typeof contentChunk === "string" && contentChunk.length > 0) ||
+        (typeof thinkingChunk === "string" && thinkingChunk.length > 0))
+    ) {
+      ttftMs = performance.now() - startedAt;
+    }
+    if (typeof contentChunk === "string") content += contentChunk;
+    if (typeof thinkingChunk === "string") thinking += thinkingChunk;
+  };
+  try {
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify(
+        plannerRequestBody({
+          provider: "vllm",
+          model,
+          descriptor,
+          catalog,
+          decisionJsonSchema,
+          stream: true,
+        }),
+      ),
+    });
+    if (!response.ok || !response.body) {
+      const responseBody = (await response.text()).slice(0, 300);
+      throw new Error(
+        `vLLM /v1/chat/completions returned HTTP ${response.status}: ${responseBody}`,
+      );
+    }
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for await (const chunk of response.body) {
+      buffer += decoder.decode(chunk, { stream: true });
+      for (;;) {
+        const boundary = buffer.indexOf("\n");
+        if (boundary < 0) break;
+        const line = buffer.slice(0, boundary).trim();
+        buffer = buffer.slice(boundary + 1);
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim();
+        if (!data || data === "[DONE]") continue;
+        acceptPayload(JSON.parse(data));
+      }
+    }
+    buffer += decoder.decode();
+    const trailing = buffer.trim();
+    if (trailing.startsWith("data:")) {
+      const data = trailing.slice(5).trim();
+      if (data && data !== "[DONE]") acceptPayload(JSON.parse(data));
+    }
+    const totalTimeMs = performance.now() - startedAt;
+    if (!content) throw new Error("vLLM stream returned no planner content.");
+    const evaluation = evaluatePlannerContent({
+      content,
+      thinking,
+      botId: descriptor.botId,
+      taskId: descriptor.taskId,
+      benchmarkCase: descriptor.benchmarkCase,
+      catalog,
+    });
+    return completedSample({
+      descriptor,
+      content,
+      thinking,
+      evaluation,
+      totalTimeMs,
+      ttftMs: ttftMs ?? totalTimeMs,
+      ttftSource: "first non-empty vLLM SSE content or reasoning chunk",
+      payload: vllmMetrics({ usage, finishReason }),
     });
   } catch (error) {
     return failedSample(descriptor, performance.now() - startedAt, error);
@@ -1082,25 +1297,110 @@ function failedSample(descriptor, totalTimeMs, error) {
   };
 }
 
-function chatBody(model, descriptor, catalog, decisionJsonSchema, stream) {
+export function plannerRequestBody({
+  provider,
+  model,
+  descriptor,
+  catalog,
+  decisionJsonSchema,
+  stream,
+}) {
+  const messages = [
+    { role: "system", content: LOCAL_PLANNER_SYSTEM_PROMPT },
+    {
+      role: "user",
+      content: plannerPrompt(
+        descriptor.benchmarkCase,
+        descriptor.botId,
+        descriptor.taskId,
+        catalog,
+      ),
+    },
+  ];
+  if (provider === "ollama") {
+    return {
+      model,
+      stream,
+      think: false,
+      messages,
+      options: { temperature: 0, num_predict: 512 },
+      format: decisionJsonSchema,
+    };
+  }
+  if (provider !== "vllm") {
+    throw new Error(`Unsupported benchmark provider: ${provider}.`);
+  }
   return {
     model,
     stream,
-    think: false,
-    messages: [
-      { role: "system", content: LOCAL_PLANNER_SYSTEM_PROMPT },
-      {
-        role: "user",
-        content: plannerPrompt(
-          descriptor.benchmarkCase,
-          descriptor.botId,
-          descriptor.taskId,
-          catalog,
-        ),
+    ...(stream ? { stream_options: { include_usage: true } } : {}),
+    messages,
+    max_tokens: 512,
+    temperature: 0,
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: "structured_response",
+        strict: true,
+        schema: decisionJsonSchema,
       },
-    ],
-    options: { temperature: 0, num_predict: 512 },
-    format: decisionJsonSchema,
+    },
+  };
+}
+
+export function providerRequestShape(provider) {
+  if (provider === "ollama") {
+    return {
+      endpoint: "/api/chat",
+      think: false,
+      temperature: 0,
+      numPredict: 512,
+      schemaMode: "Ollama format JSON Schema",
+    };
+  }
+  if (provider === "vllm") {
+    return {
+      endpoint: "/v1/chat/completions",
+      healthEndpoint: "/health",
+      modelsEndpoint: "/v1/models",
+      think: null,
+      temperature: 0,
+      maxTokens: 512,
+      schemaMode: "OpenAI strict json_schema response_format",
+      thinkingControl:
+        "VLLMAdapter has no think parameter; reasoning fields and think tags are measured as hard-gate failures",
+    };
+  }
+  throw new Error(`Unsupported benchmark provider: ${provider}.`);
+}
+
+function plannerResponse(provider, payload) {
+  if (provider === "ollama") {
+    return {
+      content: payload?.message?.content,
+      thinking: payload?.message?.thinking ?? "",
+      ttftMs: approximateTtft(payload),
+      ttftSource:
+        "Ollama durations: total_duration - eval_duration + first-token estimate",
+      metrics: payload,
+    };
+  }
+  const choice = payload?.choices?.[0];
+  const message = choice?.message;
+  return {
+    content: message?.content,
+    thinking: message?.reasoning_content ?? message?.reasoning ?? "",
+    ttftMs: null,
+    ttftSource: "unavailable for a non-streaming vLLM response",
+    metrics: vllmMetrics({ usage: payload?.usage, finishReason: choice?.finish_reason }),
+  };
+}
+
+function vllmMetrics({ usage = {}, finishReason = null }) {
+  return {
+    prompt_eval_count: usage?.prompt_tokens,
+    eval_count: usage?.completion_tokens,
+    done_reason: typeof finishReason === "string" ? finishReason : null,
   };
 }
 
@@ -1120,6 +1420,7 @@ function plannerPrompt(benchmarkCase, botId, taskId, catalog) {
       minecraftVersion: "1.21.11",
       currentDimension: CURRENT_DIMENSION,
     },
+    plannedItems: benchmarkPlannedItems(catalog),
     availableSkills: catalog.map(
       ({
         skillId,
@@ -1177,7 +1478,15 @@ function summarizeRequests(samples) {
   };
 }
 
-function evaluateHardGates({ show, operations, gate, matrix, resident, remoteAfter }) {
+function evaluateHardGates({
+  provider,
+  show,
+  operations,
+  gate,
+  matrix,
+  resident,
+  remoteAfter,
+}) {
   const gateSamples = gate.phases.flatMap(({ samples }) => samples);
   const allSamples = [
     operations.coldStart,
@@ -1231,23 +1540,29 @@ function evaluateHardGates({ show, operations, gate, matrix, resident, remoteAft
         swapDelta: swap ?? null,
       },
     },
-    ollamaArm64: {
+    [`${provider}Arm64`]: {
       passed:
         operations.coldStart.outcome === "completed" &&
         operations.warmStart.outcome === "completed" &&
         ["aarch64", "arm64"].includes(remoteAfter?.architecture),
       evidence: {
+        provider,
         coldStartOutcome: operations.coldStart.outcome,
         warmStartOutcome: operations.warmStart.outcome,
         architecture: remoteAfter?.architecture ?? null,
-        ollamaVersion: remoteAfter?.ollamaVersion ?? null,
+        runtimeVersion:
+          provider === "ollama"
+            ? remoteAfter?.ollamaVersion ?? null
+            : "unavailable: not exposed by required vLLM APIs",
       },
     },
     privateUseLicense: {
       passed: /Apache License|Apache-2\.0|MIT License|BSD License/iu.test(licenseText),
       evidence: licenseText
         ? firstNonemptyLine(licenseText)
-        : "No license metadata returned by Ollama /api/show; fail-closed.",
+        : provider === "ollama"
+          ? "No license metadata returned by Ollama /api/show; fail-closed."
+          : "unavailable: vLLM /v1/models does not return license metadata; fail-closed.",
     },
   };
 }
@@ -1257,6 +1572,11 @@ function scoreModel({ operations, gate, matrix, queueProbe, resident, remoteAfte
   const identityRate = ratio(gate.identityExactCount, gate.completedCount);
   const reasonRate = ratio(gate.reasonCodeInBenchmarkEnumCount, gate.completedCount);
   const invokeRate = ratio(gate.invokeCorrectCount, gate.invokeRequestCount);
+  const planItemsRate = ratio(
+    gate.planItemsCorrectCount,
+    gate.planItemsRequestCount,
+  );
+  const advanceRate = ratio(gate.advanceCorrectCount, gate.advanceRequestCount);
   const noopRate = ratio(gate.noopCorrectCount, gate.noopRequestCount);
   const groundedRate = ratio(gate.groundedCount, gate.completedCount);
   const concurrency4 = gate.phases.find(({ concurrency }) => concurrency === 4);
@@ -1276,7 +1596,7 @@ function scoreModel({ operations, gate, matrix, queueProbe, resident, remoteAfte
       findResidentModel(resident, operations.tag.name)?.size ?? 0,
     ),
   );
-  const memoryHeadroomRatio = remoteAfter?.memTotalBytes
+  const memoryHeadroomRatio = allocation > 0 && remoteAfter?.memTotalBytes
     ? Math.max(0, 1 - allocation / remoteAfter.memTotalBytes)
     : null;
   const queuePass =
@@ -1284,7 +1604,7 @@ function scoreModel({ operations, gate, matrix, queueProbe, resident, remoteAfte
     queueProbe.perBotOverlapViolations.length === 0 &&
     queueProbe.maxObservedGlobalConcurrency <= 4;
   const schema = round(10 * schemaRate + 10 * identityRate + 5 * reasonRate);
-  const skillSelection = round(25 * (0.3 * invokeRate + 0.7 * noopRate));
+  const skillSelection = round(25 * (0.3 * advanceRate + 0.7 * noopRate));
   const latency = latencyScore(p95c4);
   const grounding = round(15 * groundedRate);
   const stability = round(
@@ -1298,16 +1618,23 @@ function scoreModel({ operations, gate, matrix, queueProbe, resident, remoteAfte
       (queuePass ? 1 : 0),
   );
   const sizeBytes = operations.tag.size ?? Infinity;
-  const quantized = !/^F(?:16|32)$/iu.test(
-    operations.show.details?.quantization_level ?? "",
-  );
+  const quantizationLevel = operations.show.details?.quantization_level;
+  const quantized = typeof quantizationLevel === "string"
+    ? !/^F(?:16|32)$/iu.test(quantizationLevel)
+    : null;
   const coldMs = operations.coldStart.totalTimeMs ?? Infinity;
   const warmLoadMs = operations.warmStart.loadDurationMs ?? Infinity;
   const operationsScore = round(
     (operations.tagStable ? 1 : 0) +
       (sizeBytes <= 25e9 ? 1 : sizeBytes <= 60e9 ? 0.5 : 0) +
-      (quantized ? 1 : 0) +
-      (coldMs <= 15_000 ? 1 : coldMs <= 60_000 ? 0.5 : 0) +
+      (quantized === true ? 1 : 0) +
+      (operations.coldStartIsolation.startsWith("model explicitly unloaded")
+        ? coldMs <= 15_000
+          ? 1
+          : coldMs <= 60_000
+            ? 0.5
+            : 0
+        : 0) +
       (warmLoadMs <= 100 ? 1 : warmLoadMs <= 1_000 ? 0.5 : 0),
   );
   return {
@@ -1322,8 +1649,10 @@ function scoreModel({ operations, gate, matrix, queueProbe, resident, remoteAfte
       points: skillSelection,
       maximum: 25,
       invokeAccuracy: invokeRate,
+      planItemsAccuracy: planItemsRate,
+      advanceAccuracy: advanceRate,
       noopAccuracy: noopRate,
-      formula: "25 * (0.30 * invoke accuracy + 0.70 * honest-noop accuracy)",
+      formula: "25 * (0.30 * correct invoke/plan_items rate + 0.70 * honest-noop accuracy)",
     },
     latency: {
       points: latency,
@@ -1364,7 +1693,7 @@ function scoringDescription() {
     schema25:
       "10 * strict parse rate + 10 * exact botId/taskId rate + 5 * benchmark reason enum rate; schema gate still requires 100/100.",
     skill25:
-      "25 * (0.30 * correct invoke rate + 0.70 * honest noop rate).",
+      "25 * (0.30 * correct invoke/plan_items rate + 0.70 * honest noop rate).",
     latency20:
       "20 at p95@c4 <= 8s; linear to 0 at >30s.",
     grounding15: "15 * rate with no deterministic grounding trigger.",
@@ -1423,18 +1752,112 @@ function plannerInputSchema(schema, depth = 0) {
   return output;
 }
 
-async function discover(baseUrl) {
-  const tags = await getJson(baseUrl, "/api/tags", 10_000);
-  if (!Array.isArray(tags.models) || tags.models.length === 0) {
-    throw new Error("Ollama /api/tags returned no models.");
+function providerEndpoints(provider) {
+  return provider === "ollama"
+    ? { health: null, models: "/api/tags", chat: "/api/chat" }
+    : { health: "/health", models: "/v1/models", chat: "/v1/chat/completions" };
+}
+
+async function discover(config) {
+  if (config.provider === "ollama") {
+    const tags = await getJson(config.baseUrl, "/api/tags", 10_000);
+    if (!Array.isArray(tags.models) || tags.models.length === 0) {
+      throw new Error("Ollama /api/tags returned no models.");
+    }
+    return {
+      modelCount: tags.models.length,
+      models: tags.models.map(summarizeTag),
+    };
+  }
+  const health = await endpointStatus(config.baseUrl, "/health", 5_000);
+  if (
+    health.reachable &&
+    !health.ok &&
+    health.statusCode !== 404 &&
+    health.statusCode !== 405
+  ) {
+    throw new Error(`vLLM /health returned HTTP ${health.statusCode}.`);
+  }
+  const payload = await getJson(config.baseUrl, "/v1/models", 10_000);
+  const modelIds = Array.isArray(payload?.data)
+    ? payload.data
+        .map((entry) => entry?.id)
+        .filter((id) => typeof id === "string" && id.length > 0 && id.length <= 256)
+    : [];
+  if (
+    modelIds.length === 0 ||
+    modelIds.length > 256 ||
+    new Set(modelIds).size !== modelIds.length
+  ) {
+    throw new Error("vLLM /v1/models returned no usable unique model IDs.");
   }
   return {
-    modelCount: tags.models.length,
-    models: tags.models.map(summarizeTag),
+    health,
+    modelCount: modelIds.length,
+    models: modelIds.map((id) => ({
+      id,
+      name: id,
+      model: id,
+      modified_at: null,
+      size: null,
+      digest: null,
+      details: null,
+    })),
   };
 }
 
-async function apiPs(baseUrl) {
+async function endpointStatus(baseUrl, pathname, timeoutMs) {
+  try {
+    const response = await fetch(`${baseUrl}${pathname}`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return { reachable: true, statusCode: response.status, ok: response.ok };
+  } catch (error) {
+    return {
+      reachable: false,
+      statusCode: null,
+      ok: false,
+      error: boundedError(error),
+    };
+  }
+}
+
+function findDiscoveredModel(discovery, model) {
+  return discovery.models.find(
+    ({ id, name, model: alias }) => id === model || name === model || alias === model,
+  ) ?? null;
+}
+
+function discoveryModelStable(provider, before, after) {
+  if (!before.name || !after.name || before.name !== after.name) return false;
+  return provider === "ollama"
+    ? Boolean(before.digest && before.digest === after.digest)
+    : true;
+}
+
+async function modelMetadata(config, model) {
+  if (config.provider === "ollama") {
+    return postJson(config.baseUrl, "/api/show", { model }, config.timeoutMs);
+  }
+  return {
+    metadataStatus: "unavailable",
+    metadataReason:
+      "vLLM /v1/models does not provide license, artifact size, or quantization metadata",
+    license: null,
+    details: null,
+    capabilities: [],
+    model_info: {},
+  };
+}
+
+async function apiPs(baseUrl, provider) {
+  if (provider === "vllm") {
+    return {
+      models: [],
+      status: "unavailable",
+      reason: "vLLM exposes no Ollama-compatible resident-model allocation endpoint",
+    };
+  }
   try {
     const payload = await getJson(baseUrl, "/api/ps", 5_000);
     return {
@@ -1455,12 +1878,18 @@ async function apiPs(baseUrl) {
   }
 }
 
-async function withPsSampler(baseUrl, action) {
+async function withPsSampler(baseUrl, provider, action) {
+  if (provider === "vllm") {
+    return {
+      results: await action(),
+      psSamples: [await apiPs(baseUrl, provider)],
+    };
+  }
   let active = true;
   const psSamples = [];
   const sampler = (async () => {
     while (active) {
-      psSamples.push(await apiPs(baseUrl));
+      psSamples.push(await apiPs(baseUrl, provider));
       await delay(250);
     }
   })();
@@ -1472,9 +1901,15 @@ async function withPsSampler(baseUrl, action) {
   }
 }
 
-async function unloadModel(baseUrl, model, timeoutMs) {
+async function unloadModel(config, model) {
+  if (config.provider === "vllm") return;
   try {
-    await postJson(baseUrl, "/api/generate", { model, keep_alive: 0 }, timeoutMs);
+    await postJson(
+      config.baseUrl,
+      "/api/generate",
+      { model, keep_alive: 0 },
+      config.timeoutMs,
+    );
   } catch (error) {
     process.stderr.write(`  unload warning: ${boundedError(error)}\n`);
   }
@@ -1504,6 +1939,7 @@ async function postJson(baseUrl, pathname, body, timeoutMs) {
 
 async function remoteSnapshot(config) {
   if (!config.sshTarget) return null;
+  const runtimeVersionProbe = config.provider === "ollama" ? "; ollama --version" : "";
   const args = [
     ...(config.sshKey ? ["-i", config.sshKey] : []),
     "-o",
@@ -1513,7 +1949,7 @@ async function remoteSnapshot(config) {
     "-o",
     "ConnectTimeout=10",
     config.sshTarget,
-    "LC_ALL=C awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/ {print $1, $2}' /proc/meminfo; LC_ALL=C awk '/^(pswpin|pswpout) / {print $1, $2}' /proc/vmstat; uname -m; ollama --version",
+    `LC_ALL=C awk '/^(MemTotal|MemAvailable|SwapTotal|SwapFree):/ {print $1, $2}' /proc/meminfo; LC_ALL=C awk '/^(pswpin|pswpout) / {print $1, $2}' /proc/vmstat; uname -m${runtimeVersionProbe}`,
   ];
   try {
     const { stdout } = await execFileAsync("ssh", args, {
@@ -1521,13 +1957,13 @@ async function remoteSnapshot(config) {
       windowsHide: true,
       maxBuffer: 64 * 1024,
     });
-    return parseRemoteSnapshot(stdout);
+    return parseRemoteSnapshot(stdout, config.provider);
   } catch (error) {
     return { error: boundedError(error) };
   }
 }
 
-function parseRemoteSnapshot(output) {
+function parseRemoteSnapshot(output, provider) {
   const values = new Map();
   for (const line of output.split(/\r?\n/u)) {
     const match = /^(MemTotal:|MemAvailable:|SwapTotal:|SwapFree:|pswpin|pswpout)\s+(\d+)$/u.exec(line.trim());
@@ -1542,7 +1978,12 @@ function parseRemoteSnapshot(output) {
     pswpin: values.get("pswpin") ?? null,
     pswpout: values.get("pswpout") ?? null,
     architecture: lines.find((line) => line === "aarch64" || line === "arm64") ?? null,
-    ollamaVersion: lines.find((line) => /^ollama version/iu.test(line)) ?? null,
+    ollamaVersion:
+      provider === "ollama"
+        ? lines.find((line) => /^ollama version/iu.test(line)) ?? null
+        : null,
+    runtimeVersionStatus:
+      provider === "ollama" ? "sampled" : "unavailable: not exposed by required vLLM APIs",
   };
 }
 
@@ -1574,38 +2015,48 @@ async function runWorkers(requestCount, concurrency, worker) {
 }
 
 function configuration() {
-  const mode = process.env.AI_BENCH_MODE?.trim() || "full";
+  return benchmarkConfiguration(process.env);
+}
+
+export function benchmarkConfiguration(environment, now = new Date()) {
+  const provider = benchmarkProvider(environment.AI_BENCH_PROVIDER);
+  const mode = environment.AI_BENCH_MODE?.trim() || "full";
   if (mode !== "full" && mode !== "smoke") {
     throw new Error("AI_BENCH_MODE must be full or smoke.");
   }
+  const rawBaseUrl = environment.AI_BENCH_BASE_URL?.trim();
+  if (provider === "vllm" && !rawBaseUrl) {
+    throw new Error("AI_BENCH_BASE_URL is required when AI_BENCH_PROVIDER=vllm.");
+  }
   const baseUrl = loopbackOrigin(
-    process.env.AI_BENCH_BASE_URL?.trim() || "http://127.0.0.1:11435",
+    rawBaseUrl || "http://127.0.0.1:11435",
   );
-  const models = requiredList(process.env.AI_BENCH_MODELS, "AI_BENCH_MODELS");
+  const models = requiredList(environment.AI_BENCH_MODELS, "AI_BENCH_MODELS");
   const gateRequests = mode === "full"
-    ? boundedInteger(process.env.AI_BENCH_GATE_REQUESTS ?? "100", 100, 100, "AI_BENCH_GATE_REQUESTS")
-    : boundedInteger(process.env.AI_BENCH_GATE_REQUESTS ?? "20", 20, 100, "AI_BENCH_GATE_REQUESTS");
+    ? boundedInteger(environment.AI_BENCH_GATE_REQUESTS ?? "100", 100, 100, "AI_BENCH_GATE_REQUESTS")
+    : boundedInteger(environment.AI_BENCH_GATE_REQUESTS ?? "20", 20, 100, "AI_BENCH_GATE_REQUESTS");
   if (gateRequests % 20 !== 0) {
     throw new Error("AI_BENCH_GATE_REQUESTS must be divisible by 20.");
   }
   const timeoutMs = boundedInteger(
-    process.env.AI_BENCH_TIMEOUT_MS ?? "30000",
+    environment.AI_BENCH_TIMEOUT_MS ?? "30000",
     1_000,
     10 * 60_000,
     "AI_BENCH_TIMEOUT_MS",
   );
   const qualityTimeoutMs = boundedInteger(
-    process.env.AI_BENCH_QUALITY_TIMEOUT_MS ?? "120000",
+    environment.AI_BENCH_QUALITY_TIMEOUT_MS ?? "120000",
     timeoutMs,
     10 * 60_000,
     "AI_BENCH_QUALITY_TIMEOUT_MS",
   );
-  const outputPath = benchmarkOutputPath(process.env.AI_BENCH_OUTPUT);
-  const sshTarget = optionalSshTarget(process.env.AI_BENCH_SSH_TARGET);
-  const sshKey = process.env.AI_BENCH_SSH_KEY?.trim()
-    ? path.resolve(process.env.AI_BENCH_SSH_KEY.trim())
+  const outputPath = benchmarkOutputPath(environment.AI_BENCH_OUTPUT, now);
+  const sshTarget = optionalSshTarget(environment.AI_BENCH_SSH_TARGET);
+  const sshKey = environment.AI_BENCH_SSH_KEY?.trim()
+    ? path.resolve(environment.AI_BENCH_SSH_KEY.trim())
     : null;
   return {
+    provider,
     mode,
     baseUrl,
     models,
@@ -1623,8 +2074,8 @@ async function persistReport(outputPath, report) {
   await writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
 }
 
-function benchmarkOutputPath(raw) {
-  const stamp = new Date().toISOString().replace(/[-:.]/gu, "");
+function benchmarkOutputPath(raw, now = new Date()) {
+  const stamp = now.toISOString().replace(/[-:.]/gu, "");
   const resolved = path.resolve(
     raw?.trim() || path.join(RUNTIME_ROOT, `planner-model-benchmark-${stamp}.json`),
   );
@@ -1682,12 +2133,14 @@ function boundedInteger(raw, minimum, maximum, name) {
   return value;
 }
 
-async function assertBuiltArtifactsFresh() {
+async function assertBuiltArtifactsFresh(provider) {
   const pairs = [
     ["apps/coordinator/src/local-planner.ts", "apps/coordinator/dist/local-planner.js"],
     ["apps/coordinator/src/planner-prompts.ts", "apps/coordinator/dist/planner-prompts.js"],
     ["packages/skills/src/builtin/catalog.ts", "packages/skills/dist/builtin/catalog.js"],
-    ["packages/ai-router/src/adapters/ollama-adapter.ts", "packages/ai-router/dist/adapters/ollama-adapter.js"],
+    provider === "ollama"
+      ? ["packages/ai-router/src/adapters/ollama-adapter.ts", "packages/ai-router/dist/adapters/ollama-adapter.js"]
+      : ["packages/ai-router/src/adapters/vllm-adapter.ts", "packages/ai-router/dist/adapters/vllm-adapter.js"],
   ];
   for (const [source, built] of pairs) {
     const [sourceStat, builtStat] = await Promise.all([
@@ -1713,6 +2166,8 @@ function summarizeTag(tag = {}) {
 
 function summarizeShow(show) {
   return {
+    metadataStatus: show.metadataStatus ?? "available",
+    metadataReason: show.metadataReason ?? null,
     license: typeof show.license === "string" ? firstNonemptyLine(show.license) : null,
     licenseSha256: typeof show.license === "string" ? sha256(show.license) : null,
     details: show.details ?? null,
@@ -1811,7 +2266,11 @@ function frequencies(values) {
 
 function decisionLabel(decision) {
   if (!decision) return "INVALID";
-  return decision.action === "noop" ? "noop" : `invoke:${decision.skillId}`;
+  if (decision.action === "noop") return "noop";
+  if (decision.action === "plan_items") {
+    return `plan_items:${decision.goals.map(({ itemName }) => itemName).join(",")}`;
+  }
+  return `invoke:${decision.skillId}`;
 }
 
 function containsGoalToken(goal, token) {

@@ -51,6 +51,7 @@ function bot(botId: string, overrides: Record<string, unknown> = {}) {
     position: null,
     positionRedacted: true,
     minecraftVersion: null,
+    combat: null,
     ...overrides,
   };
 }

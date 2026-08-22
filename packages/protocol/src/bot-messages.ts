@@ -30,6 +30,73 @@ export const botConnectionStateSchema = z.enum([
   "error",
 ]);
 
+export const combatRuntimeStanceSchema = z.enum([
+  "disengaged",
+  "engaging",
+  "retreating",
+]);
+
+export const combatReflexDenialCodeSchema = z.enum([
+  "NO_PROBE_DATA",
+  "P99_ABOVE_BUDGET",
+  "INSUFFICIENT_SAMPLES",
+  "LOAD_NOT_REPRESENTATIVE",
+  "SERVER_PROFILE_MISMATCH",
+  "MALFORMED_PROBE_DATA",
+]);
+
+const combatReflexProbeStatusSchema = z.discriminatedUnion("status", [
+  z
+    .object({
+      status: z.literal("not-run"),
+      denial: z.literal("NO_PROBE_DATA"),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("denied"),
+      denial: combatReflexDenialCodeSchema,
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("cleared"),
+      denial: z.null(),
+    })
+    .strict(),
+]);
+
+/**
+ * Read-only deterministic combat projection. It deliberately excludes names,
+ * UUIDs and positions: operators only need the selected entity identity class
+ * here, and the combat driver remains the sole owner of target selection.
+ */
+export const combatRuntimeStatusV1Schema = z
+  .object({
+    schemaVersion: z.literal("1.0"),
+    stance: combatRuntimeStanceSchema,
+    target: z
+      .object({
+        entityId: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+        kind: z.enum(["player", "monster"]),
+      })
+      .strict()
+      .nullable(),
+    latestRefusal: z
+      .object({
+        reasonCode: z
+          .string()
+          .min(3)
+          .max(128)
+          .regex(/^[A-Z][A-Z0-9_]*$/u),
+        observedAt: timestampSchema,
+      })
+      .strict()
+      .nullable(),
+    reflexProbe: combatReflexProbeStatusSchema.nullable(),
+  })
+  .strict();
+
 export const minecraftVersionStringSchema = z
   .string()
   .min(1)
@@ -699,6 +766,7 @@ export const botStatusV1Schema = z
         latencyMs: z.number().int().nonnegative().max(120_000).nullable(),
         currentTask: currentTaskSchema.nullable(),
         safety: l0SafetyStatusSchema.optional(),
+        combat: combatRuntimeStatusV1Schema.optional(),
         minecraftVersion: minecraftVersionCompatibilitySchema
           .refine((value) => value.supportLevel !== "unsupported")
           .optional(),
@@ -976,6 +1044,11 @@ export const botProtocolMessageV1Schema = z.union([
 ]);
 
 export type ControlPermission = z.infer<typeof controlPermissionSchema>;
+export type CombatRuntimeStatusV1 = z.infer<typeof combatRuntimeStatusV1Schema>;
+export type CombatRuntimeStance = z.infer<typeof combatRuntimeStanceSchema>;
+export type CombatReflexDenialCode = z.infer<
+  typeof combatReflexDenialCodeSchema
+>;
 export type BotStatusV1 = z.infer<typeof botStatusV1Schema>;
 export type BotHeartbeatV1 = z.infer<typeof botHeartbeatV1Schema>;
 export type BotDisconnectedV1 = z.infer<typeof botDisconnectedV1Schema>;

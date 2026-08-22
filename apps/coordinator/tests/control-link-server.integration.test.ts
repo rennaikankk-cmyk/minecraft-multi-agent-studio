@@ -78,6 +78,16 @@ describe("Coordinator Control Link server", () => {
           botId: BOT_ID,
           positionRedacted: false,
           position: { x: 1, y: 64, z: 2, dimension: "minecraft:overworld" },
+          combat: {
+            schemaVersion: "1.0",
+            stance: "engaging",
+            target: { entityId: 42, kind: "player" },
+            latestRefusal: null,
+            reflexProbe: {
+              status: "denied",
+              denial: "NO_PROBE_DATA",
+            },
+          },
         },
       },
     });
@@ -547,24 +557,42 @@ describe("Coordinator Control Link server", () => {
   });
 
   it("executes an authenticated goal through the guarded planner", async () => {
-    const planAndDispatch = vi.fn(async (request: any) => ({
-      action: "noop" as const,
-      reasonCode: "NO_SAFE_SKILL",
-      ai: {
-        requestId: request.requestId,
-        botId: request.botId,
-        priority: 30,
-        value: { content: "{}", model: "local-test", usage: {} },
-        attempts: 1,
-        enqueuedAt: NOW.toISOString(),
-        startedAt: NOW.toISOString(),
-        completedAt: NOW.toISOString(),
-        queueTimeMs: 2,
-        executionTimeMs: 98,
-        totalTimeMs: 100,
+    const lifecycleOrder: string[] = [];
+    const baseStore = testGoalStore();
+    const begin = vi.fn(async (request: ControlLinkGoalRequestV1) => {
+      lifecycleOrder.push("persisted-begin");
+      return baseStore.begin(request);
+    });
+    const recordResult = vi.fn(
+      async (...args: Parameters<GoalLifecycleStore["recordResult"]>) => {
+        lifecycleOrder.push("persisted-terminal");
+        return baseStore.recordResult(...args);
       },
-    }));
-    const { url } = await startServer({ goalPlanner: { planAndDispatch } });
+    );
+    const planAndDispatch = vi.fn(async (request: any) => {
+      lifecycleOrder.push("planner-executed");
+      return {
+        action: "noop" as const,
+        reasonCode: "NO_SAFE_SKILL",
+        ai: {
+          requestId: request.requestId,
+          botId: request.botId,
+          priority: 30,
+          value: { content: "{}", model: "local-test", usage: {} },
+          attempts: 1,
+          enqueuedAt: NOW.toISOString(),
+          startedAt: NOW.toISOString(),
+          completedAt: NOW.toISOString(),
+          queueTimeMs: 2,
+          executionTimeMs: 98,
+          totalTimeMs: 100,
+        },
+      };
+    });
+    const { url } = await startServer({
+      goalPlanner: { planAndDispatch },
+      goalStore: { ...baseStore, begin, recordResult },
+    });
     const { socket, reader } = await authenticate(url);
     await readSnapshot(reader);
     const operationId = testUuid(980);
@@ -610,6 +638,11 @@ describe("Coordinator Control Link server", () => {
         operatorGoal: "采集附近的木材",
       }),
     );
+    expect(lifecycleOrder).toEqual([
+      "persisted-begin",
+      "planner-executed",
+      "persisted-terminal",
+    ]);
 
     socket.send(JSON.stringify({ ...goalMessage, messageId: testUuid(982) }));
     await expect(reader.next()).resolves.toMatchObject({
@@ -1202,6 +1235,16 @@ function statusMessage(
       position: { x: 1, y: 64, z: 2, dimension: "minecraft:overworld" },
       latencyMs: 10,
       currentTask,
+      combat: {
+        schemaVersion: "1.0",
+        stance: "engaging",
+        target: { entityId: 42, kind: "player" },
+        latestRefusal: null,
+        reflexProbe: {
+          status: "denied",
+          denial: "NO_PROBE_DATA",
+        },
+      },
     },
   };
 }

@@ -14,6 +14,7 @@ const MAX_INVOCATION_LIFETIME_MS = 5 * 60_000;
 export const skillCapabilitySchema = z.enum([
   "bot.observe",
   "bot.move",
+  "combat.control",
   "world.read",
   "world.interact",
   "inventory.read",

@@ -57,6 +57,19 @@ const validStatus = {
       lastDecisionId: "l0-42",
       lastAction: null,
     },
+    combat: {
+      schemaVersion: "1.0" as const,
+      stance: "engaging" as const,
+      target: { entityId: 73, kind: "player" as const },
+      latestRefusal: {
+        reasonCode: "REFLEX_CLEARANCE_REQUIRED",
+        observedAt: NOW,
+      },
+      reflexProbe: {
+        status: "denied" as const,
+        denial: "NO_PROBE_DATA" as const,
+      },
+    },
   },
 };
 
@@ -129,6 +142,39 @@ describe("BotStatusV1", () => {
           safety: {
             ...validStatus.payload.safety,
             activeRisks: ["LOW_HEALTH"],
+          },
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("keeps the combat projection versioned, redacted and internally consistent", () => {
+    expect(botStatusV1Schema.parse(validStatus).payload.combat).toEqual(
+      validStatus.payload.combat,
+    );
+    expect(
+      botStatusV1Schema.safeParse({
+        ...validStatus,
+        payload: {
+          ...validStatus.payload,
+          combat: {
+            ...validStatus.payload.combat,
+            target: {
+              ...validStatus.payload.combat.target,
+              username: "unredacted-player",
+            },
+          },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      botStatusV1Schema.safeParse({
+        ...validStatus,
+        payload: {
+          ...validStatus.payload,
+          combat: {
+            ...validStatus.payload.combat,
+            reflexProbe: { status: "cleared", denial: "NO_PROBE_DATA" },
           },
         },
       }).success,

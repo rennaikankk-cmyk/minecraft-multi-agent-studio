@@ -105,6 +105,31 @@ describe("PlanSupervisor recovery ladder", () => {
     expect(recoveryActionNeedsEffect("RETRY_SAME")).toBe(false);
   });
 
+  it("routes a missing combat observation through the existing reobserve hook", async () => {
+    const steps = planFor("oak_log");
+    let executions = 0;
+    let reobservations = 0;
+    const result = await new PlanSupervisor().run(
+      steps,
+      () => {
+        executions += 1;
+        return executions === 1
+          ? ({ ok: false, errorCode: "COMBAT_OBSERVATION_UNAVAILABLE" } as const)
+          : ok;
+      },
+      {},
+      { reobserve: () => { reobservations += 1; } },
+    );
+
+    expect(result.completed).toBe(true);
+    expect(reobservations).toBe(1);
+    expect(kinds(result.events, "recovery-selected")[0]).toMatchObject({
+      category: "STALE_WORLD",
+      action: "REOBSERVE_THEN_RETRY",
+    });
+    expect(recoveryActionNeedsEffect("REOBSERVE_THEN_RETRY")).toBe(true);
+  });
+
   it("does not pretend a missing hook succeeded", async () => {
     const steps = planFor("oak_log");
     // 没有 moveCloser 钩子的宿主：不能假装走近了。
@@ -376,4 +401,3 @@ describe("PlanSupervisor auto-generates subtasks for missing resources", () => {
     }
   });
 });
-
