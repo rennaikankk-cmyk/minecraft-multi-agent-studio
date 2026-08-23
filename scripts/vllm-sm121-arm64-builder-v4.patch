@@ -1,0 +1,21 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1009,13 +1009,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
+   # gencodes when both families are requested.
+   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+-    # Pin to plain "12.0" instead of the "12.0f" family target: ptxas in
+-    # CUDA 13.0 cannot emit the e2m1x2 conversion these NVFP4 kernels use
+-    # when asked to target sm_121 natively ("Instruction 'cvt with .e2m1x2'
+-    # not supported on .target 'sm_121'"), so the family-fallback in
+-    # cuda_archs_loose_intersection (which would otherwise pick up 12.1)
+-    # must not be allowed to select it here. Building sm_120 and relying on
+-    # same-major forward compatibility matches today's published behavior.
+-    cuda_archs_loose_intersection(FP4_SM120_ARCHS "12.0" "${CUDA_ARCHS}")
++    # CUDA 13.0.88 ptxas rejects the e2m1x2 conversion used by these NVFP4
++    # kernels for sm_120. The GB10 target is sm_121, where the instruction is
++    # supported, so select the native SM121 code path explicitly.
++    cuda_archs_loose_intersection(FP4_SM120_ARCHS "12.1" "${CUDA_ARCHS}")
+   else()
+     cuda_archs_loose_intersection(FP4_SM120_ARCHS "12.0a;12.1a" "${CUDA_ARCHS}")
+   endif()
