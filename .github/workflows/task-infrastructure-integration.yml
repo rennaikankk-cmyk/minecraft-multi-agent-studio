@@ -74,6 +74,8 @@ jobs:
       TASK_POSTGRES_URL: postgresql://studio:ci-${{ github.run_id }}-${{ github.run_attempt }}@127.0.0.1:5432/studio_tasks
       TASK_REDIS_URL: redis://127.0.0.1:6379/0
       TASK_INFRA_TEST_NAMESPACE: studio_test_run${{ github.run_id }}_try${{ github.run_attempt }}
+      WORLD_MEMORY_POSTGRES_URL: postgresql://studio:ci-${{ github.run_id }}-${{ github.run_attempt }}@127.0.0.1:5432/studio_tasks
+      WORLD_MEMORY_INFRA_TEST_NAMESPACE: studio_test_world_run${{ github.run_id }}_try${{ github.run_attempt }}
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
