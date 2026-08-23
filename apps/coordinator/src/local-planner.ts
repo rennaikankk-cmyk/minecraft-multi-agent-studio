@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   aiRequestPriorities,
+  parseStructuredOutput,
   type AIScheduledResult,
   type GenerateResult,
   type ScheduledAIRouter,
@@ -232,8 +233,12 @@ export type LocalPlannerErrorCode =
   | "SKILL_INVOCATION_INVALID";
 
 export class LocalPlannerError extends Error {
-  constructor(readonly code: LocalPlannerErrorCode, message: string) {
-    super(message);
+  constructor(
+    readonly code: LocalPlannerErrorCode,
+    message: string,
+    options?: Readonly<{ cause?: unknown }>,
+  ) {
+    super(message, options);
     this.name = "LocalPlannerError";
   }
 }
@@ -1014,11 +1019,15 @@ export class CoordinatorLocalPlanner {
 
 function parseDecision(content: string): LocalPlannerDecision {
   try {
-    return localPlannerDecisionSchema.parse(JSON.parse(content) as unknown);
-  } catch {
+    return parseStructuredOutput(content, {
+      name: "local-planner-decision",
+      schema: localPlannerDecisionSchema,
+    });
+  } catch (error) {
     throw new LocalPlannerError(
       "PLANNER_DECISION_INVALID",
       "Local planner response failed strict JSON validation.",
+      { cause: error },
     );
   }
 }

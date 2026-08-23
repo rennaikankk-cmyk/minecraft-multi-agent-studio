@@ -296,6 +296,29 @@ describe("CoordinatorLocalPlanner", () => {
     expect(sendSkillInvocation).not.toHaveBeenCalled();
   });
 
+  it("recovers a decision the model wrapped in a markdown fence", async () => {
+    const planner = plannerWith(async (options) =>
+      aiResult(
+        [
+          "```json",
+          JSON.stringify({
+            action: "noop",
+            botId: BOT_ID,
+            taskId: "task-01",
+            reasonCode: "NO_SAFE_SKILL",
+          }),
+          "```",
+        ].join("\n"),
+        options.requestId,
+      ),
+    );
+
+    await expect(planner.planAndDispatch(planRequest())).resolves.toMatchObject({
+      action: "noop",
+      reasonCode: "NO_SAFE_SKILL",
+    });
+  });
+
   it("holds a deterministic Bot assignment lease only for the execution window", async () => {
     const assignment = new BotAssignmentService({ registry, now: () => NOW });
     const sendSkillInvocation = vi.fn<
