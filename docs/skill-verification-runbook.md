@@ -138,14 +138,14 @@ targetsFound, itemsCollected, requestedCount, craftedCount, movedCount
 pnpm test:minecraft-skills
 ```
 
-脚本会复用固定 Minecraft 1.21.8 服务端哈希、安全 `server.properties` 与本地 ServerProfile 校验，启动临时回环服，执行真实连接、断线恢复，以及全部七个内建技能各一个成功场景，最后输出 `MINECRAFT_SKILL_ACCEPTANCE=PASS`。测试场景只触发脚本内硬编码的白名单控制台命令；marker 文件内容不会作为服务器命令执行。只有 CI 或本地真实运行完成后才能登记证据；测试代码存在本身不改变任何技能的 `verification=unverified` 状态。
+脚本会复用固定 Minecraft 1.21.8 服务端哈希、安全 `server.properties` 与本地 ServerProfile 校验，启动临时回环服，执行真实连接、断线恢复，以及固定的七个基础技能各一个成功场景，最后输出 `MINECRAFT_SKILL_ACCEPTANCE=PASS`。测试场景只触发脚本内硬编码的白名单控制台命令；marker 文件内容不会作为服务器命令执行。只有 CI 或本地真实运行完成后才能登记证据；测试代码存在本身不改变任何技能的 `verification=unverified` 状态。
 
 当前固定成功场景依次覆盖移动、采集单个原木、合成工作台、放置方块、箱子存入、四槽铁甲换装，以及 `1 raw_iron + 1 coal -> 1 iron_ingot`。后续场景应沿用同一入口扩展，不另建启动器。
 
 ### 版本化场景清单
 
 `@minecraft-studio/skills` 导出 `builtinSkillVerificationManifestsV1`。清单由严格的
-`skillVerificationManifestV1Schema` 校验，当前为 7 个内置技能固定 Minecraft 1.21.8
+`skillVerificationManifestV1Schema` 校验，当前为注册技能固定 Minecraft 1.21.8
 的验收矩阵。每个技能必须包含成功、材料不足、权限/位置拒绝、L0 抢占、取消、断线和
 部分成功读回七类场景，否则校验失败。
 

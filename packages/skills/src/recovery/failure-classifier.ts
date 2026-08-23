@@ -250,7 +250,10 @@ const EXPLICIT: Readonly<Record<string, FailureCategory>> = Object.freeze({
   POLICY_FALL_TOO_FAR: "POLICY_BLOCKED",
 
   TRADE_DISABLED: "STALE_WORLD",
-  TRADE_PRICE_UNACCEPTABLE: "POLICY_BLOCKED",
+  // A price ceiling is a caller-supplied business constraint. Retrying the
+  // same villager does not change that offer, so the caller must choose
+  // another villager or a different budget.
+  TRADE_PRICE_UNACCEPTABLE: "UNSUPPORTED",
   TRADE_ITEM_NOT_IN_INVENTORY: "MISSING_RESOURCE",
   VILLAGER_NOT_FOUND: "STALE_WORLD",
   VILLAGER_OUT_OF_REACH: "OUT_OF_REACH",

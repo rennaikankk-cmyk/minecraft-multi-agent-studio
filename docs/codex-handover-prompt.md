@@ -4,7 +4,7 @@
 
 ---
 
-你将接管 Minecraft Multi-Agent Studio 项目的持续开发。项目目标是：**在无规则（anarchy）服务器上运行一个多智能体作战集群**——侦察、突袭、防御、PvP 战斗、建造、自动化农场、后勤协同。项目位于 `C:\Users\baichengbo\Documents\minecraft-agents`（pnpm TypeScript monorepo，分支 `agent/control-api-coordinator-bridge`）。
+你将接管 Minecraft Multi-Agent Studio 项目的持续开发。项目目标是：**在无规则（anarchy）服务器上运行一个多智能体作战集群**——侦察、突袭、防御、PvP 战斗、建造、自动化农场、后勤协同。项目位于 `C:\Users\renna\Desktop\ai work\minecraft-multi-agent-studio`（pnpm TypeScript monorepo，分支 `agent/control-api-coordinator-bridge`）。
 
 ## 第一步（强制）
 
@@ -55,7 +55,7 @@
 
 ## 环境说明
 
-- 本机 Node/pnpm 不在 PATH：用 `C:\Users\baichengbo\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe`（v24）+ 其 `node_modules/pnpm/bin/pnpm.cjs`（11.9.0），或自行装 Node 22+ / pnpm 11.9.0。
+- 本机 Node/pnpm 不在 PATH：使用 Codex 工作区依赖中提供的 Node.js v24 与 pnpm 11.9.0，或自行安装 Node 22+ / pnpm 11.9.0。路径由运行环境探测，不写死到某台机器。
 - 本机无 PostgreSQL/Redis：真实基础设施测试靠 GitHub Actions（见 .github/workflows），或本机显式准备隔离服务后设 `TASK_POSTGRES_URL`/`TASK_REDIS_URL`/`TASK_INFRA_TEST_NAMESPACE`。
 - git remote：`https://github.com/rennaikankk-cmyk/minecraft-multi-agent-studio.git`；当前分支领先远程 1 个提交，推送前先与用户确认。
 - 首日清理：删 `runtime-data/` 里的 e2e 日志和 PR 草稿（pr-1-body.md、pull-request-runtime-link.md）；加 `.gitattributes` 固定 LF。

@@ -51,4 +51,34 @@ describe("N2 site-shelter runtime adapter", () => {
       expect(error).toMatchObject({ code: "TARGET_SERVER_PROFILE_MISMATCH" });
     }
   });
+
+  it("samples burial depth below the candidate", () => {
+    const calls: Vec3[] = [];
+    const bot = fakeBot({
+      blockAt: vi.fn((position: Vec3) => {
+        calls.push(position);
+        return { name: "stone", boundingBox: "block", position };
+      }),
+    });
+    observeSite(bot, "isolated-local", {
+      candidate: { x: 12_345, y: 40, z: 15_678, dimension: "minecraft:overworld", serverProfileId: "isolated-local" },
+      policy: { minHighwayDistance: 1_000, minPortalLineDistance: 512, hazardClearance: 64, burialDepthTarget: 2 },
+    });
+    expect(calls).toContainEqual(new Vec3(12_345, 39, 15_678));
+    expect(calls).not.toContainEqual(new Vec3(12_345, 41, 15_678));
+  });
+
+  it("does not claim movedInside until pathfinder reaches the shelter", async () => {
+    const bot = fakeBot({
+      dig: vi.fn(async () => undefined),
+      placeBlock: vi.fn(async () => undefined),
+      equip: vi.fn(async () => undefined),
+      inventory: { items: vi.fn(() => [{ name: "cobblestone" }]) },
+      pathfinder: { goto: vi.fn(async () => undefined), stop: vi.fn() },
+    });
+    await expect(digShelter(bot, "isolated-local", {
+      direction: "east", depth: 2, sealItemName: "cobblestone", dimension: "minecraft:overworld", serverProfileId: "isolated-local",
+    }, new AbortController().signal)).rejects.toMatchObject({ code: "SHELTER_STEP_BLOCKED" });
+    expect((bot as { placeBlock: ReturnType<typeof vi.fn> }).placeBlock).not.toHaveBeenCalled();
+  });
 });

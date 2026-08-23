@@ -1,6 +1,9 @@
 import type { Bot } from "mineflayer";
+import pathfinderModule, { Movements } from "mineflayer-pathfinder";
 import { Vec3 } from "vec3";
 import { SkillFault } from "@minecraft-studio/skills";
+
+const { goals } = pathfinderModule;
 
 type Position = Readonly<{ x: number; y: number; z: number; dimension: string; serverProfileId: string }>;
 type SitePolicy = Readonly<{ minHighwayDistance: number; minPortalLineDistance: number; hazardClearance: number; burialDepthTarget: number }>;
@@ -27,8 +30,10 @@ export function observeSite(bot: Bot, profile: string, input: { candidate: Posit
     return distances.length ? Math.min(...distances) : r;
   };
   let burial = 0;
-  for (let y = 1; y <= Math.ceil(input.policy.burialDepthTarget); y += 1) {
-    const b = bot.blockAt(c.offset(0, y, 0));
+  // Burial is protection below the candidate. Sampling upward would measure
+  // the roof/sky and could accept an exposed site as deeply buried.
+  for (let depth = 1; depth <= Math.ceil(input.policy.burialDepthTarget); depth += 1) {
+    const b = bot.blockAt(c.offset(0, -depth, 0));
     if (!b) { complete = false; break; }
     if (b.boundingBox === "empty") break;
     burial += 1;
@@ -75,8 +80,19 @@ export async function digShelter(
   scope(bot, profile, input);
   if (input.direction === "down") throw new SkillFault("POLICY_STRAIGHT_DOWN_FORBIDDEN");
   if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
-  const mutableBot = bot as Bot & { canDigBlock?: (block: unknown) => boolean; dig?: Bot["dig"]; placeBlock?: Bot["placeBlock"]; equip?: Bot["equip"] };
-  if (typeof mutableBot.dig !== "function" || typeof mutableBot.placeBlock !== "function" || typeof mutableBot.equip !== "function") {
+  const mutableBot = bot as Bot & {
+    canDigBlock?: (block: unknown) => boolean;
+    dig?: Bot["dig"];
+    placeBlock?: Bot["placeBlock"];
+    equip?: Bot["equip"];
+    pathfinder?: { goto?: (goal: object) => Promise<void>; stop?: () => void; setMovements?: (movements: Movements) => void };
+  };
+  if (
+    typeof mutableBot.dig !== "function" ||
+    typeof mutableBot.placeBlock !== "function" ||
+    typeof mutableBot.equip !== "function" ||
+    typeof mutableBot.pathfinder?.goto !== "function"
+  ) {
     throw new SkillFault("SHELTER_RUNTIME_NOT_WIRED");
   }
   const direction = directionVector[input.direction];
@@ -84,6 +100,7 @@ export async function digShelter(
   const sealItem = bot.inventory.items().find((item) => item.name === input.sealItemName);
   if (!sealItem) throw new SkillFault("ITEM_NOT_IN_INVENTORY");
   let dugBlocks = 0;
+  const shelter = origin.plus(direction.scaled(input.depth));
   try {
     for (let step = 1; step <= input.depth; step += 1) {
       for (const y of [0, 1]) {
@@ -96,6 +113,27 @@ export async function digShelter(
         dugBlocks += 1;
       }
     }
+    if (typeof mutableBot.pathfinder?.setMovements === "function") {
+      const movements = new Movements(bot);
+      movements.canDig = false;
+      movements.allow1by1towers = false;
+      movements.allowFreeMotion = false;
+      movements.allowParkour = false;
+      movements.allowSprinting = false;
+      movements.maxDropDown = 2;
+      mutableBot.pathfinder.setMovements(movements);
+    }
+    const stopOnAbort = () => mutableBot.pathfinder?.stop?.();
+    signal.addEventListener("abort", stopOnAbort, { once: true });
+    try {
+      if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      await mutableBot.pathfinder!.goto!(new goals.GoalNear(shelter.x, shelter.y, shelter.z, 0.75));
+    } finally {
+      signal.removeEventListener("abort", stopOnAbort);
+    }
+    if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+    if (bot.entity.position.distanceTo(shelter) > 1.5) throw new SkillFault("SHELTER_STEP_BLOCKED");
+
     const entrance = origin.minus(direction);
     const support = bot.blockAt(entrance.minus(new Vec3(0, 1, 0)));
     if (!support || support.boundingBox === "empty") throw new SkillFault("SHELTER_STEP_BLOCKED");
@@ -107,7 +145,6 @@ export async function digShelter(
     throw new SkillFault("SHELTER_RUNTIME_FAILED");
   }
   if (dugBlocks < 2) throw new SkillFault("SHELTER_STEP_BLOCKED");
-  const shelter = origin.plus(direction.scaled(input.depth));
   return {
     dugBlocks,
     movedInside: true as const,
