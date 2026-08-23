@@ -101,7 +101,7 @@ function Protect-SparkOutput {
   )
   $redacted = [regex]::Replace(
     $redacted,
-    '(?i)(--(?:password|passwd|secret|token|api[-_]?key)(?:=|\s+))[^\s]+',
+    '(?i)(--(?:password|passwd|secret|token|api[-_]?key|hf[-_]?token)(?:=|\s+))[^\s]+',
     '$1[REDACTED]'
   )
   $redacted = [regex]::Replace(
@@ -133,6 +133,11 @@ $checks = [ordered]@{
   listeningPorts = "ss -lntup 2>&1 || true"
   modelDirectories = 'for p in /models /model /opt/models /srv/models /data/models "$HOME/.cache/huggingface"; do if [ -e "$p" ]; then du -sh "$p" 2>/dev/null; find "$p" -maxdepth 2 -mindepth 1 -type d 2>/dev/null | head -100; fi; done'
   inferenceProcesses = "ps -eo pid,etimes,%cpu,%mem,args --sort=-%mem | grep -Ei 'vllm|sglang|triton|python.*api_server' | grep -v grep || true"
+  toolchainVersions = 'python3 --version 2>&1 || true; python3 -c "import importlib.metadata as m, json; names=[\"torch\",\"vllm\",\"transformers\"]; installed={d.metadata[\"Name\"].lower() for d in m.distributions()}; print(json.dumps({n:(m.version(n) if n in installed else None) for n in names}, sort_keys=True))" 2>&1 || true; vllm --version 2>&1 || true'
+  sm121Capability = 'python3 -c "import torch; c=torch.cuda.get_device_capability(0); a=torch.cuda.get_arch_list(); print(\"device=\"+torch.cuda.get_device_name(0)); print(\"capability=%d.%d\" % c); print(\"arch_list=\"+str(a)); print(\"sm121_native=\"+str(\"sm_121\" in a))" 2>&1 || true'
+  sm121KernelArtifacts = "command -v cuobjdump >/dev/null && cuobjdump --version 2>&1 || true; find /usr/local/lib /usr/lib /opt /home -type f -name '*.so' -size -500M 2>/dev/null | head -100"
+  gpuMemoryBreakdown = "nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2>&1 || true; nvidia-smi -q -d MEMORY 2>&1 | head -120 || true"
+  processMemoryBreakdown = "ps -eo pid,comm,rss,vsz,args --sort=-rss | head -100"
 }
 
 $results = [ordered]@{}
@@ -141,7 +146,7 @@ foreach ($entry in $checks.GetEnumerator()) {
 }
 
 $report = [ordered]@{
-  schemaVersion = "1.0"
+  schemaVersion = "1.1"
   auditType = "dgx-spark-read-only"
   capturedAt = (Get-Date).ToUniversalTime().ToString("o")
   target = [ordered]@{
@@ -149,6 +154,21 @@ $report = [ordered]@{
     user = $SparkUser
   }
   destructiveActions = $false
+  readOnly = $true
+  acceptance = [ordered]@{
+    driverCudaVllmTransformers = [ordered]@{
+      status = if ($results.toolchainVersions.output -match 'torch' -and $results.gpu.output -match 'Driver Version' -and $results.cuda.output -match 'release 13\.0') { "partial" } else { "not-verified" }
+      evidence = "gpu, cuda and toolchainVersions checks; vLLM/Transformers must be present to complete the four-tuple"
+    }
+    sm121NativeKernel = [ordered]@{
+      status = if ($results.sm121Capability.output -match 'sm121_native=True' -and $results.sm121KernelArtifacts.output -match 'sm_121|compute_121') { "candidate-evidence" } else { "not-verified" }
+      evidence = "sm121Capability plus cuobjdump output; profiler trace during model inference is still required to prove dispatch"
+    }
+    memoryBreakdown = [ordered]@{
+      status = if ($results.gpuMemoryBreakdown.output -and $results.processMemoryBreakdown.output) { "observed" } else { "not-verified" }
+      evidence = "gpuMemoryBreakdown and processMemoryBreakdown; weights/KV/CUDA-graph bytes require serving metrics or allocator trace"
+    }
+  }
   checks = $results
 }
 

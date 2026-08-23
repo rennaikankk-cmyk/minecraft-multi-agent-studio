@@ -1508,6 +1508,16 @@ function evaluateHardGates({
     ? modelAllocationBytes / totalMemoryBytes
     : null;
   const swap = concurrency4?.swapDelta;
+  const availableMemoryBytes = concurrency4?.remoteAfter?.memAvailableBytes ?? null;
+  const memoryEvidenceComplete = Boolean(
+    Number.isFinite(totalMemoryBytes) &&
+    totalMemoryBytes > 0 &&
+    Number.isFinite(availableMemoryBytes) &&
+    availableMemoryBytes >= 0 &&
+    swap &&
+    Number.isFinite(swap.pswpin) &&
+    Number.isFinite(swap.pswpout),
+  );
   const licenseText = typeof show.license === "string" ? show.license : "";
   return {
     schema100: {
@@ -1526,18 +1536,22 @@ function evaluateHardGates({
     concurrency4Memory: {
       passed: Boolean(
         concurrency4 &&
+        memoryEvidenceComplete &&
+        modelAllocationBytes > 0 &&
         !concurrency4.summary.errors.some(({ error }) => /out of memory|\boom\b/iu.test(error)) &&
-        (!swap || (swap.pswpin === 0 && swap.pswpout === 0)) &&
-        (memoryRatio === null || memoryRatio <= 0.85) &&
-        (concurrency4.remoteAfter?.memAvailableBytes == null ||
-          concurrency4.remoteAfter.memAvailableBytes >= 10e9),
+        swap.pswpin === 0 &&
+        swap.pswpout === 0 &&
+        memoryRatio !== null &&
+        memoryRatio <= 0.85 &&
+        availableMemoryBytes >= 10e9,
       ),
       evidence: {
         completed: `${concurrency4?.summary.completedCount ?? 0}/${concurrency4?.requestCount ?? 0}`,
         peakModelAllocationBytes: modelAllocationBytes || null,
         allocationToSystemMemoryRatio: round(memoryRatio),
-        memAvailableBytes: concurrency4?.remoteAfter?.memAvailableBytes ?? null,
+        memAvailableBytes: availableMemoryBytes,
         swapDelta: swap ?? null,
+        memoryEvidenceComplete,
       },
     },
     [`${provider}Arm64`]: {

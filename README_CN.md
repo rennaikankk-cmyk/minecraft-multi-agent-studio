@@ -26,7 +26,8 @@
 - L0 安全层从真实 Mineflayer 状态识别饥饿、低/危急生命值、溺水、岩浆、坠落、卡死和背包满，并执行固定白名单动作。
 - `movement.goto@1.0.0` 通过受限 Pathfinder 适配器移动，不允许挖掘、搭塔、垫方块或跑酷。
 - 任务系统提供 PostgreSQL 迁移、严格状态机、幂等键、乐观修订号、租约边界、事务 outbox、自动对账/过期租约恢复、持久取消、严格派发协议和 BullMQ Worker。
-- `apps/task-worker` 提供独立 Node 进程验收入口；当前只接受显式隔离测试配置并注册 `isolated.acceptance.wait@1.0.0`，不包含生产处理器，也不连接 Minecraft。
+- Coordinator 已实现多 Bot 协调切片：按 ServerProfile、维度、L0 安全状态、Skill 能力和当前任务占用做确定性候选评分；队列任务通过 `DurableBotAssignmentService` 将 Bot 选择、PostgreSQL task lease、revision 和 `TaskDispatchV1` outbox 在同一事务绑定，重启后可从任务表/outbox恢复；同一 Bot 的活动任务竞争由 PostgreSQL advisory lock + 行查询 fail-closed。Control Link 的持久 goal lifecycle 现在使用同步 durable assignment（记录 `dispatchBotId`、Bot lease 和 revision，但不生成没有生产 handler 的队列 job），并把受信 lease owner 传给 Local Planner，避免重复的内存 assignment；Coordinator 启动后会运行有界过期租约恢复循环。显式设置 `COORDINATOR_TASK_DELIVERY=isolated-test` 后，Coordinator 会独占启动 `BullMqTaskQueue` 与 `TaskOutboxReconciler`，关闭时先停止接单再排空投递。
+- `apps/task-worker` 提供独立 Node 进程验收入口；当前只接受显式隔离测试配置，注册 `isolated.acceptance.wait@1.0.0`（取消边界）和无网络的 `isolated.acceptance.digest@1.0.0`（严格输入、幂等、结构化结果）。这两个处理器只用于隔离控制面验收，不连接 Minecraft、AI 或正式服务器。
 - 隔离 PostgreSQL/Redis 集成测试已于 2026-07-28 在 GitHub Actions 真实临时服务中通过；本机没有运行这些服务时不会冒充本机服务在线。
 
 当前项目具备单 Bot 安全执行、可选多 Bot 进程托管和任务基础设施，但不是已经完成的多智能体产品。Supervisor 已通过不连接 Minecraft 的真实子进程认证、分组、优雅停止和崩溃恢复验收；真实 1/5/10/20 Bot 联机与 P/E Core 实体机性能门禁仍未完成。Runtime ↔ Coordinator 已通过双进程验收，Dashboard → Control API → Coordinator → Runtime 已通过不连接 Minecraft 的四进程服务级验收。Control Link 不可用时不会沿用旧快照：Control API 返回 503，Dashboard 清空 Bot 列表并明确显示错误。
@@ -387,7 +388,7 @@ $env:TASK_INFRA_TEST_NAMESPACE='studio_test_local_unique01'
 pnpm test:task-infra
 ```
 
-三个变量缺少任意一个时命令会失败，不会静默跳过。测试会构建并启动独立 `task-worker` 子进程，但强制注入 `TASK_WORKER_PURPOSE=isolated-test` 与 `TASK_WORKER_HANDLER_PROFILE=isolated-acceptance`，不会连接 Minecraft。GitHub Actions 使用固定摘要的临时 PostgreSQL/Redis 服务完成同一组测试；2026-08-14 运行 `31793333384` 的 20 项真实基础设施场景全部通过，包括跨 Worker 与独立进程取消。该边界不代表当前机器的生产基础设施在线；生产任务处理器和部署审批仍保持未接入状态。
+三个变量缺少任意一个时命令会失败，不会静默跳过。测试会构建并启动独立 `task-worker` 子进程，但强制注入 `TASK_WORKER_PURPOSE=isolated-test` 与 `TASK_WORKER_HANDLER_PROFILE=isolated-acceptance`，不会连接 Minecraft。GitHub Actions 使用固定摘要的临时 PostgreSQL/Redis 服务完成同一组测试；2026-08-14 运行 `31793333384` 的 20 项真实基础设施场景全部通过，包括跨 Worker 与独立进程取消。当前新增的 digest 场景仍需下一次 CI 运行确认；该边界不代表当前机器的生产基础设施在线，Minecraft 生产处理器和正式部署审批仍保持未接入状态。
 
 ## 安全说明
 

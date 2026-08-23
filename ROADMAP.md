@@ -257,11 +257,20 @@
 - [x] 完成事务 outbox 与 PostgreSQL→BullMQ 自动对账重投；同事务创建、连续失败预算、异常记录封存和显式重派均已通过离线与真实基础设施门禁。
 - [x] 增加 Coordinator 所有的有界过期租约恢复；`assigned` 任务恢复与新修订 outbox 同事务提交，`running` 任务按稳定原因进入失败终态，并发扫描不重叠，真实 PostgreSQL 场景已通过。
 - [x] 增加持久取消消费、跨 Worker 取消和独立隔离 Worker；GitHub Actions 真实 PostgreSQL/Redis 场景已通过。
-- [ ] 接入 Coordinator、Control API 和 Dashboard 任务看板。
+- [x] 增加显式隔离投递配置：Coordinator 在 loopback PostgreSQL/Redis 与 `studio_test_` schema 下启动唯一 `TaskOutboxReconciler`，优雅停止先停止接单再关闭投递资源。
+- [x] 增加无外部能力的 `isolated.acceptance.digest@1.0.0` 确定性处理器，严格输入、幂等摘要、结构化结果和 trace evidence；`isolated.acceptance.wait@1.0.0` 继续用于取消场景。
+- [x] 接入 Coordinator、Control API 和 Dashboard 任务看板。
 
 ### P1.4 多机器人协调
 
-- 角色评分、任务分配、资源锁、箱子锁、区域锁、替补执行和故障恢复。
+状态：**持久分配第一切片已完成；角色协同未完成**
+
+- [x] Coordinator 确定性 Bot 候选过滤与固定评分：ServerProfile、在线/新鲜状态、L0 安全、Skill 能力和当前任务占用均 fail-closed。
+- [x] 单任务/单 Bot 的有界内存 assignment lease：幂等重放、并发占用拒绝、过期和失联释放、同约束替补选择。
+- [x] Local Planner 在一次普通目标执行窗口内持有 assignment lease；Coordinator stale sweep 同时回收失效占用。
+- [x] 新增持久任务 assignment 入口：与 PostgreSQL 任务租约/TaskDispatch 原子绑定；同一 Bot 的并发任务通过 advisory lock + 活动 lease 查询拒绝，预分配 lease 可由 Worker 接管，Coordinator 重启后从任务表/outbox恢复。
+- [x] 将普通目标执行窗口迁移到同步持久 assignment：goal lifecycle 记录 `dispatchBotId`/Bot lease/revision，Local Planner 复用受信 lease owner，不再重复申请内存 assignment；过期租约恢复循环已接入 Coordinator 启停生命周期。
+- [ ] 角色评分、资源锁、箱子锁、区域锁、替补重派的持久审计和多 Bot 协同。
 
 ### P1.4.1 异构 CPU 资源调度
 
@@ -302,8 +311,13 @@ Entity Snapshot 协议。旧 `pnpm bot:start` 保持回滚可用，affinity 和 
 
 ### P2.1 长期记忆
 
-- 世界事实、箱子摘要、任务轨迹、失败经验、pgvector、Embedding 和 Reranker。
-- **服务器硬隔离**：每个服务器是独立世界。位置类记忆必含 `serverProfileId` + 维度 + 坐标（NOT NULL，缺一拒绝写入）；查询在仓储层强制按当前 ServerProfile 过滤；pgvector 相似度检索先按服过滤再算相似度；跨服对比仅限战略层显式分析查询，结果不得直接下发为坐标类任务。
+状态：**服务器隔离与 PostgreSQL 仓储第一切片已实现；真实 CI 验收待运行**
+
+- [x] 世界事实写入 Schema 强制 `serverProfileId`、维度和有限坐标；内存仓储与 PostgreSQL 仓储均按当前 ServerProfile fail-closed 隔离。
+- [x] PostgreSQL 迁移使用参数化读写、服务器/维度索引、只追加约束，并拒绝 NaN/Infinity 坐标；查询有默认和最大上限。
+- [x] 隔离基础设施测试入口覆盖跨服同坐标、注入形状 ID、未知维度、NaN/Infinity 和连接边界；真实 PostgreSQL 结果仅在 CI 运行后计入验收。
+- [ ] 箱子摘要、任务轨迹、失败经验、pgvector、Embedding 和 Reranker。
+- **服务器硬隔离（后续扩展）**：pgvector 相似度检索必须先按服过滤再算相似度；跨服对比仅限战略层显式分析查询，结果不得直接下发为坐标类任务。
 
 ### P2.2 本地规划
 
@@ -330,15 +344,15 @@ Entity Snapshot 协议。旧 `pnpm bot:start` 保持回滚可用，affinity 和 
 1. **已完成：P1.3.1 真实基础设施门禁**：GitHub Actions 中的 PostgreSQL/Redis 隔离测试已通过；测试没有连接 Minecraft。
 2. **已完成：P0 Runtime Link**：Runtime ↔ Coordinator 的认证遥测与停止传输已通过真实双进程回环验收；测试没有连接 Minecraft。
 3. **已完成：P0 Control Bridge**：Control API ↔ 独立 Coordinator 的原子状态镜像和固定停止 RPC 已通过不连接 Minecraft 的真实四进程回环服务验收。
-4. **已完成：P1.3.2 持久任务闭环**：outbox/reconciler、自动过期租约恢复、持久取消、跨 Worker 取消和独立隔离 Worker 已通过真实基础设施 CI；生产处理器仍未接入。
+4. **进行中：P1.3.2 持久任务闭环**：outbox/reconciler、自动过期租约恢复、持久取消、跨 Worker 取消和独立隔离 Worker 已通过真实基础设施 CI；新增 digest 控制面 handler 与 Coordinator 投递生命周期，仍需在 CI 真实 PostgreSQL/Redis 上完成端到端验收。
 5. **已完成：CPU 调度第一、二阶段**：可靠硬件探测与 Bot Process Supervisor 已通过离线和真实子进程门禁；未连接 Minecraft。
 6. **CPU 调度第三阶段**：用已认证子进程 PID 表执行可选 affinity，并在 Intel 混合架构与 generic fallback 主机完成实体机门禁。
 7. **P1.2.3 跨版本语义资源解析**：把规划器的“原木/石材/新版本特色物品”等语义选择解析为当前 registry 的真实资源与兼容变体。
 8. **P1.1/P1.2 实机矩阵**：验证 L0 危险场景和六个 Skill 的多版本真实行为，不扩大正式服务器权限。
-9. **P1.4 多 Bot 协调**：实现任务分配、资源/箱子/区域锁、替补执行和故障转移。
+9. **P1.4 多 Bot 协调**：在 CI 隔离基础设施门验证持久 assignment 与同步 goal lease，再接入生产队列 Worker、资源/箱子/区域锁和持久替补重派。
 10. **P1.5/P1.6 生产能力与基础设施**：按场景逐项增加生产技能，再完善指标、日志、备份与可回滚部署。
 11. **P2 智能层**：基础设施稳定后再接长期记忆、AI Router 和本地规划；受监管自我改进、基地撤离和战斗保持最后阶段。
 
 ## 当前唯一下一步
 
-完成 CPU 调度第三阶段实体机 affinity 接入：使用 Supervisor 已认证的活跃子进程 PID 表应用 CPU Pool，在 Intel 混合架构与 generic fallback 主机验证权限失败不退出、池内多核心分配和可选 systemd 配置；默认仍保持关闭，不连接正式服务器。
+在 CI 隔离 PostgreSQL/Redis 上验证 `submitTask → durable outbox → Coordinator reconciler → BullMQ → 独立 Worker → 结构化 result/evidence` 完整链路；不连接 Minecraft 或正式服务器。

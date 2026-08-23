@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   BENCHMARK_REASON_CODES,
+  benchmarkPlannedItems,
+  benchmarkProvider,
   benchmarkCatalog,
   evaluatePlannerContent,
   groundingViolations,
@@ -107,4 +109,36 @@ test("benchmark reason codes are an explicit bounded semantic enum", () => {
   assert.equal(BENCHMARK_REASON_CODES.includes("ADVANCE_TASK"), true);
   assert.equal(BENCHMARK_REASON_CODES.includes("NO_SAFE_SKILL"), true);
   assert.equal(new Set(BENCHMARK_REASON_CODES).size, BENCHMARK_REASON_CODES.length);
+});
+
+test("provider selection is explicit and planned items stay grounded in the catalog", () => {
+  assert.equal(benchmarkProvider(undefined), "ollama");
+  assert.equal(benchmarkProvider(" VLLM "), "vllm");
+  assert.throws(() => benchmarkProvider("openai"), /AI_BENCH_PROVIDER/);
+  const plannedItems = benchmarkPlannedItems(benchmarkCatalog());
+  assert.equal(plannedItems.includes("oak_log"), true);
+  assert.equal(plannedItems.includes("crafting_table"), true);
+});
+
+test("plan_items is evaluated as a single trusted resource goal", () => {
+  const benchmarkCase = PLANNER_BENCHMARK_CASES.find(
+    ({ expectedAction }) => expectedAction === "plan_items",
+  );
+  assert.ok(benchmarkCase);
+  const result = evaluatePlannerContent({
+    content: JSON.stringify({
+      action: "plan_items",
+      botId: "worker-01",
+      taskId: "task-01",
+      goals: benchmarkCase.expectedGoals,
+      reasonCode: "ADVANCE_TASK",
+    }),
+    botId: "worker-01",
+    taskId: "task-01",
+    benchmarkCase,
+    catalog: benchmarkCatalog(),
+  });
+  assert.equal(result.schemaCompliant, true);
+  assert.equal(result.expectedGoalsMatch, true);
+  assert.equal(result.correct, true);
 });

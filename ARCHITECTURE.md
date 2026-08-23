@@ -39,7 +39,7 @@ apps/
 ├─ coordinator/            # Bot 注册表与安全停止控制平面
 ├─ control-api/            # 认证 HTTP/WebSocket 状态 API 与受权停止入口
 ├─ dashboard/              # Next.js 前端、服务端代理与真实状态 Store
-└─ task-worker/            # 仅隔离验收的独立 BullMQ Worker 进程
+└─ task-worker/            # 显式隔离配置下的独立 BullMQ Worker 进程
 packages/
 ├─ cpu-resource-manager/   # CPU 探测、Pool、affinity 抽象与轻量调度
 ├─ protocol/               # 版本化 Zod Schema
@@ -50,7 +50,7 @@ packages/
 └─ task-system/            # PostgreSQL 事实源、BullMQ 队列与确定性 Worker
 ```
 
-尚未创建 AI Router 或生产数据库部署。Bot Runtime 已完成 Minecraft 1.21.8 隔离联机验收，并已通过认证 Runtime Link 接入独立 Coordinator 的进程内 Bot 注册表和安全停止控制边界。可选 Bot Process Supervisor 能用固定子入口托管一至三个 Bot 的进程组，通过双向 HMAC IPC、有限重启预算和活跃 PID 授权接入 CPU Resource Manager；旧单 Bot 入口仍可独立运行。Control API 通过认证 Control Link 镜像 Coordinator 状态并转发固定停止 RPC。Dashboard 通过服务端代理读取 Control API，浏览器不会收到长期令牌。四进程服务链路已用生产 Coordinator、Control API、Dashboard 和测试专用 Runtime fixture 完成真实回环验收；该结果没有连接 Minecraft，也不是浏览器 E2E。确定性技能库已注册 `movement.goto@1.0.0`，Bot Runtime 通过受限 Pathfinder 适配器执行；任务包已建立 PostgreSQL 适配器、严格 BullMQ 队列、持久取消和可嵌入 Worker。独立 `task-worker` 应用当前只允许通过显式隔离测试配置连接真实 PostgreSQL/Redis，并且只注册验收处理器，不是生产 Worker 配置。
+尚未创建 AI Router 或生产数据库部署。Bot Runtime 已完成 Minecraft 1.21.8 隔离联机验收，并已通过认证 Runtime Link 接入独立 Coordinator 的进程内 Bot 注册表和安全停止控制边界。可选 Bot Process Supervisor 能用固定子入口托管一至三个 Bot 的进程组，通过双向 HMAC IPC、有限重启预算和活跃 PID 授权接入 CPU Resource Manager；旧单 Bot 入口仍可独立运行。Control API 通过认证 Control Link 镜像 Coordinator 状态并转发固定停止 RPC。Dashboard 通过服务端代理读取 Control API，浏览器不会收到长期令牌。四进程服务链路已用生产 Coordinator、Control API、Dashboard 和测试专用 Runtime fixture 完成真实回环验收；该结果没有连接 Minecraft，也不是浏览器 E2E。确定性技能库已注册 `movement.goto@1.0.0`，Bot Runtime 通过受限 Pathfinder 适配器执行；任务包已建立 PostgreSQL 适配器、严格 BullMQ 队列、持久取消和可嵌入 Worker。独立 `task-worker` 应用只在显式 `TASK_WORKER_PURPOSE=isolated-test` 配置下启动，Coordinator 的 PostgreSQL→BullMQ 对账也只在显式 `COORDINATOR_TASK_DELIVERY=isolated-test` 且 loopback Redis/隔离 schema 下启用；当前注册的 digest handler 是控制面验收处理器，不是 Minecraft 生产技能。
 
 ## 4. 环境检测数据流
 
@@ -355,7 +355,7 @@ Pathfinder adapter
 ## 14. P1.3 任务基础设施
 
 ```text
-future Coordinator (pending)
+Coordinator (isolated delivery profile only)
   └─ TaskDispatchV1 → BullMQ (delivery and temporary locks)
                          ↓ strict parse + exact handler lookup
                     deterministic Worker
@@ -372,4 +372,4 @@ PostgreSQL ← parameterized transaction + revision + append-only history
 
 真实基础设施测试只接受本机回环 PostgreSQL/Redis、专用 PostgreSQL Schema 和独立 Redis 前缀；清理范围不超过这些测试命名空间，也不连接 Minecraft。GitHub Actions 使用固定镜像摘要的临时服务执行迁移、并发重放/领取、outbox 对账、租约恢复、队列去重、续租、取消、超时和显式重投场景。2026-08-14 运行 `31793333384` 的 20 项真实场景全部通过，包括跨 Worker 与独立进程取消；该结果只证明隔离集成边界，不代表生产基础设施在线。
 
-当前缺少 Coordinator 任务基础设施启动编排、生产处理器注册、任务 API、Dashboard 任务看板和生产部署。事务 outbox 与 BullMQ 之间仍是至少一次投递，不得声称 exactly-once；跨 Worker 持久取消也不构成对不合作处理器的硬终止保证。
+Coordinator 已具备显式隔离 profile 下的任务基础设施启动编排；生产 profile、Minecraft 生产处理器注册和正式部署审批仍未接入。事务 outbox 与 BullMQ 之间仍是至少一次投递，不得声称 exactly-once；跨 Worker 持久取消也不构成对不合作处理器的硬终止保证。
