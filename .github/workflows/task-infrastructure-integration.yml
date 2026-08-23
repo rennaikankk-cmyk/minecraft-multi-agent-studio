@@ -94,3 +94,5 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Run real isolated PostgreSQL and Redis tests
         run: pnpm test:task-infra
+      - name: Run real isolated PostgreSQL world memory tests
+        run: pnpm test:world-memory-infra
