@@ -150,6 +150,70 @@ describe("MineflayerBotClient lifecycle", () => {
     });
   });
 
+  it("does not treat Mineflayer's local dig prediction as a server success", async () => {
+    const emitter = new EventEmitter();
+    const wire = new EventEmitter();
+    const bot = emitter as unknown as Bot;
+    const targetPosition = new Vec3(7, 64, 2);
+    const targetBlock = { position: targetPosition, type: 49 };
+    let digCalls = 0;
+    const collectBlock = {
+      chestLocations: [] as Vec3[],
+      movements: null as Movements | null,
+      collect: vi.fn(async () => {
+        await bot.dig(targetBlock as never);
+      }),
+      cancelTask: vi.fn(async () => undefined),
+    };
+    Object.assign(bot, {
+      _client: wire,
+      dig: vi.fn(async () => {
+        digCalls += 1;
+        // The first finish is rejected by the server; the retry is accepted.
+        queueMicrotask(() => {
+          wire.emit("block_change", {
+            location: targetPosition,
+            type: digCalls === 1 ? 49 : 0,
+          });
+        });
+      }),
+      game: { dimension: "overworld" },
+      registry: { blocksByName: { oak_log: { id: 49 } } },
+      inventory: { items: () => [] },
+      findBlocks: vi.fn(() => [targetPosition]),
+      blockAt: vi.fn(() => targetBlock),
+      collectBlock,
+    });
+    const client = new MineflayerBotClient(
+      bot,
+      "auto",
+      "isolated-test-profile",
+    );
+
+    await client.invokeSkillCapability({
+      invocationId: "invocation-collect-server-confirm",
+      traceId: "trace-collect-server-confirm",
+      taskId: "task-collect-server-confirm",
+      botId: "bot-collect-server-confirm",
+      skillId: "collect.block",
+      skillVersion: "1.0.0",
+      capability: "world.interact",
+      operation: "collect.blocks-safe",
+      input: {
+        blockName: "oak_log",
+        maxCount: 1,
+        maxDistance: 8,
+        dimension: "minecraft:overworld",
+        serverProfileId: "isolated-test-profile",
+      },
+      signal: new AbortController().signal,
+    });
+
+    expect(digCalls).toBe(2);
+    expect(collectBlock.collect).toHaveBeenCalledTimes(1);
+    expect(wire.listenerCount("block_change")).toBe(0);
+  });
+
   it("waits for the collected item slot update before reporting inventory delta", async () => {
     const emitter = new EventEmitter();
     const inventory = new EventEmitter() as EventEmitter & {
@@ -310,3 +374,89 @@ function handlers(
     ...overrides,
   };
 }
+
+describe("MineflayerBotClient travel.route capability", () => {
+  it("strict-parses route metadata and delegates one bounded segment to movement.goto", async () => {
+    const emitter = new EventEmitter();
+    const bot = emitter as unknown as Bot;
+    const pathfinder = {
+      setMovements: vi.fn(),
+      thinkTimeout: 0,
+      tickTimeout: 0,
+      stop: vi.fn(),
+      goto: vi.fn(async () => {
+        bot.entity.position = new Vec3(4, 64, 0);
+      }),
+    };
+    Object.assign(bot, {
+      game: { dimension: "overworld" },
+      entity: { position: new Vec3(0, 64, 0) },
+      pathfinder,
+    });
+    const client = new MineflayerBotClient(
+      bot,
+      "auto",
+      "isolated-test-profile",
+    );
+    const request = {
+      traceId: "trace-route-runtime",
+      taskId: "task-route-runtime",
+      botId: "bot-route-runtime",
+      skillId: "travel.route",
+      skillVersion: "1.0.0",
+      capability: "bot.move" as const,
+      operation: "travel.route-segment",
+      signal: new AbortController().signal,
+    };
+
+    await expect(
+      client.invokeSkillCapability({
+        ...request,
+        invocationId: "invocation-route-runtime",
+        input: {
+          target: {
+            x: 4,
+            y: 64,
+            z: 0,
+            dimension: "minecraft:overworld",
+            serverProfileId: "isolated-test-profile",
+          },
+          radius: 1,
+          corridorPolicy: "axis-aligned",
+          segmentIndex: 0,
+        },
+      }),
+    ).resolves.toMatchObject({
+      reached: true,
+      finalPosition: {
+        x: 4,
+        y: 64,
+        z: 0,
+        dimension: "minecraft:overworld",
+        serverProfileId: "isolated-test-profile",
+      },
+    });
+    expect(pathfinder.goto).toHaveBeenCalledTimes(1);
+    expect(pathfinder.setMovements).toHaveBeenCalledTimes(1);
+
+    await expect(
+      client.invokeSkillCapability({
+        ...request,
+        invocationId: "invocation-route-runtime-invalid",
+        input: {
+          target: {
+            x: 4,
+            y: 64,
+            z: 0,
+            dimension: "minecraft:overworld",
+            serverProfileId: "isolated-test-profile",
+          },
+          radius: 1,
+          corridorPolicy: "axis-aligned",
+          segmentIndex: 0,
+          unexpected: true,
+        },
+      }),
+    ).rejects.toMatchObject({ code: "SKILL_CAPABILITY_INPUT_INVALID" });
+  });
+});

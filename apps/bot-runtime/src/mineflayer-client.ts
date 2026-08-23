@@ -26,9 +26,25 @@ import {
   smeltItemCapabilityOutputSchema,
   SAFE_PATH_MAX_DISTANCE,
   SkillFault,
+  resolveMovementProfile,
+  type ServerPolicyLimits,
   safeMovementGotoCapabilityInputSchema,
   safeMovementGotoCapabilityOutputSchema,
-  type SkillCapabilityRequest,
+  travelRouteCapabilityInputSchema,
+  tradeVillagerCapabilityInputSchema,
+  tradeVillagerCapabilityOutputSchema,
+  siteObserveCapabilityInputSchema,
+  siteObserveCapabilityOutputSchema,
+  shelterDigCapabilityInputSchema,
+  shelterDigCapabilityOutputSchema,
+  mineBranchCapabilityInputSchema,
+  mineBranchCapabilityOutputSchema,
+  mineVeinCapabilityInputSchema,
+  mineVeinCapabilityOutputSchema,
+  buildBlueprintCapabilityInputSchema,
+  buildBlueprintCapabilityOutputSchema,
+  storeSortCapabilityInputSchema,
+  storeSortCapabilityOutputSchema,  type SkillCapabilityRequest,
   type SkillCompatibilityEnvironment,
   type SkillResourceKind,
 } from "@minecraft-studio/skills";
@@ -38,6 +54,7 @@ import type {
   CombatPrimitiveAction,
 } from "./combat-driver.js";
 import { MineflayerCombatAdapter } from "./combat-mineflayer-adapter.js";
+import { observeSite, digShelter } from "./site-shelter-adapter.js";
 
 import type {
   BotClient,
@@ -163,6 +180,73 @@ const SAFE_FOOD_NAMES = new Set([
 ]);
 
 const COLLECT_INVENTORY_SYNC_TIMEOUT_MS = 1_000;
+// Mineflayer emits `diggingCompleted` after its local prediction, before the
+// server necessarily accepts the finish packet. Keep collection fail-closed
+// until an authoritative block update arrives.
+const COLLECT_SERVER_CONFIRM_TIMEOUT_MS = 1_500;
+const COLLECT_SERVER_DIG_RETRIES = 1;
+
+type BlockPosition = Readonly<{ x: number; y: number; z: number }>;
+
+type MineflayerWireClient = {
+  on?: (event: string, listener: (packet: unknown) => void) => void;
+  off?: (event: string, listener: (packet: unknown) => void) => void;
+  removeListener?: (event: string, listener: (packet: unknown) => void) => void;
+};
+
+type AuthoritativeBlockUpdate = Readonly<{
+  position: BlockPosition;
+  stateId: number;
+}>;
+
+function blockPositionKey(position: BlockPosition): string {
+  return `${position.x},${position.y},${position.z}`;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function parseBlockChangePacket(packet: unknown): AuthoritativeBlockUpdate | null {
+  const record = asRecord(packet);
+  const location = asRecord(record?.location);
+  const x = finiteNumber(location?.x);
+  const y = finiteNumber(location?.y);
+  const z = finiteNumber(location?.z);
+  const stateId = finiteNumber(record?.type);
+  if (x === null || y === null || z === null || stateId === null) return null;
+  return { position: { x, y, z }, stateId };
+}
+
+function parseMultiBlockChangePackets(packet: unknown): AuthoritativeBlockUpdate[] {
+  const record = asRecord(packet);
+  const records = Array.isArray(record?.records) ? record.records : [];
+  const chunkCoordinates = asRecord(record?.chunkCoordinates);
+  const chunkX = finiteNumber(chunkCoordinates?.x ?? record?.chunkX);
+  const chunkY = finiteNumber(chunkCoordinates?.y);
+  const chunkZ = finiteNumber(chunkCoordinates?.z ?? record?.chunkZ);
+  if (chunkX === null || chunkZ === null) return [];
+
+  const updates: AuthoritativeBlockUpdate[] = [];
+  for (const entry of records) {
+    const change = asRecord(entry);
+    const horizontalPos = finiteNumber(change?.horizontalPos);
+    const localY = finiteNumber(change?.y);
+    const stateId = finiteNumber(change?.blockId);
+    if (horizontalPos === null || localY === null || stateId === null) continue;
+    const x = chunkX * 16 + ((horizontalPos >> 4) & 0xf);
+    const z = chunkZ * 16 + (horizontalPos & 0xf);
+    const y = (chunkY === null ? 0 : chunkY * 16) + localY;
+    updates.push({ position: { x, y, z }, stateId });
+  }
+  return updates;
+}
 
 type SafetyEntityState = Readonly<{
   isInWater?: unknown;
@@ -209,6 +293,31 @@ export function configureSafePathfinderMovements(
   return movements;
 }
 
+export function configurePathfinderMovements(
+  movements: Movements,
+  profile: "SAFE" | "PARKOUR" = "SAFE",
+  policyLimits?: ServerPolicyLimits,
+  isolatedTestServer = false,
+): Movements {
+  if (profile === "SAFE") return configureSafePathfinderMovements(movements);
+  if (policyLimits === undefined) throw new SkillFault("POLICY_PARKOUR_FORBIDDEN");
+  const decision = resolveMovementProfile(profile, policyLimits, isolatedTestServer);
+  if (!decision.allowed) throw new SkillFault(decision.errorCode);
+  movements.canDig = false;
+  movements.canOpenDoors = false;
+  movements.dontCreateFlow = true;
+  movements.dontMineUnderFallingBlock = true;
+  movements.allow1by1towers = false;
+  movements.allowFreeMotion = decision.config.allowFreeMotion;
+  movements.allowParkour = decision.config.allowParkour;
+  movements.allowSprinting = decision.config.allowSprinting;
+  movements.scafoldingBlocks = [];
+  movements.maxDropDown = decision.config.maxDropDown;
+  movements.infiniteLiquidDropdownDistance = false;
+  movements.exclusionAreasBreak = [() => 100];
+  movements.exclusionAreasPlace = [() => 100];
+  return movements;
+}
 function readMaximumHealth(bot: Bot): number | null {
   const entity = bot.entity as typeof bot.entity & {
     attributes?: Record<string, { value?: number }>;
@@ -449,6 +558,19 @@ export class MineflayerBotClient implements BotClient {
     }
     if (
       request.capability === "bot.move" &&
+      request.operation === "travel.route-segment"
+    ) {
+      const input = travelRouteCapabilityInputSchema.safeParse(request.input);
+      if (!input.success) {
+        throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+      }
+      return this.invokeMovementGoto({
+        ...request,
+        input: { target: input.data.target, radius: input.data.radius },
+      });
+    }
+    if (
+      request.capability === "bot.move" &&
       request.operation === "pathfinder.goto-safe"
     ) {
       return this.invokeMovementGoto(request);
@@ -494,10 +616,123 @@ export class MineflayerBotClient implements BotClient {
       request.operation === "container.transfer-safe"
     ) {
       return this.invokeContainerTransfer(request);
+    }    if (
+      request.capability === "world.interact" &&
+      request.operation === "trade.villager-safe"
+    ) {
+      return this.invokeTradeVillager(request);
+    }
+    if (
+      request.capability === "world.read" &&
+      request.operation === "site.observe-safe"
+    ) {
+      return this.invokeSiteObservation(request);
+    }
+    if (
+      request.capability === "world.interact" &&
+      request.operation === "shelter.dig-safe"
+    ) {
+      return this.invokeShelterDig(request);
+    }
+    if (
+      request.capability === "world.interact" &&
+      (request.operation === "mine.branch-safe" || request.operation === "mine.vein-safe")
+    ) {
+      return this.invokeMinePlan(request);
     }
     throw new SkillFault("SKILL_CAPABILITY_UNSUPPORTED");
   }
 
+  private async invokeSiteObservation(request: SkillCapabilityRequest): Promise<unknown> {
+    const input = siteObserveCapabilityInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.candidate.serverProfileId);
+    this.assertDimensionMatch(input.data.candidate.dimension);
+    return siteObserveCapabilityOutputSchema.parse(observeSite(this.bot, this.serverProfileId!, input.data));
+  }
+
+  private async invokeShelterDig(request: SkillCapabilityRequest): Promise<unknown> {
+    const input = shelterDigCapabilityInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    this.assertDimensionMatch(input.data.dimension);
+    const output = await digShelter(this.bot, this.serverProfileId!, input.data, request.signal);
+    return shelterDigCapabilityOutputSchema.parse(output);
+  }
+
+  private async invokeMinePlan(request: SkillCapabilityRequest): Promise<unknown> {
+    const isBranch = request.operation === "mine.branch-safe";
+    const input = (isBranch ? mineBranchCapabilityInputSchema : mineVeinCapabilityInputSchema).safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    this.assertDimensionMatch(input.data.dimension);
+    const plan = (input.data as { plan?: unknown }).plan;
+    if (plan === undefined) throw new SkillFault("MINE_RUNTIME_NOT_WIRED");
+    // Mining execution is kept behind a dedicated bounded adapter. Returning a
+    // planner result as a success would silently claim blocks were broken, so
+    // until that adapter is supplied we fail closed with an auditable code.
+    throw new SkillFault("MINE_RUNTIME_NOT_WIRED");
+  }
+
+  private async invokeTradeVillager(request: SkillCapabilityRequest): Promise<unknown> {
+    const input = tradeVillagerCapabilityInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    this.assertDimensionMatch(input.data.dimension);
+    const entities = Object.values(this.bot.entities ?? {}) as Array<any>;
+    const villager = entities.find((entity) => String(entity?.id) === input.data.villagerEntityId);
+    if (!villager) throw new SkillFault("VILLAGER_NOT_FOUND");
+    const distance = this.bot.entity.position.distanceTo(villager.position);
+    if (!Number.isFinite(distance) || distance > 3.8) throw new SkillFault("VILLAGER_OUT_OF_REACH");
+    const botWithTrade = this.bot as Bot & {
+      openVillager?: (entity: unknown) => Promise<any>;
+      trade?: (entity: unknown, index: number, times: number) => Promise<void>;
+    };
+    if (typeof botWithTrade.openVillager !== "function" || typeof botWithTrade.trade !== "function") {
+      throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE");
+    }
+    let window: any = null;
+    try {
+      window = await botWithTrade.openVillager(villager);
+      const trades = Array.isArray(window?.trades) ? window.trades : [];
+      const index = trades.findIndex((trade: any) => String(trade?.outputItem?.name ?? trade?.outputItem?.type) === input.data.wantItem);
+      if (index < 0) throw new SkillFault("TRADE_OFFER_NOT_FOUND");
+      const trade = trades[index] as any;
+      const uses = Number(trade?.nbTradeUses ?? trade?.uses ?? 0);
+      const maximum = Number(trade?.maximumNbTradeUses ?? trade?.maxUses ?? 0);
+      if (trade?.tradeDisabled === true || (maximum > 0 && uses >= maximum)) throw new SkillFault("TRADE_DISABLED");
+      const realPrice = Math.max(0, Number(trade?.inputItem1?.count ?? trade?.price ?? 0));
+      const specialPrice = Math.max(0, Number(trade?.specialPrice ?? realPrice));
+      if (realPrice > input.data.maxUnitPrice || specialPrice > input.data.maxUnitPrice) throw new SkillFault("TRADE_PRICE_UNACCEPTABLE");
+      const paymentName = String(trade?.inputItem1?.name ?? trade?.inputItem1?.type ?? "");
+      if (!paymentName || this.countInventoryItem(paymentName) < realPrice) throw new SkillFault("TRADE_ITEM_NOT_IN_INVENTORY");
+      if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      const beforeSpent = this.countInventoryItem(paymentName);
+      const beforeReceived = this.countInventoryItem(input.data.wantItem);
+      const maxAvailable = maximum > 0 ? Math.max(0, maximum - uses) : input.data.maxTrades;
+      const times = Math.min(input.data.maxTrades, maxAvailable);
+      await botWithTrade.trade(villager, index, times);
+      const spent = Math.max(0, beforeSpent - this.countInventoryItem(paymentName));
+      const received = Math.max(0, this.countInventoryItem(input.data.wantItem) - beforeReceived);
+      const completedTrades = Math.min(times, received > 0 ? Math.max(1, Math.floor(received / Math.max(1, Number(trade?.outputItem?.count ?? 1)))) : Math.floor(spent / Math.max(1, realPrice)));
+      if (completedTrades < 1) throw new SkillFault("NON_IDEMPOTENT_RESULT_UNCERTAIN");
+      return tradeVillagerCapabilityOutputSchema.parse({
+        villagerEntityId: input.data.villagerEntityId,
+        wantItem: input.data.wantItem,
+        requestedTrades: input.data.maxTrades,
+        completedTrades,
+        receivedCount: received,
+        spentCount: spent,
+        actualUnitPrice: Math.ceil(spent / completedTrades),
+      });
+    } catch (error) {
+      if (error instanceof SkillFault) throw error;
+      if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      throw new SkillFault("SKILL_CAPABILITY_FAILED");
+    } finally {
+      try { window?.close?.(); } catch { /* close is best effort */ }
+    }
+  }
   combatObservation(nowMs: number): CombatDriverObservation | null {
     return this.combatAdapter.observation(nowMs);
   }
@@ -772,6 +1007,109 @@ export class MineflayerBotClient implements BotClient {
     });
   }
 
+  /**
+   * Mineflayer's dig promise resolves on a client-side prediction. Wrap it for
+   * collectblock so the plugin only advances after a server block-change packet
+   * confirms that the target became air. A bounded retry handles a finish packet
+   * that arrived just after the server tick boundary; timeout remains fail-closed.
+   */
+  private installServerConfirmedDigging(signal: AbortSignal): () => void {
+    const botWithWire = this.bot as Bot & {
+      _client?: MineflayerWireClient;
+    };
+    const wire = botWithWire._client;
+    if (
+      !wire ||
+      typeof wire.on !== "function" ||
+      (typeof wire.off !== "function" && typeof wire.removeListener !== "function")
+    ) {
+      // Unit doubles and pre-login clients do not expose the wire. The real
+      // Mineflayer client always does; preserving the original method here keeps
+      // lifecycle tests focused on their own contract.
+      return () => {};
+    }
+
+    const mutableBot = this.bot as Bot & { dig: Bot["dig"] };
+    const originalDig = mutableBot.dig;
+    const callOriginalDig = originalDig.bind(this.bot);
+    const remove = (
+      event: string,
+      listener: (packet: unknown) => void,
+    ): void => {
+      if (typeof wire.off === "function") wire.off(event, listener);
+      else wire.removeListener?.(event, listener);
+    };
+
+    const waitForServerAir = (position: BlockPosition) => {
+      let settled = false;
+      let timeout: ReturnType<typeof setTimeout> | null = null;
+      let resolvePromise: (confirmed: boolean) => void = () => {};
+      const targetKey = blockPositionKey(position);
+      const finish = (confirmed: boolean) => {
+        if (settled) return;
+        settled = true;
+        if (timeout !== null) clearTimeout(timeout);
+        remove("block_change", onBlockChange);
+        remove("multi_block_change", onMultiBlockChange);
+        signal.removeEventListener("abort", onAbort);
+        resolvePromise(confirmed);
+      };
+      const accept = (update: AuthoritativeBlockUpdate) => {
+        if (blockPositionKey(update.position) !== targetKey) return;
+        // Any authoritative non-air state is a rejection/correction for this
+        // dig attempt; let the bounded retry resend the finish packet.
+        finish(update.stateId === 0);
+      };
+      const onBlockChange = (packet: unknown) => {
+        const update = parseBlockChangePacket(packet);
+        if (update) accept(update);
+      };
+      const onMultiBlockChange = (packet: unknown) => {
+        for (const update of parseMultiBlockChangePackets(packet)) accept(update);
+      };
+      const onAbort = () => finish(false);
+      const promise = new Promise<boolean>((resolve) => {
+        resolvePromise = resolve;
+        wire.on?.("block_change", onBlockChange);
+        wire.on?.("multi_block_change", onMultiBlockChange);
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+      return {
+        promise,
+        armTimeout: () => {
+          if (!settled && timeout === null) {
+            timeout = setTimeout(
+              () => finish(false),
+              COLLECT_SERVER_CONFIRM_TIMEOUT_MS,
+            );
+          }
+        },
+        cancel: () => finish(false),
+      };
+    };
+
+    const wrappedDig = (async (...args: Parameters<Bot["dig"]>) => {
+      const block = args[0];
+      for (let attempt = 0; attempt <= COLLECT_SERVER_DIG_RETRIES; attempt += 1) {
+        if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+        const confirmation = waitForServerAir(block.position);
+        try {
+          await callOriginalDig(...args);
+          confirmation.armTimeout();
+          if (await confirmation.promise) return;
+        } finally {
+          confirmation.cancel();
+        }
+      }
+      throw new Error("Server did not confirm collected block break.");
+    }) as Bot["dig"];
+
+    mutableBot.dig = wrappedDig;
+    return () => {
+      if (mutableBot.dig === wrappedDig) mutableBot.dig = originalDig;
+    };
+  }
+
   private assertDimensionMatch(requestedDimension: string): void {
     const current = normalizeDimension(String(this.bot.game.dimension));
     if (requestedDimension !== current) {
@@ -843,36 +1181,10 @@ export class MineflayerBotClient implements BotClient {
     ];
     this.bot.collectBlock.movements = movements;
 
-    if (process.env.MC_DEBUG_COLLECT === "1") {
-      const target = targets[0];
-      const pathfinderTarget = target
-        ? movements.getBlock(target.position, 0, 0, 0)
-        : null;
-      console.error("MC_DEBUG_COLLECT_BEFORE", {
-        position: this.bot.entity?.position,
-        heldItem: this.bot.heldItem?.name,
-        target: target && pathfinderTarget
-          ? {
-              name: target.name,
-              type: target.type,
-              position: target.position,
-              safeToBreak: movements.safeToBreak(pathfinderTarget),
-              exclusionBreak: movements.exclusionAreasBreak.map((check) =>
-                check(pathfinderTarget),
-              ),
-            }
-          : null,
-      });
-      this.bot.once("diggingCompleted", (block) => {
-        console.error("MC_DEBUG_COLLECT_DIGGING_COMPLETED", {
-          name: block.name,
-          position: block.position,
-        });
-      });
-    }
-
     const inventoryBefore = this.countInventoryTotal();
     this.activePathInvocationId = request.invocationId;
+    const restoreServerConfirmedDigging =
+      this.installServerConfirmedDigging(request.signal);
     const stopOnAbort = () => {
       void this.bot.collectBlock.cancelTask().catch(() => {});
       this.stopPathfinder();
@@ -884,21 +1196,6 @@ export class MineflayerBotClient implements BotClient {
         throw new SkillFault("SKILL_CANCELLED");
       }
       await this.bot.collectBlock.collect(targets, { ignoreNoPath: false });
-      if (process.env.MC_DEBUG_COLLECT === "1") {
-        const target = targets[0];
-        const pathfinderTarget = target
-          ? movements.getBlock(target.position, 0, 0, 0)
-          : null;
-        console.error("MC_DEBUG_COLLECT_AFTER", {
-          position: this.bot.entity?.position,
-          target: target && pathfinderTarget
-            ? {
-                name: this.bot.blockAt(target.position)?.name,
-                safeToBreak: movements.safeToBreak(pathfinderTarget),
-              }
-            : null,
-        });
-      }
     } catch (error) {
       if (error instanceof SkillFault) throw error;
       if (request.signal.aborted) {
@@ -910,6 +1207,7 @@ export class MineflayerBotClient implements BotClient {
       if (this.activePathInvocationId === request.invocationId) {
         this.activePathInvocationId = null;
       }
+      restoreServerConfirmedDigging();
     }
 
     // collectblock resolves when the dropped entity disappears. Mineflayer can
