@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 import { Vec3 } from "vec3";
+import { DEFAULT_UNVERIFIED_SITE_POLICY, assessSite } from "@minecraft-studio/skills";
 
 import { digShelter, observeSite } from "../src/site-shelter-adapter.js";
 
@@ -52,7 +53,37 @@ describe("N2 site-shelter runtime adapter", () => {
     }
   });
 
-  it("samples burial depth below the candidate", () => {
+  it("rejects a deep foundation with exposed overhead cover", () => {
+    const calls: Vec3[] = [];
+    const candidate = { x: 12_345, y: 40, z: 15_678, dimension: "minecraft:overworld", serverProfileId: "isolated-local" };
+    const policy = {
+      ...DEFAULT_UNVERIFIED_SITE_POLICY,
+      minPortalLineDistance: 0,
+      hazardClearance: 0,
+      burialDepthTarget: 2,
+      acceptanceScore: 0.4,
+    };
+    const bot = fakeBot({
+      blockAt: vi.fn((position: Vec3) => {
+        calls.push(position);
+        if (position.x === candidate.x && position.z === candidate.z && position.y > candidate.y) {
+          return { name: "air", boundingBox: "empty", position };
+        }
+        // The foundation is solid at every depth below the candidate. It must
+        // not contribute to the upward-cover burialDepth contract.
+        return { name: "stone", boundingBox: "block", position };
+      }),
+    });
+    const worldFacts = observeSite(bot, "isolated-local", { candidate, policy });
+    const assessment = assessSite({ candidate, worldFacts, ownRecords: [], policy });
+
+    expect(worldFacts).toMatchObject({ complete: true, burialDepth: 0 });
+    expect(calls).toContainEqual(new Vec3(12_345, 41, 15_678));
+    expect(calls).not.toContainEqual(new Vec3(12_345, 39, 15_678));
+    expect(assessment).toMatchObject({ verdict: "REJECT", hardRuleFailures: [] });
+  });
+
+  it("caps upward cover sampling at the ceiling of burialDepthTarget", () => {
     const calls: Vec3[] = [];
     const bot = fakeBot({
       blockAt: vi.fn((position: Vec3) => {
@@ -60,12 +91,34 @@ describe("N2 site-shelter runtime adapter", () => {
         return { name: "stone", boundingBox: "block", position };
       }),
     });
-    observeSite(bot, "isolated-local", {
+    const result = observeSite(bot, "isolated-local", {
       candidate: { x: 12_345, y: 40, z: 15_678, dimension: "minecraft:overworld", serverProfileId: "isolated-local" },
-      policy: { minHighwayDistance: 1_000, minPortalLineDistance: 512, hazardClearance: 64, burialDepthTarget: 2 },
+      policy: { minHighwayDistance: 1_000, minPortalLineDistance: 512, hazardClearance: 64, burialDepthTarget: 2.25 },
     });
-    expect(calls).toContainEqual(new Vec3(12_345, 39, 15_678));
-    expect(calls).not.toContainEqual(new Vec3(12_345, 41, 15_678));
+
+    expect(result.burialDepth).toBe(3);
+    expect(calls).toEqual(expect.arrayContaining([
+      new Vec3(12_345, 41, 15_678),
+      new Vec3(12_345, 42, 15_678),
+      new Vec3(12_345, 43, 15_678),
+    ]));
+    expect(calls).not.toContainEqual(new Vec3(12_345, 44, 15_678));
+    expect(calls).not.toContainEqual(new Vec3(12_345, 39, 15_678));
+  });
+
+  it("marks the observation incomplete when an overhead sample is unavailable", () => {
+    const bot = fakeBot({
+      blockAt: vi.fn((position: Vec3) => {
+        if (position.x === 12_345 && position.z === 15_678 && position.y === 42) return null;
+        return { name: "stone", boundingBox: "block", position };
+      }),
+    });
+    const result = observeSite(bot, "isolated-local", {
+      candidate: { x: 12_345, y: 40, z: 15_678, dimension: "minecraft:overworld", serverProfileId: "isolated-local" },
+      policy: { minHighwayDistance: 1_000, minPortalLineDistance: 512, hazardClearance: 64, burialDepthTarget: 3 },
+    });
+
+    expect(result).toMatchObject({ complete: false, burialDepth: 1 });
   });
 
   it("does not claim movedInside until pathfinder reaches the shelter", async () => {

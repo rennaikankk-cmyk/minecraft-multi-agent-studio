@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_UNVERIFIED_SITE_POLICY, assessSite, shelterDigSkill, siteAssessSkill } from "../src/planning/site-assessor.js";
+import { DEFAULT_UNVERIFIED_SITE_POLICY, assessSite, shelterDigSkill, siteAssessSkill, sitePolicySchema } from "../src/planning/site-assessor.js";
 
 const serverProfileId = "isolated-local";
 const dimension = "minecraft:overworld";
@@ -24,6 +24,16 @@ describe("N2 site assessment", () => {
     const result = assessSite({ candidate, worldFacts: safeFacts, ownRecords: [{ ...candidate, serverProfileId: "other-server", kind: "OWN_HIDEOUT" }], policy });
     expect(result.verdict).toBe("ACCEPT");
     expect(result.hardRuleFailures).toEqual([]);
+  });
+  it("scores burialDepth as an upward-cover block ratio capped at the target", () => {
+    const value = (burialDepth: number) => assessSite({ candidate, worldFacts: { ...safeFacts, burialDepth }, ownRecords: [], policy })
+      .exposureFactors.find(({ factor }) => factor === "burial")?.value01;
+
+    expect(DEFAULT_UNVERIFIED_SITE_POLICY.burialDepthTarget).toBe(24);
+    expect(sitePolicySchema.safeParse({ ...policy, burialDepthTarget: 0 }).success).toBe(false);
+    expect(value(0)).toBe(0);
+    expect(value(24)).toBe(1);
+    expect(value(30)).toBe(1);
   });
   it("emits an N0-scoped SAFE_SITE memory record", async () => {
     const callCapability = vi.fn(async () => safeFacts);

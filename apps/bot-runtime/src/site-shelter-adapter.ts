@@ -29,14 +29,15 @@ export function observeSite(bot: Bot, profile: string, input: { candidate: Posit
     const distances = samples.filter((sample) => pred(sample.n)).map((sample) => sample.p.distanceTo(c));
     return distances.length ? Math.min(...distances) : r;
   };
-  let burial = 0;
-  // Burial is protection below the candidate. Sampling upward would measure
-  // the roof/sky and could accept an exposed site as deeply buried.
+  let overheadCoverDepthBlocks = 0;
+  // burialDepth is the consecutive solid overhead cover above the candidate,
+  // measured in blocks toward the surface. Air ends the cover; an unavailable
+  // block makes the observation incomplete so assessment fails closed.
   for (let depth = 1; depth <= Math.ceil(input.policy.burialDepthTarget); depth += 1) {
-    const b = bot.blockAt(c.offset(0, -depth, 0));
+    const b = bot.blockAt(c.offset(0, depth, 0));
     if (!b) { complete = false; break; }
     if (b.boundingBox === "empty") break;
-    burial += 1;
+    overheadCoverDepthBlocks += 1;
   }
   const dirs = [new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)];
   const escapes = dirs.filter((dir) => {
@@ -58,7 +59,7 @@ export function observeSite(bot: Bot, profile: string, input: { candidate: Posit
       water: Math.min(1, samples.filter((sample) => sample.n === "water").length / 4),
       animals: Math.min(1, entities.filter((entity) => ["cow", "pig", "sheep", "chicken"].includes(String(entity.name))).length / 4),
     },
-    burialDepth: burial,
+    burialDepth: overheadCoverDepthBlocks,
     escapeRouteCount: escapes,
     playerTraffic01: Math.min(1, entities.filter((entity) => entity.type === "player" && entity !== bot.entity).length / 4),
   };

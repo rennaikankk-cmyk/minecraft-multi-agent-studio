@@ -13,6 +13,13 @@ const timestampSchema = z.string().min(1).max(64).refine((value) => Number.isFin
 export const siteRules = ["WORLD_FACTS_INCOMPLETE", "SPAWN_EXCLUSION", "AXIS_EXCLUSION", "HIGHWAY_EXCLUSION", "OVERWORLD_PORTAL_LINE", "CONSPICUOUS_GRID_COORDINATE", "SYMMETRIC_COORDINATE", "KNOWN_HAZARD_NEARBY", "OWN_HIDEOUT_TOO_CLOSE"] as const;
 export const siteRuleSchema = z.enum(siteRules);
 export type SiteRule = z.infer<typeof siteRuleSchema>;
+/**
+ * burialDepthTarget is a positive vertical distance in blocks. Runtime
+ * observation samples upward from the candidate through ceil(target) and
+ * reports burialDepth as the consecutive whole-block overhead cover. Air ends
+ * the count; unavailable block data requires complete=false and a fail-closed
+ * WORLD_FACTS_INCOMPLETE assessment. These meanings are not foundation depth.
+ */
 export const sitePolicySchema = z.object({ minSpawnDistance: z.number().finite().nonnegative(), minAxisDistance: z.number().finite().nonnegative(), minHighwayDistance: z.number().finite().nonnegative(), minPortalLineDistance: z.number().finite().nonnegative(), coordinateGridSize: z.number().int().positive(), minCoordinateGridOffset: z.number().finite().nonnegative(), symmetryTolerance: z.number().finite().nonnegative(), hazardClearance: z.number().finite().nonnegative(), hideoutSeparation: z.number().finite().nonnegative(), burialDepthTarget: z.number().finite().positive(), escapeRouteTarget: z.number().int().positive(), acceptanceScore: z.number().finite().min(0).max(1), verified: z.literal(false), verificationNote: z.literal("未实测") }).strict();
 export type SitePolicy = z.infer<typeof sitePolicySchema>;
 export const DEFAULT_UNVERIFIED_SITE_POLICY: SitePolicy = Object.freeze({ minSpawnDistance: 10_000, minAxisDistance: 2_000, minHighwayDistance: 1_000, minPortalLineDistance: 512, coordinateGridSize: 1_000, minCoordinateGridOffset: 96, symmetryTolerance: 64, hazardClearance: 64, hideoutSeparation: 10_000, burialDepthTarget: 24, escapeRouteTarget: 2, acceptanceScore: 0.62, verified: false, verificationNote: "未实测" });
