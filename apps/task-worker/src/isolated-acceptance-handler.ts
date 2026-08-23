@@ -2,6 +2,9 @@ import {
   TaskHandlerRegistry,
   type TaskHandlerDefinition,
 } from "@minecraft-studio/task-system";
+import {
+  isolatedDeterministicHandler,
+} from "./isolated-deterministic-handler.js";
 
 export const ISOLATED_ACCEPTANCE_TASK_TYPE =
   "isolated.acceptance.wait";
@@ -28,5 +31,6 @@ export const isolatedAcceptanceHandler: TaskHandlerDefinition = {
 export function createIsolatedAcceptanceRegistry(): TaskHandlerRegistry {
   const registry = new TaskHandlerRegistry();
   registry.register(isolatedAcceptanceHandler);
+  registry.register(isolatedDeterministicHandler);
   return registry;
 }

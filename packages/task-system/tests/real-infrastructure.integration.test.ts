@@ -985,6 +985,89 @@ describeReal.sequential(
       await cancelQueuedTask(repository, submitted.task.taskId);
     }, REAL_TEST_TIMEOUT_MS);
 
+    it("completes a deterministic task through submit, outbox, reconciler, BullMQ, and Worker", async () => {
+      const queue = createQueue();
+      await queue.verifyConnection();
+      const registry = new TaskHandlerRegistry();
+      registry.register({
+        taskType: "isolated.acceptance.digest",
+        handlerVersion: "1.0.0",
+        idempotent: true,
+        execute: async ({ task, signal }) => {
+          if (signal.aborted) throw new Error("digest cancelled");
+          const input = task.input as {
+            schemaVersion?: unknown;
+            value?: unknown;
+          };
+          if (
+            input?.schemaVersion !== "1.0" ||
+            !Object.prototype.hasOwnProperty.call(input, "value")
+          ) {
+            throw new Error("invalid digest input");
+          }
+          const serialized = JSON.stringify(input.value);
+          return {
+            result: {
+              schemaVersion: "1.0",
+              kind: "isolated.acceptance.digest.v1",
+              sha256: createHash("sha256")
+                .update(serialized, "utf8")
+                .digest("hex"),
+              byteLength: Buffer.byteLength(serialized, "utf8"),
+            },
+            evidence: [{ kind: "trace" as const, reference: task.traceId }],
+          };
+        },
+      });
+      const worker = createWorker(registry, "integration-worker-outbox-e2e");
+      await worker.start();
+      const input = {
+        schemaVersion: "1.0" as const,
+        value: { operation: "digest", count: 2 },
+      };
+      const submitted = await repository.submitTask({
+        ...taskSubmitCommand("isolated.acceptance.digest"),
+        input,
+      });
+      const reconciler = new TaskOutboxReconciler({
+        repository,
+        queue,
+        instanceId: "integration-outbox-e2e-reconciler",
+      });
+      await expect(reconciler.reconcileOnce()).resolves.toEqual({
+        claimed: 1,
+        enqueued: 1,
+        skipped: 0,
+        failed: 0,
+      });
+      await expect(
+        repository.getTaskOutbox(
+          submitted.task.taskId,
+          submitted.task.revision,
+        ),
+      ).resolves.toMatchObject({
+        status: "delivered",
+        messageId: submitted.outbox.messageId,
+      });
+      const completed = await waitForTask(
+        repository,
+        submitted.task.taskId,
+        (candidate) => candidate.status === "completed",
+      );
+      const serialized = JSON.stringify(input.value);
+      expect(completed.result).toEqual({
+        schemaVersion: "1.0",
+        kind: "isolated.acceptance.digest.v1",
+        sha256: createHash("sha256").update(serialized, "utf8").digest("hex"),
+        byteLength: Buffer.byteLength(serialized, "utf8"),
+      });
+      expect(completed.evidence).toEqual([
+        { kind: "trace", reference: completed.traceId },
+      ]);
+      await worker.close();
+      await queue.close();
+    }, REAL_TEST_TIMEOUT_MS);
+
     it("records a failed queue delivery and resets its consecutive budget after recovery", async () => {
       const submitted = await repository.submitTask(
         taskSubmitCommand("test.outbox-reconciler-recovery"),
@@ -2031,6 +2114,10 @@ describeReal.sequential(
           TASK_WORKER_HANDLER_PROFILE: "isolated-acceptance",
           TASK_POSTGRES_URL: config.postgresUrl,
           TASK_REDIS_URL: config.redisUrl,
+          // Pin the child process to this test's queue. An inherited
+          // TASK_QUEUE_NAME could otherwise make the process consume an
+          // unrelated runner queue while the parent publishes here.
+          TASK_QUEUE_NAME: config.queueName,
           TASK_INFRA_TEST_NAMESPACE: schemaName,
           TASK_WORKER_CANCELLATION_POLL_INTERVAL_MS: "50",
         },
@@ -2073,6 +2160,78 @@ describeReal.sequential(
         });
         expect(acknowledged?.acknowledgedAt).not.toBeNull();
 
+        await expect(stopTaskWorkerProcess(child)).resolves.toBe(0);
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) {
+          await stopTaskWorkerProcess(child).catch(async () => {
+            await forceStopTaskWorkerProcess(child);
+          });
+        }
+      }
+    }, REAL_TEST_TIMEOUT_MS);
+
+    it("delivers a submitted digest task through the Coordinator-style reconciler to the independent Worker process", async () => {
+      const queue = createQueue();
+      const child = spawn(process.execPath, [taskWorkerEntry], {
+        cwd: fileURLToPath(new URL("../../..", import.meta.url)),
+        env: {
+          ...process.env,
+          TASK_WORKER_PURPOSE: "isolated-test",
+          TASK_WORKER_HANDLER_PROFILE: "isolated-acceptance",
+          TASK_POSTGRES_URL: config.postgresUrl,
+          TASK_REDIS_URL: config.redisUrl,
+          // Keep the independent worker on the queue selected by this test,
+          // regardless of the parent runner environment.
+          TASK_QUEUE_NAME: config.queueName,
+          TASK_INFRA_TEST_NAMESPACE: schemaName,
+          TASK_WORKER_CONCURRENCY: "1",
+        },
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      try {
+        await waitForTaskWorkerReady(child);
+        const input = {
+          schemaVersion: "1.0" as const,
+          value: { operation: "process-e2e", count: 1 },
+        };
+        const submitted = await repository.submitTask({
+          ...taskSubmitCommand("isolated.acceptance.digest"),
+          input,
+        });
+        const reconciler = new TaskOutboxReconciler({
+          repository,
+          queue,
+          instanceId: "integration-process-e2e-reconciler",
+        });
+        await expect(reconciler.reconcileOnce()).resolves.toMatchObject({
+          claimed: 1,
+          enqueued: 1,
+          failed: 0,
+        });
+        const completed = await waitForTask(
+          repository,
+          submitted.task.taskId,
+          (candidate) => candidate.status === "completed",
+        );
+        const serialized = JSON.stringify(input.value);
+        expect(completed.result).toEqual({
+          schemaVersion: "1.0",
+          kind: "isolated.acceptance.digest.v1",
+          sha256: createHash("sha256")
+            .update(serialized, "utf8")
+            .digest("hex"),
+          byteLength: Buffer.byteLength(serialized, "utf8"),
+        });
+        expect(completed.evidence).toEqual([
+          { kind: "trace", reference: completed.traceId },
+        ]);
+        await expect(
+          repository.getTaskOutbox(
+            submitted.task.taskId,
+            submitted.task.revision,
+          ),
+        ).resolves.toMatchObject({ status: "delivered" });
         await expect(stopTaskWorkerProcess(child)).resolves.toBe(0);
       } finally {
         if (child.exitCode === null && child.signalCode === null) {

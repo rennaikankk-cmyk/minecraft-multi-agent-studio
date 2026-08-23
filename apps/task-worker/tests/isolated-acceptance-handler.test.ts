@@ -6,6 +6,11 @@ import {
   createIsolatedAcceptanceRegistry,
   isolatedAcceptanceHandler,
 } from "../src/isolated-acceptance-handler.js";
+import {
+  ISOLATED_DETERMINISTIC_HANDLER_VERSION,
+  ISOLATED_DETERMINISTIC_TASK_TYPE,
+  isolatedDeterministicHandler,
+} from "../src/isolated-deterministic-handler.js";
 
 describe("isolated Task Worker handler profile", () => {
   it("registers only the exact deterministic acceptance contract", () => {
@@ -16,6 +21,12 @@ describe("isolated Task Worker handler profile", () => {
         ISOLATED_ACCEPTANCE_HANDLER_VERSION,
       ),
     ).toMatchObject(isolatedAcceptanceHandler);
+    expect(
+      registry.get(
+        ISOLATED_DETERMINISTIC_TASK_TYPE,
+        ISOLATED_DETERMINISTIC_HANDLER_VERSION,
+      ),
+    ).toMatchObject(isolatedDeterministicHandler);
     expect(registry.get(ISOLATED_ACCEPTANCE_TASK_TYPE, "2.0.0")).toBeNull();
     expect(registry.get("minecraft.move", "1.0.0")).toBeNull();
   });

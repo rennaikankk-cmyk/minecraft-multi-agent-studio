@@ -20,6 +20,8 @@
   },
   "dependencies": {
     "@minecraft-studio/observability": "workspace:*",
-    "@minecraft-studio/task-system": "workspace:*"
+    "@minecraft-studio/protocol": "workspace:*",
+    "@minecraft-studio/task-system": "workspace:*",
+    "zod": "4.4.3"
   }
 }

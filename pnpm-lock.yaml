@@ -170,9 +170,15 @@ importers:
       '@minecraft-studio/observability':
         specifier: workspace:*
         version: link:../../packages/observability
+      '@minecraft-studio/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
       '@minecraft-studio/task-system':
         specifier: workspace:*
         version: link:../../packages/task-system
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
 
   packages/ai-router:
     dependencies:
