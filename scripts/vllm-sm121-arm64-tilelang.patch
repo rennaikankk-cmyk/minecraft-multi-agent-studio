@@ -1,0 +1,25 @@
+diff --git a/docker/Dockerfile b/docker/Dockerfile
+index b17501182..b166b4e6c 100644
+--- a/docker/Dockerfile
++++ b/docker/Dockerfile
+@@ -197,6 +197,7 @@ WORKDIR /workspace
+ 
+ # We can specify the standard or nightly build of PyTorch
+ ARG PYTORCH_NIGHTLY
++ARG VLLM_BUILD_SKIP_TILELANG=false
+ 
+ # Install build and runtime dependencies, including PyTorch
+ # Check whether to install torch nightly instead of release for this build
+@@ -209,6 +210,12 @@ RUN --mount=type=cache,target=/opt/uv/cache \
+         sed -i 's/^nvidia-cutlass-dsl\\[cu13\\]/nvidia-cutlass-dsl/' requirements/cuda.txt; \
+         sed -i 's/^humming-kernels\\[cu13\\]/humming-kernels[cu12]/' requirements/cuda.txt; \
+     fi \
++    && if [ "${VLLM_BUILD_SKIP_TILELANG}" = "true" ]; then \
++        echo "Skipping TileLang only in the manylinux build environment; the runtime stage still installs the pinned requirement"; \
++        sed -i '/^tilelang==/d' requirements/cuda.txt; \
++    else \
++        test "${VLLM_BUILD_SKIP_TILELANG}" = "false"; \
++    fi \
+     && if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+         echo "Installing torch nightly..." \
+         && uv pip install --python /opt/venv/bin/python3 torch torchaudio torchvision --pre \
