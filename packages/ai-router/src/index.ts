@@ -7,6 +7,12 @@ export {
   AISchedulerError,
   aiRequestPriorities,
 } from './scheduler.js';
+export { AIError, asAIError } from './errors.js';
+export { parseStructuredOutput } from './structured-output.js';
+export { compactBotContextSchema } from './compact-context.js';
+export type { AIErrorCode } from './errors.js';
+export type { AIOutputContract } from './structured-output.js';
+export type { CompactBotContext } from './compact-context.js';
 export type { AIAdapter, GenerateOptions, GenerateResult, HealthResult } from './types/adapter.js';
 export type {
   AIRetryPolicy,
