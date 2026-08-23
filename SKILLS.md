@@ -1,6 +1,6 @@
 # 确定性技能目录
 
-本目录只记录已经注册且存在真实 Runtime 适配器的技能。测试夹具和规划中的能力不列为可用技能。
+本目录记录所有已经注册的确定性技能。状态由证据位推导；只有存在 Runtime 接线的技能才可进入运行时，规划中的能力明确标为 **Experimental**，不冒充可用。
 
 ## 状态标记
 
@@ -26,8 +26,7 @@
 - 自相矛盾的证据组合**拒绝装载**，例如"真实服跑过但运行时没接线"。
 - 只有四道闸全绿才允许对外称"已验证"（`evidenceSupportsVerifiedClaim`）。
 
-当前九个技能均为 **Partial**，缺 `isolated-server-scenarios` 与 `cross-version-matrix`
-两道真实环境闸。combat 技能已接入 Runtime 确定性适配器，但尚未完成隔离服与跨版本验收。
+当前注册表包含 20 个技能；已接入 Runtime 的条目保持 **Partial**，其余规划/策略条目标为 **Experimental**。所有技能仍缺 `isolated-server-scenarios` 与 `cross-version-matrix` 两道真实环境闸。
 真实隔离服六类场景与 1.21.8 跨版本矩阵一次没跑过。这与编译产物里的
 `verification=unverified` 是同一个事实的两种表述（AGENTS.md §8：无隔离测试服时不得声称联机测试通过）。
 
@@ -35,7 +34,7 @@
 
 - Skill ID 后的 SemVer 表示技能输入、输出和行为契约，不表示 Minecraft 服务器版本。
 - 每个 Skill 另有有序 `compatibility.variants`。Runtime 只使用连接后真实协商出的版本/协议，以及当前 registry 的 feature、物品、方块、实体和显式服务端能力探针解析变体；不以 `minVersion/maxVersion` 一刀切。
-- 当前目录中的九个 Skill 都声明无额外资源要求的 `portable` 变体；combat 技能还需要确定性 Runtime driver 接线。其余技能在当前 Mineflayer 适配器能够连接的版本上保持可用。跨版本真实场景矩阵尚未执行，所以目录上报 `availability=available`、`verification=unverified`，不冒充实机已验证。
+- 当前目录中的 20 个 Skill 都声明无额外资源要求的 `portable` 变体；只有证据中的 `runtime-wiring=true` 条目可由 Runtime 执行，其余条目保持 `Experimental`。跨版本真实场景矩阵尚未执行，所以目录上报 `availability=available`、`verification=unverified`，不冒充实机已验证。
 - 新版本特色 Skill 必须声明它实际依赖的 feature/资源；如果还依赖服务器插件、数据包或规则，则必须等待显式探针。能力为 `unknown` 时 fail-closed，不从版本号猜测。
 - `collect.block`、`craft.item`、`world.place-block` 和 `container.transfer` 当前仍接收目标版本 registry 的原生资源名。兼容变体可以表达旧/新 ID 的替代顺序，但规划器使用的语义资源别名尚未接入。
 
@@ -281,3 +280,73 @@
 - 一次也没取到产物报 `SMELT_OUTPUT_NOT_CONFIRMED`——不伪造成功。
 - 等待产出是 250ms 一轮的 `update` 事件轮询，总时长由 60 秒技能超时兜住；超时与外部取消都会关炉退出。
 - L0 暂停、Runtime 停止、超时或外部取消都会中断，且 `finally` 关炉不吞掉失败。
+
+## `travel.route@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`bot.move`
+- 适配器操作：`travel.route-segment`（每段复用有界 `pathfinder.goto-safe`）
+- 约束：单段最多 64 格，拒绝跨维度和超过调用方上限的路线；取消、断线与 L0 抢占在段边界生效。
+
+## `trade.villager@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`world.interact` + `inventory.write`
+- 适配器操作：`trade.villager-safe`
+- 约束：价格上限必填，交易不可幂等；实际库存变化由运行时回读；正式服务器与隔离服场景仍未实测。
+
+## `mine.branch@1.0.0`
+
+- 状态：**Experimental**（待 `runtime-wiring`、`isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`world.interact`
+- 约束：规划输出有界主隧道和分支，y 层由调用方提供；岩浆、虚空风险和排除区确定性拒绝，回填默认开启。
+
+## `mine.vein@1.0.0`
+
+- 状态：**Experimental**（待 `runtime-wiring`、`isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`world.interact`
+- 约束：只跟随已观测矿脉并限制 `maxBlocks`，无目标或危险状态 fail-closed；矿层提示标记为未实测。
+
+## `site.assess@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`world.read`
+- 约束：纯函数先执行出生点、轴线、危险和己方隐蔽点硬规则，再计算评分；观测不完整时不宣称安全；运行时观测适配器已接线，服务器场景仍未实测。
+
+## `shelter.dig@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`world.interact`
+- 约束：禁止直下（`POLICY_STRAIGHT_DOWN_FORBIDDEN`）；L0 暂停优先；运行时只执行有界挖掘与封口，服务器场景仍未实测。
+
+## `build.blueprint@1.0.0`
+
+- 状态：**Experimental**（待 `runtime-wiring`、`isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`world.interact`
+- 适配器操作：逐块复用 `block.place-safe`
+- 约束：相对坐标锚点、结构优先排序、分批续建；材料、范围和中间态均由 Schema/Policy 限制。
+
+## `stock.levels@1.0.0`
+
+- 状态：**Experimental**（待 `runtime-wiring`、`isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：无外部能力（纯确定性计数）
+- 约束：按 `low ≤ target ≤ ceiling` 派生补产/停产决策，食物不进入战略水位。
+
+## `store.sort@1.0.0`
+
+- 状态：**Experimental**（待 `runtime-wiring`、`isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`container.read` + `container.write`
+- 适配器操作：分批复用 `container.transfer-safe`；每批回报实际 `movedCount`，不可幂等重放。
+
+## `pack.shulker@1.0.0`
+
+- 状态：**Experimental**（待 `runtime-wiring`、`isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`container.read` + `container.write`
+- 适配器操作：复用 `container.transfer-safe`
+- 约束：支持分批续传，目标维度、服务器和伸手范围必须实时匹配。
+
+## `movement.profile@1.0.0`
+
+- 状态：**Experimental**（待 `runtime-wiring`、`isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：策略只读
+- 约束：`SAFE` 默认关闭跑酷；`PARKOUR` 仅隔离测试服且必须同时通过 sprint/jump、空中移动和坠落限制，所有数值仍标记未实测。

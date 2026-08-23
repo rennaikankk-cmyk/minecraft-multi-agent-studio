@@ -32,7 +32,7 @@ export const MAX_PLAN_STEPS = 256;
 /** 单个目标一次最多要多少个，防止 64 组请求把计划炸成几千步。 */
 export const MAX_GOAL_COUNT = 64;
 
-export const planStepKinds = ["mine", "craft", "smelt", "place-station"] as const;
+export const planStepKinds = ["mine", "craft", "smelt", "trade", "place-station"] as const;
 
 export type PlanStepKind = (typeof planStepKinds)[number];
 
@@ -42,6 +42,7 @@ export const skillIdForStepKind: Readonly<Record<PlanStepKind, string>> =
     mine: "collect.block",
     craft: "craft.item",
     smelt: "smelt.item",
+    trade: "trade.villager",
     "place-station": "world.place-block",
   });
 
@@ -324,6 +325,11 @@ class PlanState {
     depth: number,
   ): void {
     if (this.placedStations.has(station)) return;
+    // Villagers are entity-backed stations: observe and reach them, but do not place a block.
+    if (station === "villager") {
+      this.placedStations.add(station);
+      return;
+    }
     this.ensure(station, 1, forGoal, depth + 1);
     this.take(station, 1);
     this.placedStations.add(station);

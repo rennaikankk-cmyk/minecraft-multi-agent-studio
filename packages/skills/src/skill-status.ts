@@ -138,12 +138,37 @@ export type SkillStatusEntry = Readonly<{
 /**
  * 每个内建技能的证据位。**只允许在这里改布尔值，且改之前那道闸必须真的跑过。**
  *
- * 当前九个技能全是 Partial：离线单测与运行时接线都有，真实隔离服六类场景与
- * 1.21.8 跨版本矩阵一次没跑过（AGENTS.md §8"无隔离测试服时不得声称联机测试通过"）。
+ * 当前注册表包含二十个技能；证据中的 runtime-wiring=true 条目为 Partial，其余
+ * 规划/策略条目为 Experimental。所有技能的真实隔离服六类场景与 1.21.8 跨版本矩阵
+ * 尚未执行（AGENTS.md §8：无隔离测试服时不得声称联机测试通过）。
  * 这与技能编译产物里的 `verification: "unverified"` 是同一个事实的两种表述。
  */
 const EVIDENCE: Readonly<Record<string, SkillEvidence>> = Object.freeze({
   "movement.goto": {
+    offlineTests: true, runtimeWiring: true,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
+  "travel.route": {
+    offlineTests: true, runtimeWiring: true,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
+  "trade.villager": {
+    offlineTests: true, runtimeWiring: true,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
+  "mine.branch": {
+    offlineTests: true, runtimeWiring: false,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
+  "mine.vein": {
+    offlineTests: true, runtimeWiring: false,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
+  "site.assess": {
+    offlineTests: true, runtimeWiring: true,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
+  "shelter.dig": {
     offlineTests: true, runtimeWiring: true,
     isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
   },
@@ -177,6 +202,26 @@ const EVIDENCE: Readonly<Record<string, SkillEvidence>> = Object.freeze({
   },
   "smelt.item": {
     offlineTests: true, runtimeWiring: true,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
+  "build.blueprint": {
+    offlineTests: true, runtimeWiring: false,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
+  "stock.levels": {
+    offlineTests: true, runtimeWiring: false,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
+  "store.sort": {
+    offlineTests: true, runtimeWiring: false,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
+  "pack.shulker": {
+    offlineTests: true, runtimeWiring: false,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
+  "movement.profile": {
+    offlineTests: true, runtimeWiring: false,
     isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
   },
 });

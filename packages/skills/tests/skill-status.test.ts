@@ -114,15 +114,16 @@ describe("builtin skill status catalog", () => {
       expect(entry.evidence.isolatedServerScenarios).toBe(false);
       expect(entry.evidence.crossVersionMatrix).toBe(false);
       expect(evidenceSupportsVerifiedClaim(entry.evidence)).toBe(false);
-      if (entry.skillId.startsWith("combat.")) {
+      if (entry.evidence.runtimeWiring) {
         expect(entry.status).toBe("Partial");
         expect(entry.pendingGates).toEqual([
           "isolated-server-scenarios",
           "cross-version-matrix",
         ]);
       } else {
-        expect(entry.status).toBe("Partial");
+        expect(entry.status).toBe("Experimental");
         expect(entry.pendingGates).toEqual([
+          "runtime-wiring",
           "isolated-server-scenarios",
           "cross-version-matrix",
         ]);
@@ -176,14 +177,14 @@ describe("SKILLS.md is a rendering of the catalog, not a second copy", () => {
   });
 
   it("never claims a skill count that disagrees with the registry", () => {
-    // "当前目录中的六个 Skill" 就是这么活了下来的：数字写在散文里，没人对账。
-    const counts = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十"];
+    // 中文数量词仍可被文档使用，但测试表必须覆盖当前注册数量。
+    const counts = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十"];
     const correct = counts[builtinSkills.length];
     expect(correct, "registry outgrew this test's numeral table").toBeDefined();
     // "两" 是 2 的另一种口语写法，两种都得认，否则改文档的人会被迫写得别扭。
     const accepted = new Set(correct === "二" ? ["二", "两"] : [correct]);
     for (const [claim, spelled] of doc.matchAll(
-      /([零一两二三四五六七八九十])个(?:内建)?\s*(?:Skill|技能)/gmu,
+      /([零一两二三四五六七八九十]+)个(?:内建)?\s*(?:Skill|技能)/gmu,
     )) {
       expect(
         accepted.has(spelled),

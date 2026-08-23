@@ -132,6 +132,7 @@ function scenario(
  */
 const baseInputs: Readonly<Record<string, z.infer<typeof skillJsonValueSchema>>> = {
   "movement.goto": { target: { x: 4, y: 64, z: 0, dimension, serverProfileId: server }, radius: 1 },
+  "travel.route": { destination: { x: 4, y: 64, z: 0 }, dimension, serverProfileId: server, maxSegments: 1, corridorPolicy: "pathfinder" },
   "combat.engage": { serverProfileId: server },
   "combat.disengage": { serverProfileId: server },
   "collect.block": { blockName: "oak_log", maxCount: 4, maxDistance: 16, dimension, serverProfileId: server },
@@ -140,6 +141,17 @@ const baseInputs: Readonly<Record<string, z.infer<typeof skillJsonValueSchema>>>
   "container.transfer": { direction: "deposit", itemName: "cobblestone", count: 4, container: { x: 3, y: 64, z: 0 }, dimension, serverProfileId: server },
   "inventory.equip-armor": { serverProfileId: server },
   "smelt.item": { inputItemName: "raw_iron", fuelItemName: "coal", fuelCount: 1, count: 5, furnace: { x: 2, y: 64, z: 0 }, dimension, serverProfileId: server },
+
+  "build.blueprint": { blueprint: { anchor: { x: 100, y: 64, z: 100 }, dimension, serverProfileId: server, cells: [{ offset: { x: 0, y: 0, z: 0 }, itemName: "cobblestone", blockClass: "foundation", order: 0 }] }, startIndex: 0, maxPlacements: 1, availableMaterials: [{ itemName: "cobblestone", count: 1 }] },
+  "stock.levels": { levels: [{ itemName: "obsidian", low: 8, target: 16, ceiling: 32 }], counts: [{ itemName: "obsidian", count: 4 }] },
+  "store.sort": { routes: [{ itemName: "cobblestone", count: 1, container: { x: 3, y: 64, z: 0 }, dimension, serverProfileId: server }], startIndex: 0, maxTransfers: 1 },
+  "pack.shulker": { shulker: { x: 3, y: 64, z: 0 }, items: [{ itemName: "cobblestone", count: 1 }], dimension, serverProfileId: server, startIndex: 0, maxTransfers: 1 },
+  "movement.profile": { profile: "SAFE", serverProfileId: server },
+  "trade.villager": { villagerEntityId: "villager-1", wantItem: "emerald", maxUnitPrice: 16, maxTrades: 1, dimension, serverProfileId: server },
+  "mine.branch": { targetItem: "minecraft:diamond", yLevel: -50, branchLength: 4, branchSpacing: 2, maxBlocks: 8, origin: { x: 100, y: -50, z: 200 }, dimension, serverProfileId: server, backfill: true, exclusions: ["own-hideout", "blueprint-anchor", "load-bearing", "liquid-adjacent"] },
+  "mine.vein": { targetItem: "minecraft:diamond", yLevel: -50, maxBlocks: 8, origin: { x: 100, y: -50, z: 200 }, orePositions: [{ x: 101, y: -50, z: 200 }], dimension, serverProfileId: server, backfill: true, exclusions: ["own-hideout", "blueprint-anchor", "load-bearing", "liquid-adjacent"] },
+  "site.assess": { candidate: { x: 12_000, y: 64, z: 13_000, dimension, serverProfileId: server }, ownRecords: [], policy: { minSpawnDistance: 10_000, minAxisDistance: 2_000, minHighwayDistance: 1_000, minPortalLineDistance: 512, coordinateGridSize: 1_000, minCoordinateGridOffset: 96, symmetryTolerance: 64, hazardClearance: 64, hideoutSeparation: 10_000, burialDepthTarget: 24, escapeRouteTarget: 2, acceptanceScore: 0.62, verified: false, verificationNote: "未实测" }, observedAt: "2026-08-23T00:00:00.000Z", staleAfterMs: 60_000 },
+  "shelter.dig": { direction: "north", depth: 2, sealItemName: "cobblestone", dimension, serverProfileId: server },
 };
 
 /**

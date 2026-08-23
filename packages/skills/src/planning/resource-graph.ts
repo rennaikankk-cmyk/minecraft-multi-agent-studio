@@ -32,12 +32,12 @@ export function tierSatisfies(have: ToolTier, need: ToolTier): boolean {
   return tierRank(have) >= tierRank(need);
 }
 
-export const resourceStations = ["crafting_table", "furnace"] as const;
+export const resourceStations = ["crafting_table", "furnace", "villager"] as const;
 
 export type ResourceStation = (typeof resourceStations)[number];
 
 /** 获取方式。决定规划器最终派发哪个 Skill。 */
-export const acquisitionKinds = ["mine", "craft", "smelt"] as const;
+export const acquisitionKinds = ["mine", "craft", "smelt", "trade"] as const;
 
 export type AcquisitionKind = (typeof acquisitionKinds)[number];
 

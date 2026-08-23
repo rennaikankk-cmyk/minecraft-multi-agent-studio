@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  builtinSkills,
   builtinSkillVerificationManifestsV1,
   skillScenarioCategories,
   skillVerificationManifestV1Schema,
@@ -8,7 +9,7 @@ import {
 
 describe("versioned Minecraft skill verification manifests", () => {
   it("strictly validates all built-in skill matrices", () => {
-    expect(builtinSkillVerificationManifestsV1).toHaveLength(9);
+    expect(builtinSkillVerificationManifestsV1).toHaveLength(builtinSkills.length);
     for (const manifest of builtinSkillVerificationManifestsV1) {
       expect(skillVerificationManifestV1Schema.parse(manifest)).toEqual(manifest);
       expect(new Set(manifest.scenarios.map(({ category }) => category))).toEqual(

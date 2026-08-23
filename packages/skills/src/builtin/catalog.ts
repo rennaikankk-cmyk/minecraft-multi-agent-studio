@@ -8,6 +8,13 @@ import { equipArmorSkill } from "./equip-armor.js";
 import { movementGotoSkill } from "./movement-goto.js";
 import { placeBlockSkill } from "./place-block.js";
 import { smeltItemSkill } from "./smelt-item.js";
+import { travelRouteSkill } from "./travel-route.js";
+import { tradeVillagerSkill } from "./trade-villager.js";
+import { mineBranchSkill, mineVeinSkill } from "../planning/mine-planner.js";
+import { siteAssessSkill, shelterDigSkill } from "../planning/site-assessor.js";
+import { buildBlueprintSkill } from "../planning/blueprint-planner.js";
+import { packShulkerSkill, stockLevelSkill, storeSortSkill } from "../planning/stock-levels.js";
+import { movementProfileSkill } from "../planning/movement-profile.js";
 
 /**
  * 内建技能的**唯一清单**。runtime 注册、验收场景清单、状态目录与文档都从这里读，
@@ -26,6 +33,7 @@ export type AnySkillDefinition = SkillDefinition<never, unknown, never>;
 
 export const builtinSkills: readonly AnySkillDefinition[] = Object.freeze([
   movementGotoSkill,
+  travelRouteSkill,
   equipArmorSkill,
   combatEngageSkill,
   combatDisengageSkill,
@@ -34,6 +42,16 @@ export const builtinSkills: readonly AnySkillDefinition[] = Object.freeze([
   placeBlockSkill,
   containerTransferSkill,
   smeltItemSkill,
+  tradeVillagerSkill,
+  mineBranchSkill,
+  mineVeinSkill,
+  siteAssessSkill,
+  shelterDigSkill,
+  buildBlueprintSkill,
+  stockLevelSkill,
+  storeSortSkill,
+  packShulkerSkill,
+  movementProfileSkill,
 ] as readonly unknown[] as readonly AnySkillDefinition[]);
 
 /** 内建技能的 id 集合（去重后按字典序），用于跨清单一致性断言。 */
