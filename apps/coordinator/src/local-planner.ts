@@ -30,6 +30,10 @@ import { z } from "zod";
 
 import type { BotRegistry, BotRegistryRecord } from "./bot-registry.js";
 import {
+  BotAssignmentError,
+  type BotAssignmentService,
+} from "./bot-assignment.js";
+import {
   buildLocalPlannerPrompt,
   LOCAL_PLANNER_PROMPT_VERSION,
   LOCAL_PLANNER_SYSTEM_PROMPT,
@@ -165,6 +169,12 @@ export type LocalPlanRequest = Readonly<{
   botId: string;
   operatorGoal: string;
   timeoutMs: number;
+  /**
+   * Present only when the caller already holds the PostgreSQL goal lease for
+   * this task. Direct planner callers omit it and retain the in-memory
+   * assignment guard below.
+   */
+  assignmentLeaseOwner?: string;
   signal?: AbortSignal;
 }>;
 
@@ -206,6 +216,7 @@ export type SkillInvocationTransport = Readonly<{
 export type LocalPlannerErrorCode =
   | "PLANNER_REQUEST_INVALID"
   | "PLANNER_BOT_UNAVAILABLE"
+  | "PLANNER_BOT_BUSY"
   | "PLANNER_SAFETY_PAUSED"
   | "PLANNER_SKILL_CATALOG_UNAVAILABLE"
   | "PLANNER_DECISION_INVALID"
@@ -230,6 +241,18 @@ export class LocalPlannerError extends Error {
 export type CoordinatorLocalPlannerOptions = Readonly<{
   ai: Pick<ScheduledAIRouter, "generate">;
   registry: Pick<BotRegistry, "get">;
+  assignment?: Pick<BotAssignmentService, "acquire" | "release">;
+  /**
+   * Durable lease authority used when a caller supplies a pre-acquired goal
+   * lease.  A lease-owner string by itself is not a capability: direct
+   * planner callers must not be able to bypass the in-memory assignment
+   * guard by guessing one.
+   */
+  verifyAssignmentLease?: (input: Readonly<{
+    taskId: string;
+    botId: string;
+    leaseOwner: string;
+  }>) => boolean | Promise<boolean>;
   transport: SkillInvocationTransport;
   coordinatorInstanceId: string;
   actorId?: string;
@@ -295,6 +318,7 @@ export class CoordinatorLocalPlanner {
     const deadlineMs = startedAt.getTime() + request.timeoutMs;
     this.assertWithinDeadline(deadlineMs, request.signal);
     const record = this.requireAvailableBot(request.botId);
+    return this.withAssignment(request, record, deadlineMs, async () => {
     const availableSkills = record.skillCatalog!.skills.filter(
       ({ availability }) => availability === "available",
     );
@@ -441,6 +465,82 @@ export class CoordinatorLocalPlanner {
       result,
       ai,
     };
+    });
+  }
+
+  private async withAssignment<T>(
+    request: LocalPlanRequest,
+    record: BotRegistryRecord,
+    deadlineMs: number,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    if (request.assignmentLeaseOwner !== undefined) {
+      const verifier = this.options.verifyAssignmentLease;
+      if (!verifier) {
+        throw new LocalPlannerError(
+          "PLANNER_BOT_UNAVAILABLE",
+          "A pre-acquired assignment lease has no trusted verifier.",
+        );
+      }
+      let verified = false;
+      try {
+        verified =
+          (await verifier({
+            taskId: request.taskId,
+            botId: request.botId,
+            leaseOwner: request.assignmentLeaseOwner,
+          })) === true;
+      } catch {
+        // A persistence/authority failure must not degrade into an
+        // unguarded execution path.
+        verified = false;
+      }
+      if (!verified) {
+        throw new LocalPlannerError(
+          "PLANNER_BOT_UNAVAILABLE",
+          "The pre-acquired assignment lease is not currently authoritative.",
+        );
+      }
+      this.assertWithinDeadline(deadlineMs, request.signal);
+      return action();
+    }
+    const assignment = this.options.assignment;
+    if (!assignment) {
+      this.assertWithinDeadline(deadlineMs, request.signal);
+      return action();
+    }
+    let leaseId: string | null = null;
+    try {
+      const lease = assignment.acquire({
+        taskId: request.taskId,
+        serverProfileId: record.serverProfileId,
+        dimension: record.currentStatus!.position.dimension,
+        requiredSkills: [],
+        preferredBotId: request.botId,
+        leaseTtlMs: request.timeoutMs,
+      }, this.validNow());
+      leaseId = lease.leaseId;
+    } catch (cause) {
+      if (cause instanceof BotAssignmentError) {
+        if (cause.code === "ASSIGNMENT_PREFERRED_BOT_BUSY") {
+          throw new LocalPlannerError(
+            "PLANNER_BOT_BUSY",
+            "Target Bot already owns another active assignment.",
+          );
+        }
+        throw new LocalPlannerError(
+          "PLANNER_BOT_UNAVAILABLE",
+          "Target Bot could not obtain a safe assignment lease.",
+        );
+      }
+      throw cause;
+    }
+    try {
+      this.assertWithinDeadline(deadlineMs, request.signal);
+      return await action();
+    } finally {
+      if (leaseId) assignment.release(leaseId);
+    }
   }
 
   private coordinatorBindableGoalNames(
@@ -784,6 +884,8 @@ export class CoordinatorLocalPlanner {
       !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(
         request.operatorGoal,
       ) &&
+      (request.assignmentLeaseOwner === undefined ||
+        identifierSchema.safeParse(request.assignmentLeaseOwner).success) &&
       Number.isSafeInteger(request.timeoutMs) &&
       request.timeoutMs >= 10 &&
       request.timeoutMs <= 10 * 60_000;

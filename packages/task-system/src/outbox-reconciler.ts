@@ -229,7 +229,27 @@ export class TaskOutboxReconciler {
       // must not be acknowledged as delivered: the durable task is still
       // queued, so a completed/failed job leaves no runnable dispatch. Remove
       // the stale job and re-drive a fresh one (fail-closed on unknown states).
-      await this.options.queue.remove(entry.taskId, entry.expectedRevision);
+      const removed = await this.options.queue.remove(
+        entry.taskId,
+        entry.expectedRevision,
+      );
+      if (!removed) {
+        // A false result can mean the job disappeared in the race between
+        // getJob() and remove(), or that BullMQ could not remove a locked
+        // job.  Only the former is safe to redrive.  Re-read the exact job
+        // identity before enqueueing; if it is still present, fail closed so
+        // the outbox claim is retried instead of being acknowledged against
+        // a non-runnable/unknown job.
+        const stillPresent = await this.options.queue.getJob(
+          entry.taskId,
+          entry.expectedRevision,
+        );
+        if (stillPresent) {
+          throw new Error(
+            "Stale task dispatch job could not be removed before redrive.",
+          );
+        }
+      }
     }
     await this.options.queue.enqueue(entry.payload);
   }

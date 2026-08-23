@@ -317,6 +317,362 @@ describe("task model and PostgreSQL boundary", () => {
     expect(client.released).toBe(true);
   });
 
+  it("atomically persists a preassignment lease and revisioned dispatch", async () => {
+    const assignment = {
+      schemaVersion: "1.0" as const,
+      operationId: "33333333-3333-4333-8333-333333333333",
+      taskId: command.taskId,
+      expectedRevision: 0,
+      actorId: "coordinator-main",
+      botId: "worker-01",
+      leaseOwner: "coordinator-assignment-01",
+      leaseDurationMs: 5_000,
+      serverProfileId: "isolated-local",
+      dimension: "minecraft:overworld",
+    };
+    let taskRowState = taskRow(replayTask());
+    let outboxRow: Record<string, unknown> | null = null;
+    let history: {
+      operationFingerprint: string;
+      taskSnapshot: unknown;
+    } | null = null;
+    const client: PostgresClientLike = {
+      async query<TRow extends Record<string, unknown> = Record<string, unknown>>(
+        text: string,
+        values: readonly unknown[] = [],
+      ): Promise<SqlQueryResult<TRow>> {
+        if (text.includes("FROM studio_task_history")) {
+          return {
+            rows: history === null
+              ? []
+              : [{
+                  operation_fingerprint: history.operationFingerprint,
+                  task_id: command.taskId,
+                  task_snapshot: history.taskSnapshot,
+                } as unknown as TRow],
+            rowCount: history === null ? 0 : 1,
+          };
+        }
+        if (text.includes("SELECT * FROM studio_tasks")) {
+          return { rows: [taskRowState as TRow], rowCount: 1 };
+        }
+        if (text.includes("FROM studio_task_dependencies")) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (text.includes("clock_timestamp() AS database_now")) {
+          return { rows: [{ database_now: NOW } as unknown as TRow], rowCount: 1 };
+        }
+        if (text.includes("UPDATE studio_tasks SET")) {
+          taskRowState = {
+            ...taskRowState,
+            status: values[1],
+            dispatch_bot_id: values[2],
+            assigned_bot_id: values[3],
+            retry_count: values[4],
+            lease_owner: values[5],
+            lease_expires_at: values[6],
+            failure_reason: values[7],
+            result: values[8] === null ? null : JSON.parse(String(values[8])),
+            evidence: JSON.parse(String(values[9])),
+            revision: values[10],
+            updated_at: values[11],
+            started_at: values[12],
+            finished_at: values[13],
+          };
+          return { rows: [], rowCount: 1 };
+        }
+        if (text.includes("INSERT INTO studio_task_history")) {
+          history = {
+            operationFingerprint: String(values[1]),
+            taskSnapshot: JSON.parse(String(values[8])),
+          };
+          return { rows: [], rowCount: 1 };
+        }
+        if (text.includes("FROM studio_task_outbox")) {
+          return {
+            rows: outboxRow === null ? [] : [outboxRow as TRow],
+            rowCount: outboxRow === null ? 0 : 1,
+          };
+        }
+        if (text.includes("INSERT INTO studio_task_outbox")) {
+          const payload = JSON.parse(String(values[4])) as Record<string, unknown>;
+          outboxRow = {
+            message_id: values[0],
+            task_id: values[1],
+            expected_revision: values[2],
+            type: values[3],
+            payload,
+            status: "pending",
+            attempt_count: 0,
+            available_at: values[5],
+            claimed_by: null,
+            claim_expires_at: null,
+            last_error: null,
+            created_at: values[5],
+            updated_at: values[5],
+            delivered_at: null,
+          };
+          return { rows: [], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+      release() {},
+    };
+    const repository = new PostgresTaskRepository({
+      connect: async () => client,
+    });
+
+    await expect(
+      repository.acquireAssignmentLease({
+        ...assignment,
+        serverProfileId: "different-server",
+      }),
+    ).rejects.toMatchObject({ code: "TASK_SERVER_CONTEXT_CONFLICT" });
+
+    const first = await repository.acquireAssignmentLease(assignment);
+    const replay = await repository.acquireAssignmentLease(assignment);
+
+    expect(first).toMatchObject({
+      task: {
+        status: "assigned",
+        dispatchBotId: "worker-01",
+        assignedBotId: "worker-01",
+        leaseOwner: "coordinator-assignment-01",
+        revision: 1,
+      },
+      dispatch: {
+        botId: "worker-01",
+        payload: {
+          expectedRevision: 1,
+          assignmentLeaseOwner: "coordinator-assignment-01",
+        },
+      },
+      outbox: { taskId: command.taskId, expectedRevision: 1 },
+    });
+    expect(replay).toEqual(first);
+  });
+
+  it("persists a synchronous assignment without creating a queue outbox", async () => {
+    const assignment = {
+      schemaVersion: "1.0" as const,
+      operationId: "44444444-4444-4444-8444-444444444444",
+      taskId: command.taskId,
+      expectedRevision: 0,
+      actorId: "coordinator-main",
+      botId: "worker-01",
+      leaseOwner: "goal-assignment-01",
+      leaseDurationMs: 5_000,
+      serverProfileId: "isolated-local",
+      dimension: "minecraft:overworld",
+    };
+    let taskRowState = taskRow(replayTask());
+    let history: { operationFingerprint: string; taskSnapshot: unknown } | null = null;
+    const statements: string[] = [];
+    const client: PostgresClientLike = {
+      async query<TRow extends Record<string, unknown> = Record<string, unknown>>(
+        text: string,
+        values: readonly unknown[] = [],
+      ): Promise<SqlQueryResult<TRow>> {
+        statements.push(text);
+        if (text.includes("FROM studio_task_history")) {
+          return {
+            rows: history === null
+              ? []
+              : [{
+                  operation_fingerprint: history.operationFingerprint,
+                  task_id: command.taskId,
+                  task_snapshot: history.taskSnapshot,
+                } as unknown as TRow],
+            rowCount: history === null ? 0 : 1,
+          };
+        }
+        if (text.includes("SELECT * FROM studio_tasks")) {
+          return { rows: [taskRowState as TRow], rowCount: 1 };
+        }
+        if (text.includes("FROM studio_task_dependencies")) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (text.includes("clock_timestamp() AS database_now")) {
+          return { rows: [{ database_now: NOW } as unknown as TRow], rowCount: 1 };
+        }
+        if (text.includes("UPDATE studio_tasks SET")) {
+          taskRowState = {
+            ...taskRowState,
+            status: values[1],
+            dispatch_bot_id: values[2],
+            assigned_bot_id: values[3],
+            retry_count: values[4],
+            lease_owner: values[5],
+            lease_expires_at: values[6],
+            failure_reason: values[7],
+            result: values[8] === null ? null : JSON.parse(String(values[8])),
+            evidence: JSON.parse(String(values[9])),
+            revision: values[10],
+            updated_at: values[11],
+            started_at: values[12],
+            finished_at: values[13],
+          };
+          return { rows: [], rowCount: 1 };
+        }
+        if (text.includes("INSERT INTO studio_task_history")) {
+          history = {
+            operationFingerprint: String(values[1]),
+            taskSnapshot: JSON.parse(String(values[8])),
+          };
+          return { rows: [], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+      release() {},
+    };
+    const repository = new PostgresTaskRepository({
+      connect: async () => client,
+    });
+
+    const first = await repository.acquireSynchronousAssignment(assignment);
+    const replay = await repository.acquireSynchronousAssignment(assignment);
+
+    expect(first).toMatchObject({
+      status: "assigned",
+      dispatchBotId: "worker-01",
+      assignedBotId: "worker-01",
+      leaseOwner: "goal-assignment-01",
+      revision: 1,
+    });
+    expect(replay).toEqual(first);
+    expect(statements.some((text) => text.includes("INSERT INTO studio_task_outbox"))).toBe(false);
+  });
+
+  it("rejects synchronous assignment when a durable dispatch target already exists", async () => {
+    const assignment = {
+      schemaVersion: "1.0" as const,
+      operationId: "55555555-5555-4555-8555-555555555555",
+      taskId: command.taskId,
+      expectedRevision: 0,
+      actorId: "coordinator-main",
+      botId: "worker-02",
+      leaseOwner: "goal-assignment-02",
+      leaseDurationMs: 5_000,
+      serverProfileId: "isolated-local",
+      dimension: "minecraft:overworld",
+    };
+    const submitted = taskRow({
+      ...replayTask(),
+      dispatchBotId: "worker-01",
+    });
+    const client: PostgresClientLike = {
+      async query<TRow extends Record<string, unknown> = Record<string, unknown>>(
+        text: string,
+      ): Promise<SqlQueryResult<TRow>> {
+        if (text.includes("FROM studio_task_history")) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (text.includes("SELECT * FROM studio_tasks")) {
+          return { rows: [submitted as TRow], rowCount: 1 };
+        }
+        if (text.includes("FROM studio_task_dependencies")) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (text.includes("clock_timestamp() AS database_now")) {
+          return { rows: [{ database_now: NOW } as unknown as TRow], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+      release() {},
+    };
+    const repository = new PostgresTaskRepository({
+      connect: async () => client,
+    });
+
+    await expect(repository.acquireSynchronousAssignment(assignment)).rejects.toMatchObject({
+      code: "TASK_OPERATION_CONFLICT",
+    });
+  });
+
+  it("rejects synchronous assignment when the same-revision outbox survives without a target", async () => {
+    const assignment = {
+      schemaVersion: "1.0" as const,
+      operationId: "66666666-6666-4666-8666-666666666666",
+      taskId: command.taskId,
+      expectedRevision: 0,
+      actorId: "coordinator-main",
+      botId: "worker-02",
+      leaseOwner: "goal-assignment-03",
+      leaseDurationMs: 5_000,
+      serverProfileId: "isolated-local",
+      dimension: "minecraft:overworld",
+    };
+    const task = taskRow(replayTask());
+    const client: PostgresClientLike = {
+      async query<TRow extends Record<string, unknown> = Record<string, unknown>>(
+        text: string,
+      ): Promise<SqlQueryResult<TRow>> {
+        if (text.includes("FROM studio_task_history")) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (text.includes("SELECT * FROM studio_tasks")) {
+          return { rows: [task as TRow], rowCount: 1 };
+        }
+        if (text.includes("FROM studio_task_dependencies")) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (text.includes("clock_timestamp() AS database_now")) {
+          return { rows: [{ database_now: NOW } as unknown as TRow], rowCount: 1 };
+        }
+        if (
+          text.includes("FROM studio_task_outbox") &&
+          text.includes("expected_revision = $2")
+        ) {
+          return { rows: [{ marker: true } as TRow], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+      release() {},
+    };
+    const repository = new PostgresTaskRepository({
+      connect: async () => client,
+    });
+
+    await expect(repository.acquireSynchronousAssignment(assignment)).rejects.toMatchObject({
+      code: "TASK_OPERATION_CONFLICT",
+    });
+  });
+
+  it("checks the exact active durable assignment lease at the PostgreSQL boundary", async () => {
+    const calls: Array<{ text: string; values: readonly unknown[] }> = [];
+    const client: PostgresClientLike = {
+      async query<TRow extends Record<string, unknown> = Record<string, unknown>>(
+        text: string,
+        values: readonly unknown[] = [],
+      ): Promise<SqlQueryResult<TRow>> {
+        calls.push({ text, values });
+        if (text.includes("FROM studio_tasks")) {
+          return { rows: [{ active: 1 } as TRow], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+      release() {},
+    };
+    const repository = new PostgresTaskRepository({
+      connect: async () => client,
+    });
+
+    await expect(
+      repository.isTaskAssignmentLeaseActive({
+        taskId: command.taskId,
+        botId: "worker-01",
+        leaseOwner: "goal-assignment-01",
+      }),
+    ).resolves.toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      values: [command.taskId, "worker-01", "goal-assignment-01"],
+    });
+    expect(calls[0]?.text).toContain("dispatch_bot_id = $2");
+    expect(calls[0]?.text).toContain("status IN ('assigned', 'running')");
+    expect(calls[0]?.text).toContain("lease_expires_at > clock_timestamp()");
+  });
+
   it("stores structured task input in the task row", async () => {
     const client = new RecordingClient();
     const repository = new PostgresTaskRepository(new RecordingPool(client));

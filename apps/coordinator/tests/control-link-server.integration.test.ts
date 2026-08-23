@@ -636,6 +636,7 @@ describe("Coordinator Control Link server", () => {
         taskId: operationId,
         botId: BOT_ID,
         operatorGoal: "采集附近的木材",
+        assignmentLeaseOwner: expect.any(String),
       }),
     );
     expect(lifecycleOrder).toEqual([

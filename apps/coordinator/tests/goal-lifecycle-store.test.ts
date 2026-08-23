@@ -202,6 +202,76 @@ describe("PostgresGoalLifecycleStore", () => {
     );
   });
 
+  it("uses the synchronous durable assignment boundary when live Bot context is available", async () => {
+    const queued = task("queued");
+    const assigned = task("assigned", {
+      revision: 1,
+      dispatchBotId: "worker-01",
+      leaseOwner: "goal-test",
+    });
+    const running = task("running", {
+      revision: 2,
+      dispatchBotId: "worker-01",
+      leaseOwner: "goal-test",
+    });
+    const acquireSynchronousAssignment = vi.fn(async (command: any) => ({
+      ...assigned,
+      dispatchBotId: command.botId,
+      leaseOwner: command.leaseOwner,
+    }));
+    const acquireLease = vi.fn();
+    const transition = vi.fn(async (command: any) => ({
+      ...running,
+      dispatchBotId: "worker-01",
+      leaseOwner: command.leaseOwner,
+    }));
+    const store = new PostgresGoalLifecycleStore({
+      repository: repository({
+        createTask: vi.fn(async () => ({ task: queued, created: true })),
+        getDatabaseTime: vi.fn(async () => NOW),
+        acquireSynchronousAssignment,
+        acquireLease,
+        transition,
+      }),
+      coordinatorInstanceId: "coordinator-test",
+      resolveBotContext: () => ({
+        serverProfileId: "isolated-test",
+        dimension: "minecraft:overworld",
+      }),
+    });
+
+    await expect(store.begin(request())).resolves.toMatchObject({
+      kind: "execute",
+      snapshot: { status: "running" },
+    });
+    expect(acquireSynchronousAssignment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        botId: "worker-01",
+        serverProfileId: "isolated-test",
+        dimension: "minecraft:overworld",
+      }),
+    );
+    expect(acquireLease).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the production context resolver cannot prove a live Bot", async () => {
+    const acquireSynchronousAssignment = vi.fn();
+    const store = new PostgresGoalLifecycleStore({
+      repository: repository({
+        createTask: vi.fn(async () => ({ task: task("queued"), created: false })),
+        getDatabaseTime: vi.fn(async () => NOW),
+        acquireSynchronousAssignment,
+      }),
+      coordinatorInstanceId: "coordinator-test",
+      resolveBotContext: () => null,
+    });
+
+    await expect(store.begin(request())).rejects.toMatchObject({
+      code: "BOT_UNAVAILABLE",
+    });
+    expect(acquireSynchronousAssignment).not.toHaveBeenCalled();
+  });
+
   it("returns busy for an active persisted lease without executing twice", async () => {
     const acquireLease = vi.fn();
     const active = task("running");

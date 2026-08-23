@@ -11,6 +11,29 @@ export {
 } from "./bot-registry.js";
 
 export {
+  BotAssignmentError,
+  BotAssignmentService,
+  botAssignmentLeaseSchema,
+  botAssignmentRequestSchema,
+  type BotAssignmentCandidate,
+  type BotAssignmentEvent,
+  type BotAssignmentErrorCode,
+  type BotAssignmentLease,
+  type BotAssignmentReconcileResult,
+  type BotAssignmentRequest,
+  type BotAssignmentScoreBreakdown,
+  type BotAssignmentServiceOptions,
+  type BotAssignmentSkillRequirement,
+} from "./bot-assignment.js";
+
+export {
+  DurableBotAssignmentService,
+  type DurableBotAssignmentRepository,
+  type DurableBotAssignmentRequest,
+  type DurableBotAssignmentResult,
+} from "./durable-bot-assignment.js";
+
+export {
   CoordinatorStopError,
   InMemoryStopAuditSink,
   StopController,
@@ -86,6 +109,12 @@ export {
   type ExpiredLeaseRecoveryRepository,
   type ExpiredLeaseRecoveryResult,
 } from "./expired-lease-recovery.js";
+
+export {
+  TaskDeliveryConfigError,
+  loadTaskDeliveryConfig,
+  type TaskDeliveryConfig,
+} from "./task-delivery-config.js";
 
 export {
   LocalAIConfigError,

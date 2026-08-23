@@ -112,6 +112,13 @@ export type PostgresGoalLifecycleStoreOptions = Readonly<{
   repository: PostgresTaskRepository;
   coordinatorInstanceId: string;
   randomId?: () => string;
+  /** Resolve the live ServerProfile/dimension for a connected Bot. */
+  resolveBotContext?: (
+    botId: string,
+  ) => Readonly<{
+    serverProfileId: string;
+    dimension: string;
+  }> | null;
 }>;
 
 export class PostgresGoalLifecycleStore implements GoalLifecycleStore {
@@ -288,19 +295,40 @@ export class PostgresGoalLifecycleStore implements GoalLifecycleStore {
       return terminalBeginResult(expired, input);
     }
     const leaseOwner = `${this.leaseOwnerPrefix}-${input.operationId.slice(0, 12)}`;
-    const assigned = await this.options.repository.acquireLease({
-      schemaVersion: "1.0",
-      operationId: this.randomId(),
-      taskId: task.taskId,
-      expectedRevision: task.revision,
-      actorId: this.options.coordinatorInstanceId,
-      botId: input.botId,
-      leaseOwner,
-      leaseDurationMs: Math.min(
-        MAX_GOAL_LEASE_MS,
-        input.timeoutMs + GOAL_LEASE_GRACE_MS,
-      ),
-    });
+    const leaseDurationMs = Math.min(
+      MAX_GOAL_LEASE_MS,
+      input.timeoutMs + GOAL_LEASE_GRACE_MS,
+    );
+    const context = this.options.resolveBotContext?.(input.botId);
+    if (this.options.resolveBotContext && context === null) {
+      throw new GoalLifecycleStoreError(
+        "BOT_UNAVAILABLE",
+        "The requested Bot has no current ServerProfile context.",
+      );
+    }
+    const assigned = context
+      ? await this.options.repository.acquireSynchronousAssignment({
+          schemaVersion: "1.0",
+          operationId: this.randomId(),
+          taskId: task.taskId,
+          expectedRevision: task.revision,
+          actorId: this.options.coordinatorInstanceId,
+          botId: input.botId,
+          leaseOwner,
+          leaseDurationMs,
+          serverProfileId: context.serverProfileId,
+          dimension: context.dimension,
+        })
+      : await this.options.repository.acquireLease({
+          schemaVersion: "1.0",
+          operationId: this.randomId(),
+          taskId: task.taskId,
+          expectedRevision: task.revision,
+          actorId: this.options.coordinatorInstanceId,
+          botId: input.botId,
+          leaseOwner,
+          leaseDurationMs,
+        });
     const running = await this.options.repository.transition({
       schemaVersion: "1.0",
       operationId: this.randomId(),
@@ -426,6 +454,9 @@ function validateGoalTask(
     input.timeoutMs !== task.timeoutMs ||
     ((task.status === "assigned" || task.status === "running") &&
       task.assignedBotId !== input.botId) ||
+    ((task.status === "assigned" || task.status === "running") &&
+      task.dispatchBotId !== null &&
+      task.dispatchBotId !== input.botId) ||
     (expectedInput !== undefined &&
       durableGoalFingerprint(input) !== durableGoalFingerprint(expectedInput))
   ) {

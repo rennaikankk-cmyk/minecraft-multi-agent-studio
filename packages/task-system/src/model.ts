@@ -366,6 +366,26 @@ export const taskLeaseExpireCommandSchema = z
   })
   .strict();
 
+/**
+ * Coordinator assignment is a durable task lease.  The dispatch outbox is
+ * created by the same PostgreSQL transaction, so a restart cannot leave a
+ * leased task without a delivery record.
+ */
+export const taskAssignmentAcquireCommandSchema = z
+  .object({
+    ...operationBaseShape,
+    botId: identifierSchema,
+    leaseOwner: identifierSchema,
+    leaseDurationMs: z.number().int().min(1_000).max(5 * 60_000),
+    // Assignment selection is made against a concrete Runtime connection.
+    // Persist the same context at the PostgreSQL boundary so a restart or a
+    // competing Coordinator cannot silently move a coordinate task across
+    // isolated server worlds.
+    serverProfileId: identifierSchema,
+    dimension: taskTargetSchema.shape.dimension,
+  })
+  .strict();
+
 export type TaskStatus = z.infer<typeof taskStatusSchema>;
 export type TaskCreateCommand = z.infer<typeof taskCreateCommandSchema>;
 export type TaskSubmitCommand = z.infer<typeof taskSubmitCommandSchema>;
@@ -394,4 +414,7 @@ export type TaskLeaseReleaseCommand = z.infer<
 >;
 export type TaskLeaseExpireCommand = z.infer<
   typeof taskLeaseExpireCommandSchema
+>;
+export type TaskAssignmentAcquireCommand = z.infer<
+  typeof taskAssignmentAcquireCommandSchema
 >;

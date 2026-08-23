@@ -308,6 +308,13 @@ async function startStack(
   const planner = new CoordinatorLocalPlanner({
     ai: { generate },
     registry: { get: plannerRegistryGet },
+    // This stack intentionally uses the in-memory GoalStore below.  Bind the
+    // planner's pre-acquired lease path to that fixture's exact lease tuple;
+    // production Coordinator wiring uses PostgreSQL authority instead.
+    verifyAssignmentLease: async ({ taskId, botId, leaseOwner }) =>
+      taskId.length > 0 &&
+      botId === BOT_ID &&
+      leaseOwner === "goal-control-api-test",
     transport: runtimeLink,
     coordinatorInstanceId: COORDINATOR_ID,
   });

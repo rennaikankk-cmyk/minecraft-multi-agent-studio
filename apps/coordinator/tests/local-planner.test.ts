@@ -9,9 +9,11 @@ import type {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
+import { BotAssignmentService } from "../src/bot-assignment.js";
 import { BotRegistry } from "../src/bot-registry.js";
 import {
   CoordinatorLocalPlanner,
+  type CoordinatorLocalPlannerOptions,
   LocalPlannerError,
   type LocalPlanRequest,
   type SkillInvocationTransport,
@@ -292,6 +294,156 @@ describe("CoordinatorLocalPlanner", () => {
       reasonCode: "NO_SAFE_SKILL",
     });
     expect(sendSkillInvocation).not.toHaveBeenCalled();
+  });
+
+  it("holds a deterministic Bot assignment lease only for the execution window", async () => {
+    const assignment = new BotAssignmentService({ registry, now: () => NOW });
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => {
+      expect(assignment.list(NOW)).toHaveLength(1);
+      return skillResult(invocation, "completed");
+    });
+    const planner = new CoordinatorLocalPlanner({
+      ai: {
+        generate: async (options) =>
+          aiResult(
+            JSON.stringify({
+              action: "invoke_skill",
+              botId: BOT_ID,
+              taskId: "task-01",
+              skillId: "movement.goto",
+              skillVersion: "1.0.0",
+              input: {
+                target: {
+                  x: 10,
+                  y: 64,
+                  z: 10,
+                  dimension: "minecraft:overworld",
+                  serverProfileId: "$CURRENT_SERVER_PROFILE",
+                },
+                radius: 2,
+              },
+              reasonCode: "ADVANCE_TASK",
+            }),
+            options.requestId,
+          ),
+      },
+      registry,
+      assignment,
+      transport: { sendSkillInvocation },
+      coordinatorInstanceId: "coordinator-01",
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    await expect(planner.planAndDispatch(planRequest())).resolves.toMatchObject({
+      action: "skill_result",
+      result: { payload: { outcome: "completed" } },
+    });
+    expect(assignment.list(NOW)).toHaveLength(0);
+  });
+
+  it("reuses the persisted goal lease instead of acquiring a second memory lease", async () => {
+    const acquire = vi.fn<BotAssignmentService["acquire"]>();
+    const release = vi.fn<BotAssignmentService["release"]>();
+    const planner = plannerWith(
+      async (options) =>
+        aiResult(
+          JSON.stringify({
+            action: "noop",
+            botId: BOT_ID,
+            taskId: "task-01",
+            reasonCode: "NO_SAFE_SKILL",
+          }),
+          options.requestId,
+        ),
+      { sendSkillInvocation: vi.fn() },
+      { acquire, release },
+      async () => true,
+    );
+
+    await expect(
+      planner.planAndDispatch({
+        ...planRequest(),
+        assignmentLeaseOwner: "goal-persistent-lease",
+      }),
+    ).resolves.toMatchObject({
+      action: "noop",
+      reasonCode: "NO_SAFE_SKILL",
+    });
+    expect(acquire).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it("rejects a free-form lease owner when no durable verifier is configured", async () => {
+    const acquire = vi.fn<BotAssignmentService["acquire"]>();
+    const release = vi.fn<BotAssignmentService["release"]>();
+    const planner = plannerWith(
+      async (options) =>
+        aiResult(
+          JSON.stringify({
+            action: "noop",
+            botId: BOT_ID,
+            taskId: "task-01",
+            reasonCode: "NO_SAFE_SKILL",
+          }),
+          options.requestId,
+        ),
+      { sendSkillInvocation: vi.fn() },
+      { acquire, release },
+    );
+
+    await expect(
+      planner.planAndDispatch({
+        ...planRequest(),
+        assignmentLeaseOwner: "forged-lease-owner",
+      }),
+    ).rejects.toMatchObject({ code: "PLANNER_BOT_UNAVAILABLE" });
+    expect(acquire).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it("requires the durable verifier to approve the exact task, Bot, and owner", async () => {
+    const verifyAssignmentLease = vi.fn<
+      NonNullable<CoordinatorLocalPlannerOptions["verifyAssignmentLease"]>
+    >(async (input) =>
+      input.taskId === "task-01" &&
+      input.botId === BOT_ID &&
+      input.leaseOwner === "goal-persistent-lease",
+    );
+    const planner = new CoordinatorLocalPlanner({
+      ai: {
+        generate: async (options) =>
+          aiResult(
+            JSON.stringify({
+              action: "noop",
+              botId: BOT_ID,
+              taskId: "task-01",
+              reasonCode: "NO_SAFE_SKILL",
+            }),
+            options.requestId,
+          ),
+      },
+      registry,
+      transport: { sendSkillInvocation: vi.fn() },
+      coordinatorInstanceId: "coordinator-01",
+      verifyAssignmentLease,
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    await expect(
+      planner.planAndDispatch({
+        ...planRequest(),
+        assignmentLeaseOwner: "goal-persistent-lease",
+      }),
+    ).resolves.toMatchObject({ action: "noop" });
+    expect(verifyAssignmentLease).toHaveBeenCalledWith({
+      taskId: "task-01",
+      botId: BOT_ID,
+      leaseOwner: "goal-persistent-lease",
+    });
   });
 
   it("reobserves and safely retries a pre-execution rejection with fresh authorization", async () => {
@@ -748,10 +900,14 @@ describe("CoordinatorLocalPlanner", () => {
 function plannerWith(
   generate: (options: any) => Promise<AIScheduledResult<GenerateResult>>,
   transport: SkillInvocationTransport = { sendSkillInvocation: vi.fn() },
+  assignment?: Pick<BotAssignmentService, "acquire" | "release">,
+  verifyAssignmentLease?: CoordinatorLocalPlannerOptions["verifyAssignmentLease"],
 ): CoordinatorLocalPlanner {
   return new CoordinatorLocalPlanner({
     ai: { generate },
     registry,
+    ...(assignment ? { assignment } : {}),
+    ...(verifyAssignmentLease ? { verifyAssignmentLease } : {}),
     transport,
     coordinatorInstanceId: "coordinator-01",
     now: () => NOW,

@@ -31,6 +31,17 @@ describe("TaskDispatchV1", () => {
     expect(parseTaskDispatch(dispatch)).toEqual(dispatch);
   });
 
+  it("accepts an optional durable assignment lease owner", () => {
+    const preassigned = {
+      ...dispatch,
+      payload: {
+        ...dispatch.payload,
+        assignmentLeaseOwner: "coordinator-assignment-01",
+      },
+    };
+    expect(parseTaskDispatch(preassigned)).toEqual(preassigned);
+  });
+
   it("requires the coordinator source and rejects source extensions", () => {
     expect(taskQueueSourceSchema.parse(dispatch.source)).toEqual(
       dispatch.source,

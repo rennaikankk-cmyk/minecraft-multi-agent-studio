@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import { z } from "zod";
+
 import {
   identifierSchema,
   taskDispatchV1Schema,
@@ -9,6 +11,7 @@ import {
 import { TaskSystemError } from "./errors.js";
 import {
   taskCancelCommandSchema,
+  taskAssignmentAcquireCommandSchema,
   taskCreateCommandSchema,
   taskDispatchRetryCommandSchema,
   taskLeaseAcquireCommandSchema,
@@ -21,6 +24,7 @@ import {
   taskRecordSchema,
   taskTransitionCommandSchema,
   type TaskCreateCommand,
+  type TaskAssignmentAcquireCommand,
   type TaskDispatchRetryCommand,
   type TaskOutboxRecord,
   type TaskCancellationRequest,
@@ -41,6 +45,14 @@ import {
 } from "./state-machine.js";
 
 type SqlRow = Record<string, unknown>;
+
+const taskAssignmentLeaseCheckSchema = z
+  .object({
+    taskId: taskCreateCommandSchema.shape.taskId,
+    botId: identifierSchema,
+    leaseOwner: identifierSchema,
+  })
+  .strict();
 
 export type SqlQueryResult<TRow extends SqlRow = SqlRow> = Readonly<{
   rows: readonly TRow[];
@@ -125,6 +137,15 @@ export type RecoverExpiredLeaseResult = Readonly<{
   dispatch: TaskDispatchV1 | null;
   outbox: TaskOutboxRecord | null;
 }>;
+
+export type AcquireTaskAssignmentResult = Readonly<{
+  task: TaskRecord;
+  dispatch: TaskDispatchV1;
+  outbox: TaskOutboxRecord;
+}>;
+
+/** A synchronous Coordinator execution lease has no queue delivery record. */
+export type AcquireSynchronousAssignmentResult = TaskRecord;
 
 export type TaskOutboxFailureRecord = Readonly<{
   messageId: string;
@@ -443,6 +464,10 @@ function outboxMatchesTaskContract(
   row: SqlRow,
   outbox: TaskOutboxRecord,
 ): boolean {
+  const taskLeaseOwner = nullableText(row.task_lease_owner);
+  const taskAssignedBotId = nullableText(row.task_assigned_bot_id);
+  const dispatchLeaseOwner =
+    outbox.payload.payload.assignmentLeaseOwner ?? null;
   return (
     nullableText(row.task_dispatch_bot_id) === outbox.payload.botId &&
     nullableText(row.task_type) === outbox.payload.payload.taskType &&
@@ -450,7 +475,11 @@ function outboxMatchesTaskContract(
       outbox.payload.payload.handlerVersion &&
     row.task_execution_idempotent ===
       outbox.payload.payload.executionIdempotent &&
-    nullableText(row.task_trace_id) === outbox.payload.traceId
+    nullableText(row.task_trace_id) === outbox.payload.traceId &&
+    dispatchLeaseOwner ===
+      (row.task_status === "assigned" ? taskLeaseOwner : null) &&
+    (row.task_status !== "assigned" ||
+      taskAssignedBotId === outbox.payload.botId)
   );
 }
 
@@ -496,6 +525,9 @@ function dispatchPayload(
       taskType: task.taskType,
       handlerVersion: task.handlerVersion,
       executionIdempotent: task.executionIdempotent,
+      ...(task.status === "assigned" && task.leaseOwner !== null
+        ? { assignmentLeaseOwner: task.leaseOwner }
+        : {}),
     },
   });
 }
@@ -823,6 +855,36 @@ export class PostgresTaskRepository {
     }
   }
 
+  /**
+   * Checks a pre-acquired execution lease at the PostgreSQL authority. The
+   * planner uses this instead of treating a caller-supplied owner string as a
+   * capability. The check is deliberately one-shot; subsequent mutations
+   * still enforce the lease owner and revision transactionally.
+   */
+  async isTaskAssignmentLeaseActive(input: unknown): Promise<boolean> {
+    const parsed = taskAssignmentLeaseCheckSchema.parse(input);
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(
+        `SELECT 1
+         FROM studio_tasks
+         WHERE task_id = $1
+           AND dispatch_bot_id = $2
+           AND assigned_bot_id = $2
+           AND lease_owner = $3
+           AND status IN ('assigned', 'running')
+           AND lease_expires_at > clock_timestamp()
+         LIMIT 1`,
+        [parsed.taskId, parsed.botId, parsed.leaseOwner],
+      );
+      return result.rows.length === 1;
+    } catch (error) {
+      throw this.persistenceError(error);
+    } finally {
+      client.release();
+    }
+  }
+
   async getDatabaseTime(): Promise<Date> {
     const client = await this.pool.connect();
     try {
@@ -1080,8 +1142,17 @@ export class PostgresTaskRepository {
             )
           )
             AND outbox.available_at <= clock_timestamp()
-            AND task.status = 'queued'
             AND task.revision = outbox.expected_revision
+            AND (
+              task.status = 'queued'
+              OR (
+                task.status = 'assigned'
+                AND task.lease_expires_at > clock_timestamp()
+                AND task.assigned_bot_id = (outbox.payload ->> 'botId')
+                AND (outbox.payload -> 'payload' ->> 'assignmentLeaseOwner') =
+                    task.lease_owner
+              )
+            )
           ORDER BY outbox.available_at ASC, outbox.created_at ASC,
                    outbox.message_id ASC
           LIMIT $1
@@ -1099,6 +1170,9 @@ export class PostgresTaskRepository {
         )
         SELECT claimed.*,
                task.dispatch_bot_id AS task_dispatch_bot_id,
+               task.status AS task_status,
+               task.lease_owner AS task_lease_owner,
+               task.assigned_bot_id AS task_assigned_bot_id,
                task.task_type,
                task.handler_version AS task_handler_version,
                task.execution_idempotent AS task_execution_idempotent,
@@ -1337,6 +1411,159 @@ export class PostgresTaskRepository {
 
   retryOutbox(input: TaskOutboxRetryOptions): Promise<boolean> {
     return this.retryTaskOutbox(input);
+  }
+
+  /**
+   * Atomically binds a deterministic Coordinator Bot choice to the durable
+   * task lease and its next-revision dispatch outbox entry. The worker can
+   * therefore consume the assignment lease after a Coordinator restart
+   * without performing a second competing lease claim.
+   */
+  acquireTaskAssignment(input: unknown): Promise<AcquireTaskAssignmentResult> {
+    const command: TaskAssignmentAcquireCommand =
+      taskAssignmentAcquireCommandSchema.parse(input);
+    return this.mutate(
+      command,
+      "task.assignment-acquired",
+      "TASK_ASSIGNMENT_ACQUIRED",
+      async (task, now, client) => {
+        await this.assertBotAssignmentAvailable(client, command.botId, task.taskId);
+        this.assertAssignmentServerContext(task, command);
+        if (await this.hasTaskCancellationRequest(client, task.taskId)) {
+          throw new TaskSystemError(
+            "TASK_CANCELLATION_PENDING",
+            "Task cancellation must resolve before assignment.",
+          );
+        }
+        if (
+          task.dispatchBotId !== null &&
+          task.dispatchBotId !== command.botId &&
+          task.revision === 0
+        ) {
+          throw new TaskSystemError(
+            "TASK_OPERATION_CONFLICT",
+            "Initial task dispatch target belongs to another Bot.",
+          );
+        }
+        if (
+          task.dispatchBotId !== null &&
+          task.dispatchBotId !== command.botId
+        ) {
+          await this.supersedeDispatchOutbox(client, task);
+        }
+        const {
+          serverProfileId: _serverProfileId,
+          dimension: _dimension,
+          ...leaseCommand
+        } = command;
+        const leased = acquireTaskLease(task, leaseCommand, {
+          now,
+          dependenciesReady: await this.dependenciesReady(
+            client,
+            command.taskId,
+          ),
+        });
+        return taskRecordSchema.parse({
+          ...leased,
+          dispatchBotId: command.botId,
+        });
+      },
+      async (task, client) => {
+        if (task.status !== "assigned" || task.dispatchBotId === null) {
+          throw new TaskSystemError(
+            "TASK_PERSISTENCE_FAILED",
+            "Assignment replay did not retain an active durable dispatch target.",
+          );
+        }
+        const outbox = await this.ensureDispatchOutbox(
+          client,
+          task,
+          task.updatedAt,
+        );
+        return { task, dispatch: outbox.payload, outbox };
+      },
+      true,
+    );
+  }
+
+  assignTask(input: unknown): Promise<AcquireTaskAssignmentResult> {
+    return this.acquireTaskAssignment(input);
+  }
+
+  acquireAssignmentLease(input: unknown): Promise<AcquireTaskAssignmentResult> {
+    return this.acquireTaskAssignment(input);
+  }
+
+  /**
+   * Persists a Coordinator-owned execution lease without creating a BullMQ
+   * dispatch. This is for synchronous, already-connected control paths (the
+   * guarded Local Planner); a queued task must use acquireTaskAssignment so
+   * its durable outbox cannot be omitted.
+   */
+  acquireSynchronousAssignment(
+    input: unknown,
+  ): Promise<AcquireSynchronousAssignmentResult> {
+    const command: TaskAssignmentAcquireCommand =
+      taskAssignmentAcquireCommandSchema.parse(input);
+    return this.mutate(
+      command,
+      "task.assignment-acquired",
+      "TASK_ASSIGNMENT_ACQUIRED",
+      async (task, now, client) => {
+        if (task.dispatchBotId !== null) {
+          throw new TaskSystemError(
+            "TASK_OPERATION_CONFLICT",
+            "Synchronous assignment cannot replace a durable dispatch target.",
+          );
+        }
+        await this.assertBotAssignmentAvailable(client, command.botId, task.taskId);
+        // A legacy or manually repaired row may have lost its dispatch target
+        // while retaining the same-revision outbox.  Treat that state as
+        // ambiguous instead of leasing it synchronously and orphaning the
+        // durable delivery record.
+        const outbox = await client.query(
+          `SELECT 1
+           FROM studio_task_outbox
+           WHERE task_id = $1
+             AND expected_revision = $2
+             AND type = 'task.dispatch.v1'
+           LIMIT 1
+           FOR UPDATE`,
+          [task.taskId, task.revision],
+        );
+        if (outbox.rows.length > 0) {
+          throw new TaskSystemError(
+            "TASK_OPERATION_CONFLICT",
+            "Synchronous assignment cannot claim a task with a durable dispatch outbox.",
+          );
+        }
+        this.assertAssignmentServerContext(task, command);
+        if (await this.hasTaskCancellationRequest(client, task.taskId)) {
+          throw new TaskSystemError(
+            "TASK_CANCELLATION_PENDING",
+            "Task cancellation must resolve before assignment.",
+          );
+        }
+        const {
+          serverProfileId: _serverProfileId,
+          dimension: _dimension,
+          ...leaseCommand
+        } = command;
+        const leased = acquireTaskLease(task, leaseCommand, {
+          now,
+          dependenciesReady: await this.dependenciesReady(
+            client,
+            command.taskId,
+          ),
+        });
+        return taskRecordSchema.parse({
+          ...leased,
+          dispatchBotId: command.botId,
+        });
+      },
+      undefined,
+      true,
+    );
   }
 
   async retryTaskDispatch(input: unknown): Promise<RetryTaskDispatchResult> {
@@ -1846,6 +2073,7 @@ export class PostgresTaskRepository {
       "task.lease-acquired",
       "TASK_LEASE_ACQUIRED",
       async (task, now, client) => {
+        await this.assertBotAssignmentAvailable(client, command.botId, task.taskId);
         if (await this.hasTaskCancellationRequest(client, task.taskId)) {
           throw new TaskSystemError(
             "TASK_CANCELLATION_PENDING",
@@ -2053,10 +2281,37 @@ export class PostgresTaskRepository {
       outbox.payload.payload.taskType !== task.taskType ||
       outbox.payload.payload.handlerVersion !== task.handlerVersion ||
       outbox.payload.payload.executionIdempotent !== task.executionIdempotent
+      || outbox.payload.payload.assignmentLeaseOwner !==
+        (task.status === "assigned" ? task.leaseOwner ?? undefined : undefined)
     ) {
       throw new TaskSystemError(
         "TASK_OPERATION_CONFLICT",
         "Task dispatch outbox payload conflicts with the task record.",
+      );
+    }
+  }
+
+  private async supersedeDispatchOutbox(
+    client: PostgresClientLike,
+    task: TaskRecord,
+  ): Promise<void> {
+    const result = await client.query(
+      `UPDATE studio_task_outbox
+       SET status = 'failed',
+           claimed_by = NULL,
+           claim_expires_at = NULL,
+           last_error = 'TASK_DISPATCH_SUPERSEDED',
+           updated_at = clock_timestamp()
+       WHERE task_id = $1
+         AND expected_revision = $2
+         AND type = 'task.dispatch.v1'
+         AND status <> 'failed'`,
+      [task.taskId, task.revision],
+    );
+    if (result.rowCount !== null && result.rowCount > 1) {
+      throw new TaskSystemError(
+        "TASK_PERSISTENCE_FAILED",
+        "More than one dispatch outbox exists for a task revision.",
       );
     }
   }
@@ -2077,6 +2332,7 @@ export class PostgresTaskRepository {
       task: TaskRecord,
       client: PostgresClientLike,
     ) => TResult | Promise<TResult>,
+    persistDispatchBotId = false,
   ): Promise<TResult> {
     const operationFingerprint = taskOperationFingerprint(command);
     const client = await this.pool.connect();
@@ -2102,36 +2358,70 @@ export class PostgresTaskRepository {
       const now = await this.databaseNow(client);
       const next = await planner(current, now, client);
       const updated = await client.query(
-        `UPDATE studio_tasks SET
-          status = $2,
-          assigned_bot_id = $3,
-          retry_count = $4,
-          lease_owner = $5,
-          lease_expires_at = $6,
-          failure_reason = $7,
-          result = $8::jsonb,
-          evidence = $9::jsonb,
-          revision = $10,
-          updated_at = $11,
-          started_at = $12,
-          finished_at = $13
-        WHERE task_id = $1 AND revision = $14`,
-        [
-          next.taskId,
-          next.status,
-          next.assignedBotId,
-          next.retryCount,
-          next.leaseOwner,
-          next.leaseExpiresAt,
-          next.failureReason,
-          next.result === null ? null : JSON.stringify(next.result),
-          JSON.stringify(next.evidence),
-          next.revision,
-          next.updatedAt,
-          next.startedAt,
-          next.finishedAt,
-          current.revision,
-        ],
+        persistDispatchBotId
+          ? `UPDATE studio_tasks SET
+              status = $2,
+              dispatch_bot_id = $3,
+              assigned_bot_id = $4,
+              retry_count = $5,
+              lease_owner = $6,
+              lease_expires_at = $7,
+              failure_reason = $8,
+              result = $9::jsonb,
+              evidence = $10::jsonb,
+              revision = $11,
+              updated_at = $12,
+              started_at = $13,
+              finished_at = $14
+            WHERE task_id = $1 AND revision = $15`
+          : `UPDATE studio_tasks SET
+              status = $2,
+              assigned_bot_id = $3,
+              retry_count = $4,
+              lease_owner = $5,
+              lease_expires_at = $6,
+              failure_reason = $7,
+              result = $8::jsonb,
+              evidence = $9::jsonb,
+              revision = $10,
+              updated_at = $11,
+              started_at = $12,
+              finished_at = $13
+            WHERE task_id = $1 AND revision = $14`,
+        persistDispatchBotId
+          ? [
+              next.taskId,
+              next.status,
+              next.dispatchBotId,
+              next.assignedBotId,
+              next.retryCount,
+              next.leaseOwner,
+              next.leaseExpiresAt,
+              next.failureReason,
+              next.result === null ? null : JSON.stringify(next.result),
+              JSON.stringify(next.evidence),
+              next.revision,
+              next.updatedAt,
+              next.startedAt,
+              next.finishedAt,
+              current.revision,
+            ]
+          : [
+              next.taskId,
+              next.status,
+              next.assignedBotId,
+              next.retryCount,
+              next.leaseOwner,
+              next.leaseExpiresAt,
+              next.failureReason,
+              next.result === null ? null : JSON.stringify(next.result),
+              JSON.stringify(next.evidence),
+              next.revision,
+              next.updatedAt,
+              next.startedAt,
+              next.finishedAt,
+              current.revision,
+            ],
       );
       if (updated.rowCount !== 1) {
         throw new TaskSystemError(
@@ -2216,6 +2506,59 @@ export class PostgresTaskRepository {
        )`,
       [operationId],
     );
+  }
+
+  private async lockBotAssignment(
+    client: PostgresClientLike,
+    botId: string,
+  ): Promise<void> {
+    await client.query(
+      `SELECT pg_advisory_xact_lock(
+         hashtextextended($1::text, 0)
+       )`,
+      [`task-assignment-bot:${botId}`],
+    );
+  }
+
+  private async assertBotAssignmentAvailable(
+    client: PostgresClientLike,
+    botId: string,
+    taskId: string,
+  ): Promise<void> {
+    await this.lockBotAssignment(client, botId);
+    const competing = await client.query(
+      `SELECT task_id
+       FROM studio_tasks
+       WHERE assigned_bot_id = $1
+         AND status IN ('assigned', 'running')
+         AND lease_expires_at > clock_timestamp()
+       LIMIT 1
+       FOR UPDATE`,
+      [botId],
+    );
+    const competingTaskId = competing.rows[0]?.task_id;
+    if (competingTaskId !== undefined && competingTaskId !== taskId) {
+      throw new TaskSystemError(
+        "TASK_BOT_ASSIGNMENT_CONFLICT",
+        "Bot already owns another active durable task assignment.",
+      );
+    }
+  }
+
+  private assertAssignmentServerContext(
+    task: TaskRecord,
+    command: TaskAssignmentAcquireCommand,
+  ): void {
+    if (
+      task.target !== null &&
+      (task.target.serverProfileId !== command.serverProfileId ||
+        task.target.dimension !== command.dimension)
+    ) {
+      throw new TaskSystemError(
+        "TASK_SERVER_CONTEXT_CONFLICT",
+        "Assignment server context does not match the task target.",
+      );
+    }
   }
 
   private async beginTransaction(client: PostgresClientLike): Promise<void> {

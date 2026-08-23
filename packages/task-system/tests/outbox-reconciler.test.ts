@@ -207,6 +207,7 @@ class FakeQueue {
   readonly removed: Array<{ taskId: string; revision: number }> = [];
   readonly jobs = new Map<string, { getState: () => Promise<string> }>();
   failNext = false;
+  removeResultOverride: boolean | null = null;
 
   async enqueue(input: unknown): Promise<{ accepted: true }> {
     if (this.failNext) {
@@ -229,6 +230,9 @@ class FakeQueue {
 
   async remove(taskId: string, expectedRevision: number): Promise<boolean> {
     this.removed.push({ taskId, revision: expectedRevision });
+    if (this.removeResultOverride !== null) {
+      return this.removeResultOverride;
+    }
     return this.jobs.delete(`${taskId}:${expectedRevision}`);
   }
 }
@@ -536,20 +540,23 @@ class RecordingDispatchRetryClient implements PostgresClientLike {
       };
     }
     if (text.includes("UPDATE studio_tasks SET")) {
+      const hasDispatchTarget = text.includes("dispatch_bot_id = $3");
+      const offset = hasDispatchTarget ? 1 : 0;
       this.taskRow = {
         ...this.taskRow,
+        ...(hasDispatchTarget ? { dispatch_bot_id: values[2] } : {}),
         status: values[1],
-        assigned_bot_id: values[2],
-        retry_count: values[3],
-        lease_owner: values[4],
-        lease_expires_at: values[5],
-        failure_reason: values[6],
-        result: values[7] === null ? null : JSON.parse(String(values[7])),
-        evidence: JSON.parse(String(values[8])),
-        revision: values[9],
-        updated_at: values[10],
-        started_at: values[11],
-        finished_at: values[12],
+        assigned_bot_id: values[2 + offset],
+        retry_count: values[3 + offset],
+        lease_owner: values[4 + offset],
+        lease_expires_at: values[5 + offset],
+        failure_reason: values[6 + offset],
+        result: values[7 + offset] === null ? null : JSON.parse(String(values[7 + offset])),
+        evidence: JSON.parse(String(values[8 + offset])),
+        revision: values[9 + offset],
+        updated_at: values[10 + offset],
+        started_at: values[11 + offset],
+        finished_at: values[12 + offset],
       };
       return { rows: [], rowCount: 1 };
     }
@@ -756,6 +763,27 @@ describe("TaskOutboxReconciler", () => {
     });
     expect(queue.removed).toEqual([{ taskId: TASK_A, revision: 0 }]);
     expect(queue.enqueued).toEqual([entry.payload]);
+  });
+
+  it("does not acknowledge a stale job when BullMQ refuses removal", async () => {
+    const repository = new FakeOutboxRepository();
+    const queue = new FakeQueue();
+    const entry = outbox(TASK_A, 0, "abababab-abab-4aba-8aba-abababababab");
+    repository.entries.set(entry.messageId, entry);
+    queue.jobs.set(`${TASK_A}:0`, { getState: async () => "failed" });
+    queue.removeResultOverride = false;
+
+    await expect(reconciler(repository, queue).reconcileOnce()).resolves.toEqual({
+      claimed: 1,
+      enqueued: 0,
+      skipped: 0,
+      failed: 1,
+    });
+    expect(queue.enqueued).toEqual([]);
+    expect(repository.entries.get(entry.messageId)).toMatchObject({
+      status: "pending",
+      lastError: "Stale task dispatch job could not be removed before redrive.",
+    });
   });
 
   it("keeps a live (active) BullMQ job without removing it", async () => {
@@ -1305,6 +1333,61 @@ describe("PostgresTaskRepository outbox claims", () => {
       "reconciler-01",
       "TASK_OUTBOX_TASK_CONTRACT_MISMATCH",
     ]);
+  });
+
+  it("claims a dispatch for an active preassignment lease", async () => {
+    const assignmentLeaseOwner = "coordinator-assignment-01";
+    const base = outbox(
+      TASK_A,
+      1,
+      "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    );
+    const payload = {
+      ...base.payload,
+      payload: {
+        ...base.payload.payload,
+        assignmentLeaseOwner,
+      },
+    };
+    const entry: TaskOutboxRecord = { ...base, payload };
+    const client = new RecordingClaimClient({
+      message_id: entry.messageId,
+      task_id: entry.taskId,
+      expected_revision: entry.expectedRevision,
+      type: entry.type,
+      payload: entry.payload,
+      status: "claimed",
+      attempt_count: 0,
+      available_at: NOW,
+      claimed_by: "reconciler-01",
+      claim_expires_at: "2026-07-27T12:00:30.000Z",
+      last_error: null,
+      created_at: NOW,
+      updated_at: NOW,
+      delivered_at: null,
+      task_dispatch_bot_id: "worker-01",
+      task_status: "assigned",
+      task_lease_owner: assignmentLeaseOwner,
+      task_assigned_bot_id: "worker-01",
+      task_type: submitCommand.taskType,
+      task_handler_version: submitCommand.handlerVersion,
+      task_execution_idempotent: submitCommand.executionIdempotent,
+      task_trace_id: entry.payload.traceId,
+    });
+    const repository = new PostgresTaskRepository(
+      new RecordingClaimPool(client),
+    );
+
+    const claimed = await repository.claimTaskOutbox({
+      claimerId: "reconciler-01",
+      leaseDurationMs: 1_000,
+    });
+
+    expect(claimed).toHaveLength(1);
+    expect(claimed[0]?.payload.payload.assignmentLeaseOwner).toBe(
+      assignmentLeaseOwner,
+    );
+    expect(client.calls.some(({ text }) => text === "COMMIT")).toBe(true);
   });
 
   it("expires an invalid dispatch when the task deadline has arrived", async () => {

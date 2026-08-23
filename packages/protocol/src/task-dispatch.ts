@@ -39,6 +39,10 @@ export const taskDispatchV1Schema = z
         taskType: taskDispatchTaskTypeSchema,
         handlerVersion: skillVersionSchema,
         executionIdempotent: z.boolean(),
+        // When a Coordinator pre-acquires the task lease, the worker must
+        // consume that exact lease instead of racing a second lease claim.
+        // The field is optional for the existing queued-dispatch contract.
+        assignmentLeaseOwner: identifierSchema.optional(),
       })
       .strict(),
   })

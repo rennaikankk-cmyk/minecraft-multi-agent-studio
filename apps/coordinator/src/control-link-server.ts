@@ -1278,6 +1278,7 @@ export class ControlLinkServer {
         botId: request.payload.botId,
         operatorGoal: request.payload.operatorGoal,
         timeoutMs: request.payload.timeoutMs,
+        assignmentLeaseOwner: lease.leaseOwner,
         signal: controller.signal,
       });
       if (timedOut || controller.signal.aborted) {
@@ -1953,6 +1954,7 @@ function goalErrorCode(
     if (cause.code === "PLANNER_TIMEOUT") return "AI_TIMEOUT";
     if (
       cause.code === "PLANNER_BOT_UNAVAILABLE" ||
+      cause.code === "PLANNER_BOT_BUSY" ||
       cause.code === "PLANNER_SAFETY_PAUSED" ||
       cause.code === "PLANNER_SKILL_CATALOG_UNAVAILABLE"
     ) {

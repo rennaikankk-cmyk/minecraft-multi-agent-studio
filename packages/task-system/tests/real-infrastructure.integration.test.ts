@@ -30,6 +30,7 @@ import { TaskOutboxReconciler } from "../src/outbox-reconciler.js";
 import {
   MAX_TASK_OUTBOX_ATTEMPTS,
   PostgresTaskRepository,
+  type AcquireTaskAssignmentResult,
 } from "../src/postgres-repository.js";
 import {
   taskRecordSchema,
@@ -138,6 +139,32 @@ function taskSubmitCommand(taskType: string) {
   return {
     ...taskCreateCommand(taskType),
     dispatchBotId: "isolated-test-bot",
+  };
+}
+
+function taskAssignmentCommand(
+  task: Pick<TaskRecord, "taskId" | "revision">,
+  input: Readonly<{
+    botId: string;
+    leaseOwner: string;
+    actorId: string;
+    operationId?: string;
+    leaseDurationMs?: number;
+    serverProfileId?: string;
+    dimension?: string;
+  }>,
+) {
+  return {
+    schemaVersion: "1.0" as const,
+    operationId: input.operationId ?? randomUUID(),
+    taskId: task.taskId,
+    expectedRevision: task.revision,
+    actorId: input.actorId,
+    botId: input.botId,
+    leaseOwner: input.leaseOwner,
+    leaseDurationMs: input.leaseDurationMs ?? 1_000,
+    serverProfileId: input.serverProfileId ?? "isolated-local",
+    dimension: input.dimension ?? "minecraft:overworld",
   };
 }
 
@@ -1342,6 +1369,361 @@ describeReal.sequential(
         [first.task.taskId],
       );
       expect(taskCount.rows[0]?.count).toBe(1);
+    }, REAL_TEST_TIMEOUT_MS);
+
+    it("serializes competing durable assignments for one Bot across Coordinators", async () => {
+      const first = (
+        await repository.createTask(
+          taskCreateCommand("test.concurrent-assignment-first"),
+        )
+      ).task;
+      const second = (
+        await repository.createTask(
+          taskCreateCommand("test.concurrent-assignment-second"),
+        )
+      ).task;
+      const claims = await Promise.allSettled([
+        repository.acquireTaskAssignment(
+          taskAssignmentCommand(first, {
+            botId: "isolated-assignment-bot",
+            leaseOwner: "coordinator-assignment-a",
+            actorId: "coordinator-assignment-a",
+            leaseDurationMs: 3_000,
+          }),
+        ),
+        repository.acquireTaskAssignment(
+          taskAssignmentCommand(second, {
+            botId: "isolated-assignment-bot",
+            leaseOwner: "coordinator-assignment-b",
+            actorId: "coordinator-assignment-b",
+            leaseDurationMs: 3_000,
+          }),
+        ),
+      ]);
+      const winner = claims.find(
+        (claim) => claim.status === "fulfilled",
+      );
+      const loser = claims.find((claim) => claim.status === "rejected");
+      expect(winner?.status).toBe("fulfilled");
+      expect(loser?.status).toBe("rejected");
+      if (winner?.status !== "fulfilled") {
+        throw new Error("Concurrent durable assignment did not produce a winner.");
+      }
+      expect(loser?.reason).toMatchObject({
+        code: "TASK_BOT_ASSIGNMENT_CONFLICT",
+      });
+
+      const persisted = await Promise.all([
+        repository.getTask(first.taskId),
+        repository.getTask(second.taskId),
+      ]);
+      expect(
+        persisted.filter(
+          (task) =>
+            task?.status === "assigned" &&
+            task.assignedBotId === "isolated-assignment-bot",
+        ),
+      ).toHaveLength(1);
+      expect(
+        persisted.filter((task) => task?.status === "queued"),
+      ).toHaveLength(1);
+
+      await repository.cancelTask({
+        schemaVersion: "1.0",
+        operationId: randomUUID(),
+        taskId: winner.value.task.taskId,
+        actorId: "integration-assignment-cleanup",
+        leaseOwner: winner.value.task.leaseOwner,
+        reasonCode: "TEST_TASK_CLEANUP",
+      });
+      const queued = persisted.find(
+        (task) => task?.taskId !== winner.value.task.taskId,
+      );
+      if (!queued) throw new Error("Concurrent assignment loser disappeared.");
+      await cancelQueuedTask(repository, queued.taskId);
+    }, REAL_TEST_TIMEOUT_MS);
+
+    it("fails closed when assignment server context conflicts with the task target", async () => {
+      const created = (
+        await repository.createTask({
+          ...taskCreateCommand("test.assignment-context-conflict"),
+          target: {
+            x: 10,
+            y: 64,
+            z: -10,
+            dimension: "minecraft:overworld",
+            serverProfileId: "isolated-local",
+          },
+        })
+      ).task;
+      await expect(
+        repository.acquireTaskAssignment(
+          taskAssignmentCommand(created, {
+            botId: "isolated-context-bot",
+            leaseOwner: "coordinator-context-conflict",
+            actorId: "coordinator-context-conflict",
+            serverProfileId: "different-server",
+          }),
+        ),
+      ).rejects.toMatchObject({
+        code: "TASK_SERVER_CONTEXT_CONFLICT",
+      });
+      await expect(repository.getTask(created.taskId)).resolves.toMatchObject({
+        status: "queued",
+        revision: 0,
+        dispatchBotId: null,
+        assignedBotId: null,
+        leaseOwner: null,
+      });
+      await expect(
+        repository.getTaskOutbox(created.taskId, created.revision),
+      ).resolves.toBeNull();
+      await cancelQueuedTask(repository, created.taskId);
+    }, REAL_TEST_TIMEOUT_MS);
+
+    it("recovers an assignment lease and dispatch outbox after a Coordinator restart", async () => {
+      const created = (
+        await repository.createTask(
+          taskCreateCommand("test.assignment-coordinator-restart"),
+        )
+      ).task;
+      const command = taskAssignmentCommand(created, {
+        botId: "isolated-restart-bot",
+        leaseOwner: "coordinator-before-restart",
+        actorId: "coordinator-before-restart",
+        leaseDurationMs: 300_000,
+      });
+      const beforeRestartAdapter = new PgTaskPoolAdapter(scopedPoolConfig);
+      let acquired: AcquireTaskAssignmentResult;
+      try {
+        await beforeRestartAdapter.verifyConnection();
+        const beforeRestartRepository = new PostgresTaskRepository(
+          beforeRestartAdapter,
+        );
+        acquired = await beforeRestartRepository.acquireTaskAssignment(command);
+      } finally {
+        await boundedCleanup(
+          beforeRestartAdapter.close(),
+          "Pre-restart PostgreSQL adapter",
+        );
+      }
+
+      const restartedAdapter = new PgTaskPoolAdapter(scopedPoolConfig);
+      try {
+        await restartedAdapter.verifyConnection();
+        const restartedRepository = new PostgresTaskRepository(
+          restartedAdapter,
+        );
+        await expect(
+          restartedRepository.getTask(created.taskId),
+        ).resolves.toEqual(acquired.task);
+        await expect(
+          restartedRepository.getTaskOutbox(
+            created.taskId,
+            acquired.task.revision,
+          ),
+        ).resolves.toEqual(acquired.outbox);
+        await expect(
+          restartedRepository.acquireTaskAssignment(command),
+        ).resolves.toEqual(acquired);
+      } finally {
+        await boundedCleanup(
+          restartedAdapter.close(),
+          "Restarted PostgreSQL adapter",
+        );
+      }
+
+      await repository.cancelTask({
+        schemaVersion: "1.0",
+        operationId: randomUUID(),
+        taskId: acquired.task.taskId,
+        actorId: "integration-assignment-cleanup",
+        leaseOwner: acquired.task.leaseOwner,
+        reasonCode: "TEST_TASK_CLEANUP",
+      });
+    }, REAL_TEST_TIMEOUT_MS);
+
+    it("reassigns an expired assignment to a substitute Bot at a new revision", async () => {
+      const created = (
+        await repository.createTask(
+          taskCreateCommand("test.assignment-substitute-bot"),
+        )
+      ).task;
+      const assigned = await repository.acquireTaskAssignment(
+        taskAssignmentCommand(created, {
+          botId: "isolated-expired-bot",
+          leaseOwner: "coordinator-expired-owner",
+          actorId: "coordinator-expired-owner",
+          leaseDurationMs: 1_000,
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+
+      const expired = await repository.recoverExpiredLease({
+        schemaVersion: "1.0",
+        operationId: randomUUID(),
+        taskId: assigned.task.taskId,
+        expectedRevision: assigned.task.revision,
+        actorId: "coordinator-expiry-recovery",
+        reasonCode: "TASK_LEASE_EXPIRED",
+      });
+      expect(expired).toMatchObject({
+        task: {
+          status: "queued",
+          revision: assigned.task.revision + 1,
+          assignedBotId: null,
+          leaseOwner: null,
+        },
+        dispatch: {
+          botId: "isolated-expired-bot",
+          payload: { expectedRevision: assigned.task.revision + 1 },
+        },
+        outbox: {
+          status: "pending",
+          expectedRevision: assigned.task.revision + 1,
+        },
+      });
+
+      const substitute = await repository.acquireTaskAssignment(
+        taskAssignmentCommand(expired.task, {
+          botId: "isolated-substitute-bot",
+          leaseOwner: "coordinator-substitute-owner",
+          actorId: "coordinator-substitute-owner",
+          leaseDurationMs: 300_000,
+        }),
+      );
+      expect(substitute).toMatchObject({
+        task: {
+          status: "assigned",
+          revision: expired.task.revision + 1,
+          assignedBotId: "isolated-substitute-bot",
+          dispatchBotId: "isolated-substitute-bot",
+          leaseOwner: "coordinator-substitute-owner",
+        },
+        dispatch: {
+          botId: "isolated-substitute-bot",
+          payload: {
+            expectedRevision: expired.task.revision + 1,
+            assignmentLeaseOwner: "coordinator-substitute-owner",
+          },
+        },
+      });
+      await expect(
+        repository.getTaskOutbox(
+          assigned.task.taskId,
+          expired.task.revision,
+        ),
+      ).resolves.toMatchObject({
+        status: "failed",
+        lastError: "TASK_DISPATCH_SUPERSEDED",
+      });
+
+      await repository.cancelTask({
+        schemaVersion: "1.0",
+        operationId: randomUUID(),
+        taskId: substitute.task.taskId,
+        actorId: "integration-assignment-cleanup",
+        leaseOwner: substitute.task.leaseOwner,
+        reasonCode: "TEST_TASK_CLEANUP",
+      });
+    }, REAL_TEST_TIMEOUT_MS);
+
+    it("persists a synchronous assignment without creating a BullMQ outbox", async () => {
+      const created = (
+        await repository.createTask(
+          taskCreateCommand("test.synchronous-assignment"),
+        )
+      ).task;
+      const assigned = await repository.acquireSynchronousAssignment(
+        taskAssignmentCommand(created, {
+          botId: "isolated-synchronous-bot",
+          leaseOwner: "coordinator-synchronous-owner",
+          actorId: "coordinator-synchronous-owner",
+          leaseDurationMs: 300_000,
+        }),
+      );
+      expect(assigned).toMatchObject({
+        status: "assigned",
+        dispatchBotId: "isolated-synchronous-bot",
+        assignedBotId: "isolated-synchronous-bot",
+        leaseOwner: "coordinator-synchronous-owner",
+        revision: created.revision + 1,
+      });
+      await expect(
+        repository.getTaskOutbox(created.taskId, assigned.revision),
+      ).resolves.toBeNull();
+      await repository.cancelTask({
+        schemaVersion: "1.0",
+        operationId: randomUUID(),
+        taskId: assigned.taskId,
+        actorId: "integration-assignment-cleanup",
+        leaseOwner: assigned.leaseOwner,
+        reasonCode: "TEST_TASK_CLEANUP",
+      });
+    }, REAL_TEST_TIMEOUT_MS);
+
+    it("reconciles an assigned outbox after Redis loses its BullMQ job", async () => {
+      const queue = createQueue();
+      await queue.verifyConnection();
+      const created = (
+        await repository.createTask(
+          taskCreateCommand("test.assignment-redis-reconciliation"),
+        )
+      ).task;
+      const assigned = await repository.acquireTaskAssignment(
+        taskAssignmentCommand(created, {
+          botId: "isolated-redis-assignment-bot",
+          leaseOwner: "coordinator-redis-owner",
+          actorId: "coordinator-redis-owner",
+          leaseDurationMs: 300_000,
+        }),
+      );
+      const reconciler = new TaskOutboxReconciler({
+        repository,
+        queue,
+        instanceId: "integration-assignment-redis-reconciler",
+      });
+      await expect(reconciler.reconcileOnce()).resolves.toEqual({
+        claimed: 1,
+        enqueued: 1,
+        skipped: 0,
+        failed: 0,
+      });
+      expect(
+        await queue.getJob(assigned.task.taskId, assigned.task.revision),
+      ).not.toBeNull();
+      expect(
+        await queue.remove(assigned.task.taskId, assigned.task.revision),
+      ).toBe(true);
+      await assertionPool.query(
+        `UPDATE studio_task_outbox
+         SET available_at = clock_timestamp(),
+             updated_at = clock_timestamp()
+         WHERE message_id = $1`,
+        [assigned.outbox.messageId],
+      );
+
+      await expect(reconciler.reconcileOnce()).resolves.toEqual({
+        claimed: 1,
+        enqueued: 1,
+        skipped: 0,
+        failed: 0,
+      });
+      const recreated = await queue.getJob(
+        assigned.task.taskId,
+        assigned.task.revision,
+      );
+      expect(recreated).not.toBeNull();
+      expect(recreated?.data.messageId).toBe(assigned.outbox.messageId);
+      await queue.remove(assigned.task.taskId, assigned.task.revision);
+      await repository.cancelTask({
+        schemaVersion: "1.0",
+        operationId: randomUUID(),
+        taskId: assigned.task.taskId,
+        actorId: "integration-assignment-cleanup",
+        leaseOwner: assigned.task.leaseOwner,
+        reasonCode: "TEST_TASK_CLEANUP",
+      });
     }, REAL_TEST_TIMEOUT_MS);
 
     it("blocks new leases and resolves queued cancellation atomically", async () => {

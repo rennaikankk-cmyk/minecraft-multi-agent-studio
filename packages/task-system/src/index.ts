@@ -4,6 +4,7 @@ export {
 } from "./errors.js";
 export {
   taskCancelCommandSchema,
+  taskAssignmentAcquireCommandSchema,
   taskCancellationRequestSchema,
   taskCreateCommandSchema,
   taskDispatchRetryCommandSchema,
@@ -23,6 +24,7 @@ export {
   taskTargetSchema,
   taskTransitionCommandSchema,
   type TaskCancelCommand,
+  type TaskAssignmentAcquireCommand,
   type TaskCancellationRequest,
   type TaskCreateCommand,
   type TaskDispatch,
@@ -54,6 +56,8 @@ export {
   type SubmitTaskResult,
   type RetryTaskDispatchResult,
   type RecoverExpiredLeaseResult,
+  type AcquireTaskAssignmentResult,
+  type AcquireSynchronousAssignmentResult,
   type ResolveTaskCancellationInput,
   type ResolveTaskCancellationResult,
   type TaskCancellationAcknowledgeInput,

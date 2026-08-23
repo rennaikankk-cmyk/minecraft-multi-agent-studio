@@ -540,11 +540,9 @@ export class BullMqTaskWorker {
     }
     const active: ActiveTaskExecution = {
       jobId,
-      leaseOwner: deterministicLeaseOwner(
-        this.options.instanceId,
-        dispatch.messageId,
-        jobId,
-      ),
+      leaseOwner:
+        dispatch.payload.assignmentLeaseOwner ??
+        deterministicLeaseOwner(this.options.instanceId, dispatch.messageId, jobId),
       cancellation: null,
       abortExecution: null,
     };
@@ -642,10 +640,15 @@ export class BullMqTaskWorker {
           "Task dispatch revision is stale.",
         );
       }
-      if (task.status !== "queued") {
+      const preassigned =
+        task.status === "assigned" &&
+        dispatch.payload.assignmentLeaseOwner !== undefined &&
+        task.assignedBotId === dispatch.botId &&
+        task.leaseOwner === dispatch.payload.assignmentLeaseOwner;
+      if (task.status !== "queued" && !preassigned) {
         throw new TaskWorkerError(
           "TASK_DISPATCH_STALE",
-          "Task is not ready for dispatch.",
+          "Task is not ready for dispatch or does not own the assignment lease.",
         );
       }
 
@@ -656,29 +659,31 @@ export class BullMqTaskWorker {
       );
       if (cancelledBeforeLease) return cancelledBeforeLease;
 
-      try {
-        task = await this.repository.acquireLease({
-          schemaVersion: "1.0",
-          operationId: deterministicOperationId(
-            dispatch.messageId,
-            "lease-acquire",
-            task.revision,
-          ),
-          taskId: task.taskId,
-          expectedRevision: task.revision,
-          actorId: this.options.instanceId,
-          botId: dispatch.botId,
-          leaseOwner: active.leaseOwner,
-          leaseDurationMs: this.options.leaseDurationMs,
-        });
-      } catch (error) {
-        const cancelled = await this.resolvePendingCancellation(
-          error,
-          task.taskId,
-          active,
-        );
-        if (cancelled) return requiredTerminalResult(cancelled);
-        throw error;
+      if (!preassigned) {
+        try {
+          task = await this.repository.acquireLease({
+            schemaVersion: "1.0",
+            operationId: deterministicOperationId(
+              dispatch.messageId,
+              "lease-acquire",
+              task.revision,
+            ),
+            taskId: task.taskId,
+            expectedRevision: task.revision,
+            actorId: this.options.instanceId,
+            botId: dispatch.botId,
+            leaseOwner: active.leaseOwner,
+            leaseDurationMs: this.options.leaseDurationMs,
+          });
+        } catch (error) {
+          const cancelled = await this.resolvePendingCancellation(
+            error,
+            task.taskId,
+            active,
+          );
+          if (cancelled) return requiredTerminalResult(cancelled);
+          throw error;
+        }
       }
       const cancelledAfterLease = await this.cancelIfRequested(
         task,
@@ -746,6 +751,16 @@ export class BullMqTaskWorker {
       recoveredFromThisDispatch: boolean;
     }>
   > {
+    // A preassigned dispatch owns the task row lease before it reaches this
+    // worker. A BullMQ redelivery while the task is still `assigned` must
+    // reuse that lease; expiring it here would race the Coordinator recovery
+    // loop and create a second revision/outbox.
+    if (
+      dispatch.payload.assignmentLeaseOwner !== undefined &&
+      task.status === "assigned"
+    ) {
+      return { task, recoveredFromThisDispatch: false };
+    }
     if (
       attemptsStarted <= 1 ||
       (task.status !== "assigned" && task.status !== "running")
