@@ -314,6 +314,44 @@ describe("SingleBotRuntime", () => {
     });
   });
 
+  it("reports why a snapshot was rejected instead of dropping it silently", async () => {
+    const messages: BotTelemetryMessageV1[] = [];
+    const client = new FakeBotClient();
+    const runtime = new SingleBotRuntime(profile, {
+      createClient: () => client,
+      messageSink: (message) => messages.push(message),
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+
+    runtime.start();
+    client.spawn();
+    const publishedBefore = messages.filter(
+      ({ type }) => type === "bot.status.v1",
+    ).length;
+
+    client.setSnapshot({
+      ...snapshot,
+      health: { ...snapshot.health, current: Number.NaN },
+    });
+    client.stateChanged();
+
+    expect(
+      messages.filter(({ type }) => type === "bot.status.v1").length,
+    ).toBe(publishedBefore);
+    expect(logger.error).toHaveBeenCalledWith(
+      "l0_safety_snapshot_invalid",
+      expect.objectContaining({
+        botId: profile.botId,
+        code: "SAFETY_SNAPSHOT_INVALID",
+        reason: expect.stringContaining("health"),
+      }),
+    );
+
+    await runtime.stop();
+  });
+
   it("reconnects with bounded backoff after an unexpected disconnect", async () => {
     const messages: BotTelemetryMessageV1[] = [];
     const clients = [new FakeBotClient(), new FakeBotClient()];

@@ -1000,10 +1000,16 @@ export class SingleBotRuntime {
     if (generation !== this.generation || this.state !== "online") return;
     try {
       if (this.client) this.evaluateSafetySnapshot(generation, this.client.snapshot());
-    } catch {
+    } catch (cause) {
+      // A bare code cannot distinguish a field the server has not sent yet
+      // from a real L0 boundary violation. The reason comes from our own
+      // safety boundary, which names fields rather than values.
       this.dependencies.logger.error(
         "l0_safety_snapshot_invalid",
-        this.logFields({ code: "SAFETY_SNAPSHOT_INVALID" }),
+        this.logFields({
+          code: "SAFETY_SNAPSHOT_INVALID",
+          reason: statusFailureReason(cause),
+        }),
       );
     }
     const elapsed = this.now().getTime() - this.lastStatusAt;
@@ -1075,10 +1081,14 @@ export class SingleBotRuntime {
       this.lastStatusSequence = sequence;
       this.lastStatusAt = this.now().getTime();
       this.emit(message);
-    } catch {
+    } catch (cause) {
+      // Without the originating reason this event cannot distinguish a
+      // transient pre-first-packet field from a real boundary violation or a
+      // protocol schema regression. The message comes from our own schemas and
+      // safety boundary, which name fields rather than values.
       this.dependencies.logger.error(
         "bot_runtime_status_invalid",
-        this.logFields(),
+        this.logFields({ reason: statusFailureReason(cause) }),
       );
     }
   }
@@ -1648,6 +1658,21 @@ export class SingleBotRuntime {
       this[key] = null;
     }
   }
+}
+
+/**
+ * A ZodError carries every issue in `message` as a JSON blob. Take the first
+ * issue with its path instead, matching how ServerProfile validation reports
+ * failures, and keep the result bounded for the log sink.
+ */
+function statusFailureReason(cause: unknown): string {
+  if (cause instanceof z.ZodError) {
+    const issue = cause.issues[0];
+    if (!issue) return "status payload failed schema validation";
+    const path = issue.path.join(".");
+    return path.length > 0 ? `${path}: ${issue.message}` : issue.message;
+  }
+  return cause instanceof Error ? cause.message : String(cause);
 }
 
 type CombatIntent = "ENGAGE" | "DISENGAGE";
