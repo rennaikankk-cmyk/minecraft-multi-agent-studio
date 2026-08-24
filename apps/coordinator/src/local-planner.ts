@@ -1069,13 +1069,22 @@ export class CoordinatorLocalPlanner {
           last = { step, invocation: bound.invocation, result };
           const outcome = stepOutcomeFromResult(step, result);
           if (bound.idempotent) return outcome;
-          return nonIdempotentStepOutcome(result, outcome);
+          const guarded = nonIdempotentStepOutcome(result, outcome);
+          this.logMaskedStepFailure(request, step, outcome, guarded);
+          return guarded;
         } catch (cause) {
           if (!bound.idempotent) {
-            return {
-              ok: false,
+            const guarded = {
+              ok: false as const,
               errorCode: NON_IDEMPOTENT_RESULT_UNCERTAIN,
             };
+            this.logMaskedStepFailure(
+              request,
+              step,
+              { ok: false, errorCode: transportFailureCode(cause) },
+              guarded,
+            );
+            return guarded;
           }
           if (request.signal?.aborted) {
             return { ok: false, errorCode: "SKILL_CANCELLED" };
@@ -1513,6 +1522,43 @@ export class CoordinatorLocalPlanner {
       } else {
         logger.warn("coordinator_planner_goal_supervision", fields);
       }
+    } catch {
+      // Diagnostics must never change what the planner reports.
+    }
+  }
+
+  /**
+   * `NON_IDEMPOTENT_RESULT_UNCERTAIN` is the right thing to *return* — a
+   * non-idempotent step that may have already had side effects must not be
+   * replayed. But it replaces the code the Skill actually reported, so the
+   * supervision log alone cannot say what went wrong: a live `crafting_table`
+   * plan recorded the mask while the real cause, `COLLECT_BLOCKS_FAILED`, was
+   * only visible by cross-referencing the Runtime log on another host.
+   *
+   * So the mask is recorded alongside the code it hid. The returned outcome is
+   * untouched; this only adds the one field that makes the coordinator log
+   * self-sufficient.
+   */
+  private logMaskedStepFailure(
+    request: LocalPlanRequest,
+    step: PlanStep,
+    original: StepOutcome,
+    guarded: StepOutcome,
+  ): void {
+    const logger = this.options.logger;
+    if (!logger) return;
+    if (original.ok || guarded.ok) return;
+    if (original.errorCode === guarded.errorCode) return;
+    try {
+      logger.warn("coordinator_planner_step_failure_masked", {
+        traceId: request.traceId,
+        taskId: request.taskId,
+        botId: request.botId,
+        skillId: step.skillId,
+        itemName: step.itemName,
+        reportedErrorCode: guarded.errorCode,
+        skillErrorCode: original.errorCode,
+      });
     } catch {
       // Diagnostics must never change what the planner reports.
     }

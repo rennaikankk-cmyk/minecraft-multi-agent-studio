@@ -451,6 +451,82 @@ describe("CoordinatorLocalPlanner", () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
+  /**
+   * 屏蔽码本身是对的：非幂等步骤失败后不能让上层以为可以安全重放。但只返回
+   * `NON_IDEMPOTENT_RESULT_UNCERTAIN` 会把"到底哪儿坏了"一并丢掉——真实排查时
+   * 协调器日志里只有这个屏蔽码，得翻 bot-runtime 日志才能看到
+   * `COLLECT_BLOCKS_FAILED`。所以真实码要在屏蔽发生的地方记下来。
+   */
+  it("logs the real failure code behind the non-idempotent mask", async () => {
+    const planning = planningRegistry();
+    const info = vi.fn();
+    const warn = vi.fn();
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) =>
+      invocation.payload.skillId === "collect.block"
+        ? skillResult(invocation, "failed", "COLLECT_BLOCKS_FAILED")
+        : skillResult(invocation, "completed"),
+    );
+    const generate = vi.fn(async (options) =>
+      aiResult(
+        JSON.stringify(
+          options.requestId.endsWith(":plan-items-retry")
+            ? {
+                action: "plan_items",
+                botId: BOT_ID,
+                taskId: "task-01",
+                goals: [{ itemName: "crafting_table", count: 1 }],
+                reasonCode: "ADVANCE_TASK",
+              }
+            : {
+                action: "noop",
+                botId: BOT_ID,
+                taskId: "task-01",
+                reasonCode: "NO_SAFE_SKILL",
+              },
+        ),
+        options.requestId,
+      ),
+    );
+    const planner = new CoordinatorLocalPlanner({
+      ai: { generate },
+      registry: { get: () => planning.get(BOT_ID, NOW) },
+      transport: { sendSkillInvocation },
+      coordinatorInstanceId: "coordinator-01",
+      logger: { info, warn, error: vi.fn(), debug: vi.fn() } as never,
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    await expect(
+      planner.planAndDispatch(resourcePlanRequest()),
+    ).rejects.toMatchObject({ code: "PLANNER_GOAL_EXECUTION_FAILED" });
+
+    const masked = warn.mock.calls.find(
+      ([event]) => event === "coordinator_planner_step_failure_masked",
+    );
+    // 两个码同时在场：上报的屏蔽码，和真正解释故障的那个。
+    expect(masked?.[1]).toMatchObject({
+      traceId: "trace-plan-01",
+      taskId: "task-01",
+      botId: BOT_ID,
+      skillId: "collect.block",
+      reportedErrorCode: "NON_IDEMPOTENT_RESULT_UNCERTAIN",
+      skillErrorCode: "COLLECT_BLOCKS_FAILED",
+    });
+    // 屏蔽语义不动：监督链记的仍然是"结果不确定",没被诊断日志改写成可重放。
+    const supervision = [...info.mock.calls, ...warn.mock.calls].find(
+      ([event]) => event === "coordinator_planner_goal_supervision",
+    );
+    expect(JSON.stringify(supervision?.[1])).toContain(
+      "NON_IDEMPOTENT_RESULT_UNCERTAIN",
+    );
+    const logged = JSON.stringify([...info.mock.calls, ...warn.mock.calls]);
+    expect(logged).not.toContain("nearby resources");
+    expect(logged).not.toContain("isolated-test");
+  });
+
   it("records a discarded re-ask so a retried noop is not mistaken for a first-pass one", async () => {
     const planning = planningRegistry();
     const info = vi.fn();
