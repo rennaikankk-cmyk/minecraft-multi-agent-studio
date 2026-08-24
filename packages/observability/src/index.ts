@@ -61,9 +61,73 @@ export type MetricRecorder = Readonly<{
   snapshot(): MetricSample[];
 }>;
 
+/**
+ * Bounds on how much of one structured field reaches the log. The caps
+ * themselves are deliberate — an unbounded array or object from a message
+ * payload would let a remote peer decide log volume. What must not happen is
+ * dropping the excess *silently*: a capped array is indistinguishable from a
+ * complete one, so a reader counting names in it concludes the missing entries
+ * were never there. That is how a truthful `availableCount: 21` ended up beside
+ * a 20-name catalog array, reading as though the 21st Skill was not offered.
+ *
+ * So every cap below is paired with a visible marker. Incomplete observations
+ * are reported as incomplete, the same discipline the Skill layer applies to a
+ * partial world scan.
+ */
+const MAX_LOGGED_ARRAY_ITEMS = 20;
+const MAX_LOGGED_OBJECT_KEYS = 32;
+const MAX_LOGGED_FIELDS = 64;
+const TRUNCATION_KEY = "[TRUNCATED]";
+
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const METRIC_LABEL_PATTERN = /^[a-z][a-z0-9_]{0,31}$/u;
-const SENSITIVE_KEY_PATTERN = /(?:authorization|cookie|password|secret|token|api[_-]?key|appsecret|private[_-]?key|server(?:address|host|ip)|position|coordinates)/iu;
+/**
+ * Sensitive keys are matched on word tokens, not on raw substrings. Substring
+ * matching redacted every key that merely *contained* a sensitive word:
+ * `disposition` and `deposition` hit `position`, `maxTokens` and `tokenizer`
+ * hit `token`. That silently deletes diagnostics — the coordinator's
+ * `plan_items` retry logged `disposition: "[REDACTED]"`, hiding the one field
+ * that says what the retry decided.
+ *
+ * Splitting on separators and camelCase humps keeps every true positive
+ * (`position`, `botPosition`, `server_host`, `access_token`) while letting a
+ * longer word that happens to embed one through. Matching stays deliberately
+ * generous in the other direction: a lone `tokens` count is redacted rather
+ * than risk leaking a credential, because over-redaction costs a diagnostic
+ * and under-redaction costs a secret.
+ */
+const SENSITIVE_KEY_TOKENS = new Set([
+  "authorization",
+  "cookie",
+  "cookies",
+  "credential",
+  "credentials",
+  "password",
+  "passwords",
+  "secret",
+  "secrets",
+  "token",
+  "tokens",
+  "apikey",
+  "appsecret",
+  "coordinate",
+  "coordinates",
+  "position",
+  "positions",
+  "serveraddress",
+  "serverhost",
+  "serverip",
+]);
+const SENSITIVE_KEY_TOKEN_PAIRS = new Set([
+  "access:token",
+  "api:key",
+  "app:secret",
+  "private:key",
+  "refresh:token",
+  "server:address",
+  "server:host",
+  "server:ip",
+]);
 const SENSITIVE_VALUE_PATTERNS = [
   /Bearer\s+[A-Za-z0-9._~+\/-]+=*/giu,
   /\bgho_[A-Za-z0-9]{20,}\b/gu,
@@ -147,7 +211,7 @@ export class InMemoryMetricRegistry implements MetricRecorder {
     for (const [key, value] of entries) {
       if (
         !METRIC_LABEL_PATTERN.test(key) ||
-        SENSITIVE_KEY_PATTERN.test(key) ||
+        isSensitiveKey(key) ||
         !IDENTIFIER_PATTERN.test(value)
       ) {
         throw new TypeError("Metric label is invalid or sensitive.");
@@ -182,12 +246,15 @@ function sanitizeFields(
   fields: Readonly<Record<string, unknown>>,
 ): Record<string, unknown> {
   const output: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(fields).slice(0, 64)) {
+  const entries = Object.entries(fields);
+  for (const [key, value] of entries.slice(0, MAX_LOGGED_FIELDS)) {
     if (CORE_FIELDS.has(key)) continue;
-    output[key] = SENSITIVE_KEY_PATTERN.test(key)
+    output[key] = isSensitiveKey(key)
       ? "[REDACTED]"
       : sanitizeValue(value, 0, new WeakSet<object>());
   }
+  const droppedFields = entries.length - MAX_LOGGED_FIELDS;
+  if (droppedFields > 0) output[TRUNCATION_KEY] = droppedFields;
   return output;
 }
 
@@ -207,18 +274,43 @@ function sanitizeValue(
   if (seen.has(value)) return "[CIRCULAR]";
   seen.add(value);
   if (Array.isArray(value)) {
-    return value.slice(0, 20).map((item) => sanitizeValue(item, depth + 1, seen));
+    const kept = value
+      .slice(0, MAX_LOGGED_ARRAY_ITEMS)
+      .map((item) => sanitizeValue(item, depth + 1, seen));
+    const dropped = value.length - kept.length;
+    // The marker is an extra element rather than a replacement, so the entries
+    // that did fit stay readable and the reader still learns the list is short.
+    return dropped > 0 ? [...kept, `[+${dropped} ${TRUNCATION_KEY}]`] : kept;
   }
   if (value instanceof Error) {
     return { name: sanitizeString(value.name) };
   }
   const record: Record<string, unknown> = {};
-  for (const [key, item] of Object.entries(value).slice(0, 32)) {
-    record[key] = SENSITIVE_KEY_PATTERN.test(key)
+  const entries = Object.entries(value);
+  for (const [key, item] of entries.slice(0, MAX_LOGGED_OBJECT_KEYS)) {
+    record[key] = isSensitiveKey(key)
       ? "[REDACTED]"
       : sanitizeValue(item, depth + 1, seen);
   }
+  const droppedKeys = entries.length - MAX_LOGGED_OBJECT_KEYS;
+  if (droppedKeys > 0) record[TRUNCATION_KEY] = droppedKeys;
   return record;
+}
+
+function isSensitiveKey(key: string): boolean {
+  const tokens = key
+    .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
+    .split(/[^A-Za-z0-9]+/u)
+    .filter((token) => token.length > 0)
+    .map((token) => token.toLowerCase());
+  for (const [index, token] of tokens.entries()) {
+    if (SENSITIVE_KEY_TOKENS.has(token)) return true;
+    const next = tokens[index + 1];
+    if (next !== undefined && SENSITIVE_KEY_TOKEN_PAIRS.has(`${token}:${next}`)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function sanitizeString(value: string): string {
