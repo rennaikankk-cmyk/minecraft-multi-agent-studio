@@ -1,7 +1,9 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { mkdir, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { homedir } from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { promisify } from "node:util";
@@ -9,11 +11,13 @@ import { pathToFileURL } from "node:url";
 
 import {
   buildLocalPlannerGenerationSchema,
+  buildLocalPlannerPlanItemsRetrySchema,
   buildLocalPlannerPrompt,
   LOCAL_PLANNER_REASON_CODES,
   localPlannerDecisionSchema,
   LOCAL_PLANNER_PROMPT_VERSION,
   LOCAL_PLANNER_SYSTEM_PROMPT,
+  plannedAcquisitionGoalItem,
 } from "../apps/coordinator/dist/index.js";
 import {
   AIRouter,
@@ -40,6 +44,20 @@ const RUNTIME_ROOT = path.join(REPOSITORY_ROOT, "runtime-data");
 const CURRENT_SERVER_PROFILE = "$CURRENT_SERVER_PROFILE";
 const CURRENT_DIMENSION = "minecraft:overworld";
 const BENCHMARK_PROVIDERS = Object.freeze(["ollama", "vllm"]);
+// Deployment fleet size, not a protocol limit: CONTROL_LINK_MAX_BOTS is 1000.
+// The gate's heaviest phase must match the number of Bots that plan at once in
+// production, so a pass rate is never measured under lighter load than the
+// fleet actually applies.
+const FLEET_CONCURRENCY = 10;
+// Weight rises toward the fleet tier: a pass rate is most meaningful under the
+// load production actually applies, and c=8 covers the near-saturation step
+// where a queueing regression shows up before the full fleet tier hides it.
+const GATE_PHASE_WEIGHTS = Object.freeze([
+  { concurrency: 1, weight: 1 },
+  { concurrency: 4, weight: 2 },
+  { concurrency: 8, weight: 3 },
+  { concurrency: FLEET_CONCURRENCY, weight: 4 },
+]);
 const MATRIX_CASES = Object.freeze([
   { concurrency: 1, requestCount: 4 },
   { concurrency: 2, requestCount: 4 },
@@ -419,11 +437,19 @@ async function main() {
       productionTimeoutMs: config.timeoutMs,
       qualityTimeoutMs: config.qualityTimeoutMs,
       schemaSha256: sha256(JSON.stringify(decisionJsonSchema)),
+      // The hash above covers the shared template. Each request narrows
+      // botId/taskId to the Coordinator-supplied constants before sending, so
+      // the wire schema differs per request by exactly those two values.
+      identityPinnedPerRequest: true,
       promptVersion: LOCAL_PLANNER_PROMPT_VERSION,
       plannedItems,
       plannerGateRequests: config.gateRequests,
-      latencyRequestsAtConcurrency1: config.gateRequests / 5,
-      latencyRequestsAtConcurrency4: config.gateRequests * 4 / 5,
+      fleetConcurrency: FLEET_CONCURRENCY,
+      fleetConcurrencySource:
+        "deployment fleet size supplied by the operator; CONTROL_LINK_MAX_BOTS is a protocol ceiling and is not used here",
+      gatePhases: gatePhasePlan(config.gateRequests).map(
+        ({ concurrency, count }) => ({ concurrency, requestCount: count }),
+      ),
       matrix: MATRIX_CASES,
       matrixTotalRequests: sum(MATRIX_CASES.map(({ requestCount }) => requestCount)),
     },
@@ -500,7 +526,7 @@ async function benchmarkModel({
 
   await unloadModel(config, model);
   const coldRequest = requestDescriptor(PLANNER_BENCHMARK_CASES[0], 0, "cold");
-  operations.coldStart = await nonStreamingPlannerRequest({
+  operations.coldStart = await gradedNonStreamingRequest({
     baseUrl: config.baseUrl,
     model,
     timeoutMs: config.qualityTimeoutMs,
@@ -510,7 +536,7 @@ async function benchmarkModel({
     provider: config.provider,
   });
   const warmRequest = requestDescriptor(PLANNER_BENCHMARK_CASES[0], 1, "warm");
-  operations.warmStart = await nonStreamingPlannerRequest({
+  operations.warmStart = await gradedNonStreamingRequest({
     baseUrl: config.baseUrl,
     model,
     timeoutMs: config.qualityTimeoutMs,
@@ -680,6 +706,35 @@ function skippedConcurrencyMatrix(reason) {
   };
 }
 
+/**
+ * Splits the gate's request budget across the concurrency phases by weight,
+ * giving the remainder to the heaviest phase so the fleet-concurrency tier is
+ * never the one that gets shortchanged. Every phase gets at least one request.
+ */
+export function gatePhasePlan(requestCount) {
+  const totalWeight = sum(GATE_PHASE_WEIGHTS.map(({ weight }) => weight));
+  let offset = 0;
+  const phases = GATE_PHASE_WEIGHTS.map(({ concurrency, weight }, index) => {
+    const count = index === GATE_PHASE_WEIGHTS.length - 1
+      ? requestCount - offset
+      : Math.max(1, Math.floor((requestCount * weight) / totalWeight));
+    const phase = { concurrency, count, offset };
+    offset += count;
+    return phase;
+  });
+  const planned = sum(phases.map(({ count }) => count));
+  if (planned !== requestCount || phases.some(({ count }) => count < 1)) {
+    throw new Error(
+      `Gate request count ${requestCount} cannot cover concurrency phases ${GATE_PHASE_WEIGHTS.map(({ concurrency }) => concurrency).join("/")}.`,
+    );
+  }
+  return phases;
+}
+
+export function heaviestGateConcurrency() {
+  return Math.max(...GATE_PHASE_WEIGHTS.map(({ concurrency }) => concurrency));
+}
+
 async function runPlannerGate({
   baseUrl,
   model,
@@ -690,13 +745,8 @@ async function runPlannerGate({
   provider,
   ssh,
 }) {
-  const concurrency1Count = requestCount / 5;
-  const concurrency4Count = requestCount - concurrency1Count;
   const phases = [];
-  for (const [concurrency, count, offset] of [
-    [1, concurrency1Count, 0],
-    [4, concurrency4Count, concurrency1Count],
-  ]) {
+  for (const { concurrency, count, offset } of gatePhasePlan(requestCount)) {
     const remoteBefore = await remoteSnapshot(ssh);
     const startedAt = performance.now();
     const { results, psSamples } = await withPsSampler(baseUrl, provider, () =>
@@ -707,7 +757,7 @@ async function runPlannerGate({
           offset + index,
           `gate-c${concurrency}`,
         );
-        return nonStreamingPlannerRequest({
+        return gradedNonStreamingRequest({
           baseUrl,
           model,
           timeoutMs,
@@ -717,6 +767,7 @@ async function runPlannerGate({
           provider,
         });
       }),
+      ssh,
     );
     const wallTimeMs = performance.now() - startedAt;
     const remoteAfter = await remoteSnapshot(ssh);
@@ -729,6 +780,7 @@ async function runPlannerGate({
       remoteAfter,
       swapDelta: swapDelta(remoteBefore, remoteAfter),
       peakModelAllocationBytes: maximumPsAllocation(psSamples, model),
+      allocationEvidence: allocationEvidence(psSamples),
       samples: results,
     });
   }
@@ -826,7 +878,7 @@ async function runConcurrencyMatrix({
         matrixCase.concurrency,
         async (index) => {
           const benchmarkCase = PLANNER_BENCHMARK_CASES[index % PLANNER_BENCHMARK_CASES.length];
-          return streamingPlannerRequest({
+          return gradedStreamingRequest({
             baseUrl,
             model,
             timeoutMs,
@@ -841,6 +893,7 @@ async function runConcurrencyMatrix({
           });
         },
       ),
+      ssh,
     );
     const wallTimeMs = performance.now() - startedAt;
     const remoteAfter = await remoteSnapshot(ssh);
@@ -857,6 +910,7 @@ async function runConcurrencyMatrix({
       remoteAfter,
       swapDelta: swapDelta(remoteBefore, remoteAfter),
       peakModelAllocationBytes: maximumPsAllocation(sampled.psSamples, model),
+      allocationEvidence: allocationEvidence(sampled.psSamples),
       samples: sampled.results,
     });
     process.stderr.write(
@@ -870,7 +924,7 @@ async function runConcurrencyMatrix({
       summary.schemaCompliantCount === requestCount &&
       summary.thinkingSuppressedCount === requestCount &&
       summary.totalTimeMs.p95 <= 30_000 &&
-      (!swap || (swap.pswpin === 0 && swap.pswpout === 0)),
+      swapPressureFree(swap),
   );
   const maximumThroughput = Math.max(
     0,
@@ -911,20 +965,23 @@ async function runSchedulerQueueProbe({
       : new VLLMAdapter(baseUrl, model),
   );
   const scheduler = new AIRequestScheduler({
-    maxConcurrency: 4,
+    maxConcurrency: FLEET_CONCURRENCY,
     maxQueue: 64,
     perBotConcurrency: 1,
     defaultTimeoutMs: timeoutMs,
     onEvent: (event) => events.push(event),
   });
   const scheduled = new ScheduledAIRouter(router, scheduler);
-  const generationSchema = buildLocalPlannerGenerationSchema(
-    catalog,
-    benchmarkPlannedItems(catalog),
-  );
-  const requests = Array.from({ length: 8 }, (_, index) => {
-    const botId = `queue-bot-${index % 4}`;
+  // Two plans per Bot: perBotConcurrency 1 forces the second to queue, so the
+  // probe exercises per-Bot serialization across the whole fleet, not a subset.
+  const requests = Array.from({ length: FLEET_CONCURRENCY * 2 }, (_, index) => {
+    const botId = `queue-bot-${index % FLEET_CONCURRENCY}`;
     const taskId = `queue-task-${String(index).padStart(2, "0")}`;
+    const generationSchema = buildLocalPlannerGenerationSchema(
+      catalog,
+      benchmarkPlannedItems(catalog),
+      { botId, taskId },
+    );
     const benchmarkCase = PLANNER_BENCHMARK_CASES[2];
     const prompt = plannerPrompt(benchmarkCase, botId, taskId, catalog);
     return scheduled.generate({
@@ -972,6 +1029,50 @@ async function runSchedulerQueueProbe({
   };
 }
 
+/**
+ * Grades the two-step path the Coordinator actually runs: a declined
+ * single-item acquisition goal is asked again with the narrowed grammar. The
+ * merged sample carries both requests' latency, because production pays both
+ * before a Bot sees a decision.
+ */
+async function withDeclinedAcquisitionRetry({ sample, descriptor, catalog, run }) {
+  if (
+    sample.outcome !== "completed" ||
+    sample.evaluation.decision?.action !== "noop"
+  ) {
+    return sample;
+  }
+  const itemName = plannedAcquisitionGoalItem(
+    descriptor.benchmarkCase.operatorGoal,
+    benchmarkPlannedItems(catalog),
+  );
+  if (itemName === null) return sample;
+  const retry = await run(itemName);
+  if (retry.outcome !== "completed") {
+    return { ...sample, retry: retrySummary(retry, itemName) };
+  }
+  return {
+    ...retry,
+    totalTimeMs: round(sample.totalTimeMs + retry.totalTimeMs),
+    firstPass: {
+      decision: sample.evaluation.decision,
+      totalTimeMs: sample.totalTimeMs,
+      evalCount: sample.evalCount,
+    },
+    retry: retrySummary(retry, itemName),
+  };
+}
+
+function retrySummary(retry, itemName) {
+  return {
+    itemName,
+    outcome: retry.outcome,
+    totalTimeMs: retry.totalTimeMs,
+    correct: retry.evaluation?.correct ?? false,
+    error: retry.error ?? null,
+  };
+}
+
 async function nonStreamingPlannerRequest({
   baseUrl,
   model,
@@ -980,6 +1081,7 @@ async function nonStreamingPlannerRequest({
   catalog,
   decisionJsonSchema,
   provider,
+  retryItemName = null,
 }) {
   const startedAt = performance.now();
   try {
@@ -994,6 +1096,7 @@ async function nonStreamingPlannerRequest({
         catalog,
         decisionJsonSchema,
         stream: false,
+        retryItemName,
       }),
       timeoutMs,
     );
@@ -1026,6 +1129,29 @@ async function nonStreamingPlannerRequest({
   }
 }
 
+/** Non-streaming request plus the Coordinator's declined-acquisition retry. */
+async function gradedNonStreamingRequest(options) {
+  const sample = await nonStreamingPlannerRequest(options);
+  return withDeclinedAcquisitionRetry({
+    sample,
+    descriptor: options.descriptor,
+    catalog: options.catalog,
+    run: (retryItemName) =>
+      nonStreamingPlannerRequest({ ...options, retryItemName }),
+  });
+}
+
+/** Streaming request plus the same retry, for the latency matrix. */
+async function gradedStreamingRequest(options) {
+  const sample = await streamingPlannerRequest(options);
+  return withDeclinedAcquisitionRetry({
+    sample,
+    descriptor: options.descriptor,
+    catalog: options.catalog,
+    run: (retryItemName) => streamingPlannerRequest({ ...options, retryItemName }),
+  });
+}
+
 async function streamingPlannerRequest({
   baseUrl,
   model,
@@ -1034,6 +1160,7 @@ async function streamingPlannerRequest({
   catalog,
   decisionJsonSchema,
   provider,
+  retryItemName = null,
 }) {
   if (provider === "vllm") {
     return streamingVllmPlannerRequest({
@@ -1043,6 +1170,7 @@ async function streamingPlannerRequest({
       descriptor,
       catalog,
       decisionJsonSchema,
+      retryItemName,
     });
   }
   const controller = new AbortController();
@@ -1064,6 +1192,7 @@ async function streamingPlannerRequest({
           catalog,
           decisionJsonSchema,
           stream: true,
+          retryItemName,
         }),
       ),
     });
@@ -1138,6 +1267,7 @@ async function streamingVllmPlannerRequest({
   descriptor,
   catalog,
   decisionJsonSchema,
+  retryItemName = null,
 }) {
   const controller = new AbortController();
   const timer = setTimeout(
@@ -1179,6 +1309,7 @@ async function streamingVllmPlannerRequest({
           catalog,
           decisionJsonSchema,
           stream: true,
+          retryItemName,
         }),
       ),
     });
@@ -1309,6 +1440,35 @@ function failedSample(descriptor, totalTimeMs, error) {
   };
 }
 
+/**
+ * Narrows botId/taskId to the descriptor's trusted values in every branch of the
+ * decision schema, matching what the Coordinator sends for a real plan request.
+ * The benchmark builds one schema template up front, but identity varies per
+ * request, so the pin is applied here where the request is assembled.
+ */
+export function pinDecisionIdentity(decisionJsonSchema, descriptor) {
+  const pinned = { botId: descriptor.botId, taskId: descriptor.taskId };
+  const applyToBranch = (branch) => {
+    if (!branch || typeof branch !== "object" || !branch.properties) return branch;
+    const properties = { ...branch.properties };
+    for (const [key, value] of Object.entries(pinned)) {
+      if (!properties[key]) continue;
+      properties[key] = { type: "string", const: value };
+    }
+    return { ...branch, properties };
+  };
+  const branchKey = ["anyOf", "oneOf", "allOf"].find((key) =>
+    Array.isArray(decisionJsonSchema?.[key]),
+  );
+  if (branchKey) {
+    return {
+      ...decisionJsonSchema,
+      [branchKey]: decisionJsonSchema[branchKey].map(applyToBranch),
+    };
+  }
+  return applyToBranch(decisionJsonSchema);
+}
+
 export function plannerRequestBody({
   provider,
   model,
@@ -1316,7 +1476,13 @@ export function plannerRequestBody({
   catalog,
   decisionJsonSchema,
   stream,
+  retryItemName = null,
 }) {
+  // A retry ships the narrowed single-branch grammar the Coordinator builds, so
+  // the identity pin is already applied by the builder rather than patched on.
+  const requestSchema = retryItemName === null
+    ? pinDecisionIdentity(decisionJsonSchema, descriptor)
+    : retryJsonSchema(provider, retryItemName, descriptor);
   const messages = [
     { role: "system", content: LOCAL_PLANNER_SYSTEM_PROMPT },
     {
@@ -1326,6 +1492,7 @@ export function plannerRequestBody({
         descriptor.botId,
         descriptor.taskId,
         catalog,
+        retryItemName,
       ),
     },
   ];
@@ -1336,7 +1503,7 @@ export function plannerRequestBody({
       think: false,
       messages,
       options: { temperature: 0, num_predict: 512 },
-      format: decisionJsonSchema,
+      format: requestSchema,
     };
   }
   if (provider !== "vllm") {
@@ -1354,10 +1521,20 @@ export function plannerRequestBody({
       json_schema: {
         name: "structured_response",
         strict: true,
-        schema: decisionJsonSchema,
+        schema: requestSchema,
       },
     },
   };
+}
+
+function retryJsonSchema(provider, itemName, descriptor) {
+  const schema = z.toJSONSchema(
+    buildLocalPlannerPlanItemsRetrySchema(itemName, {
+      botId: descriptor.botId,
+      taskId: descriptor.taskId,
+    }),
+  );
+  return provider === "vllm" ? sanitizeVllmJsonSchema(schema) : schema;
 }
 
 export function providerRequestShape(provider) {
@@ -1416,22 +1593,22 @@ function vllmMetrics({ usage = {}, finishReason = null }) {
   };
 }
 
-function plannerPrompt(benchmarkCase, botId, taskId, catalog) {
+function plannerPrompt(benchmarkCase, botId, taskId, catalog, retryItemName = null) {
+  // The retry mirrors the Coordinator exactly: one trusted item, no advertised
+  // skills. Anything else would grade a request production never sends.
+  if (retryItemName !== null) {
+    return buildLocalPlannerPrompt({
+      promptVersion: LOCAL_PLANNER_PROMPT_VERSION,
+      operatorGoal: benchmarkCase.operatorGoal,
+      bot: plannerBotContext(botId, taskId),
+      plannedItems: [retryItemName],
+      availableSkills: [],
+    });
+  }
   return buildLocalPlannerPrompt({
     promptVersion: LOCAL_PLANNER_PROMPT_VERSION,
     operatorGoal: benchmarkCase.operatorGoal,
-    bot: {
-      botId,
-      taskId,
-      connectionState: "online",
-      health: 20,
-      food: 20,
-      armorPoints: 0,
-      safetyMode: "monitoring",
-      activeRiskCodes: [],
-      minecraftVersion: "1.21.11",
-      currentDimension: CURRENT_DIMENSION,
-    },
+    bot: plannerBotContext(botId, taskId),
     plannedItems: benchmarkPlannedItems(catalog),
     availableSkills: catalog.map(
       ({
@@ -1451,6 +1628,21 @@ function plannerPrompt(benchmarkCase, botId, taskId, catalog) {
       }),
     ),
   });
+}
+
+function plannerBotContext(botId, taskId) {
+  return {
+    botId,
+    taskId,
+    connectionState: "online",
+    health: 20,
+    food: 20,
+    armorPoints: 0,
+    safetyMode: "monitoring",
+    activeRiskCodes: [],
+    minecraftVersion: "1.21.11",
+    currentDimension: CURRENT_DIMENSION,
+  };
 }
 
 function requestDescriptor(benchmarkCase, index, phase) {
@@ -1509,18 +1701,20 @@ function evaluateHardGates({
   const completedSamples = allSamples.filter(
     (sample) => sample?.outcome === "completed",
   );
-  const concurrency4 = gate.phases.find(({ concurrency }) => concurrency === 4);
+  const fleetPhase = gate.phases.find(
+    ({ concurrency }) => concurrency === heaviestGateConcurrency(),
+  );
   const residentModel = findResidentModel(resident, operations.tag.name);
   const totalMemoryBytes = remoteAfter?.memTotalBytes ?? null;
   const modelAllocationBytes = Math.max(
-    concurrency4?.peakModelAllocationBytes ?? 0,
+    fleetPhase?.peakModelAllocationBytes ?? 0,
     Math.max(residentModel?.size_vram ?? 0, residentModel?.size ?? 0),
   );
   const memoryRatio = totalMemoryBytes
     ? modelAllocationBytes / totalMemoryBytes
     : null;
-  const swap = concurrency4?.swapDelta;
-  const availableMemoryBytes = concurrency4?.remoteAfter?.memAvailableBytes ?? null;
+  const swap = fleetPhase?.swapDelta;
+  const availableMemoryBytes = fleetPhase?.remoteAfter?.memAvailableBytes ?? null;
   const memoryEvidenceComplete = Boolean(
     Number.isFinite(totalMemoryBytes) &&
     totalMemoryBytes > 0 &&
@@ -1545,25 +1739,26 @@ function evaluateHardGates({
         completedSamples.every((sample) => sample.evaluation.thinkingSuppressed),
       evidence: `${count(completedSamples, (sample) => sample.evaluation.thinkingSuppressed)}/${completedSamples.length} completed responses suppressed thinking`,
     },
-    concurrency4Memory: {
+    fleetConcurrencyMemory: {
       passed: Boolean(
-        concurrency4 &&
+        fleetPhase &&
         memoryEvidenceComplete &&
         modelAllocationBytes > 0 &&
-        !concurrency4.summary.errors.some(({ error }) => /out of memory|\boom\b/iu.test(error)) &&
-        swap.pswpin === 0 &&
-        swap.pswpout === 0 &&
+        !fleetPhase.summary.errors.some(({ error }) => /out of memory|\boom\b/iu.test(error)) &&
+        swapPressureFree(swap) &&
         memoryRatio !== null &&
         memoryRatio <= 0.85 &&
         availableMemoryBytes >= 10e9,
       ),
       evidence: {
-        completed: `${concurrency4?.summary.completedCount ?? 0}/${concurrency4?.requestCount ?? 0}`,
+        concurrency: heaviestGateConcurrency(),
+        completed: `${fleetPhase?.summary.completedCount ?? 0}/${fleetPhase?.requestCount ?? 0}`,
         peakModelAllocationBytes: modelAllocationBytes || null,
         allocationToSystemMemoryRatio: round(memoryRatio),
         memAvailableBytes: availableMemoryBytes,
         swapDelta: swap ?? null,
         memoryEvidenceComplete,
+        allocationEvidence: fleetPhase?.allocationEvidence ?? null,
       },
     },
     [`${provider}Arm64`]: {
@@ -1582,13 +1777,53 @@ function evaluateHardGates({
             : "unavailable: not exposed by required vLLM APIs",
       },
     },
-    privateUseLicense: {
-      passed: /Apache License|Apache-2\.0|MIT License|BSD License/iu.test(licenseText),
+    privateUseLicense: evaluatePrivateUseLicense({ provider, licenseText }),
+  };
+}
+
+export function evaluatePrivateUseLicense({ provider, licenseText }) {
+  // Provider-served license text is the preferred source: it comes from the runtime
+  // actually serving the weights. Ollama exposes it; vLLM does not.
+  if (PRIVATE_USE_LICENSE_PATTERN.test(licenseText)) {
+    return {
+      passed: true,
+      evidence: {
+        source: `${provider} model metadata`,
+        license: firstNonemptyLine(licenseText),
+        licenseSha256: sha256(licenseText),
+      },
+    };
+  }
+  const expectedRepo = process.env.AI_BENCH_LICENSE_REPO?.trim() || null;
+  const fileEvidence = readLicenseEvidenceFile(expectedRepo);
+  if (!fileEvidence) {
+    return {
+      passed: false,
       evidence: licenseText
-        ? firstNonemptyLine(licenseText)
+        ? `served license text does not grant private use; fail-closed.`
         : provider === "ollama"
-          ? "No license metadata returned by Ollama /api/show; fail-closed."
-          : "unavailable: vLLM /v1/models does not return license metadata; fail-closed.",
+          ? "No license metadata returned by Ollama /api/show, and AI_BENCH_LICENSE_EVIDENCE is unset; fail-closed."
+          : "unavailable: vLLM /v1/models does not return license metadata, and AI_BENCH_LICENSE_EVIDENCE is unset; fail-closed.",
+    };
+  }
+  if (fileEvidence.error) {
+    return {
+      passed: false,
+      evidence: `AI_BENCH_LICENSE_EVIDENCE ${fileEvidence.error}; fail-closed.`,
+    };
+  }
+  const license = fileEvidence.license ?? "";
+  return {
+    passed: PRIVATE_USE_LICENSE_PATTERN.test(license),
+    evidence: {
+      source: "out-of-band upstream metadata document",
+      repo: fileEvidence.repo,
+      repoMatchedExpected: expectedRepo ? fileEvidence.repo === expectedRepo : null,
+      license: license || null,
+      licenseTag: fileEvidence.licenseTag,
+      safetensorsShardCount: fileEvidence.shardCount,
+      documentSha256: fileEvidence.documentSha256,
+      documentPath: fileEvidence.path,
     },
   };
 }
@@ -1605,18 +1840,19 @@ function scoreModel({ operations, gate, matrix, queueProbe, resident, remoteAfte
   const advanceRate = ratio(gate.advanceCorrectCount, gate.advanceRequestCount);
   const noopRate = ratio(gate.noopCorrectCount, gate.noopRequestCount);
   const groundedRate = ratio(gate.groundedCount, gate.completedCount);
-  const concurrency4 = gate.phases.find(({ concurrency }) => concurrency === 4);
-  const p95c4 = concurrency4?.summary.totalTimeMs.p95 ?? Infinity;
+  const fleetPhase = gate.phases.find(
+    ({ concurrency }) => concurrency === heaviestGateConcurrency(),
+  );
+  const fleetP95Ms = fleetPhase?.summary.totalTimeMs.p95 ?? Infinity;
   const matrixZeroError = matrix.results.every(
     ({ requestCount, summary }) => summary.completedCount === requestCount,
   );
-  const c4Stable = Boolean(
-    concurrency4?.summary.completedCount === concurrency4?.requestCount &&
-    (!concurrency4.swapDelta ||
-      (concurrency4.swapDelta.pswpin === 0 && concurrency4.swapDelta.pswpout === 0)),
+  const fleetStable = Boolean(
+    fleetPhase?.summary.completedCount === fleetPhase?.requestCount &&
+    swapPressureFree(fleetPhase?.swapDelta),
   );
   const allocation = Math.max(
-    concurrency4?.peakModelAllocationBytes ?? 0,
+    fleetPhase?.peakModelAllocationBytes ?? 0,
     Math.max(
       findResidentModel(resident, operations.tag.name)?.size_vram ?? 0,
       findResidentModel(resident, operations.tag.name)?.size ?? 0,
@@ -1628,14 +1864,14 @@ function scoreModel({ operations, gate, matrix, queueProbe, resident, remoteAfte
   const queuePass =
     queueProbe.fulfilledCount === queueProbe.requestCount &&
     queueProbe.perBotOverlapViolations.length === 0 &&
-    queueProbe.maxObservedGlobalConcurrency <= 4;
+    queueProbe.maxObservedGlobalConcurrency <= FLEET_CONCURRENCY;
   const schema = round(10 * schemaRate + 10 * identityRate + 5 * reasonRate);
   const skillSelection = round(25 * (0.3 * advanceRate + 0.7 * noopRate));
-  const latency = latencyScore(p95c4);
+  const latency = latencyScore(fleetP95Ms);
   const grounding = round(15 * groundedRate);
   const stability = round(
     (matrixZeroError ? 4 : 0) +
-      (c4Stable ? 3 : 0) +
+      (fleetStable ? 3 : 0) +
       (memoryHeadroomRatio === null
         ? 0
         : memoryHeadroomRatio >= 0.15
@@ -1683,7 +1919,8 @@ function scoreModel({ operations, gate, matrix, queueProbe, resident, remoteAfte
     latency: {
       points: latency,
       maximum: 20,
-      p95Concurrency4Ms: Number.isFinite(p95c4) ? p95c4 : null,
+      fleetConcurrency: heaviestGateConcurrency(),
+      p95FleetConcurrencyMs: Number.isFinite(fleetP95Ms) ? fleetP95Ms : null,
     },
     grounding: {
       points: grounding,
@@ -1695,7 +1932,7 @@ function scoreModel({ operations, gate, matrix, queueProbe, resident, remoteAfte
       points: stability,
       maximum: 10,
       matrixZeroError,
-      concurrency4Stable: c4Stable,
+      fleetConcurrencyStable: fleetStable,
       memoryHeadroomRatio: round(memoryHeadroomRatio),
       queuePass,
     },
@@ -1721,10 +1958,10 @@ function scoringDescription() {
     skill25:
       "25 * (0.30 * correct invoke/plan_items rate + 0.70 * honest noop rate).",
     latency20:
-      "20 at p95@c4 <= 8s; linear to 0 at >30s.",
+      `20 at p95@c${FLEET_CONCURRENCY} <= 8s; linear to 0 at >30s.`,
     grounding15: "15 * rate with no deterministic grounding trigger.",
     stability10:
-      "4 matrix zero-error + 3 c4/no-swap + 2 >=15% memory headroom + 1 production scheduler per-bot queue probe.",
+      `4 matrix zero-error + 3 c${FLEET_CONCURRENCY}/no-swap + 2 >=15% memory headroom + 1 production scheduler per-bot queue probe.`,
     operations5:
       "1 stable tag + 1 pull size + 1 quantization + 1 cold start + 1 warm keep-alive load.",
     reasonCodeNote:
@@ -1904,11 +2141,12 @@ async function apiPs(baseUrl, provider) {
   }
 }
 
-async function withPsSampler(baseUrl, provider, action) {
+async function withPsSampler(baseUrl, provider, action, ssh) {
   if (provider === "vllm") {
+    const results = await action();
     return {
-      results: await action(),
-      psSamples: [await apiPs(baseUrl, provider)],
+      results,
+      psSamples: [await vllmAllocationSample(ssh)],
     };
   }
   let active = true;
@@ -1963,6 +2201,48 @@ async function postJson(baseUrl, pathname, body, timeoutMs) {
   return response.json();
 }
 
+// vLLM exposes no allocation endpoint, and on unified memory the driver's
+// allocations are charged to neither process RSS nor the container cgroup. The
+// per-process device counter is the only source that sees them, so the gate
+// measures it over the same SSH channel it already uses for /proc evidence.
+export async function vllmAllocationSample(config) {
+  const unavailable = (reason) => ({ models: [], status: "unavailable", reason });
+  if (!config?.sshTarget) {
+    return unavailable("no AI_BENCH_SSH_TARGET; vLLM allocation is not measurable over HTTP");
+  }
+  const args = [
+    ...(config.sshKey ? ["-i", config.sshKey] : []),
+    "-o",
+    "IdentitiesOnly=yes",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=10",
+    config.sshTarget,
+    "{ LC_ALL=C ps -eo pid=,args=; echo ---; LC_ALL=C nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits; } | LC_ALL=C awk 'BEGIN{s=0} /^---$/{p=1;next} !p{ if ($0 ~ /VLLM|vllm|api_server/ && $0 !~ /awk/) v[$1]=1; next } { gsub(/,/,\" \"); if ($1 in v) s+=$2 } END{ print \"VllmDeviceMib\", s+0 }'",
+  ];
+  try {
+    const { stdout } = await execFileAsync("ssh", args, {
+      timeout: 20_000,
+      windowsHide: true,
+      maxBuffer: 64 * 1024,
+    });
+    const match = /^VllmDeviceMib\s+(\d+)$/mu.exec(stdout.trim());
+    const mebibytes = match ? Number(match[1]) : 0;
+    if (!mebibytes) {
+      return unavailable("device allocation counter reported no vLLM process memory");
+    }
+    return {
+      models: [],
+      status: "sampled",
+      source: "nvidia-smi --query-compute-apps",
+      deviceAllocationBytes: mebibytes * 1024 * 1024,
+    };
+  } catch (error) {
+    return unavailable(boundedError(error));
+  }
+}
+
 async function remoteSnapshot(config) {
   if (!config.sshTarget) return null;
   const runtimeVersionProbe = config.provider === "ollama" ? "; ollama --version" : "";
@@ -2011,6 +2291,20 @@ function parseRemoteSnapshot(output, provider) {
     runtimeVersionStatus:
       provider === "ollama" ? "sampled" : "unavailable: not exposed by required vLLM APIs",
   };
+}
+
+/**
+ * pswpout is the eviction signal: a nonzero delta means the run forced the
+ * kernel to write pages out, which is the memory pressure this gate exists to
+ * catch. pswpin counts pages faulted back *in* from swap, so unrelated
+ * processes touching memory that was already swapped out before the run raise
+ * it without the model having caused anything. Gating on pswpin therefore fails
+ * the model for another process's history, so it is recorded as evidence and
+ * the headroom floors (allocation ratio and MemAvailable) carry the rest.
+ */
+export function swapPressureFree(swap) {
+  if (!swap) return true;
+  return swap.pswpout === 0;
 }
 
 function swapDelta(before, after) {
@@ -2078,9 +2372,7 @@ export function benchmarkConfiguration(environment, now = new Date()) {
   );
   const outputPath = benchmarkOutputPath(environment.AI_BENCH_OUTPUT, now);
   const sshTarget = optionalSshTarget(environment.AI_BENCH_SSH_TARGET);
-  const sshKey = environment.AI_BENCH_SSH_KEY?.trim()
-    ? path.resolve(environment.AI_BENCH_SSH_KEY.trim())
-    : null;
+  const sshKey = sshKeyPath(environment.AI_BENCH_SSH_KEY);
   return {
     provider,
     mode,
@@ -2127,6 +2419,21 @@ function loopbackOrigin(raw) {
     throw new Error("AI_BENCH_BASE_URL must be an explicit loopback HTTP origin.");
   }
   return url.origin;
+}
+
+/**
+ * A shell writes `~/.ssh/id` literally into the environment, and path.resolve
+ * turns that into a directory named "~" that no key lives in. With
+ * IdentitiesOnly=yes an unresolvable key makes every SSH probe fail, so expand
+ * the home prefix here rather than letting the gate report a missing number.
+ */
+export function sshKeyPath(raw) {
+  const value = raw?.trim();
+  if (!value) return null;
+  const expanded = /^~(?:$|[/\\])/u.test(value)
+    ? path.join(homedir(), value.slice(1))
+    : value;
+  return path.resolve(expanded);
 }
 
 function optionalSshTarget(raw) {
@@ -2234,9 +2541,31 @@ function distribution(values) {
   };
 }
 
-function maximumPsAllocation(samples, model) {
+/**
+ * A zero allocation reads the same whether the probe measured nothing or never
+ * ran, so the gate records which one happened. Without this a failed hard gate
+ * cites a missing number and never says why it is missing.
+ */
+export function allocationEvidence(samples) {
+  const sampled = samples.find(({ status }) => status === "sampled");
+  if (sampled) {
+    return { status: "sampled", source: sampled.source ?? null, reason: null };
+  }
+  const failed = samples.find(({ status, error }) => status === "unavailable" || error);
+  if (failed) {
+    return {
+      status: "unavailable",
+      source: null,
+      reason: failed.reason ?? failed.error ?? null,
+    };
+  }
+  return { status: "sampled", source: "Ollama /api/ps", reason: null };
+}
+
+export function maximumPsAllocation(samples, model) {
   return Math.max(
     0,
+    ...samples.map(({ deviceAllocationBytes }) => Number(deviceAllocationBytes) || 0),
     ...samples.flatMap(({ models = [] }) =>
       models
         .filter(({ name, model: alias }) => name === model || alias === model)
@@ -2330,6 +2659,57 @@ function round(value) {
 
 function kilobytes(value) {
   return Number.isFinite(value) ? value * 1_024 : null;
+}
+
+const PRIVATE_USE_LICENSE_PATTERN =
+  /Apache License|Apache-2\.0|apache-2\.0|MIT License|BSD License/u;
+
+// vLLM's /v1/models carries no license metadata, so a vLLM-hosted model can only
+// clear this gate on evidence captured out of band. AI_BENCH_LICENSE_EVIDENCE
+// points at that capture: the upstream metadata document for the checkpoint under
+// test. It must name the exact repo it describes, so evidence for one model can
+// never be used to pass another. Absent or unreadable evidence stays fail-closed.
+function readLicenseEvidenceFile(expectedRepo) {
+  const evidencePath = process.env.AI_BENCH_LICENSE_EVIDENCE?.trim();
+  if (!evidencePath) {
+    return null;
+  }
+  let raw;
+  try {
+    raw = readFileSync(evidencePath, "utf8");
+  } catch (error) {
+    return { error: `unreadable (${error.code ?? error.message})`, path: evidencePath };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { error: "not valid JSON", path: evidencePath };
+  }
+  const declaredRepo = typeof parsed?.id === "string" ? parsed.id : null;
+  if (!declaredRepo) {
+    return { error: "no repo id field", path: evidencePath };
+  }
+  if (expectedRepo && declaredRepo !== expectedRepo) {
+    return {
+      error: `describes ${declaredRepo}, not ${expectedRepo}`,
+      path: evidencePath,
+    };
+  }
+  const licenseTag = (parsed.tags ?? [])
+    .filter((tag) => typeof tag === "string" && tag.startsWith("license:"))
+    .map((tag) => tag.slice("license:".length))[0];
+  const license = parsed.cardData?.license ?? licenseTag ?? null;
+  return {
+    repo: declaredRepo,
+    license: typeof license === "string" ? license : null,
+    licenseTag: licenseTag ?? null,
+    shardCount: (parsed.siblings ?? []).filter((sibling) =>
+      /\.safetensors$/u.test(sibling?.rfilename ?? ""),
+    ).length,
+    path: evidencePath,
+    documentSha256: sha256(raw),
+  };
 }
 
 function sha256(value) {

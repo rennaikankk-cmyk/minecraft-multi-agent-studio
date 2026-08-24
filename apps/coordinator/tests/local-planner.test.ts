@@ -12,10 +12,14 @@ import { z } from "zod";
 import { BotAssignmentService } from "../src/bot-assignment.js";
 import { BotRegistry } from "../src/bot-registry.js";
 import {
+  buildLocalPlannerGenerationSchema,
+  buildLocalPlannerPlanItemsRetrySchema,
   CoordinatorLocalPlanner,
   type CoordinatorLocalPlannerOptions,
+  localPlannerDecisionSchema,
   LocalPlannerError,
   type LocalPlanRequest,
+  plannedAcquisitionGoalItem,
   type SkillInvocationTransport,
 } from "../src/local-planner.js";
 import {
@@ -97,16 +101,21 @@ describe("CoordinatorLocalPlanner", () => {
     expect(options.temperature).toBe(0);
     expect(options.schema).toBeDefined();
     const generationSchema = z.toJSONSchema(options.schema);
-    const invokeSchema = generationSchema.oneOf?.find(
+    const invokeSchema = generationSchema.anyOf?.find(
       (branch) => branch.properties?.action?.const === "invoke_skill",
     );
     expect(invokeSchema?.properties?.skillId).toMatchObject({
-      enum: ["movement.goto"],
+      const: "movement.goto",
     });
     expect(invokeSchema?.properties?.skillVersion).toMatchObject({
-      enum: ["1.0.0"],
+      const: "1.0.0",
     });
     expect(invokeSchema?.properties?.skillVersion).not.toHaveProperty("pattern");
+    expect(invokeSchema?.properties?.input).toMatchObject({
+      type: "object",
+      properties: { radius: { type: "integer" } },
+    });
+    expect(invokeSchema?.properties?.input).not.toHaveProperty("$ref");
     expect(sendSkillInvocation).toHaveBeenCalledWith(
       expect.objectContaining({
         botId: BOT_ID,
@@ -317,6 +326,139 @@ describe("CoordinatorLocalPlanner", () => {
       action: "noop",
       reasonCode: "NO_SAFE_SKILL",
     });
+  });
+
+  it("re-asks a declined single-item acquisition goal with only the plan_items branch", async () => {
+    const planning = planningRegistry();
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => skillResult(invocation, "completed"));
+    const generate = vi.fn(async (options) =>
+      aiResult(
+        JSON.stringify(
+          options.requestId.endsWith(":plan-items-retry")
+            ? {
+                action: "plan_items",
+                botId: BOT_ID,
+                taskId: "task-01",
+                goals: [{ itemName: "crafting_table", count: 1 }],
+                reasonCode: "ADVANCE_TASK",
+              }
+            : {
+                action: "noop",
+                botId: BOT_ID,
+                taskId: "task-01",
+                reasonCode: "NO_SAFE_SKILL",
+              },
+        ),
+        options.requestId,
+      ),
+    );
+    const planner = new CoordinatorLocalPlanner({
+      ai: { generate },
+      registry: { get: () => planning.get(BOT_ID, NOW) },
+      transport: { sendSkillInvocation },
+      coordinatorInstanceId: "coordinator-01",
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    await expect(
+      planner.planAndDispatch(resourcePlanRequest()),
+    ).resolves.toMatchObject({
+      action: "skill_result",
+      reasonCode: "ADVANCE_TASK",
+      result: { payload: { outcome: "completed" } },
+    });
+    expect(generate).toHaveBeenCalledTimes(2);
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(3);
+    const retryOptions = generate.mock.calls[1]![0];
+    // The retry offers one branch and advertises no skills, so the model cannot
+    // restate the noop it just gave; the item is the Coordinator's, not the model's.
+    expect(retryOptions.requestId).toBe("plan-request-01:plan-items-retry");
+    const retrySchema = z.toJSONSchema(retryOptions.schema);
+    expect(retrySchema).not.toHaveProperty("anyOf");
+    expect(retrySchema.properties?.action).toMatchObject({ const: "plan_items" });
+    expect(JSON.parse(retryOptions.prompt).availableSkills).toEqual([]);
+  });
+
+  it("leaves an honest noop standing when the goal asks for no acquisition", async () => {
+    const planning = planningRegistry();
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >();
+    const generate = vi.fn(async (options) =>
+      aiResult(
+        JSON.stringify({
+          action: "noop",
+          botId: BOT_ID,
+          taskId: "task-01",
+          reasonCode: "NO_SAFE_SKILL",
+        }),
+        options.requestId,
+      ),
+    );
+    const planner = new CoordinatorLocalPlanner({
+      ai: { generate },
+      registry: { get: () => planning.get(BOT_ID, NOW) },
+      transport: { sendSkillInvocation },
+      coordinatorInstanceId: "coordinator-01",
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    await expect(
+      planner.planAndDispatch({
+        ...planRequest(),
+        operatorGoal: "Equip the best armor already in inventory.",
+      }),
+    ).resolves.toMatchObject({ action: "noop", reasonCode: "NO_SAFE_SKILL" });
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(sendSkillInvocation).not.toHaveBeenCalled();
+  });
+
+  it("keeps a retried decision under the same grounding and identity checks", async () => {
+    const planning = planningRegistry();
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >();
+    const generate = vi.fn(async (options) =>
+      aiResult(
+        JSON.stringify(
+          options.requestId.endsWith(":plan-items-retry")
+            ? {
+                action: "plan_items",
+                botId: "other-bot",
+                taskId: "task-01",
+                goals: [{ itemName: "crafting_table", count: 1 }],
+                reasonCode: "ADVANCE_TASK",
+              }
+            : {
+                action: "noop",
+                botId: BOT_ID,
+                taskId: "task-01",
+                reasonCode: "NO_SAFE_SKILL",
+              },
+        ),
+        options.requestId,
+      ),
+    );
+    const planner = new CoordinatorLocalPlanner({
+      ai: { generate },
+      registry: { get: () => planning.get(BOT_ID, NOW) },
+      transport: { sendSkillInvocation },
+      coordinatorInstanceId: "coordinator-01",
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    // A retry that changes identity is discarded, not dispatched, and the
+    // original noop is what the caller sees.
+    await expect(
+      planner.planAndDispatch(resourcePlanRequest()),
+    ).resolves.toMatchObject({ action: "noop", reasonCode: "NO_SAFE_SKILL" });
+    expect(generate).toHaveBeenCalledTimes(2);
+    expect(sendSkillInvocation).not.toHaveBeenCalled();
   });
 
   it("holds a deterministic Bot assignment lease only for the execution window", async () => {
@@ -573,7 +715,7 @@ describe("CoordinatorLocalPlanner", () => {
       serverProfileId: "isolated-test",
     });
     const generationSchema = z.toJSONSchema(generate.mock.calls[0]![0].schema);
-    expect(generationSchema.oneOf?.some(
+    expect(generationSchema.anyOf?.some(
       (branch) => branch.properties?.action?.const === "plan_items",
     )).toBe(true);
   });
@@ -917,6 +1059,273 @@ describe("CoordinatorLocalPlanner", () => {
       code: "PLANNER_SKILL_CATALOG_UNAVAILABLE",
     });
     expect(generate).not.toHaveBeenCalled();
+  });
+});
+
+describe("buildLocalPlannerGenerationSchema", () => {
+  const skills = [{ skillId: "movement.goto", skillVersion: "1.0.0" }];
+
+  it("pins botId and taskId to the trusted values on every branch", () => {
+    const schema = buildLocalPlannerGenerationSchema(skills, ["oak_log"], {
+      botId: BOT_ID,
+      taskId: "task-01",
+    });
+    const noop = {
+      action: "noop",
+      botId: BOT_ID,
+      taskId: "task-01",
+      reasonCode: "NO_SAFE_SKILL",
+    };
+    expect(schema.safeParse(noop).success).toBe(true);
+    expect(
+      schema.safeParse({ ...noop, botId: "other-worker" }).success,
+    ).toBe(false);
+    expect(schema.safeParse({ ...noop, taskId: "task-02" }).success).toBe(false);
+  });
+
+  it("leaves identity free when no trusted identity is supplied", () => {
+    const schema = buildLocalPlannerGenerationSchema(skills, ["oak_log"]);
+    expect(
+      schema.safeParse({
+        action: "noop",
+        botId: "any-worker",
+        taskId: "any-task",
+        reasonCode: "NO_SAFE_SKILL",
+      }).success,
+    ).toBe(true);
+  });
+
+  it("constrains every invoke branch to one skill's advertised input", () => {
+    const catalog = [
+      {
+        skillId: "movement.goto",
+        skillVersion: "1.0.0",
+        inputSchema: {
+          type: "object",
+          properties: {
+            radius: { type: "integer", minimum: 1, maximum: 4 },
+            serverProfileId: { type: "string" },
+          },
+          required: ["radius", "serverProfileId"],
+          additionalProperties: false,
+        },
+      },
+      {
+        skillId: "collect.block",
+        skillVersion: "1.0.0",
+        inputSchema: {
+          type: "object",
+          properties: {
+            blockName: { type: "string" },
+            serverProfileId: { type: "string" },
+          },
+          required: ["blockName", "serverProfileId"],
+          additionalProperties: false,
+        },
+      },
+    ];
+    const jsonSchema = z.toJSONSchema(
+      buildLocalPlannerGenerationSchema(catalog, ["oak_log"], {
+        botId: BOT_ID,
+        taskId: "task-01",
+      }),
+    );
+    const invokeBranches = (jsonSchema.anyOf ?? []).filter(
+      (branch) => branch.properties?.action?.const === "invoke_skill",
+    );
+    expect(invokeBranches).toHaveLength(2);
+    expect(
+      invokeBranches.map((branch) => branch.properties?.skillId?.const),
+    ).toEqual(["movement.goto", "collect.block"]);
+    // An unconstrained input leaf is the whole defect: it is the only region a
+    // grammar-constrained model can wander in, so it must never come back.
+    for (const branch of invokeBranches) {
+      expect(branch.properties?.input).not.toHaveProperty("$ref");
+      expect(branch.properties?.input).toMatchObject({ type: "object" });
+    }
+    expect(
+      invokeBranches[0]!.properties?.input?.properties,
+    ).toHaveProperty("radius");
+    expect(
+      invokeBranches[1]!.properties?.input?.properties,
+    ).toHaveProperty("blockName");
+  });
+
+  it("rejects an input that belongs to a different catalog skill", () => {
+    const schema = buildLocalPlannerGenerationSchema(
+      [
+        {
+          skillId: "movement.goto",
+          skillVersion: "1.0.0",
+          inputSchema: {
+            type: "object",
+            properties: { radius: { type: "integer" } },
+            required: ["radius"],
+            additionalProperties: false,
+          },
+        },
+        {
+          skillId: "collect.block",
+          skillVersion: "1.0.0",
+          inputSchema: {
+            type: "object",
+            properties: { blockName: { type: "string" } },
+            required: ["blockName"],
+            additionalProperties: false,
+          },
+        },
+      ],
+      ["oak_log"],
+      { botId: BOT_ID, taskId: "task-01" },
+    );
+    const decision = {
+      action: "invoke_skill",
+      botId: BOT_ID,
+      taskId: "task-01",
+      skillVersion: "1.0.0",
+      reasonCode: "ADVANCE_TASK",
+    };
+    expect(
+      schema.safeParse({
+        ...decision,
+        skillId: "movement.goto",
+        input: { radius: 2 },
+      }).success,
+    ).toBe(true);
+    expect(
+      schema.safeParse({
+        ...decision,
+        skillId: "movement.goto",
+        input: { blockName: "oak_log" },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("falls back to a shared branch when no advertised schema compiles", () => {
+    const schema = buildLocalPlannerGenerationSchema(skills, ["oak_log"], {
+      botId: BOT_ID,
+      taskId: "task-01",
+    });
+    expect(
+      schema.safeParse({
+        action: "invoke_skill",
+        botId: BOT_ID,
+        taskId: "task-01",
+        skillId: "movement.goto",
+        skillVersion: "1.0.0",
+        input: { radius: 2 },
+        reasonCode: "ADVANCE_TASK",
+      }).success,
+    ).toBe(true);
+  });
+
+  it("keeps the pin out of the shared protocol schema", () => {
+    buildLocalPlannerGenerationSchema(skills, ["oak_log"], {
+      botId: BOT_ID,
+      taskId: "task-01",
+    });
+    expect(
+      localPlannerDecisionSchema.safeParse({
+        action: "noop",
+        botId: "unrelated-worker",
+        taskId: "unrelated-task",
+        reasonCode: "NO_SAFE_SKILL",
+      }).success,
+    ).toBe(true);
+  });
+});
+
+describe("plannedAcquisitionGoalItem", () => {
+  const reachable = ["crafting_table", "oak_log", "stick"];
+
+  it("names the single item an acquisition goal asks for", () => {
+    expect(
+      plannedAcquisitionGoalItem("Craft one crafting_table from nearby resources.", reachable),
+    ).toBe("crafting_table");
+    // The spaced spelling and the Chinese verb both reach the same item, because
+    // the guard shares one spelling rule with the pre-dispatch grounding check.
+    expect(
+      plannedAcquisitionGoalItem("Gather a crafting table please.", reachable),
+    ).toBe("crafting_table");
+    expect(plannedAcquisitionGoalItem("采集 oak_log", reachable)).toBe("oak_log");
+  });
+
+  it("declines a goal with no acquisition verb, so an honest noop still stands", () => {
+    // "equip the best armor" mentions no planned item and asks for no acquisition;
+    // overturning a noop here would invent operator intent.
+    expect(
+      plannedAcquisitionGoalItem("Equip the best armor already in inventory.", reachable),
+    ).toBeNull();
+    expect(
+      plannedAcquisitionGoalItem("Move to coordinates (10, 64, -7).", reachable),
+    ).toBeNull();
+  });
+
+  it("declines an ambiguous multi-item goal because plan_items carries exactly one", () => {
+    expect(
+      plannedAcquisitionGoalItem("Craft a crafting_table and a stick.", reachable),
+    ).toBeNull();
+  });
+
+  it("declines an item outside the trusted reachable set", () => {
+    expect(plannedAcquisitionGoalItem("Craft one beacon.", reachable)).toBeNull();
+  });
+});
+
+describe("buildLocalPlannerPlanItemsRetrySchema", () => {
+  it("offers exactly one plan_items branch pinned to the trusted item and identity", () => {
+    const schema = buildLocalPlannerPlanItemsRetrySchema("crafting_table", {
+      botId: BOT_ID,
+      taskId: "task-01",
+    });
+    expect(
+      schema.safeParse({
+        action: "plan_items",
+        botId: BOT_ID,
+        taskId: "task-01",
+        goals: [{ itemName: "crafting_table", count: 1 }],
+        reasonCode: "ADVANCE_TASK",
+      }).success,
+    ).toBe(true);
+    // A different item, a different identity, and noop are all off-grammar, which
+    // is precisely why the retry cannot restate the decision it just declined.
+    for (const invalid of [
+      { itemName: "oak_log", count: 1 },
+      { itemName: "crafting_table", count: 2 },
+    ]) {
+      expect(
+        schema.safeParse({
+          action: "plan_items",
+          botId: BOT_ID,
+          taskId: "task-01",
+          goals: [invalid],
+          reasonCode: "ADVANCE_TASK",
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      schema.safeParse({
+        action: "noop",
+        botId: BOT_ID,
+        taskId: "task-01",
+        reasonCode: "NO_SAFE_SKILL",
+      }).success,
+    ).toBe(false);
+    expect(
+      schema.safeParse({
+        action: "plan_items",
+        botId: "other-bot",
+        taskId: "task-01",
+        goals: [{ itemName: "crafting_table", count: 1 }],
+        reasonCode: "ADVANCE_TASK",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("refuses an item outside the trusted planning vocabulary", () => {
+    expect(() => buildLocalPlannerPlanItemsRetrySchema("minecraft:crafting_table")).toThrow(
+      LocalPlannerError,
+    );
   });
 });
 

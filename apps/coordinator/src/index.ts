@@ -128,6 +128,8 @@ export {
   LocalPlannerError,
   LOCAL_PLANNER_REASON_CODES,
   buildLocalPlannerGenerationSchema,
+  buildLocalPlannerPlanItemsRetrySchema,
+  plannedAcquisitionGoalItem,
   localPlannerDecisionSchema,
   type CoordinatorLocalPlannerOptions,
   type LocalPlanRequest,

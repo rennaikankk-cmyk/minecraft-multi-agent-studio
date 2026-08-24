@@ -62,6 +62,51 @@ const localPlannerNoopDecisionSchema = z
   })
   .strict();
 
+/**
+ * A catalog entry as constrained generation needs it. `inputSchema` is optional
+ * so callers that only know IDs and versions still compile; supplying it lets
+ * the grammar constrain that Skill's input instead of accepting any JSON.
+ */
+export type LocalPlannerGenerationSkill = Pick<
+  BotSkillCatalogEntryV1,
+  "skillId" | "skillVersion"
+> &
+  Partial<Pick<BotSkillCatalogEntryV1, "inputSchema">>;
+
+/**
+ * The trusted identity a decision must echo back. The Coordinator already owns
+ * both values and rejects any deviation as PLANNER_DECISION_MISMATCH, so
+ * generation never needs to produce them freely.
+ */
+export type LocalPlannerTrustedIdentity = Readonly<{
+  botId: string;
+  taskId: string;
+}>;
+
+/**
+ * Narrows `botId`/`taskId` to the exact trusted values for constrained
+ * generation. Free-form identifier generation leaves a region where the grammar
+ * accepts arbitrary whitespace, and a model that has already decided the
+ * outcome can stall there until `max_tokens` instead of emitting the remaining
+ * required keys. Pinning removes that region without weakening validation: the
+ * full protocol schema still re-parses the response before dispatch.
+ */
+function trustedIdentityFields(identity: LocalPlannerTrustedIdentity | undefined) {
+  if (!identity) return { botId: identifierSchema, taskId: identifierSchema };
+  const trusted = z.object({ botId: identifierSchema, taskId: identifierSchema });
+  const parsed = trusted.safeParse(identity);
+  if (!parsed.success) {
+    throw new LocalPlannerError(
+      "PLANNER_DECISION_MISMATCH",
+      "Trusted planner identity is not a valid identifier pair.",
+    );
+  }
+  return {
+    botId: z.literal(parsed.data.botId),
+    taskId: z.literal(parsed.data.taskId),
+  };
+}
+
 const planGoalItemNameSchema = z
   .string()
   .min(1)
@@ -76,9 +121,12 @@ const planGoalSchema = z
   })
   .strict();
 
-function localPlannerInvokeDecisionSchema(
+function localPlannerInvokeDecisionSchema<
+  InputSchema extends z.ZodType = typeof skillJsonValueSchema,
+>(
   skillIdSchema: z.ZodType<string>,
   skillVersionValueSchema: z.ZodType<string>,
+  inputValueSchema: InputSchema = skillJsonValueSchema as unknown as InputSchema,
 ) {
   return z
     .object({
@@ -87,10 +135,55 @@ function localPlannerInvokeDecisionSchema(
       taskId: identifierSchema,
       skillId: skillIdSchema,
       skillVersion: skillVersionValueSchema,
-      input: skillJsonValueSchema,
+      input: inputValueSchema,
       reasonCode: reasonCodeSchema,
     })
     .strict();
+}
+
+/**
+ * Builds one constrained invoke branch per catalog Skill, pairing each exact
+ * `skillId`/`skillVersion` with that Skill's own advertised input schema.
+ *
+ * A single shared branch has to type `input` as arbitrary JSON, which is the
+ * only unconstrained region left in the decision grammar once identity and
+ * reason codes are pinned. Constrained decoding then steers away from
+ * `invoke_skill` toward the branches the grammar actually describes, so Skills
+ * never get invoked. Compiling each advertised schema into its own branch
+ * removes that asymmetry. This narrows generation only; every decision is still
+ * re-parsed by the protocol schema and re-validated against the advertised
+ * schema before dispatch.
+ *
+ * A Skill whose advertised schema will not compile is omitted rather than
+ * widened back to arbitrary JSON: `validateAdvertisedInput` would reject its
+ * dispatch anyway, so advertising it for generation could only produce a
+ * decision that cannot be executed.
+ */
+function localPlannerInvokeBranches(
+  availableSkills: readonly LocalPlannerGenerationSkill[],
+): z.ZodType[] {
+  const branches: z.ZodType[] = [];
+  for (const { skillId, skillVersion, inputSchema } of availableSkills) {
+    if (inputSchema === undefined) continue;
+    let inputValueSchema: z.ZodType;
+    try {
+      inputValueSchema = z.fromJSONSchema(
+        plannerInputSchema(inputSchema) as Parameters<
+          typeof z.fromJSONSchema
+        >[0],
+      );
+    } catch {
+      continue;
+    }
+    branches.push(
+      localPlannerInvokeDecisionSchema(
+        z.literal(skillId),
+        z.literal(skillVersion),
+        inputValueSchema,
+      ),
+    );
+  }
+  return branches;
 }
 
 function localPlannerPlanItemsDecisionSchema(
@@ -122,12 +215,11 @@ export const localPlannerDecisionSchema = z.discriminatedUnion("action", [
  * complete protocol-backed schema before dispatch.
  */
 export function buildLocalPlannerGenerationSchema(
-  availableSkills: readonly Pick<
-    BotSkillCatalogEntryV1,
-    "skillId" | "skillVersion"
-  >[],
+  availableSkills: readonly LocalPlannerGenerationSkill[],
   plannedItemNames: readonly string[] = new GoalPlanner().resourceGraph.knownItemNames(),
+  trustedIdentity?: LocalPlannerTrustedIdentity,
 ) {
+  const identity = trustedIdentityFields(trustedIdentity);
   const skillIds = [...new Set(availableSkills.map(({ skillId }) => skillId))];
   const skillVersions = [
     ...new Set(availableSkills.map(({ skillVersion }) => skillVersion)),
@@ -138,27 +230,101 @@ export function buildLocalPlannerGenerationSchema(
       "Bot Runtime has no versions available for constrained generation.",
     );
   }
-  const invokeSchema = localPlannerInvokeDecisionSchema(
-    z.enum(skillIds as [string, ...string[]]),
-    z.enum(skillVersions as [string, ...string[]]),
+  const perSkillInvokeBranches = localPlannerInvokeBranches(availableSkills).map(
+    (branch) => (branch as z.ZodObject).extend(identity),
   );
+  const invokeBranches = perSkillInvokeBranches.length > 0
+    ? perSkillInvokeBranches
+    : [
+        localPlannerInvokeDecisionSchema(
+          z.enum(skillIds as [string, ...string[]]),
+          z.enum(skillVersions as [string, ...string[]]),
+        ).extend(identity),
+      ];
+  const noopSchema = localPlannerNoopDecisionSchema.extend(identity);
   const itemNames = [...new Set(plannedItemNames)].filter(
     (itemName) => planGoalItemNameSchema.safeParse(itemName).success,
   );
+  const branches: z.ZodType[] = [noopSchema, ...invokeBranches];
   if (itemNames.length > 0) {
-    const planSchema = localPlannerPlanItemsDecisionSchema(
-      z.enum(itemNames as [string, ...string[]]),
+    branches.push(
+      localPlannerPlanItemsDecisionSchema(
+        z.enum(itemNames as [string, ...string[]]),
+      ).extend(identity),
     );
-    return z.discriminatedUnion("action", [
-      localPlannerNoopDecisionSchema,
-      invokeSchema,
-      planSchema,
-    ] as const);
   }
-  return z.discriminatedUnion("action", [
-    localPlannerNoopDecisionSchema,
-    invokeSchema,
-  ] as const);
+  return z.union(branches as [z.ZodType, z.ZodType, ...z.ZodType[]]);
+}
+
+/**
+ * Offers exactly one plan_items branch for a single trusted item, with no noop
+ * and no invoke branch.
+ *
+ * Reserved for the retry below. With all branches offered, the model answers a
+ * gather-then-craft goal with noop/NO_SAFE_SKILL every time: it reads "no one
+ * advertised skill completes this" as grounds to decline, and no amount of
+ * prompt wording moved it (v7 through v11 all measured 0). Removing the branch
+ * it wrongly prefers is the only lever left that does not weaken a check.
+ *
+ * Narrowing is safe precisely because it constrains generation only: the
+ * response is still re-parsed with the protocol-backed
+ * localPlannerDecisionSchema, still grounded against the operator goal, and
+ * every expanded step is still authorized by the deterministic GoalPlanner.
+ */
+export function buildLocalPlannerPlanItemsRetrySchema(
+  itemName: string,
+  trustedIdentity?: LocalPlannerTrustedIdentity,
+) {
+  if (!planGoalItemNameSchema.safeParse(itemName).success) {
+    throw new LocalPlannerError(
+      "PLANNER_GOAL_UNSUPPORTED",
+      "The retry item name is outside the trusted planning vocabulary.",
+    );
+  }
+  return localPlannerPlanItemsDecisionSchema(z.literal(itemName)).extend(
+    trustedIdentityFields(trustedIdentity),
+  );
+}
+
+const PLAN_ITEMS_ACQUISITION_GOAL_PATTERN =
+  /(?:obtain|craft|make|build|gather|collect|acquire|获取|制作|采集|收集|合成)/iu;
+
+/**
+ * Names the single trusted item a declined goal is asking to acquire, or null
+ * when the goal is not an unambiguous single-item acquisition request.
+ *
+ * Both halves matter. The acquisition verb keeps goals that merely mention an
+ * item ("equip the best armor") out of the retry, and the exactly-one rule
+ * keeps a multi-item goal out, since plan_items carries exactly one goal and
+ * picking one of several would be the Coordinator inventing operator intent.
+ * Every candidate is drawn from the caller's trusted reachable set, so this
+ * reads the goal only to choose among items the deterministic planner has
+ * already proven it can reach.
+ */
+export function plannedAcquisitionGoalItem(
+  operatorGoal: string,
+  plannedItemNames: readonly string[],
+): string | null {
+  if (!PLAN_ITEMS_ACQUISITION_GOAL_PATTERN.test(operatorGoal)) return null;
+  const named = [...new Set(plannedItemNames)].filter((itemName) =>
+    planGoalItemNameSchema.safeParse(itemName).success &&
+    goalNamesPlannedItem(operatorGoal, itemName),
+  );
+  return named.length === 1 ? named[0]! : null;
+}
+
+/**
+ * The single spelling rule shared by the retry guard and the pre-dispatch
+ * grounding check, so a goal the guard treats as naming an item can never be
+ * one that assertPlanGoalsGrounded then rejects as ungrounded.
+ */
+function goalNamesPlannedItem(operatorGoal: string, itemName: string): boolean {
+  const aliases = PLANNED_ITEM_GOAL_ALIASES[itemName] ?? [];
+  return (
+    containsGoalToken(operatorGoal, itemName) ||
+    containsGoalToken(operatorGoal, itemName.replaceAll("_", " ")) ||
+    aliases.some((alias) => containsGoalToken(operatorGoal, alias))
+  );
 }
 
 export type LocalPlannerDecision = z.infer<typeof localPlannerDecisionSchema>;
@@ -338,6 +504,7 @@ export class CoordinatorLocalPlanner {
     const generationSchema = buildLocalPlannerGenerationSchema(
       availableSkills,
       plannedItemNames,
+      { botId: request.botId, taskId: request.taskId },
     );
 
     let prompt: string;
@@ -394,6 +561,15 @@ export class CoordinatorLocalPlanner {
       );
     }
     if (decision.action === "noop") {
+      const retried = await this.retryDeclinedAcquisitionGoal({
+        request,
+        operatorGoal,
+        plannedItemNames,
+        record,
+        availableSkills,
+        deadlineMs,
+      });
+      if (retried) return retried;
       return { action: "noop", reasonCode: decision.reasonCode, ai };
     }
     if (decision.action === "plan_items") {
@@ -570,6 +746,87 @@ export class CoordinatorLocalPlanner {
       }
     }
     return Object.freeze(names);
+  }
+
+  /**
+   * Re-asks a declined single-item acquisition goal with only the plan_items
+   * branch on offer, and returns null whenever the goal is not one.
+   *
+   * Measured behaviour, not a guess: offered every branch, the model answers
+   * "craft one crafting_table from nearby resources" with noop/NO_SAFE_SKILL on
+   * 6 of 6 requests while a forced single-branch probe produced the correct
+   * decision 4 of 4 times. The capability is there; the branch choice is what
+   * fails, so this removes the choice for the one goal shape that is provably
+   * reachable and asks again.
+   *
+   * A null return leaves the model's original noop standing untouched, which is
+   * why an honest decline can never be overturned here: the guard requires an
+   * acquisition verb and exactly one named item from the trusted reachable set,
+   * and no such goal is one the deterministic planner cannot serve.
+   */
+  private async retryDeclinedAcquisitionGoal({
+    request,
+    operatorGoal,
+    plannedItemNames,
+    record,
+    availableSkills,
+    deadlineMs,
+  }: {
+    request: LocalPlanRequest;
+    operatorGoal: string;
+    plannedItemNames: readonly string[];
+    record: BotRegistryRecord;
+    availableSkills: readonly BotSkillCatalogEntryV1[];
+    deadlineMs: number;
+  }): Promise<LocalPlanResult | null> {
+    const itemName = plannedAcquisitionGoalItem(operatorGoal, plannedItemNames);
+    if (itemName === null) return null;
+    this.assertWithinDeadline(deadlineMs, request.signal);
+
+    const retryAi = await this.options.ai.generate({
+      requestId: `${request.requestId}:plan-items-retry`,
+      botId: request.botId,
+      priority: aiRequestPriorities.planning,
+      supersedeKey: `plan-items-retry:${request.taskId}`,
+      prompt: buildLocalPlannerPrompt({
+        promptVersion: LOCAL_PLANNER_PROMPT_VERSION,
+        operatorGoal,
+        bot: safeBotContext(record, request.taskId),
+        plannedItems: [itemName],
+        availableSkills: [],
+      }),
+      systemPrompt: LOCAL_PLANNER_SYSTEM_PROMPT,
+      schema: buildLocalPlannerPlanItemsRetrySchema(itemName, {
+        botId: request.botId,
+        taskId: request.taskId,
+      }),
+      maxTokens: 512,
+      temperature: 0,
+      timeoutMs: request.timeoutMs,
+      traceId: request.traceId,
+      ...(request.signal ? { signal: request.signal } : {}),
+    });
+    this.assertWithinDeadline(deadlineMs, request.signal);
+
+    // The narrowed grammar constrains generation only. The response still has
+    // to satisfy the protocol-backed schema and carry the trusted identity,
+    // exactly as a first-pass decision does.
+    const retryDecision = parseDecision(retryAi.value.content);
+    if (
+      retryDecision.action !== "plan_items" ||
+      retryDecision.botId !== request.botId ||
+      retryDecision.taskId !== request.taskId
+    ) {
+      return null;
+    }
+    return this.planItemsAndDispatch(
+      request,
+      retryDecision,
+      record,
+      availableSkills,
+      retryAi,
+      deadlineMs,
+    );
   }
 
   private async planItemsAndDispatch(
@@ -1075,13 +1332,7 @@ function assertPlanGoalsGrounded(
   operatorGoal: string,
 ): void {
   for (const goal of goals) {
-    const spaced = goal.itemName.replaceAll("_", " ");
-    const aliases = PLANNED_ITEM_GOAL_ALIASES[goal.itemName] ?? [];
-    if (
-      !containsGoalToken(operatorGoal, goal.itemName) &&
-      !containsGoalToken(operatorGoal, spaced) &&
-      !aliases.some((alias) => containsGoalToken(operatorGoal, alias))
-    ) {
+    if (!goalNamesPlannedItem(operatorGoal, goal.itemName)) {
       throw new LocalPlannerError(
         "PLANNER_INPUT_UNGROUNDED",
         `Planned item ${goal.itemName} was not named by the operator goal.`,
