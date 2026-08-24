@@ -661,6 +661,84 @@ describe("CoordinatorLocalPlanner", () => {
     expect(sendSkillInvocation).not.toHaveBeenCalled();
   });
 
+  /**
+   * A bare `action: "noop"` reads the same whether the model declined a
+   * reachable goal or the Coordinator never offered the item at all. That is the
+   * same silent-failure shape as a truncated log array: the record looks
+   * complete. Real case: a stone-pickaxe goal came back `noop` because every
+   * derived plan needs a placed crafting table and this Runtime advertises no
+   * placement Skill — invisible from the coordinator log.
+   */
+  it("records why a declined goal's item was never offered", async () => {
+    const planning = planningRegistry();
+    const info = vi.fn();
+    const warn = vi.fn();
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >();
+    const generate = vi.fn(async (options) =>
+      aiResult(
+        JSON.stringify({
+          action: "noop",
+          botId: BOT_ID,
+          taskId: "task-01",
+          reasonCode: "NO_SAFE_SKILL",
+        }),
+        options.requestId,
+      ),
+    );
+    const planner = new CoordinatorLocalPlanner({
+      ai: { generate },
+      registry: { get: () => planning.get(BOT_ID, NOW) },
+      transport: { sendSkillInvocation },
+      coordinatorInstanceId: "coordinator-01",
+      logger: { info, warn, error: vi.fn(), debug: vi.fn() } as never,
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    await expect(
+      planner.planAndDispatch({
+        ...planRequest(),
+        operatorGoal: "Craft one stone_pickaxe from nearby resources.",
+      }),
+    ).resolves.toMatchObject({ action: "noop", reasonCode: "NO_SAFE_SKILL" });
+
+    // The item is excluded, so the narrowed re-ask must not fire: overturning
+    // this noop would dispatch a plan the execution gate then refuses.
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(sendSkillInvocation).not.toHaveBeenCalled();
+
+    const bindability = info.mock.calls.find(
+      ([event]) => event === "coordinator_planner_goal_bindability",
+    );
+    expect(bindability?.[1]).toMatchObject({
+      taskId: "task-01",
+      botId: BOT_ID,
+    });
+    expect(bindability?.[1].bindableCount).toBeGreaterThan(0);
+    expect(bindability?.[1].excludedCount).toBeGreaterThan(0);
+    // Aggregated, so one record cannot grow with the resource graph.
+    expect(
+      bindability?.[1].exclusionReasons["SKILL_NOT_ADVERTISED:world.place-block"],
+    ).toBeGreaterThan(0);
+
+    // The one question a noop cannot otherwise answer: was this item offered?
+    const named = warn.mock.calls.find(
+      ([event]) => event === "coordinator_planner_goal_named_unbindable_item",
+    );
+    expect(named?.[1]).toMatchObject({
+      traceId: "trace-plan-01",
+      taskId: "task-01",
+      botId: BOT_ID,
+      unbindableItems: ["stone_pickaxe=SKILL_NOT_ADVERTISED:world.place-block"],
+    });
+    // Diagnostics stay narrower than the prompt: no goal text, no server identity.
+    const logged = JSON.stringify([...info.mock.calls, ...warn.mock.calls]);
+    expect(logged).not.toContain("nearby resources");
+    expect(logged).not.toContain("isolated-test");
+  });
+
   it("keeps a retried decision under the same grounding and identity checks", async () => {
     const planning = planningRegistry();
     const sendSkillInvocation = vi.fn<

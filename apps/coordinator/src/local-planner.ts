@@ -511,6 +511,17 @@ export type CoordinatorLocalPlannerOptions = Readonly<{
   randomId?: () => string;
 }>;
 
+/**
+ * The bindable/excluded split of every planner-known item, with the reason each
+ * exclusion was made. Named rather than inferred because both log helpers take
+ * it as a parameter, and an indexed access on a private method is not a type
+ * the compiler will hand out.
+ */
+type GoalBindability = Readonly<{
+  bindable: readonly string[];
+  excluded: readonly Readonly<{ itemName: string; reason: string }>[];
+}>;
+
 type BoundPlanStep = Readonly<{
   invocation: SkillInvocationV1;
   runtimeInstanceId: string;
@@ -652,7 +663,9 @@ export class CoordinatorLocalPlanner {
       );
     }
     const operatorGoal = safeOperatorGoal(request.operatorGoal, record);
-    const plannedItemNames = this.coordinatorBindableGoalNames(availableSkills);
+    const bindability = this.coordinatorGoalBindability(availableSkills);
+    this.logGoalBindability(request, bindability);
+    const plannedItemNames = bindability.bindable;
     const generationSchema = buildLocalPlannerGenerationSchema(
       availableSkills,
       plannedItemNames,
@@ -722,6 +735,7 @@ export class CoordinatorLocalPlanner {
         deadlineMs,
       });
       if (retried) return retried;
+      this.logUnbindableGoalNames(request, operatorGoal, bindability);
       return { action: "noop", reasonCode: decision.reasonCode, ai };
     }
     if (decision.action === "plan_items") {
@@ -876,28 +890,82 @@ export class CoordinatorLocalPlanner {
     }
   }
 
-  private coordinatorBindableGoalNames(
+  /**
+   * Splits every planner-known item into the set the coordinator can actually
+   * bind and the set it cannot, carrying the reason for each exclusion.
+   *
+   * The exclusions are the interesting half. A goal naming an excluded item
+   * comes back as a bare `action: "noop"`, which reads identically to the model
+   * honestly declining a reachable goal — so an operator asking for a stone
+   * pickaxe could not tell "this Runtime cannot place a crafting table" from
+   * "the model chose not to". Deriving the reason here lets the caller log it
+   * instead of leaving the difference invisible.
+   */
+  private coordinatorGoalBindability(
     availableSkills: readonly BotSkillCatalogEntryV1[],
-  ): readonly string[] {
+  ): GoalBindability {
     const available = new Set(
       availableSkills.map(({ skillId }) => skillId),
     );
-    const names: string[] = [];
+    const bindable: string[] = [];
+    const excluded: { itemName: string; reason: string }[] = [];
     for (const itemName of this.goalPlanner.resourceGraph.knownItemNames()) {
       const plan = this.goalPlanner.plan([{ itemName, count: 1 }], {});
       if (!plan.planned || plan.steps.length === 0) continue;
-      if (
-        plan.steps.every(
-          (step) =>
-            available.has(skillIdForStepKind[step.kind]) &&
-            (step.kind === "mine" ||
-              (step.kind === "craft" && step.station === null)),
-        )
-      ) {
-        names.push(itemName);
+      const blocker = plan.steps.find(
+        (step) =>
+          !available.has(skillIdForStepKind[step.kind]) ||
+          !(
+            step.kind === "mine" ||
+            (step.kind === "craft" && step.station === null)
+          ),
+      );
+      if (!blocker) {
+        bindable.push(itemName);
+        continue;
       }
+      excluded.push({
+        itemName,
+        reason: !available.has(skillIdForStepKind[blocker.kind])
+          ? `SKILL_NOT_ADVERTISED:${skillIdForStepKind[blocker.kind]}`
+          : blocker.kind === "craft"
+            ? `STATION_REQUIRED:${blocker.station ?? "unknown"}`
+            : `STEP_KIND_UNSUPPORTED:${blocker.kind}`,
+      });
     }
-    return Object.freeze(names);
+    return Object.freeze({
+      bindable: Object.freeze(bindable),
+      excluded: Object.freeze(excluded),
+    });
+  }
+
+  /**
+   * Reports the bindable/excluded split once per planning attempt, with the
+   * exclusion reasons aggregated so the record stays a fixed size no matter how
+   * large the resource graph grows.
+   */
+  private logGoalBindability(
+    request: LocalPlanRequest,
+    bindability: GoalBindability,
+  ): void {
+    const logger = this.options.logger;
+    if (!logger) return;
+    try {
+      const reasonCounts: Record<string, number> = {};
+      for (const { reason } of bindability.excluded) {
+        reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1;
+      }
+      logger.info("coordinator_planner_goal_bindability", {
+        traceId: request.traceId,
+        taskId: request.taskId,
+        botId: request.botId,
+        bindableCount: bindability.bindable.length,
+        excludedCount: bindability.excluded.length,
+        exclusionReasons: reasonCounts,
+      });
+    } catch {
+      // Diagnostics must never change what the planner reports.
+    }
   }
 
   /**
@@ -1539,6 +1607,40 @@ export class CoordinatorLocalPlanner {
    * untouched; this only adds the one field that makes the coordinator log
    * self-sufficient.
    */
+  /**
+   * Names the excluded items a declined goal actually mentioned, so the one
+   * question a `noop` cannot otherwise answer — "was this even offered?" — has a
+   * recorded answer. Silence here means the goal named nothing excluded, which
+   * is the case where the model's decline stands on its own.
+   *
+   * Uses the same spelling rule as the retry guard, so an item reported here is
+   * exactly one the guard would also have recognised had it been bindable.
+   */
+  private logUnbindableGoalNames(
+    request: LocalPlanRequest,
+    operatorGoal: string,
+    bindability: GoalBindability,
+  ): void {
+    const logger = this.options.logger;
+    if (!logger) return;
+    try {
+      const named = bindability.excluded.filter(({ itemName }) =>
+        goalNamesPlannedItem(operatorGoal, itemName),
+      );
+      if (named.length === 0) return;
+      logger.warn("coordinator_planner_goal_named_unbindable_item", {
+        traceId: request.traceId,
+        taskId: request.taskId,
+        botId: request.botId,
+        unbindableItems: named.map(
+          ({ itemName, reason }) => `${itemName}=${reason}`,
+        ),
+      });
+    } catch {
+      // Diagnostics must never change what the planner reports.
+    }
+  }
+
   private logMaskedStepFailure(
     request: LocalPlanRequest,
     step: PlanStep,
