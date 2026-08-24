@@ -7,6 +7,7 @@ import { craftItemSkill } from "./craft-item.js";
 import { equipArmorSkill } from "./equip-armor.js";
 import { movementGotoSkill } from "./movement-goto.js";
 import { placeBlockSkill } from "./place-block.js";
+import { scanBlocksSkill } from "./scan-blocks.js";
 import { smeltItemSkill } from "./smelt-item.js";
 import { travelRouteSkill } from "./travel-route.js";
 import { tradeVillagerSkill } from "./trade-villager.js";
@@ -22,7 +23,7 @@ import { movementProfileSkill } from "../planning/movement-profile.js";
  * verification-scenarios 的 baseInputs、SKILLS.md 的散文），
  * 于是 `smelt.item` 只漏掉了其中一处就没人发现。
  *
- * 顺序即注册顺序：先移动/装备，再采集/合成/放置/搬运/熔炼。
+ * 顺序即注册顺序：先移动/装备，再感知，再采集/合成/放置/搬运/熔炼。
  *
  * 类型擦除到 `unknown` 是必要的：各技能的 Input/Output/State 各不相同，
  * 装进同一个数组只能取共同上界。SkillRegistry 内部本就以
@@ -37,6 +38,7 @@ export const builtinSkills: readonly AnySkillDefinition[] = Object.freeze([
   equipArmorSkill,
   combatEngageSkill,
   combatDisengageSkill,
+  scanBlocksSkill,
   collectBlockSkill,
   craftItemSkill,
   placeBlockSkill,

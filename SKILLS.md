@@ -139,6 +139,41 @@
 
 控制面只提交有界的 `DISENGAGE` 意图。Runtime 必须返回结构化实际回执；已延迟、丢弃或修改的请求都要带稳定原因码，不能伪造已执行。
 
+## `world.scan@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`world.read`
+- 风险：R0
+- 适配器操作：`world.scan-blocks-safe`
+- 超时：10 秒
+- 自动重试：无（只读，失败重试没有额外信息）
+- 底层：mineflayer 自带的 `registry.blocksByName` + `findBlocks` + `blockAt`，不加插件
+- 并发：与任何技能都不互斥（不移动、不挖掘、不占用移动通道）
+
+`site.assess` 只把世界压成 `resources` 的 0–1 密度分，那个分数无法瞄准
+`collect.block`；本技能补的就是这一段——返回**带坐标的命中结果**，让上层
+先看清再决定挖哪一个，而不是拿 `movement.goto` 盲跳去试。
+
+输入：
+
+```json
+{ "blockName": "oak_log", "maxCount": 8, "maxDistance": 32,
+  "dimension": "minecraft:overworld", "serverProfileId": "isolated-local" }
+```
+
+输出遥测：`matches`（按 `distance` 升序的整数方块坐标）、`targetsFound`
+（`findBlocks` 命中的位置数）、`complete`（每个命中位置都读到了方块数据）。
+
+约束：
+
+- 单次最多 16 个命中、64 格半径；只读，不消耗、不挖掘、不移动。
+- `matches.length < targetsFound` 时 `complete` 为 false：区块未加载导致
+  `blockAt` 读不到，观测不完整必须如实说，不能把缺失当成"附近没有"。
+- `matches: []` 且 `complete: true` 是合法完成（附近确实没有该方块）。
+- 只读也照样受 L0 约束：`normalTasksPaused` 期间拒绝执行，不给暂停开绕道。
+- 命中项不重复携带 `dimension`/`serverProfileId`：整次扫描只在一个维度、
+  一个 ServerProfile 内进行，那两个事实由输出顶层承载。
+
 ## `collect.block@1.0.0`
 
 - 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）

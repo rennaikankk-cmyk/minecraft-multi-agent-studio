@@ -460,3 +460,133 @@ describe("MineflayerBotClient travel.route capability", () => {
     ).rejects.toMatchObject({ code: "SKILL_CAPABILITY_INPUT_INVALID" });
   });
 });
+
+describe("MineflayerBotClient world.scan capability", () => {
+  const request = {
+    invocationId: "invocation-scan",
+    traceId: "trace-scan",
+    taskId: "task-scan",
+    botId: "bot-scan",
+    skillId: "world.scan",
+    skillVersion: "1.0.0",
+    capability: "world.read" as const,
+    operation: "world.scan-blocks-safe",
+    signal: new AbortController().signal,
+    input: {
+      blockName: "oak_log",
+      maxCount: 4,
+      maxDistance: 32,
+      dimension: "minecraft:overworld",
+      serverProfileId: "isolated-test-profile",
+    },
+  };
+
+  function scanBot(overrides: Record<string, unknown> = {}): Bot {
+    const bot = new EventEmitter() as unknown as Bot;
+    Object.assign(bot, {
+      game: { dimension: "overworld" },
+      entity: { position: new Vec3(0, 64, 0) },
+      registry: { blocksByName: { oak_log: { id: 49 } } },
+      findBlocks: vi.fn(() => []),
+      blockAt: vi.fn(() => ({ type: 49 })),
+      ...overrides,
+    });
+    return bot;
+  }
+
+  it("returns located blocks nearest-first without digging or moving", async () => {
+    const far = new Vec3(9, 64, 0);
+    const near = new Vec3(2, 64, 0);
+    const dig = vi.fn();
+    const pathfinder = { goto: vi.fn(), setMovements: vi.fn(), stop: vi.fn() };
+    const bot = scanBot({
+      findBlocks: vi.fn(() => [far, near]),
+      dig,
+      pathfinder,
+    });
+    const client = new MineflayerBotClient(bot, "auto", "isolated-test-profile");
+
+    await expect(client.invokeSkillCapability(request)).resolves.toEqual({
+      blockName: "oak_log",
+      dimension: "minecraft:overworld",
+      // findBlocks returned the far hit first; the caller aims collect.block
+      // with this list, so the ordering has to be by distance, not by luck.
+      matches: [
+        { x: 2, y: 64, z: 0, distance: 2 },
+        { x: 9, y: 64, z: 0, distance: 9 },
+      ],
+      targetsFound: 2,
+      complete: true,
+    });
+    expect(dig).not.toHaveBeenCalled();
+    expect(pathfinder.goto).not.toHaveBeenCalled();
+  });
+
+  it("reports an unloaded-chunk hit as incomplete rather than as absence", async () => {
+    const readable = new Vec3(2, 64, 0);
+    const unreadable = new Vec3(40, 64, 0);
+    const bot = scanBot({
+      findBlocks: vi.fn(() => [readable, unreadable]),
+      blockAt: vi.fn((position: Vec3) =>
+        position.equals(readable) ? { type: 49 } : null,
+      ),
+    });
+    const client = new MineflayerBotClient(bot, "auto", "isolated-test-profile");
+
+    // matches.length < targetsFound is the honest shape here: swallowing the
+    // unreadable hit silently would tell the planner the world is emptier
+    // than it was actually able to see.
+    await expect(client.invokeSkillCapability(request)).resolves.toMatchObject({
+      matches: [{ x: 2, y: 64, z: 0, distance: 2 }],
+      targetsFound: 2,
+      complete: false,
+    });
+  });
+
+  it("reports an empty scan as a complete observation", async () => {
+    const client = new MineflayerBotClient(
+      scanBot(),
+      "auto",
+      "isolated-test-profile",
+    );
+
+    await expect(client.invokeSkillCapability(request)).resolves.toMatchObject({
+      matches: [],
+      targetsFound: 0,
+      complete: true,
+    });
+  });
+
+  it("fails closed on an unknown block name, wrong profile, or wrong dimension", async () => {
+    const client = new MineflayerBotClient(
+      scanBot(),
+      "auto",
+      "isolated-test-profile",
+    );
+
+    await expect(
+      client.invokeSkillCapability({
+        ...request,
+        input: { ...request.input, blockName: "not_a_block" },
+      }),
+    ).rejects.toMatchObject({ code: "BLOCK_NAME_UNKNOWN" });
+    await expect(
+      client.invokeSkillCapability({
+        ...request,
+        input: { ...request.input, serverProfileId: "other-profile" },
+      }),
+    ).rejects.toMatchObject({ code: "TARGET_SERVER_PROFILE_MISMATCH" });
+    await expect(
+      client.invokeSkillCapability({
+        ...request,
+        input: { ...request.input, dimension: "minecraft:the_nether" },
+      }),
+    ).rejects.toMatchObject({ code: "TARGET_DIMENSION_MISMATCH" });
+    await expect(
+      client.invokeSkillCapability({
+        ...request,
+        input: { ...request.input, unexpected: true },
+      }),
+    ).rejects.toMatchObject({ code: "SKILL_CAPABILITY_INPUT_INVALID" });
+  });
+});

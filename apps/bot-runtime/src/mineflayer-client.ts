@@ -33,6 +33,8 @@ import {
   travelRouteCapabilityInputSchema,
   tradeVillagerCapabilityInputSchema,
   tradeVillagerCapabilityOutputSchema,
+  scanBlocksCapabilityInputSchema,
+  scanBlocksCapabilityOutputSchema,
   siteObserveCapabilityInputSchema,
   siteObserveCapabilityOutputSchema,
   shelterDigCapabilityInputSchema,
@@ -629,6 +631,12 @@ export class MineflayerBotClient implements BotClient {
       return this.invokeSiteObservation(request);
     }
     if (
+      request.capability === "world.read" &&
+      request.operation === "world.scan-blocks-safe"
+    ) {
+      return this.invokeScanBlocks(request);
+    }
+    if (
       request.capability === "world.interact" &&
       request.operation === "shelter.dig-safe"
     ) {
@@ -649,6 +657,48 @@ export class MineflayerBotClient implements BotClient {
     this.assertServerProfileMatch(input.data.candidate.serverProfileId);
     this.assertDimensionMatch(input.data.candidate.dimension);
     return siteObserveCapabilityOutputSchema.parse(observeSite(this.bot, this.serverProfileId!, input.data));
+  }
+
+  /**
+   * 只读方块扫描。与 `invokeCollectBlocks` 共用 registry.blocksByName →
+   * findBlocks → blockAt 这条链，但到 blockAt 就停：不设 canDig、不动
+   * pathfinder、不碰背包。`complete` 记录的是这条链有没有走完——findBlocks
+   * 报了坐标而 blockAt 读不到（区块未加载）时，那一项进不了 matches，
+   * 于是 complete 为 false。把它当成"附近没有"会让上层误判。
+   */
+  private async invokeScanBlocks(request: SkillCapabilityRequest): Promise<unknown> {
+    const input = scanBlocksCapabilityInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    this.assertDimensionMatch(input.data.dimension);
+    const registry = this.bot.registry as unknown as {
+      blocksByName?: Record<string, { id: number } | undefined>;
+    };
+    const blockType = registry.blocksByName?.[input.data.blockName];
+    if (!blockType) throw new SkillFault("BLOCK_NAME_UNKNOWN");
+    const origin = this.bot.entity?.position;
+    if (!origin) throw new SkillFault("SKILL_CAPABILITY_FAILED");
+    const positions = this.bot.findBlocks({
+      matching: blockType.id,
+      maxDistance: input.data.maxDistance,
+      count: input.data.maxCount,
+    });
+    const matches = positions
+      .filter((position) => this.bot.blockAt(position) !== null)
+      .map((position) => ({
+        x: Math.floor(position.x),
+        y: Math.floor(position.y),
+        z: Math.floor(position.z),
+        distance: origin.distanceTo(position),
+      }))
+      .sort((left, right) => left.distance - right.distance);
+    return scanBlocksCapabilityOutputSchema.parse({
+      blockName: input.data.blockName,
+      dimension: input.data.dimension,
+      matches,
+      targetsFound: positions.length,
+      complete: matches.length === positions.length,
+    });
   }
 
   private async invokeShelterDig(request: SkillCapabilityRequest): Promise<unknown> {

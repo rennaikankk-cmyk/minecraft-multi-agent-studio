@@ -79,6 +79,17 @@ export {
   collectBlockStateSchema,
 } from "./builtin/collect-block.js";
 export {
+  SCAN_BLOCKS_TIMEOUT_MS,
+  SCAN_MAX_COUNT,
+  SCAN_MAX_DISTANCE,
+  scanBlocksCapabilityInputSchema,
+  scanBlocksCapabilityOutputSchema,
+  scanBlocksInputSchema,
+  scanBlocksOutputSchema,
+  scanBlocksSkill,
+  scanBlocksStateSchema,
+} from "./builtin/scan-blocks.js";
+export {
   blockCenterDistance,
   blockWithinPolicyReach,
   type BlockCoordinate,
