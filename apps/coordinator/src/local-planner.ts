@@ -26,7 +26,9 @@ import {
   type PlanStep,
   type PlannerInventory,
   type StepOutcome,
+  type SupervisionResult,
 } from "@minecraft-studio/skills";
+import type { AppLogger } from "@minecraft-studio/observability";
 import { z } from "zod";
 
 import type { BotRegistry, BotRegistryRecord } from "./bot-registry.js";
@@ -399,13 +401,26 @@ export type LocalPlannerErrorCode =
   | "SKILL_INVOCATION_INVALID";
 
 export class LocalPlannerError extends Error {
+  /** Plan step the failure came from, when the failure had one. Log-only. */
+  readonly stepIndex?: number;
+  /** Skill the failing step was bound to, when it had been bound. Log-only. */
+  readonly stepSkillId?: string;
+
   constructor(
     readonly code: LocalPlannerErrorCode,
     message: string,
-    options?: Readonly<{ cause?: unknown }>,
+    options?: Readonly<{
+      cause?: unknown;
+      stepIndex?: number;
+      stepSkillId?: string;
+    }>,
   ) {
     super(message, options);
     this.name = "LocalPlannerError";
+    if (options?.stepIndex !== undefined) this.stepIndex = options.stepIndex;
+    if (options?.stepSkillId !== undefined) {
+      this.stepSkillId = options.stepSkillId;
+    }
   }
 }
 
@@ -427,6 +442,13 @@ export type CoordinatorLocalPlannerOptions = Readonly<{
   transport: SkillInvocationTransport;
   coordinatorInstanceId: string;
   actorId?: string;
+  /**
+   * Diagnostic sink for the step ladder.  Without it a failed multi-step goal
+   * is only visible as one coarse code at the control link, and the per-step
+   * outcome lives solely in the Runtime's own log — which is a different
+   * process, and the wrong place to start a triage.
+   */
+  logger?: AppLogger;
   now?: () => Date;
   randomId?: () => string;
 }>;
@@ -817,8 +839,10 @@ export class CoordinatorLocalPlanner {
       retryDecision.botId !== request.botId ||
       retryDecision.taskId !== request.taskId
     ) {
+      this.logRetry(request, itemName, "discarded", retryDecision.action);
       return null;
     }
+    this.logRetry(request, itemName, "accepted", retryDecision.action);
     return this.planItemsAndDispatch(
       request,
       retryDecision,
@@ -976,6 +1000,7 @@ export class CoordinatorLocalPlanner {
         },
       },
     );
+    this.logSupervision(request, plan.steps, supervision);
     this.assertWithinDeadline(deadlineMs, request.signal);
     const failure = supervision.failure;
     const observedLast = last as LastSkillResult | null;
@@ -987,23 +1012,35 @@ export class CoordinatorLocalPlanner {
         observedLast.result.payload.outcome !== "completed"
           ? observedLast
           : null;
+      const stepContext = {
+        stepIndex: failure.stepIndex,
+        ...(failedResult
+          ? { stepSkillId: failedResult.invocation.payload.skillId }
+          : {}),
+      };
       if (failure.errorCode === "STEP_TARGET_NOT_FOUND") {
         throw new LocalPlannerError(
           "STEP_TARGET_NOT_FOUND",
           "A trusted world target was not available for the next plan step.",
+          stepContext,
         );
       }
       if (
         failure.errorCode === "PLAN_STEP_DISPATCH_UNAVAILABLE" ||
         failure.errorCode === "SKILL_INVOCATION_INVALID"
       ) {
-        throw new LocalPlannerError(failure.errorCode, failure.errorCode);
+        throw new LocalPlannerError(
+          failure.errorCode,
+          failure.errorCode,
+          stepContext,
+        );
       }
       throw new LocalPlannerError(
         "PLANNER_GOAL_EXECUTION_FAILED",
         failedResult
           ? skillResultErrorCode(failedResult.result)
           : failure.errorCode,
+        stepContext,
       );
     }
     if (observedLast === null) {
@@ -1270,6 +1307,84 @@ export class CoordinatorLocalPlanner {
         "PLANNER_TIMEOUT",
         "Local planner exceeded or cancelled its total request deadline.",
       );
+    }
+  }
+
+  /**
+   * Records whether the narrowed re-ask overturned a declined acquisition
+   * goal.  The retry is otherwise invisible: a discarded one looks exactly
+   * like a first-pass noop from outside the planner.
+   */
+  private logRetry(
+    request: LocalPlanRequest,
+    itemName: string,
+    disposition: "accepted" | "discarded",
+    retriedAction: string,
+  ): void {
+    const logger = this.options.logger;
+    if (!logger) return;
+    try {
+      logger.info("coordinator_planner_plan_items_retry", {
+        traceId: request.traceId,
+        taskId: request.taskId,
+        botId: request.botId,
+        itemName,
+        disposition,
+        retriedAction,
+      });
+    } catch {
+      // Diagnostics must never change what the planner reports.
+    }
+  }
+
+  /**
+   * Emits the step ladder for one goal.  Only planner-derived values are
+   * recorded — step kinds, trusted item names, and outcome codes.  The
+   * operator goal, Skill inputs, and world coordinates stay out, so turning
+   * diagnostics on never widens what a log reader can see.
+   */
+  private logSupervision(
+    request: LocalPlanRequest,
+    steps: readonly PlanStep[],
+    supervision: SupervisionResult,
+  ): void {
+    const logger = this.options.logger;
+    if (!logger) return;
+    const fields = {
+      traceId: request.traceId,
+      taskId: request.taskId,
+      botId: request.botId,
+      plannedSteps: steps.length,
+      stepsCompleted: supervision.stepsCompleted,
+      repairStepsInserted: supervision.repairStepsInserted,
+      failureCode: supervision.failure?.errorCode ?? null,
+      failureCategory: supervision.failure?.category ?? null,
+      failureAction: supervision.failure?.action ?? null,
+      failureStepIndex: supervision.failure?.stepIndex ?? null,
+      failureItemName: supervision.failure?.itemName ?? null,
+      steps: supervision.events.map((event) => ({
+        kind: event.kind,
+        stepIndex: event.stepIndex,
+        itemName: event.itemName,
+        attempt: event.attempt,
+        execution: event.execution,
+        ...(event.errorCode === undefined ? {} : { errorCode: event.errorCode }),
+        ...(event.category === undefined ? {} : { category: event.category }),
+        ...(event.action === undefined ? {} : { action: event.action }),
+        ...(event.insertedSteps === undefined
+          ? {}
+          : { insertedSteps: event.insertedSteps }),
+        ...(event.reason === undefined ? {} : { reason: event.reason }),
+      })),
+    };
+    try {
+      if (supervision.completed) {
+        logger.info("coordinator_planner_goal_supervision", fields);
+      } else {
+        logger.warn("coordinator_planner_goal_supervision", fields);
+      }
+    } catch {
+      // Diagnostics must never change what the planner reports.
     }
   }
 }

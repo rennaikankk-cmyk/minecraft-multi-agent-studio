@@ -146,6 +146,7 @@ async function main(): Promise<void> {
       },
       transport: runtimeServer,
       coordinatorInstanceId: instanceId,
+      logger,
     });
   }
   if (goalPersistenceConfig) {

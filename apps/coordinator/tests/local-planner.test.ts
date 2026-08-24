@@ -382,6 +382,172 @@ describe("CoordinatorLocalPlanner", () => {
     expect(JSON.parse(retryOptions.prompt).availableSkills).toEqual([]);
   });
 
+  it("records the narrowed re-ask and the step ladder without leaking the goal or inputs", async () => {
+    const planning = planningRegistry();
+    const info = vi.fn();
+    const warn = vi.fn();
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => skillResult(invocation, "completed"));
+    const generate = vi.fn(async (options) =>
+      aiResult(
+        JSON.stringify(
+          options.requestId.endsWith(":plan-items-retry")
+            ? {
+                action: "plan_items",
+                botId: BOT_ID,
+                taskId: "task-01",
+                goals: [{ itemName: "crafting_table", count: 1 }],
+                reasonCode: "ADVANCE_TASK",
+              }
+            : {
+                action: "noop",
+                botId: BOT_ID,
+                taskId: "task-01",
+                reasonCode: "NO_SAFE_SKILL",
+              },
+        ),
+        options.requestId,
+      ),
+    );
+    const planner = new CoordinatorLocalPlanner({
+      ai: { generate },
+      registry: { get: () => planning.get(BOT_ID, NOW) },
+      transport: { sendSkillInvocation },
+      coordinatorInstanceId: "coordinator-01",
+      logger: { info, warn, error: vi.fn(), debug: vi.fn() } as never,
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    await expect(
+      planner.planAndDispatch(resourcePlanRequest()),
+    ).resolves.toMatchObject({ action: "skill_result" });
+
+    expect(info).toHaveBeenCalledWith("coordinator_planner_plan_items_retry", {
+      traceId: "trace-plan-01",
+      taskId: "task-01",
+      botId: BOT_ID,
+      itemName: "crafting_table",
+      disposition: "accepted",
+      retriedAction: "plan_items",
+    });
+    const supervision = info.mock.calls.find(
+      ([event]) => event === "coordinator_planner_goal_supervision",
+    );
+    expect(supervision?.[1]).toMatchObject({
+      taskId: "task-01",
+      plannedSteps: 3,
+      stepsCompleted: 3,
+      failureCode: null,
+    });
+    // Diagnostics must not become a second, wider disclosure channel than the
+    // prompt: the operator goal, Skill inputs, and coordinates stay out.
+    const logged = JSON.stringify(info.mock.calls);
+    expect(logged).not.toContain("nearby resources");
+    expect(logged).not.toContain("isolated-test");
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("records a discarded re-ask so a retried noop is not mistaken for a first-pass one", async () => {
+    const planning = planningRegistry();
+    const info = vi.fn();
+    const generate = vi.fn(async (options) =>
+      aiResult(
+        JSON.stringify(
+          options.requestId.endsWith(":plan-items-retry")
+            ? {
+                action: "plan_items",
+                botId: "other-bot",
+                taskId: "task-01",
+                goals: [{ itemName: "crafting_table", count: 1 }],
+                reasonCode: "ADVANCE_TASK",
+              }
+            : {
+                action: "noop",
+                botId: BOT_ID,
+                taskId: "task-01",
+                reasonCode: "NO_SAFE_SKILL",
+              },
+        ),
+        options.requestId,
+      ),
+    );
+    const planner = new CoordinatorLocalPlanner({
+      ai: { generate },
+      registry: { get: () => planning.get(BOT_ID, NOW) },
+      transport: { sendSkillInvocation: vi.fn() },
+      coordinatorInstanceId: "coordinator-01",
+      logger: { info, warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as never,
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    await expect(
+      planner.planAndDispatch(resourcePlanRequest()),
+    ).resolves.toMatchObject({ action: "noop" });
+    expect(info).toHaveBeenCalledWith("coordinator_planner_plan_items_retry", {
+      traceId: "trace-plan-01",
+      taskId: "task-01",
+      botId: BOT_ID,
+      itemName: "crafting_table",
+      disposition: "discarded",
+      retriedAction: "plan_items",
+    });
+  });
+
+  it("carries the failing step index and skill on a goal execution failure", async () => {
+    const planning = planningRegistry();
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) =>
+      invocation.payload.skillId === "craft.item" &&
+      inputField(invocation.payload.input, "itemName") === "oak_planks"
+        ? skillResult(invocation, "failed", "SKILL_CAPABILITY_FAILED", 1)
+        : skillResult(invocation, "completed"),
+    );
+    const planner = resourcePlanner(planning, { sendSkillInvocation });
+
+    // The step index and skill are what triage needs first; the client still
+    // only ever sees the coarse code.
+    await expect(
+      planner.planAndDispatch(resourcePlanRequest()),
+    ).rejects.toMatchObject({
+      code: "PLANNER_GOAL_EXECUTION_FAILED",
+      // The index is the position in the repaired ladder, not the original
+      // plan: the first failure inserted a repair step ahead of this one.
+      stepIndex: 2,
+      stepSkillId: "craft.item",
+    });
+  });
+
+  it("still names the failing step when no skill result identifies it", async () => {
+    const planning = planningRegistry();
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) =>
+      invocation.payload.skillId === "collect.block"
+        ? skillResult(invocation, "completed", undefined, 1, {
+            blockName: "oak_log",
+            targetsFound: 0,
+            itemsCollected: 0,
+          })
+        : skillResult(invocation, "completed"),
+    );
+    const planner = resourcePlanner(planning, { sendSkillInvocation });
+
+    // An empty collect completes, so no result is at fault; the supervisor
+    // fails the step that then had nothing to consume. Reporting a skill here
+    // would be an invention, so only the index is attached.
+    await expect(
+      planner.planAndDispatch(resourcePlanRequest()),
+    ).rejects.toMatchObject({
+      code: "PLANNER_GOAL_EXECUTION_FAILED",
+      stepIndex: 1,
+      stepSkillId: undefined,
+    });
+  });
+
   it("leaves an honest noop standing when the goal asks for no acquisition", async () => {
     const planning = planningRegistry();
     const sendSkillInvocation = vi.fn<

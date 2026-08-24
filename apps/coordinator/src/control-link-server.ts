@@ -1363,6 +1363,11 @@ export class ControlLinkServer {
         botId: request.payload.botId,
         clientId: request.payload.clientId,
         code: errorCode,
+        // `code` is the coarse code the client is entitled to see; several
+        // distinct planner outcomes collapse into PLANNER_REJECTED. The
+        // originating code stays log-only so triage does not start by
+        // guessing which one it was.
+        ...plannerDiagnostics(cause),
       });
     } finally {
       clearTimeout(timer);
@@ -1890,6 +1895,29 @@ function safeLog(
   } catch {
     // Observability failures cannot alter authenticated transport state.
   }
+}
+
+/**
+ * Log-only detail about why a goal failed.  The planner's own code and the
+ * failing step index never reach the client, because the coarse code is the
+ * contract; they exist so triage starts from the real cause instead of from
+ * a mapped one.
+ */
+function plannerDiagnostics(
+  cause: unknown,
+): Readonly<Record<string, unknown>> {
+  if (cause instanceof LocalPlannerError) {
+    return {
+      plannerCode: cause.code,
+      ...(cause.stepIndex === undefined
+        ? {}
+        : { plannerStepIndex: cause.stepIndex }),
+      ...(cause.stepSkillId === undefined
+        ? {}
+        : { plannerStepSkillId: cause.stepSkillId }),
+    };
+  }
+  return { plannerCode: null };
 }
 
 function publicGoalResult(

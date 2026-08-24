@@ -921,6 +921,64 @@ describe("Coordinator Control Link server", () => {
     });
   });
 
+  it("logs the originating planner code and step without widening the client error", async () => {
+    const planAndDispatch = vi.fn(async () => {
+      throw new LocalPlannerError(
+        "PLANNER_GOAL_EXECUTION_FAILED",
+        "injected step failure",
+        { stepIndex: 1, stepSkillId: "craft.item" },
+      );
+    });
+    const { registry, url } = await startServer({
+      goalPlanner: { planAndDispatch },
+    });
+    registry.ingest(statusMessage(1), NOW);
+    const { socket, reader } = await authenticate(url);
+    await readSnapshot(reader);
+    const operationId = testUuid(989);
+    socket.send(JSON.stringify(controlLinkGoalRequestV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: testUuid(992),
+      timestamp: NOW.toISOString(),
+      type: "control.link.goal-request.v1",
+      payload: {
+        coordinatorInstanceId: "coordinator-test",
+        clientId: CLIENT_ID,
+        controlApiInstanceId: CONTROL_API_INSTANCE_ID,
+        operationId,
+        taskId: operationId,
+        botId: BOT_ID,
+        actorId: "operator-01",
+        operatorGoal: "采集附近的木材",
+        timeoutMs: 30_000,
+        issuedAt: NOW.toISOString(),
+        expiresAt: new Date(NOW.getTime() + 35_000).toISOString(),
+      },
+    })));
+
+    // The wire keeps the coarse code, so no planner internals leak to the
+    // client; the log is where triage learns which failure it actually was.
+    let failure: any;
+    await vi.waitFor(async () => {
+      failure = await reader.next();
+      expect(failure).toMatchObject({
+        type: "control.link.goal-response.v1",
+        ok: false,
+        payload: { operationId, errorCode: "PLANNER_REJECTED" },
+      });
+    });
+    expect(JSON.stringify(failure)).not.toContain("craft.item");
+    expect(logger.warn).toHaveBeenCalledWith(
+      "coordinator_control_link_goal_failed",
+      expect.objectContaining({
+        code: "PLANNER_REJECTED",
+        plannerCode: "PLANNER_GOAL_EXECUTION_FAILED",
+        plannerStepIndex: 1,
+        plannerStepSkillId: "craft.item",
+      }),
+    );
+  });
+
   it("aborts an active goal when the Coordinator stops", async () => {
     let receivedSignal: AbortSignal | undefined;
     const baseStore = testGoalStore();
