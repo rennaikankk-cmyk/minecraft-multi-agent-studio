@@ -393,7 +393,9 @@ async function main() {
   const catalog = benchmarkCatalog();
   const plannedItems = benchmarkPlannedItems(catalog);
   const generationSchema = buildLocalPlannerGenerationSchema(catalog, plannedItems);
-  const decisionJsonSchema = z.toJSONSchema(generationSchema);
+  const decisionJsonSchema = config.provider === "vllm"
+    ? sanitizeVllmJsonSchema(z.toJSONSchema(generationSchema))
+    : z.toJSONSchema(generationSchema);
   const discovery = await discover(config);
   const missing = config.models.filter(
     (model) => !findDiscoveredModel(discovery, model),
@@ -463,6 +465,16 @@ async function main() {
     })),
   }, null, 2)}\n`);
   process.stderr.write(`Planner model benchmark report: ${config.outputPath}\n`);
+}
+
+function sanitizeVllmJsonSchema(value) {
+  if (Array.isArray(value)) return value.map(sanitizeVllmJsonSchema);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key !== "propertyNames")
+      .map(([key, entry]) => [key, sanitizeVllmJsonSchema(entry)]),
+  );
 }
 
 async function benchmarkModel({

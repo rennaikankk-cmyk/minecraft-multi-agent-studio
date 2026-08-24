@@ -1,6 +1,16 @@
 import type { AIAdapter, GenerateOptions, GenerateResult, HealthResult } from '../types/adapter.js';
 import { z } from 'zod';
 
+function sanitizeVllmJsonSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sanitizeVllmJsonSchema);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key !== 'propertyNames')
+      .map(([key, entry]) => [key, sanitizeVllmJsonSchema(entry)]),
+  );
+}
+
 const chatCompletionResponseSchema = z
   .object({
     choices: z
@@ -110,7 +120,7 @@ export class VLLMAdapter implements AIAdapter {
                   json_schema: {
                     name: 'structured_response',
                     strict: true,
-                    schema: z.toJSONSchema(request.schema),
+                    schema: sanitizeVllmJsonSchema(z.toJSONSchema(request.schema)),
                   },
                 },
               }

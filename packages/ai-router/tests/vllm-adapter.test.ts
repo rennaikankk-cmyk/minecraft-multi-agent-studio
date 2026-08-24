@@ -108,6 +108,35 @@ describe('VLLMAdapter', () => {
     });
   });
 
+  it('removes JSON Schema propertyNames unsupported by vLLM grammar compilation', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { content: '{"action":"noop","labels":{}}' } }],
+          usage: { prompt_tokens: 12, completion_tokens: 5 },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = new VLLMAdapter('http://127.0.0.1:18100', 'test-model');
+
+    await adapter.generate({
+      prompt: 'plan',
+      maxTokens: 64,
+      temperature: 0,
+      timeoutMs: 5_000,
+      traceId: 'trace-vllm-property-names',
+      schema: z.object({
+        action: z.literal('noop'),
+        labels: z.record(z.string(), z.string()),
+      }).strict(),
+    });
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(JSON.stringify(body.response_format.json_schema.schema)).not.toContain('propertyNames');
+  });
+
   it('rejects malformed successful responses instead of returning invented defaults', async () => {
     vi.stubGlobal(
       'fetch',
