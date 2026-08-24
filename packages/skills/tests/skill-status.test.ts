@@ -183,8 +183,11 @@ describe("SKILLS.md is a rendering of the catalog, not a second copy", () => {
     expect(correct, "registry outgrew this test's numeral table").toBeDefined();
     // "两" 是 2 的另一种口语写法，两种都得认，否则改文档的人会被迫写得别扭。
     const accepted = new Set(correct === "二" ? ["二", "两"] : [correct]);
+    // 阿拉伯数字也要认。此前这条只扫中文数字，而文档写的是"20 个技能"，
+    // 于是注册表长到 21 时这条断言一个都没匹配上，空转着报绿。
+    accepted.add(String(builtinSkills.length));
     for (const [claim, spelled] of doc.matchAll(
-      /([零一两二三四五六七八九十]+)个(?:内建)?\s*(?:Skill|技能)/gmu,
+      /(\d+|[零一两二三四五六七八九十]+)\s*个(?:内建)?\s*(?:Skill|技能)/gmu,
     )) {
       expect(
         accepted.has(spelled),

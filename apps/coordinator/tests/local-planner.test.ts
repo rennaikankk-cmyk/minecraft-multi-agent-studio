@@ -6,6 +6,7 @@ import type {
   SkillExecutionResultV1,
   SkillJsonValue,
 } from "@minecraft-studio/protocol";
+import { vanillaResourceRecipes } from "@minecraft-studio/skills";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
@@ -20,6 +21,7 @@ import {
   LocalPlannerError,
   type LocalPlanRequest,
   plannedAcquisitionGoalItem,
+  plannedItemGoalAliasCoverage,
   type SkillInvocationTransport,
 } from "../src/local-planner.js";
 import {
@@ -1435,6 +1437,72 @@ describe("plannedAcquisitionGoalItem", () => {
 
   it("declines an item outside the trusted reachable set", () => {
     expect(plannedAcquisitionGoalItem("Craft one beacon.", reachable)).toBeNull();
+  });
+
+  it("recognizes Chinese goals for every item the resource graph can reach", () => {
+    // 别名表此前只覆盖四个物品，于是"做一个熔炉"这种规划器完全推得出的目标
+    // 会被判成"没提到可达物品"而降级成 noop。缺的是这张表，不是规划能力。
+    const graphItems = vanillaResourceRecipes.map((recipe) => recipe.itemName);
+    for (const itemName of graphItems) {
+      expect(
+        plannedItemGoalAliasCoverage,
+        `${itemName} is reachable but has no goal alias`,
+      ).toContain(itemName);
+    }
+  });
+
+  it("never lists an alias for an item the planner cannot actually reach", () => {
+    // 反向那半同样要成立：认得出一个规划器推不出来的名字，只会把目标带到
+    // 一次注定失败的派发上，而不是当场如实拒绝。
+    const graphItems = new Set(
+      vanillaResourceRecipes.map((recipe) => recipe.itemName),
+    );
+    for (const itemName of plannedItemGoalAliasCoverage) {
+      expect(graphItems.has(itemName), `${itemName} has an alias but is unreachable`).toBe(
+        true,
+      );
+    }
+  });
+
+  it("resolves a Chinese goal for a newly covered item end to end", () => {
+    const reachableGraph = vanillaResourceRecipes.map((recipe) => recipe.itemName);
+    expect(plannedAcquisitionGoalItem("做一个熔炉", reachableGraph)).toBe("furnace");
+    expect(plannedAcquisitionGoalItem("采集一些圆石", reachableGraph)).toBe(
+      "cobblestone",
+    );
+    expect(plannedAcquisitionGoalItem("合成一把石镐", reachableGraph)).toBe(
+      "stone_pickaxe",
+    );
+    // 可达集合仍然是闸门：别名认得出"钻石剑"，但调用方没把它列为可达时照样拒绝。
+    expect(plannedAcquisitionGoalItem("合成一把钻石剑", ["furnace"])).toBeNull();
+  });
+
+  it("resolves a tiered item whose name contains a shorter reachable name", () => {
+    // "钻石镐"里含着"钻石"，"diamond chestplate"里含着"diamond"，两者都可达。
+    // 唯一命中规则会把这句毫不含糊的目标算成两次命中而降级 noop——含糊的不是
+    // 操作者，是把包含关系当成了两个独立请求。
+    const reachableGraph = vanillaResourceRecipes.map((recipe) => recipe.itemName);
+    expect(plannedAcquisitionGoalItem("合成一把钻石镐", reachableGraph)).toBe(
+      "diamond_pickaxe",
+    );
+    expect(
+      plannedAcquisitionGoalItem("Craft a diamond chestplate.", reachableGraph),
+    ).toBe("diamond_chestplate");
+  });
+
+  it("still declines when the shorter name is also asked for on its own", () => {
+    // 这一半必须保住："钻石"出现在"钻石镐"覆盖不到的位置，说明操作者真的提了
+    // 两样东西，而 plan_items 只带一个目标，替他挑一个就是发明意图。
+    const reachableGraph = vanillaResourceRecipes.map((recipe) => recipe.itemName);
+    expect(
+      plannedAcquisitionGoalItem("挖点钻石，再合成一把钻石镐", reachableGraph),
+    ).toBeNull();
+    expect(
+      plannedAcquisitionGoalItem(
+        "Gather diamond, then craft a diamond sword.",
+        reachableGraph,
+      ),
+    ).toBeNull();
   });
 });
 

@@ -288,8 +288,17 @@ export function buildLocalPlannerPlanItemsRetrySchema(
   );
 }
 
+/**
+ * 取得类动词。中文一侧此前只认书面的"获取/制作/采集/收集/合成"，
+ * 而"做一个熔炉""挖点铁矿"这类最常见的口语说法一个都不匹配——目标里明明写了
+ * 可达物品，却因为动词没登记而降级成 noop。英文一侧早已同时收 make 与 build，
+ * 中文补齐到同一水位。
+ *
+ * 放宽的只是"这句话是不是在要东西"，不是任何安全判定：候选仍只能来自
+ * 确定性规划器已证明可达的集合，且必须唯一命中，否则照样返回 null。
+ */
 const PLAN_ITEMS_ACQUISITION_GOAL_PATTERN =
-  /(?:obtain|craft|make|build|gather|collect|acquire|获取|制作|采集|收集|合成)/iu;
+  /(?:obtain|craft|make|build|gather|collect|acquire|mine|smelt|获取|制作|采集|收集|合成|做|造|挖|烧)/iu;
 
 /**
  * Names the single trusted item a declined goal is asking to acquire, or null
@@ -308,11 +317,65 @@ export function plannedAcquisitionGoalItem(
   plannedItemNames: readonly string[],
 ): string | null {
   if (!PLAN_ITEMS_ACQUISITION_GOAL_PATTERN.test(operatorGoal)) return null;
-  const named = [...new Set(plannedItemNames)].filter((itemName) =>
-    planGoalItemNameSchema.safeParse(itemName).success &&
-    goalNamesPlannedItem(operatorGoal, itemName),
+  const matched = [...new Set(plannedItemNames)]
+    .filter((itemName) => planGoalItemNameSchema.safeParse(itemName).success)
+    .map((itemName) => ({
+      itemName,
+      spans: goalNameSpans(operatorGoal, itemName),
+    }))
+    .filter(({ spans }) => spans.length > 0);
+  const distinct = matched.filter(
+    ({ itemName, spans }) =>
+      !spans.every((span) =>
+        matched.some(
+          (other) =>
+            other.itemName !== itemName &&
+            other.spans.some((cover) => strictlyCovers(cover, span)),
+        ),
+      ),
   );
-  return named.length === 1 ? named[0]! : null;
+  return distinct.length === 1 ? distinct[0]!.itemName : null;
+}
+
+type GoalSpan = Readonly<{ start: number; end: number }>;
+
+/**
+ * True when `cover` contains `span` and is strictly longer, which is what makes
+ * the shorter name an artifact of the longer spelling rather than a request.
+ */
+function strictlyCovers(cover: GoalSpan, span: GoalSpan): boolean {
+  return (
+    cover.start <= span.start &&
+    span.end <= cover.end &&
+    cover.end - cover.start > span.end - span.start
+  );
+}
+
+/**
+ * Where the goal spells an item, across its own name and every registered
+ * alias.
+ *
+ * Positions, not just a yes/no, because reachable item names nest: "钻石镐"
+ * contains "钻石" and "diamond chestplate" contains "diamond". Counting those
+ * as two hits made the exactly-one rule decline the entire diamond tier —
+ * goals the deterministic planner derives a full chain for — as if the operator
+ * had named two items. Containment is a spelling fact, and the spans are what
+ * distinguish it from a genuine second request.
+ */
+function goalNameSpans(operatorGoal: string, itemName: string): GoalSpan[] {
+  const spans: GoalSpan[] = [];
+  for (const spelling of [
+    itemName,
+    itemName.replaceAll("_", " "),
+    ...(PLANNED_ITEM_GOAL_ALIASES[itemName] ?? []),
+  ]) {
+    for (const match of operatorGoal.matchAll(
+      goalTokenPattern(spelling, "giu"),
+    )) {
+      spans.push({ start: match.index, end: match.index + match[0].length });
+    }
+  }
+  return spans;
 }
 
 /**
@@ -321,12 +384,7 @@ export function plannedAcquisitionGoalItem(
  * one that assertPlanGoalsGrounded then rejects as ungrounded.
  */
 function goalNamesPlannedItem(operatorGoal: string, itemName: string): boolean {
-  const aliases = PLANNED_ITEM_GOAL_ALIASES[itemName] ?? [];
-  return (
-    containsGoalToken(operatorGoal, itemName) ||
-    containsGoalToken(operatorGoal, itemName.replaceAll("_", " ")) ||
-    aliases.some((alias) => containsGoalToken(operatorGoal, alias))
-  );
+  return goalNameSpans(operatorGoal, itemName).length > 0;
 }
 
 export type LocalPlannerDecision = z.infer<typeof localPlannerDecisionSchema>;
@@ -468,23 +526,95 @@ type LastSkillResult = Readonly<{
 const COORDINATOR_COLLECT_MAX_DISTANCE = 16;
 const REOBSERVE_TIMEOUT_MS = 5_000;
 const NON_IDEMPOTENT_RESULT_UNCERTAIN = "NON_IDEMPOTENT_RESULT_UNCERTAIN";
+/**
+ * 中文与自然英文说法 → 计划物品名。**只影响"这条目标提到了哪个物品"的判定**，
+ * 不放宽任何检查：候选永远来自确定性 GoalPlanner 已证明可达的集合，
+ * 命中之后仍要过 assertPlanGoalsGrounded。
+ *
+ * 覆盖面必须跟上 ResourceGraph。此前只登记了四个物品，于是"做一个熔炉"这类
+ * 目标在规划器明明推得出链条时仍然被判成"没提到任何可达物品"而降级 noop——
+ * 缺的不是能力，是这张表。下面的 `plannedItemGoalAliasCoverage` 把它变成测试。
+ */
 const PLANNED_ITEM_GOAL_ALIASES: Readonly<Record<string, readonly string[]>> =
   Object.freeze({
-    oak_log: Object.freeze(["oak log", "oak_log", "橡木原木", "原木"]),
+    oak_log: Object.freeze(["oak log", "oak_log", "橡木原木", "原木", "木头"]),
     oak_planks: Object.freeze([
       "oak planks",
       "oak_planks",
       "橡木木板",
       "木板",
     ]),
-    stick: Object.freeze(["stick", "sticks", "木棍"]),
+    stick: Object.freeze(["stick", "sticks", "木棍", "木棒"]),
     crafting_table: Object.freeze([
       "crafting table",
       "crafting_table",
       "工作台",
       "合成台",
     ]),
+    cobblestone: Object.freeze(["cobblestone", "圆石", "鹅卵石"]),
+    coal: Object.freeze(["coal", "煤炭", "煤"]),
+    raw_iron: Object.freeze(["raw iron", "raw_iron", "粗铁", "铁矿石"]),
+    iron_ingot: Object.freeze(["iron ingot", "iron_ingot", "铁锭"]),
+    diamond: Object.freeze(["diamond", "diamonds", "钻石"]),
+    furnace: Object.freeze(["furnace", "熔炉", "炉子"]),
+    wooden_pickaxe: Object.freeze([
+      "wooden pickaxe",
+      "wooden_pickaxe",
+      "木镐",
+      "木制镐",
+    ]),
+    stone_pickaxe: Object.freeze([
+      "stone pickaxe",
+      "stone_pickaxe",
+      "石镐",
+      "石制镐",
+    ]),
+    iron_pickaxe: Object.freeze([
+      "iron pickaxe",
+      "iron_pickaxe",
+      "铁镐",
+      "铁制镐",
+    ]),
+    diamond_pickaxe: Object.freeze([
+      "diamond pickaxe",
+      "diamond_pickaxe",
+      "钻石镐",
+    ]),
+    diamond_sword: Object.freeze([
+      "diamond sword",
+      "diamond_sword",
+      "钻石剑",
+    ]),
+    diamond_helmet: Object.freeze([
+      "diamond helmet",
+      "diamond_helmet",
+      "钻石头盔",
+    ]),
+    diamond_chestplate: Object.freeze([
+      "diamond chestplate",
+      "diamond_chestplate",
+      "钻石胸甲",
+    ]),
+    diamond_leggings: Object.freeze([
+      "diamond leggings",
+      "diamond_leggings",
+      "钻石护腿",
+    ]),
+    diamond_boots: Object.freeze([
+      "diamond boots",
+      "diamond_boots",
+      "钻石靴子",
+      "钻石鞋",
+    ]),
   });
+
+/**
+ * 别名表覆盖到的物品名，供测试与 ResourceGraph 对账。导出的是键集合而不是整张
+ * 表：调用方需要的是"哪些物品能被目标文本认出来"，不该拿到可改的别名列表。
+ */
+export const plannedItemGoalAliasCoverage: readonly string[] = Object.freeze(
+  Object.keys(PLANNED_ITEM_GOAL_ALIASES).sort(),
+);
 
 export class CoordinatorLocalPlanner {
   private readonly now: () => Date;
@@ -1769,11 +1899,27 @@ function dimensionsFromGoal(
 }
 
 function containsGoalToken(goal: string, token: string): boolean {
+  return goalTokenPattern(token, "iu").test(goal);
+}
+
+/**
+ * The one spelling rule every goal-token reader shares. `goalNameSpans` needs
+ * the pattern itself rather than a boolean, so it lives here instead of being
+ * rebuilt per caller — two copies of this rule would be two chances for the
+ * retry guard and the grounding check to disagree.
+ *
+ * The word boundaries are lookarounds rather than consumed characters so a
+ * match spans the token alone. Consuming a delimiter would fold it into the
+ * span and make a nested name look the same length as its container, which is
+ * exactly the comparison `strictlyCovers` depends on. Acceptance is unchanged:
+ * either way a token must not be flanked by an identifier character.
+ */
+function goalTokenPattern(token: string, flags: string): RegExp {
   const escaped = token.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
   return new RegExp(
-    `(?:^|[^A-Za-z0-9_])${escaped}(?:$|[^A-Za-z0-9_])`,
-    "iu",
-  ).test(goal);
+    `(?<![A-Za-z0-9_])${escaped}(?![A-Za-z0-9_])`,
+    flags,
+  );
 }
 
 function boundedAbortSignal(

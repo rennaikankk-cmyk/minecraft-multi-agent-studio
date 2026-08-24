@@ -9,6 +9,7 @@ import {
   runtimeLinkClientProofInput,
   runtimeLinkServerProofInput,
   type BotHeartbeatV1,
+  type BotSkillCatalogV1,
   type BotStatusV1,
   type ControlAuthorizationContext,
   type RuntimeLinkChallengeV1,
@@ -459,6 +460,36 @@ describe("Coordinator Runtime Link server", () => {
       code: "RUNTIME_LINK_ABORTED",
     });
   });
+
+  it("logs which advertised skills a runtime actually offered", async () => {
+    // 目录此前只落进 registry。planner 的生成分支是由这份目录构建的，
+    // 所以"某个技能有没有被提供出去"必须有一个可读的面，否则注册漂移
+    // 只能靠提交一个目标去猜。
+    const { url } = await startServer();
+    const socket = await authenticate(url);
+    const catalog = skillCatalogMessage(1);
+    const acknowledgement = nextServerMessage(socket);
+    socket.send(JSON.stringify(catalog));
+    await acknowledgement;
+
+    expect(logger.info).toHaveBeenCalledWith(
+      "coordinator_runtime_link_skill_catalog",
+      {
+        traceId: catalog.traceId,
+        botId: BOT_ID,
+        runtimeInstanceId: RUNTIME_ID,
+        accepted: true,
+        reason: "accepted",
+        skillCount: 2,
+        availableCount: 1,
+        availableSkills: ["world.scan@1.0.0"],
+        unavailableSkills: ["mine.branch@1.0.0"],
+      },
+    );
+    // 目录日志不得复制世界内容或服务器身份：那是遥测泄露面，不是可观测性。
+    const logged = JSON.stringify((logger.info as ReturnType<typeof vi.fn>).mock.calls);
+    expect(logged).not.toContain("isolated-test");
+  });
 });
 
 async function startServer(
@@ -601,6 +632,56 @@ function heartbeatMessage(sequence: number): BotHeartbeatV1 {
       uptimeMs: sequence * 1_000,
       lastStatusSequence: null,
       currentTaskId: null,
+    },
+  };
+}
+
+function skillCatalogMessage(sequence: number): BotSkillCatalogV1 {
+  return {
+    schemaVersion: "1.0",
+    messageId: testUuid(1_500 + sequence),
+    traceId: "trace-runtime-catalog",
+    timestamp: NOW.toISOString(),
+    source: { service: "bot-runtime", instanceId: RUNTIME_ID },
+    botId: BOT_ID,
+    type: "bot.skill-catalog.v1",
+    payload: {
+      serverProfileId: "isolated-test",
+      runtimeInstanceId: RUNTIME_ID,
+      sequence,
+      observedAt: NOW.toISOString(),
+      minecraftVersion: "1.21.11",
+      protocolVersion: 774,
+      skills: [
+        {
+          skillId: "world.scan",
+          skillVersion: "1.0.0",
+          availability: "available",
+          verification: "unverified",
+          inputSchema: { type: "object", additionalProperties: false },
+          timeoutMs: 10_000,
+          idempotent: true,
+          selectedVariantId: "portable",
+          unavailableReasons: [],
+        },
+        {
+          skillId: "mine.branch",
+          skillVersion: "1.0.0",
+          availability: "unavailable",
+          verification: "unverified",
+          inputSchema: { type: "object", additionalProperties: false },
+          timeoutMs: 60_000,
+          idempotent: false,
+          selectedVariantId: null,
+          unavailableReasons: [
+            {
+              variantId: "portable",
+              code: "SERVER_CAPABILITY_UNKNOWN",
+              subject: "mine.runtime",
+            },
+          ],
+        },
+      ],
     },
   };
 }
