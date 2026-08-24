@@ -59,7 +59,7 @@ Conclusion: **partial native SM121/121a kernels**. CMake architecture acceptance
 Ornith command:
 
 ```powershell
-$env:LOCAL_AI_HUB_URL='http://127.0.0.1:18100'; $env:LOCAL_AI_MODEL='ornith-sm121-v5'; $env:AI_BENCH_OUTPUT='runtime-data/spark-phase2/evidence/spark-benchmark-ornith-baseline.json'; pnpm benchmark:spark
+$env:LOCAL_AI_HUB_URL='http://127.0.0.1:18100'; $env:LOCAL_AI_MODEL='/model'; $env:AI_BENCH_OUTPUT='runtime-data/spark-phase2/evidence/spark-benchmark-ornith-baseline.json'; pnpm benchmark:spark
 ```
 
 Qwen comparison command:
@@ -94,7 +94,7 @@ The sentinel validator therefore failed all three cases for both models because 
 Ornith command:
 
 ```powershell
-$env:AI_BENCH_PROVIDER='vllm'; $env:AI_BENCH_BASE_URL='http://127.0.0.1:18100'; $env:AI_BENCH_MODELS='ornith-sm121-v5'; $env:AI_BENCH_OUTPUT='runtime-data/spark-phase2/evidence/planner-benchmark-ornith-vllm-full.json'; pnpm build:control-plane; pnpm benchmark:planner-models
+$env:AI_BENCH_PROVIDER='vllm'; $env:AI_BENCH_BASE_URL='http://127.0.0.1:18100'; $env:AI_BENCH_MODELS='/model'; $env:AI_BENCH_OUTPUT='runtime-data/spark-phase2/evidence/planner-benchmark-ornith-vllm-full.json'; pnpm build:control-plane; pnpm benchmark:planner-models
 ```
 
 Qwen used the same command with model/output `qwen38-sm121-v5` / `planner-benchmark-qwen38-vllm-full.json`.
