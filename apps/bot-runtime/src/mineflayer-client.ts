@@ -182,11 +182,26 @@ const SAFE_FOOD_NAMES = new Set([
 ]);
 
 const COLLECT_INVENTORY_SYNC_TIMEOUT_MS = 1_000;
-// Mineflayer emits `diggingCompleted` after its local prediction, before the
-// server necessarily accepts the finish packet. Keep collection fail-closed
-// until an authoritative block update arrives.
+// Mineflayer emits `diggingCompleted` after its own local prediction — it writes
+// the finish packet, then sets the block to air itself, so its promise resolves
+// whether or not the server agreed. Collection stays fail-closed until the
+// server speaks for itself.
+//
+// Measured against the live server (1.21.8 / protocol 772), breaking `stone`:
+//   8967 diggingCompleted (mineflayer local) / bot.dig() resolved
+//   9018 <= acknowledge_player_digging {"sequenceId":0}
+// The accepted break produced no `block_change` and no `multi_block_change` at
+// the target at all. A block update at the target is therefore the server
+// *correcting* a break it refused, which is why the ack is the accept signal and
+// a non-air update is the reject signal.
 const COLLECT_SERVER_CONFIRM_TIMEOUT_MS = 1_500;
 const COLLECT_SERVER_DIG_RETRIES = 1;
+// An ack says the server processed the sequence, not that the block broke. A
+// refusal arrives immediately after as a correcting block update, so hold the
+// ack briefly before trusting it. Measured ack latency above was ~51 ms.
+const COLLECT_SERVER_CORRECTION_GRACE_MS = 300;
+// `block_dig` status 2 = finish digging; the pre-1.19 positional ack echoes it.
+const BLOCK_DIG_STATUS_FINISH = 2;
 
 type BlockPosition = Readonly<{ x: number; y: number; z: number }>;
 
@@ -226,28 +241,131 @@ function parseBlockChangePacket(packet: unknown): AuthoritativeBlockUpdate | nul
   return { position: { x, y, z }, stateId };
 }
 
+/**
+ * Decode one packed section record: `blockStateId << 12 | localX << 8 | localZ << 4 | localY`.
+ *
+ * Division rather than bitwise shifts: a state ID above 524287 pushes the packed
+ * value past 2^31, where JavaScript's bitwise operators would truncate to 32
+ * bits and silently produce a different block. `varlong` records also decode to
+ * a BigInt, which bitwise operators reject outright.
+ */
+function packedSectionRecord(value: unknown): Readonly<{
+  localX: number;
+  localY: number;
+  localZ: number;
+  stateId: number;
+}> | null {
+  const numeric =
+    typeof value === "bigint"
+      ? Number(value)
+      : typeof value === "string"
+        ? Number(value)
+        : finiteNumber(value);
+  if (
+    numeric === null ||
+    !Number.isFinite(numeric) ||
+    !Number.isInteger(numeric) ||
+    numeric < 0
+  ) {
+    return null;
+  }
+  const packedPosition = numeric % 4096;
+  return {
+    localX: Math.floor(packedPosition / 256) % 16,
+    localZ: Math.floor(packedPosition / 16) % 16,
+    localY: packedPosition % 16,
+    stateId: (numeric - packedPosition) / 4096,
+  };
+}
+
+/**
+ * Both wire encodings of `multi_block_change`, because they disagree completely:
+ *   - 1.8–1.15 sent one container per record (`horizontalPos`, absolute `y`,
+ *     `blockId`) alongside flat `chunkX` / `chunkZ`.
+ *   - 1.16+ sends a section-relative packed `varlong`/`varint` per record with a
+ *     `chunkCoordinates` bitfield carrying the section Y.
+ * Reading the container field names off a packed number yields `undefined` for
+ * every field, which dropped every batched update without a trace — the class of
+ * silent failure this repo keeps having to dig back out.
+ */
 function parseMultiBlockChangePackets(packet: unknown): AuthoritativeBlockUpdate[] {
   const record = asRecord(packet);
   const records = Array.isArray(record?.records) ? record.records : [];
   const chunkCoordinates = asRecord(record?.chunkCoordinates);
   const chunkX = finiteNumber(chunkCoordinates?.x ?? record?.chunkX);
-  const chunkY = finiteNumber(chunkCoordinates?.y);
+  const sectionY = finiteNumber(chunkCoordinates?.y);
   const chunkZ = finiteNumber(chunkCoordinates?.z ?? record?.chunkZ);
   if (chunkX === null || chunkZ === null) return [];
 
   const updates: AuthoritativeBlockUpdate[] = [];
   for (const entry of records) {
     const change = asRecord(entry);
-    const horizontalPos = finiteNumber(change?.horizontalPos);
-    const localY = finiteNumber(change?.y);
-    const stateId = finiteNumber(change?.blockId);
-    if (horizontalPos === null || localY === null || stateId === null) continue;
-    const x = chunkX * 16 + ((horizontalPos >> 4) & 0xf);
-    const z = chunkZ * 16 + (horizontalPos & 0xf);
-    const y = (chunkY === null ? 0 : chunkY * 16) + localY;
-    updates.push({ position: { x, y, z }, stateId });
+    if (change) {
+      const horizontalPos = finiteNumber(change.horizontalPos);
+      const absoluteY = finiteNumber(change.y);
+      const stateId = finiteNumber(change.blockId);
+      if (horizontalPos === null || absoluteY === null || stateId === null) {
+        continue;
+      }
+      updates.push({
+        position: {
+          x: chunkX * 16 + (Math.floor(horizontalPos / 16) % 16),
+          y: absoluteY,
+          z: chunkZ * 16 + (horizontalPos % 16),
+        },
+        stateId,
+      });
+      continue;
+    }
+    const packed = packedSectionRecord(entry);
+    if (!packed) continue;
+    updates.push({
+      position: {
+        x: chunkX * 16 + packed.localX,
+        y: (sectionY ?? 0) * 16 + packed.localY,
+        z: chunkZ * 16 + packed.localZ,
+      },
+      stateId: packed.stateId,
+    });
   }
   return updates;
+}
+
+/**
+ * `acknowledge_player_digging` also has two shapes. 1.19+ carries only a
+ * `sequenceId`, which Mineflayer always writes as 0, so it cannot be matched to
+ * a specific dig — it is attributable only by the window it arrives in. 1.16–1.18
+ * name the block and say outright whether the action succeeded. Versions before
+ * 1.16 have no such packet, so there the confirmation falls back to block
+ * updates alone.
+ */
+type DiggingAck =
+  | Readonly<{ kind: "sequence" }>
+  | Readonly<{
+      kind: "positional";
+      position: BlockPosition;
+      status: number;
+      successful: boolean;
+    }>;
+
+function parseDiggingAckPacket(packet: unknown): DiggingAck | null {
+  const record = asRecord(packet);
+  if (!record) return null;
+  const location = asRecord(record.location);
+  if (location) {
+    const x = finiteNumber(location.x);
+    const y = finiteNumber(location.y);
+    const z = finiteNumber(location.z);
+    const status = finiteNumber(record.status);
+    if (x === null || y === null || z === null || status === null) return null;
+    return {
+      kind: "positional",
+      position: { x, y, z },
+      status,
+      successful: record.successful === true,
+    };
+  }
+  return finiteNumber(record.sequenceId) === null ? null : { kind: "sequence" };
 }
 
 type SafetyEntityState = Readonly<{
@@ -293,6 +411,160 @@ export function configureSafePathfinderMovements(
   movements.exclusionAreasBreak = [() => 100];
   movements.exclusionAreasPlace = [() => 100];
   return movements;
+}
+
+// findBlocks 只按距离排序取最近的命中，完全不问那些命中能不能靠近。实测
+// 生服出生点：半径 16 内有 12843 个 stone，其中只有 173 个有任何一面贴空气，
+// 最近的暴露面在 12.9 格外——所以交给采集器的三个"最近"目标永远是全埋的。
+// collectblock 用 GoalLookAtBlock 接近目标，它要求目标有一面能被射线看到，
+// 而安全移动配置给所有非目标方块 100 的破除代价，于是路径根本不存在：
+//   collect-config timeout=5000 radius=-1 status=noPath visited=9961
+// 把 thinkTimeout 抬到 20 秒也一样是 noPath（717ms），可见不是预算不够。
+// 同一份探针里最近的**暴露** stone 则 158ms 就搜出路径（visited=2836）。
+// 因此候选筛选必须带上"至少一面临空"这一条，否则上层的重试阶梯只是在
+// 反复瞄准一个永远到不了的坐标。
+const CANDIDATE_FACES: readonly Readonly<[number, number, number]>[] = [
+  [0, 1, 0],
+  [0, -1, 0],
+  [1, 0, 0],
+  [-1, 0, 0],
+  [0, 0, 1],
+  [0, 0, -1],
+];
+
+// 临空的那一面若是液体，靠近就等于往水里/岩浆里挖。mine-planner 已经把
+// lava/water 邻接判成 MINE_LAVA_ADJACENT（planning/mine-planner.ts:162），
+// 这里沿用同一条立场：液体不算可用的暴露面。上面那组暴露计数是用"只看
+// boundingBox 为 empty"测的，所以实际可用候选只会比它少，不会更多。
+const CANDIDATE_FACE_LIQUIDS = new Set([
+  "water",
+  "flowing_water",
+  "lava",
+  "flowing_lava",
+  "bubble_column",
+]);
+
+/**
+ * 判断一个方块是否至少有一面贴着可通行的非液体空间。
+ *
+ * 读不到邻居（区块未加载）时那一面不算暴露：fail-closed 比乐观猜测好，
+ * 因为猜错的代价是上层拿着一个到不了的目标烧完整条重试阶梯。
+ */
+export function hasReachableFace(
+  bot: Pick<Bot, "blockAt">,
+  position: Vec3,
+): boolean {
+  return CANDIDATE_FACES.some(([dx, dy, dz]) => {
+    const neighbor = bot.blockAt(position.offset(dx, dy, dz));
+    if (!neighbor || neighbor.boundingBox !== "empty") return false;
+    return !CANDIDATE_FACE_LIQUIDS.has(neighbor.name);
+  });
+}
+
+/**
+ * 供 findBlocks 的 useExtraInfo 使用的候选谓词。
+ *
+ * mineflayer 4.37.1 的 getFullMatchingFunction 在 useExtraInfo 是函数时走
+ * `matcher(block) && useExtraInfo(block)`（lib/plugins/blocks.js:145），
+ * 而距离排序与 count 截断都在匹配**之后**（同文件 199-206），所以这里过滤
+ * 得到的是"最近的可达候选"，而不是"最近若干个里恰好可达的那些"。
+ * 段级短路仍然只用基础 matcher，因此加这个谓词不会让扫描退化成全量遍历。
+ */
+function reachableCandidateFilter(
+  bot: Pick<Bot, "blockAt">,
+): (block: { position: Vec3 } | null) => boolean {
+  return (block) =>
+    block !== null && hasReachableFace(bot, block.position);
+}
+
+/**
+ * 手里/背包里有没有能真正收获该方块的工具。
+ *
+ * 必须在把目标交给 collectblock **之前**问这一句，否则进程会 OOM 崩掉，这是实测：
+ * mineBlock 调 bot.tool.equipForBlock(block, {requireHarvest:true,
+ * getFromChest:true, ...})（CollectBlock.js:74）；mineflayer-tool 的
+ * equipForBlock 在 requireHarvest 下按 `block.canHarvest(item?.type ?? null)`
+ * 过滤（Tool.js:115），列表空了就 `await retrieveTools(...)` 然后**递归调用自己**
+ * （Tool.js:121-127）；而 retrieveTools 在 chestLocations 为空时整个 while 循环
+ * 一次都不进，直接 resolve 而不是抛错（Inventory.js:48）。我们又把
+ * chestLocations 恒置为空（入库是 container.transfer 的职责）。于是列表永远是空的，
+ * 递归永远不终止。
+ *
+ * equip-probe 直接调这一个函数测得：石头 + 空背包 + chestLocations=[] →
+ * 2001 层递归只用了 15ms（约 133k 层/秒），每层还留着一份
+ * `[...bot.inventory.items()]` 拷贝；对照组把 getFromChest 关掉则 0ms 内以
+ * NoItem 拒绝。这解释了两次探针崩溃的完整形态：heap 在寻路阶段平稳在 45-95MB
+ * （path_update 停在 13、resets=0），随后 500ms 采样器**整个停止触发**（事件循环
+ * 被同步递归占满），而 GC 报到 1.9GB / 5.9GB，最后
+ * "Ineffective mark-compacts near heap limit"。
+ *
+ * 所以这里不是"提前失败更礼貌"，而是唯一能避免 OOM 的位置：一旦进了
+ * collectblock，递归发生在库内部，我们既拦不住也没有超时可言。
+ */
+export function canHarvestWithInventory(
+  bot: Pick<Bot, "inventory" | "heldItem">,
+  block: { canHarvest: (itemType: number | null) => boolean | null },
+): boolean {
+  // 空手也可能收获（泥土、沙子），所以 null 是一个必须参与判断的候选，
+  // 而不是"没工具"的同义词。
+  if (block.canHarvest(null) === true) return true;
+  return bot.inventory
+    .items()
+    .some((item) => block.canHarvest(item.type) === true);
+}
+
+// collect 自己的寻路预算，不再继承 invokeMovementGoto 写在 bot.pathfinder 上
+// 的全局值。三条实测把这两个数字定死了：
+//   1. astar.js:73 比的是**构造以来的墙钟**（`performance.now() - this.startTime
+//      > this.timeout`），不是累计计算时间——注释写的 "total compute time" 是错的。
+//      而 compute() 每次最多跑 tickTimeout 毫秒，且 monitorMovement 挂在
+//      physicsTick 上（index.js:166，约 50ms 一次）。于是占空比 =
+//      tickTimeout / 50ms：tickTimeout=20 时 thinkTimeout=5000 只买到约 2.0s
+//      的真实计算。reset-probe 实测 ticks=101、path_reset=0、astarTime=5000ms、
+//      visited=30511——一个搜索被饿死，不是重启风暴。
+//   2. 40 个暴露 stone 从固定原点全占空比排干（tickTimeout == timeout，wall ≈
+//      compute）：能解的 33 个 max=527ms min=181ms median=445ms，判不出路的 7 个
+//      在 671-678ms 内落定 noPath。所以真实需求是亚秒级。
+//   3. tickTimeout=40 是库默认值（index.js:40），把占空比从 40% 抬到约 80%。
+// 8000ms 墙钟 × 约 80% 占空比 ≈ 6.4s 计算，是实测最坏 527ms 的十倍余量，留给
+// 行进途中 blockUpdate/chunkColumnLoad 触发的 resetPath 重付成本（duty-probe
+// 实测 resets=11）。
+const COLLECT_PATH_THINK_TIMEOUT_MS = 8_000;
+const COLLECT_PATH_TICK_TIMEOUT_MS = 40;
+
+// 逐个候选排干一次有界的全占空比搜索，只留下答 success 的目标。
+// 为什么必须前置：collectblock 的 collectAll 对每个目标各做一次 goto，并把
+// 拒绝直接上抛（CollectBlock.js:31，第 33 行还留着 `// TODO:
+// options.ignoreNoPath`），所以**一个**到不了的目标就会中止整批采集。实测 40 个
+// 暴露候选里有 7 个是 noPath，而选择只按距离排序，撞上纯属运气。
+// tickTimeout == timeout 让切片背靠背跑，wall ≈ compute；1500ms 是实测最坏
+// 定论耗时 678ms 的两倍余量，且仍然有界。
+const COLLECT_PRECHECK_BUDGET_MS = 1_500;
+export function collectReachableTargets<TBlock extends { position: Vec3 }>(
+  bot: Pick<Bot, "pathfinder" | "entity" | "world">,
+  movements: Movements,
+  targets: readonly TBlock[],
+): TBlock[] {
+  const reachable: TBlock[] = [];
+  for (const target of targets) {
+    const generator = bot.pathfinder.getPathFromTo(
+      movements,
+      bot.entity.position,
+      new goals.GoalLookAtBlock(target.position, bot.world),
+      {
+        timeout: COLLECT_PRECHECK_BUDGET_MS,
+        tickTimeout: COLLECT_PRECHECK_BUDGET_MS,
+        searchRadius: -1,
+      },
+    );
+    let status: string | undefined;
+    for (const step of generator) {
+      status = step.result.status;
+      if (status !== "partial") break;
+    }
+    if (status === "success") reachable.push(target);
+  }
+  return reachable;
 }
 
 export function configurePathfinderMovements(
@@ -665,6 +937,11 @@ export class MineflayerBotClient implements BotClient {
    * pathfinder、不碰背包。`complete` 记录的是这条链有没有走完——findBlocks
    * 报了坐标而 blockAt 读不到（区块未加载）时，那一项进不了 matches，
    * 于是 complete 为 false。把它当成"附近没有"会让上层误判。
+   *
+   * matches 只含**至少一面临空**的方块，和 collect 的候选筛选是同一个谓词。
+   * 这不是"少报"：这份结果的用途就是给 collect.block 瞄准，报一个采集器
+   * 到不了的坐标比不报更糟。全埋的矿脉因此会显示为 0 命中——那也是诚实的，
+   * 因为在当前配置下（非目标方块破除代价 100）它确实取不到。
    */
   private async invokeScanBlocks(request: SkillCapabilityRequest): Promise<unknown> {
     const input = scanBlocksCapabilityInputSchema.safeParse(request.input);
@@ -678,10 +955,14 @@ export class MineflayerBotClient implements BotClient {
     if (!blockType) throw new SkillFault("BLOCK_NAME_UNKNOWN");
     const origin = this.bot.entity?.position;
     if (!origin) throw new SkillFault("SKILL_CAPABILITY_FAILED");
+    // 与 collect 用同一个可达谓词。若扫描把全埋的方块也报成 matches，
+    // 上层就会照着这份坐标去派 collect.block，而 collect 已经筛掉了它们——
+    // 两侧不一致的后果是规划器一直瞄准采集器根本不会接受的目标。
     const positions = this.bot.findBlocks({
       matching: blockType.id,
       maxDistance: input.data.maxDistance,
       count: input.data.maxCount,
+      useExtraInfo: reachableCandidateFilter(this.bot),
     });
     const matches = positions
       .filter((position) => this.bot.blockAt(position) !== null)
@@ -862,12 +1143,21 @@ export class MineflayerBotClient implements BotClient {
           input.data.radius,
         ),
       );
-    } catch {
+    } catch (error) {
       if (request.signal.aborted) {
         throw new SkillFault("SKILL_CANCELLED");
       }
       this.stopPathfinder();
-      throw new SkillFault("PATHFINDER_GOTO_FAILED");
+      // pathfinder 用 error.name 区分 NoPath / Timeout / GoalChanged /
+      // PathStopped（lib/goto.js:26-40），全丢掉就只剩一个"走不过去"，
+      // 运维侧再也分不出是没有路还是思考预算不够。屏蔽码保持不变，
+      // 原因走 onFault 进宿主日志。
+      throw new SkillFault(
+        "PATHFINDER_GOTO_FAILED",
+        error instanceof Error && error.message.trim().length > 0
+          ? `${error.name}: ${error.message.trim()}`
+          : "pathfinder rejected without a message.",
+      );
     } finally {
       request.signal.removeEventListener("abort", stopOnAbort);
       if (this.activePathInvocationId === request.invocationId) {
@@ -1090,38 +1380,67 @@ export class MineflayerBotClient implements BotClient {
       else wire.removeListener?.(event, listener);
     };
 
-    const waitForServerAir = (position: BlockPosition) => {
+    const waitForServerConfirmation = (position: BlockPosition) => {
       let settled = false;
       let timeout: ReturnType<typeof setTimeout> | null = null;
+      let grace: ReturnType<typeof setTimeout> | null = null;
       let resolvePromise: (confirmed: boolean) => void = () => {};
       const targetKey = blockPositionKey(position);
       const finish = (confirmed: boolean) => {
         if (settled) return;
         settled = true;
         if (timeout !== null) clearTimeout(timeout);
+        if (grace !== null) clearTimeout(grace);
         remove("block_change", onBlockChange);
         remove("multi_block_change", onMultiBlockChange);
+        remove("acknowledge_player_digging", onDiggingAck);
         signal.removeEventListener("abort", onAbort);
         resolvePromise(confirmed);
       };
-      const accept = (update: AuthoritativeBlockUpdate) => {
+      // An ack alone means the server processed the sequence. A refusal follows
+      // as a correcting block update, so wait out the grace window before
+      // treating the ack as proof — but let a real update settle it immediately.
+      const acceptAfterGrace = () => {
+        if (settled || grace !== null) return;
+        grace = setTimeout(() => finish(true), COLLECT_SERVER_CORRECTION_GRACE_MS);
+      };
+      const applyBlockUpdate = (update: AuthoritativeBlockUpdate) => {
         if (blockPositionKey(update.position) !== targetKey) return;
-        // Any authoritative non-air state is a rejection/correction for this
-        // dig attempt; let the bounded retry resend the finish packet.
+        // Air is the break; any other authoritative state at the target is the
+        // server putting the block back. Let the bounded retry resend the finish.
         finish(update.stateId === 0);
       };
       const onBlockChange = (packet: unknown) => {
         const update = parseBlockChangePacket(packet);
-        if (update) accept(update);
+        if (update) applyBlockUpdate(update);
       };
       const onMultiBlockChange = (packet: unknown) => {
-        for (const update of parseMultiBlockChangePackets(packet)) accept(update);
+        for (const update of parseMultiBlockChangePackets(packet)) {
+          applyBlockUpdate(update);
+        }
+      };
+      const onDiggingAck = (packet: unknown) => {
+        const ack = parseDiggingAckPacket(packet);
+        if (!ack) return;
+        if (ack.kind === "sequence") {
+          acceptAfterGrace();
+          return;
+        }
+        if (
+          blockPositionKey(ack.position) !== targetKey ||
+          ack.status !== BLOCK_DIG_STATUS_FINISH
+        ) {
+          return;
+        }
+        if (ack.successful) acceptAfterGrace();
+        else finish(false);
       };
       const onAbort = () => finish(false);
       const promise = new Promise<boolean>((resolve) => {
         resolvePromise = resolve;
         wire.on?.("block_change", onBlockChange);
         wire.on?.("multi_block_change", onMultiBlockChange);
+        wire.on?.("acknowledge_player_digging", onDiggingAck);
         signal.addEventListener("abort", onAbort, { once: true });
       });
       return {
@@ -1142,7 +1461,7 @@ export class MineflayerBotClient implements BotClient {
       const block = args[0];
       for (let attempt = 0; attempt <= COLLECT_SERVER_DIG_RETRIES; attempt += 1) {
         if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
-        const confirmation = waitForServerAir(block.position);
+        const confirmation = waitForServerConfirmation(block.position);
         try {
           await callOriginalDig(...args);
           confirmation.armTimeout();
@@ -1195,10 +1514,14 @@ export class MineflayerBotClient implements BotClient {
       throw new SkillFault("BLOCK_NAME_UNKNOWN");
     }
 
+    // useExtraInfo 而不是事后 filter：过滤发生在距离排序和 count 截断之前，
+    // 所以拿到的是最近的**可达**候选。若改成先取 maxCount 个再筛，全埋区域
+    // 里筛完就是空数组，等于把"附近有矿但都埋着"报成"附近没有矿"。
     const targetPositions = this.bot.findBlocks({
       matching: blockType.id,
       maxDistance: input.data.maxDistance,
       count: input.data.maxCount,
+      useExtraInfo: reachableCandidateFilter(this.bot),
     });
     const targets = targetPositions
       .map((position) => this.bot.blockAt(position))
@@ -1229,7 +1552,52 @@ export class MineflayerBotClient implements BotClient {
         ? 0
         : 100
     ];
+    // collectblock 的 collect() 在开跑前会把这两个标志按回 false 并调
+    // setMovements（CollectBlock.js:192-196），也就是插件会替我们关掉"不在下落方块
+    // 底下挖"和"不制造液体流动"。这两条是安全配置里唯一被外部改写的项，所以钉住
+    // 它们：写入变成静默 no-op，读出恒为 true。用 no-op setter 而不是只读属性，
+    // 是因为只读属性在严格模式下会让插件的赋值直接抛错，那等于把安全配置换成崩溃。
+    for (const flag of ["dontMineUnderFallingBlock", "dontCreateFlow"] as const) {
+      Object.defineProperty(movements, flag, {
+        get: () => true,
+        set: () => {},
+        configurable: true,
+        enumerable: true,
+      });
+    }
     this.bot.collectBlock.movements = movements;
+
+    // 工具闸门必须在交给 collectblock 之前。不是礼貌，是防 OOM：详见
+    // canHarvestWithInventory 的注释（equipForBlock 无界递归，实测 15ms 递归
+    // 2001 层，堆在几十秒内冲到 6GB 并崩溃）。
+    if (!canHarvestWithInventory(this.bot, targets[0]!)) {
+      throw new SkillFault(
+        "COLLECT_TOOL_MISSING",
+        `No inventory item can harvest ${input.data.blockName}.`,
+      );
+    }
+
+    // 预算显式写死，不再继承 invokeMovementGoto 最后一次写进去的全局值
+    // （thinkTimeout=5000 / tickTimeout=20）。继承意味着 collect 的行为取决于
+    // 调用顺序——同一个目标先走过 travel.route 就能成，反之被饿死。
+    this.bot.pathfinder.thinkTimeout = COLLECT_PATH_THINK_TIMEOUT_MS;
+    this.bot.pathfinder.tickTimeout = COLLECT_PATH_TICK_TIMEOUT_MS;
+
+    // 只把证明得出路径的目标交下去：collectAll 让 goto 的拒绝上抛，一个到不了的
+    // 目标会中止整批（实测 40 个暴露候选里 7 个 noPath）。
+    const reachableTargets = collectReachableTargets(
+      this.bot,
+      movements,
+      targets,
+    );
+    if (reachableTargets.length === 0) {
+      // 扫描说"有暴露面"，寻路说"都到不了"——这是世界状态，不是缺陷，
+      // 所以带着可达数报出去，让上层重新观察而不是原样重试。
+      throw new SkillFault(
+        "COLLECT_TARGET_UNREACHABLE",
+        `All ${targets.length} exposed ${input.data.blockName} candidates failed the reachability pre-check.`,
+      );
+    }
 
     const inventoryBefore = this.countInventoryTotal();
     this.activePathInvocationId = request.invocationId;
@@ -1245,13 +1613,37 @@ export class MineflayerBotClient implements BotClient {
         stopOnAbort();
         throw new SkillFault("SKILL_CANCELLED");
       }
-      await this.bot.collectBlock.collect(targets, { ignoreNoPath: false });
+      await this.bot.collectBlock.collect(reachableTargets, {
+        ignoreNoPath: false,
+      });
     } catch (error) {
       if (error instanceof SkillFault) throw error;
       if (request.signal.aborted) {
         throw new SkillFault("SKILL_CANCELLED");
       }
-      throw new SkillFault("COLLECT_BLOCKS_FAILED");
+      // 扫描已经证明目标在射程内，走到这里说明是"够不到/挖不动"，而不是"没有树"。
+      // 两者的处置完全不同，所以底层原因必须带走：屏蔽码留给协议，原因留给日志。
+      //
+      // 三个码而不是一个：collectblock 直接转抛 pathfinder 的 goto 错误
+      // （lib/CollectBlock.js:31 → pathfinder lib/goto.js:26-28），error.name
+      // 就是判据。码写成字面量而不是从 helper 返回，是因为分类器测试靠正则扫
+      // `new SkillFault("...")` 来发现新码（failure-classifier.test.ts:467）；
+      // 藏在 helper 里的码扫不到，就会静默漏收分类。
+      const reason =
+        error instanceof Error && error.message.trim().length > 0
+          ? error.message.trim()
+          : "collectBlock rejected without a message.";
+      const failure = error instanceof Error ? error.name : "";
+      // A* 搜完了，确实没有路：重新观察，别原样重试。
+      if (failure === "NoPath") {
+        throw new SkillFault("COLLECT_TARGET_UNREACHABLE", reason);
+      }
+      // 思考预算用尽，**没有**证明不可达。实测 tickTimeout 切片会把一个 700ms
+      // 就判得出 noPath 的搜索拖到 5010ms 报 Timeout，两者绝不能合并。
+      if (failure === "Timeout") {
+        throw new SkillFault("COLLECT_PATH_SEARCH_EXHAUSTED", reason);
+      }
+      throw new SkillFault("COLLECT_BLOCKS_FAILED", reason);
     } finally {
       request.signal.removeEventListener("abort", stopOnAbort);
       if (this.activePathInvocationId === request.invocationId) {
@@ -1270,7 +1662,9 @@ export class MineflayerBotClient implements BotClient {
     );
     return collectBlockCapabilityOutputSchema.parse({
       blockName: input.data.blockName,
-      targetsFound: targets.length,
+      // 报实际交给采集器的数量，而不是扫描命中数：扫到 8 个而只有 1 个走得到时，
+      // 报 8 会让上层的验收谓词（targetsFound >= runs）过得比世界实际情况宽松。
+      targetsFound: reachableTargets.length,
       itemsCollected,
     });
   }

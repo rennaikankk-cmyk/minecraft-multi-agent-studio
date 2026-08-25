@@ -739,6 +739,398 @@ describe("CoordinatorLocalPlanner", () => {
     expect(logged).not.toContain("isolated-test");
   });
 
+  /**
+   * 木镐以上的全部工具链此前都卡在 `place-station`：协调器填不出
+   * `world.place-block` 要的 `referenceBlock`，于是整条链在派发前就被拒。缺的从来
+   * 不是技能——`world.scan` 和 `world.place-block` 一直都在上报——缺的是把观测事实
+   * 喂给协调器。这条把整条链跑通，并钉住"参考方块必须来自观测"这一点。
+   */
+  it("observes a placement site and completes a station-backed craft chain", async () => {
+    const placement = placementRegistry();
+    const dispatched: string[] = [];
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => {
+      dispatched.push(invocation.payload.skillId);
+      return skillResult(invocation, "completed");
+    });
+    const planner = resourcePlanner(
+      placement,
+      { sendSkillInvocation },
+      [{ itemName: "wooden_pickaxe", count: 1 }],
+    );
+
+    await expect(
+      planner.planAndDispatch({
+        ...planRequest(),
+        operatorGoal: "Craft one wooden_pickaxe from nearby resources.",
+      }),
+    ).resolves.toMatchObject({
+      action: "skill_result",
+      result: { payload: { outcome: "completed" } },
+    });
+
+    // The scan comes before the placement, and the station-backed craft comes
+    // after it: the order is what makes the reference an observation.
+    const scanIndex = dispatched.indexOf("world.scan");
+    const placeIndex = dispatched.indexOf("world.place-block");
+    expect(scanIndex).toBeGreaterThanOrEqual(0);
+    expect(placeIndex).toBeGreaterThan(scanIndex);
+    expect(dispatched.lastIndexOf("craft.item")).toBeGreaterThan(placeIndex);
+
+    const scan = sendSkillInvocation.mock.calls.find(
+      ([invocation]) => invocation.payload.skillId === "world.scan",
+    )![0];
+    expect(scan.payload.input).toMatchObject({
+      blockName: "grass_block",
+      maxCount: 16,
+      maxDistance: 6,
+      dimension: "minecraft:overworld",
+      serverProfileId: "isolated-test",
+    });
+
+    // The reference is the in-window scanned block, not `position.y - 1`, and
+    // the face is the one surface a scanned ground block can be built on.
+    const placement_ = sendSkillInvocation.mock.calls.find(
+      ([invocation]) => invocation.payload.skillId === "world.place-block",
+    )![0];
+    expect(placement_.payload.input).toMatchObject({
+      itemName: "crafting_table",
+      referenceBlock: { x: 1_236, y: 63, z: -4_321 },
+      face: { x: 0, y: 1, z: 0 },
+      serverProfileId: "isolated-test",
+    });
+
+    // The station-backed craft binds to the Runtime's read-back position — one
+    // block above the reference — not to a coordinate the coordinator invented.
+    const stationCraft = sendSkillInvocation.mock.calls
+      .map(([invocation]) => invocation)
+      .find(
+        (invocation) =>
+          invocation.payload.skillId === "craft.item" &&
+          inputField(invocation.payload.input, "itemName") === "wooden_pickaxe",
+      )!;
+    expect(stationCraft.payload.input).toMatchObject({
+      itemName: "wooden_pickaxe",
+      craftingTable: { x: 1_236, y: 64, z: -4_321 },
+    });
+  });
+
+  it("binds the station craft to the Runtime's read-back, not reference + face", async () => {
+    const placement = placementRegistry();
+    // The Runtime reports a position the coordinator's own arithmetic would not
+    // produce. Trusting the read-back is the whole point: only the Runtime has
+    // confirmed a block is really standing there.
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) =>
+      invocation.payload.skillId === "world.place-block"
+        ? skillResult(invocation, "completed", undefined, 1, {
+            placed: true,
+            placedBlockName: "crafting_table",
+            position: { x: 1_240, y: 70, z: -4_300 },
+          })
+        : skillResult(invocation, "completed"),
+    );
+    const planner = resourcePlanner(
+      placement,
+      { sendSkillInvocation },
+      [{ itemName: "wooden_pickaxe", count: 1 }],
+    );
+
+    await expect(
+      planner.planAndDispatch({
+        ...planRequest(),
+        operatorGoal: "Craft one wooden_pickaxe from nearby resources.",
+      }),
+    ).resolves.toMatchObject({ action: "skill_result" });
+
+    const stationCraft = sendSkillInvocation.mock.calls
+      .map(([invocation]) => invocation)
+      .find(
+        (invocation) =>
+          invocation.payload.skillId === "craft.item" &&
+          inputField(invocation.payload.input, "itemName") === "wooden_pickaxe",
+      )!;
+    expect(stationCraft.payload.input).toMatchObject({
+      craftingTable: { x: 1_240, y: 70, z: -4_300 },
+    });
+  });
+
+  it("reports no target when every scanned block falls outside the reach window", async () => {
+    const placement = placementRegistry();
+    const initial = placement.get(BOT_ID, NOW)!;
+    let statusSequence = initial.currentStatus!.sequence;
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) =>
+      invocation.payload.skillId === "world.scan"
+        ? skillResult(invocation, "completed", undefined, 1, {
+            blockName: String(inputField(invocation.payload.input, "blockName")),
+            dimension: "minecraft:overworld",
+            // One under the bot's feet, one past placement reach. Neither is a
+            // site, so dispatching a placement would be a guess.
+            matches: [
+              { x: 1_234, y: 63, z: -4_321, distance: 1 },
+              { x: 1_240, y: 63, z: -4_321, distance: 6 },
+            ],
+            targetsFound: 2,
+            complete: true,
+          })
+        : skillResult(invocation, "completed"),
+    );
+    const planner = new CoordinatorLocalPlanner({
+      ai: {
+        generate: async (options) =>
+          aiResult(
+            JSON.stringify({
+              action: "plan_items",
+              botId: BOT_ID,
+              taskId: "task-01",
+              goals: [{ itemName: "wooden_pickaxe", count: 1 }],
+              reasonCode: "ADVANCE_TASK",
+            }),
+            options.requestId,
+          ),
+      },
+      registry: {
+        get: () => ({
+          ...initial,
+          currentStatus: {
+            ...initial.currentStatus!,
+            sequence: statusSequence,
+          },
+        }),
+      },
+      // A missing site is repairable, so the supervisor re-observes before it
+      // gives up. Without a reobserve transport the failure would surface as
+      // PLAN_STEP_DISPATCH_UNAVAILABLE and hide the real reason.
+      transport: {
+        sendSkillInvocation,
+        requestFreshStatus: async (
+          _botId,
+          _runtimeInstanceId,
+          afterStatusSequence,
+        ) => {
+          expect(afterStatusSequence).toBe(statusSequence);
+          statusSequence += 1;
+        },
+      },
+      coordinatorInstanceId: "coordinator-01",
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    await expect(
+      planner.planAndDispatch({
+        ...planRequest(),
+        operatorGoal: "Craft one wooden_pickaxe from nearby resources.",
+      }),
+    ).rejects.toMatchObject({ code: "STEP_TARGET_NOT_FOUND" });
+    // Every ground-block candidate was tried before reporting no site: giving up
+    // after the first name would report "no site" for a world that has one.
+    const scanned = new Set(
+      sendSkillInvocation.mock.calls
+        .filter(([invocation]) => invocation.payload.skillId === "world.scan")
+        .map(([invocation]) => inputField(invocation.payload.input, "blockName")),
+    );
+    expect(scanned.size).toBe(8);
+    expect(
+      sendSkillInvocation.mock.calls.some(
+        ([invocation]) => invocation.payload.skillId === "world.place-block",
+      ),
+    ).toBe(false);
+  });
+
+  it("does not accept a placement whose read-back names a different block", async () => {
+    const placement = placementRegistry();
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) =>
+      invocation.payload.skillId === "world.place-block"
+        ? skillResult(invocation, "completed", undefined, 1, {
+            placed: true,
+            placedBlockName: "dirt",
+            position: { x: 1_236, y: 64, z: -4_321 },
+          })
+        : skillResult(invocation, "completed"),
+    );
+    const planner = resourcePlanner(
+      placement,
+      { sendSkillInvocation },
+      [{ itemName: "wooden_pickaxe", count: 1 }],
+    );
+
+    // `placed: true` is only the Runtime's word that it tried. The station the
+    // next craft needs is proven by the read-back name, so a mismatch fails.
+    await expect(
+      planner.planAndDispatch({
+        ...planRequest(),
+        operatorGoal: "Craft one wooden_pickaxe from nearby resources.",
+      }),
+    ).rejects.toMatchObject({ code: "PLANNER_GOAL_EXECUTION_FAILED" });
+    expect(
+      sendSkillInvocation.mock.calls.some(
+        ([invocation]) =>
+          invocation.payload.skillId === "craft.item" &&
+          inputField(invocation.payload.input, "itemName") === "wooden_pickaxe",
+      ),
+    ).toBe(false);
+  });
+
+  it("still refuses smelting, and names the station that blocked it", async () => {
+    const placement = placementRegistry();
+    const info = vi.fn();
+    const warn = vi.fn();
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >();
+    const generate = vi.fn(async (options) =>
+      aiResult(
+        JSON.stringify({
+          action: "noop",
+          botId: BOT_ID,
+          taskId: "task-01",
+          reasonCode: "NO_SAFE_SKILL",
+        }),
+        options.requestId,
+      ),
+    );
+    const planner = new CoordinatorLocalPlanner({
+      ai: { generate },
+      registry: { get: () => placement.get(BOT_ID, NOW) },
+      transport: { sendSkillInvocation },
+      coordinatorInstanceId: "coordinator-01",
+      logger: { info, warn, error: vi.fn(), debug: vi.fn() } as never,
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    // Crafting a furnace is now reachable — its station is a crafting table.
+    // Smelting *with* one is not: placing a furnace is the easy half, and the
+    // `smelt` step after it still needs fuel accounting the coordinator cannot
+    // bind, so every item behind a furnace stays out.
+    await expect(
+      planner.planAndDispatch({
+        ...planRequest(),
+        operatorGoal: "Craft one iron_ingot from nearby resources.",
+      }),
+    ).resolves.toMatchObject({ action: "noop" });
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(sendSkillInvocation).not.toHaveBeenCalled();
+
+    const bindability = info.mock.calls.find(
+      ([event]) => event === "coordinator_planner_goal_bindability",
+    );
+    // The reason now names the station rather than the step kind: the placement
+    // Skills are advertised, so "unsupported kind" would be the wrong answer.
+    expect(
+      bindability?.[1].exclusionReasons["STATION_UNSUPPORTED:furnace"],
+    ).toBeGreaterThan(0);
+    const named = warn.mock.calls.find(
+      ([event]) => event === "coordinator_planner_goal_named_unbindable_item",
+    );
+    expect(named?.[1]).toMatchObject({
+      unbindableItems: ["iron_ingot=STATION_UNSUPPORTED:furnace"],
+    });
+  });
+
+  /**
+   * 熔炉这一项本身现在是可达的：它的工作站是工作台，而工作台已经能放置了。
+   * 这条把"新可达"钉住，免得下次有人为了让 iron_ingot 的排除更简单，
+   * 顺手把整个 furnace 也划到不可达里去。
+   */
+  it("offers the furnace item itself once placement is advertised", async () => {
+    const placement = placementRegistry();
+    const info = vi.fn();
+    const planner = new CoordinatorLocalPlanner({
+      ai: {
+        generate: async (options) =>
+          aiResult(
+            JSON.stringify({
+              action: "noop",
+              botId: BOT_ID,
+              taskId: "task-01",
+              reasonCode: "NO_SAFE_SKILL",
+            }),
+            options.requestId,
+          ),
+      },
+      registry: { get: () => placement.get(BOT_ID, NOW) },
+      transport: { sendSkillInvocation: vi.fn() },
+      coordinatorInstanceId: "coordinator-01",
+      logger: { info, warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as never,
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    await planner.planAndDispatch({
+      ...planRequest(),
+      operatorGoal: "Equip the best armor already in inventory.",
+    });
+
+    const bindability = info.mock.calls.find(
+      ([event]) => event === "coordinator_planner_goal_bindability",
+    );
+    // The station-backed tool tier is what placement unlocked, so the bindable
+    // count has to have grown past the four items the planning catalog reached.
+    expect(bindability?.[1].bindableCount).toBeGreaterThan(4);
+    expect(
+      bindability?.[1].exclusionReasons["SKILL_NOT_ADVERTISED:world.place-block"],
+    ).toBeUndefined();
+  });
+
+  it("records the reference block name but never the placement coordinate", async () => {
+    const placement = placementRegistry();
+    const info = vi.fn();
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => skillResult(invocation, "completed"));
+    const planner = new CoordinatorLocalPlanner({
+      ai: {
+        generate: async (options) =>
+          aiResult(
+            JSON.stringify({
+              action: "plan_items",
+              botId: BOT_ID,
+              taskId: "task-01",
+              goals: [{ itemName: "wooden_pickaxe", count: 1 }],
+              reasonCode: "ADVANCE_TASK",
+            }),
+            options.requestId,
+          ),
+      },
+      registry: { get: () => placement.get(BOT_ID, NOW) },
+      transport: { sendSkillInvocation },
+      coordinatorInstanceId: "coordinator-01",
+      logger: { info, warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as never,
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    await expect(
+      planner.planAndDispatch({
+        ...planRequest(),
+        operatorGoal: "Craft one wooden_pickaxe from nearby resources.",
+      }),
+    ).resolves.toMatchObject({ action: "skill_result" });
+
+    const site = info.mock.calls.find(
+      ([event]) => event === "coordinator_planner_placement_site_observed",
+    );
+    expect(site?.[1]).toMatchObject({
+      traceId: "trace-plan-01",
+      taskId: "task-01",
+      botId: BOT_ID,
+      referenceBlockName: "grass_block",
+    });
+    // A station coordinate is a base coordinate. Diagnostics stay narrower than
+    // the prompt, so the position is absent even though the planner holds it.
+    const logged = JSON.stringify(info.mock.calls);
+    expect(logged).not.toContain("1236");
+    expect(logged).not.toContain("isolated-test");
+  });
+
   it("keeps a retried decision under the same grounding and identity checks", async () => {
     const planning = planningRegistry();
     const sendSkillInvocation = vi.fn<
@@ -1923,7 +2315,11 @@ function planningRegistry(): BotRegistry {
   return planning;
 }
 
-function catalogEntry(skillId: string, inputSchema: Record<string, unknown>) {
+function catalogEntry(
+  skillId: string,
+  inputSchema: Record<string, unknown>,
+  idempotent = false,
+) {
   return {
     skillId,
     skillVersion: "1.0.0",
@@ -1931,10 +2327,101 @@ function catalogEntry(skillId: string, inputSchema: Record<string, unknown>) {
     verification: "unverified" as const,
     inputSchema,
     timeoutMs: 20_000,
-    idempotent: false,
+    idempotent,
     selectedVariantId: "portable",
     unavailableReasons: [],
   };
+}
+
+/**
+ * The planning catalog plus the two placement Skills, advertised with the same
+ * bounds the Runtime really advertises (`world.scan` maxCount 1..16, maxDistance
+ * 2..64; `world.place-block` face components ∈ {-1,0,1}). Advertising looser
+ * bounds here would let a test pass on an input the live Runtime rejects.
+ */
+function placementRegistry(): BotRegistry {
+  const planning = planningRegistry();
+  const now = NOW.toISOString();
+  const existing = planning.get(BOT_ID, NOW)!.skillCatalog!.skills;
+  planning.ingest({
+    schemaVersion: "1.0",
+    messageId: uuid(4),
+    traceId: "trace-registry",
+    timestamp: now,
+    source: { service: "bot-runtime", instanceId: RUNTIME_ID },
+    botId: BOT_ID,
+    type: "bot.skill-catalog.v1",
+    payload: {
+      serverProfileId: "isolated-test",
+      runtimeInstanceId: RUNTIME_ID,
+      sequence: 4,
+      observedAt: now,
+      minecraftVersion: "1.21.11",
+      protocolVersion: 774,
+      skills: [
+        ...existing,
+        catalogEntry(
+          "world.scan",
+          {
+            type: "object",
+            properties: {
+              blockName: { type: "string", minLength: 1, maxLength: 64 },
+              maxCount: { type: "integer", minimum: 1, maximum: 16 },
+              maxDistance: { type: "integer", minimum: 2, maximum: 64 },
+              dimension: { type: "string", minLength: 3, maxLength: 128 },
+              serverProfileId: { type: "string", minLength: 1, maxLength: 128 },
+            },
+            required: [
+              "blockName",
+              "maxCount",
+              "maxDistance",
+              "dimension",
+              "serverProfileId",
+            ],
+            additionalProperties: false,
+          },
+          true,
+        ),
+        catalogEntry("world.place-block", {
+          type: "object",
+          properties: {
+            itemName: { type: "string", minLength: 1, maxLength: 64 },
+            referenceBlock: {
+              type: "object",
+              properties: {
+                x: { type: "integer", minimum: -30_000_000, maximum: 30_000_000 },
+                y: { type: "integer", minimum: -2_048, maximum: 2_048 },
+                z: { type: "integer", minimum: -30_000_000, maximum: 30_000_000 },
+              },
+              required: ["x", "y", "z"],
+              additionalProperties: false,
+            },
+            face: {
+              type: "object",
+              properties: {
+                x: { enum: [-1, 0, 1] },
+                y: { enum: [-1, 0, 1] },
+                z: { enum: [-1, 0, 1] },
+              },
+              required: ["x", "y", "z"],
+              additionalProperties: false,
+            },
+            dimension: { type: "string", minLength: 3, maxLength: 128 },
+            serverProfileId: { type: "string", minLength: 1, maxLength: 128 },
+          },
+          required: [
+            "itemName",
+            "referenceBlock",
+            "face",
+            "dimension",
+            "serverProfileId",
+          ],
+          additionalProperties: false,
+        }),
+      ],
+    },
+  }, NOW);
+  return planning;
 }
 
 function aiResult(
@@ -2028,13 +2515,93 @@ function completedOutputForInvocation(
     return {
       itemName,
       requestedCount,
-      craftedCount:
-        itemName === "oak_planks" ? requestedCount * 4 : requestedCount,
+      craftedCount: requestedCount * craftYield(itemName),
       usedCraftingTable:
         inputField(invocation.payload.input, "craftingTable") !== null,
     };
   }
+  if (invocation.payload.skillId === "world.scan") {
+    return scanOutput(invocation, [TOO_CLOSE_MATCH, IN_WINDOW_MATCH]);
+  }
+  if (invocation.payload.skillId === "world.place-block") {
+    return placeBlockOutput(invocation);
+  }
   return {};
+}
+
+/**
+ * One craft run's output count, taken from the same recipe table the planner
+ * derives `producedCount` from. A flat "one run makes one item" fixture is not a
+ * simplification but a wrong Runtime: a `stick` run really yields 4, and a
+ * fixture that reports 1 makes the supervisor fail a step the world satisfied.
+ */
+function craftYield(itemName: string): number {
+  const recipe = vanillaResourceRecipes.find(
+    (candidate) => candidate.itemName === itemName,
+  );
+  return recipe?.yield ?? 1;
+}
+
+/**
+ * A scanned block under the bot's own feet. Building on it would place the
+ * station inside the bot, so the coordinator must skip it even though the scan
+ * legitimately reports it.
+ */
+const TOO_CLOSE_MATCH = Object.freeze({
+  x: 1_234,
+  y: 63,
+  z: -4_321,
+  distance: 1,
+});
+/** A solid block inside the placement window. */
+const IN_WINDOW_MATCH = Object.freeze({
+  x: 1_236,
+  y: 63,
+  z: -4_321,
+  distance: 3,
+});
+
+function scanOutput(
+  invocation: Parameters<typeof skillResult>[0],
+  matches: readonly Readonly<{
+    x: number;
+    y: number;
+    z: number;
+    distance: number;
+  }>[],
+): SkillJsonValue {
+  return {
+    blockName: String(inputField(invocation.payload.input, "blockName")),
+    dimension: String(inputField(invocation.payload.input, "dimension")),
+    matches: matches.map((match) => ({ ...match })),
+    targetsFound: matches.length,
+    complete: true,
+  };
+}
+
+/**
+ * The Runtime's read-back after a placement: reference + face, which is where
+ * the block physically lands. A test that wants to prove the coordinator uses
+ * this field rather than its own arithmetic overrides it.
+ */
+function placeBlockOutput(
+  invocation: Parameters<typeof skillResult>[0],
+): SkillJsonValue {
+  const reference = inputField(invocation.payload.input, "referenceBlock") as
+    | Record<string, number>
+    | undefined;
+  const face = inputField(invocation.payload.input, "face") as
+    | Record<string, number>
+    | undefined;
+  return {
+    placed: true,
+    placedBlockName: String(inputField(invocation.payload.input, "itemName")),
+    position: {
+      x: (reference?.x ?? 0) + (face?.x ?? 0),
+      y: (reference?.y ?? 0) + (face?.y ?? 0),
+      z: (reference?.z ?? 0) + (face?.z ?? 0),
+    },
+  };
 }
 
 function inputField(input: unknown, key: string): unknown {

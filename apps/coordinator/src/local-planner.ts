@@ -21,7 +21,6 @@ import {
 import {
   GoalPlanner,
   PlanSupervisor,
-  skillIdForStepKind,
   type GoalRequest,
   type PlanStep,
   type PlannerInventory,
@@ -534,9 +533,104 @@ type LastSkillResult = Readonly<{
   result: SkillExecutionResultV1;
 }>;
 
+/**
+ * The observed world facts one plan step is allowed to be bound against.
+ *
+ * Both fields are observations, never predictions. `placementSites` holds only
+ * positions the Runtime read back after confirming a block is really there, and
+ * `placementReference` holds a block a `world.scan` just returned. A step whose
+ * fact is absent binds to null and fails closed, which is what keeps the
+ * coordinator from asserting a workstation exists where it never looked.
+ */
+type PlanStepBinding = Readonly<{
+  placementSites: ReadonlyMap<string, PlacementPosition>;
+  placementReference: PlacementPosition | null;
+}>;
+
 const COORDINATOR_COLLECT_MAX_DISTANCE = 16;
 const REOBSERVE_TIMEOUT_MS = 5_000;
 const NON_IDEMPOTENT_RESULT_UNCERTAIN = "NON_IDEMPOTENT_RESULT_UNCERTAIN";
+
+/** The one face a scanned ground block can be built on without further observation. */
+const COORDINATOR_PLACEMENT_FACE = Object.freeze({ x: 0, y: 1, z: 0 });
+/**
+ * Stations the coordinator can place. `furnace` is deliberately absent: placing
+ * it is the easy half, and the `smelt` step that follows still needs fuel
+ * accounting and furnace interaction the coordinator cannot bind.
+ */
+const COORDINATOR_PLACEABLE_STATIONS: ReadonlySet<string> = new Set([
+  "crafting_table",
+]);
+/** Both are needed for any placement: one to observe the site, one to build on it. */
+const COORDINATOR_PLACEMENT_SKILLS = Object.freeze([
+  "world.scan",
+  "world.place-block",
+]);
+/**
+ * Ground blocks worth scanning for a placement reference. Every one is solid by
+ * name, so whichever the scan actually returns is an observed fact rather than
+ * an assumption about what the bot happens to be standing on.
+ */
+const COORDINATOR_PLACEMENT_GROUND_BLOCKS = Object.freeze([
+  "grass_block",
+  "dirt",
+  "stone",
+  "cobblestone",
+  "sand",
+  "gravel",
+  "coarse_dirt",
+  "podzol",
+]);
+const COORDINATOR_PLACEMENT_SCAN_MAX_COUNT = 16;
+const COORDINATOR_PLACEMENT_SCAN_MAX_DISTANCE = 6;
+/**
+ * A reference must be far enough not to be the block under the bot's own feet
+ * and near enough to stay inside placement reach. Outside this window the
+ * coordinator reports no site rather than dispatching a placement the Runtime
+ * would refuse.
+ */
+const COORDINATOR_PLACEMENT_MIN_DISTANCE = 2;
+const COORDINATOR_PLACEMENT_MAX_DISTANCE = 4.5;
+
+type PlacementPosition = Readonly<{ x: number; y: number; z: number }>;
+
+/**
+ * Why a plan step cannot be bound, or null when it can.
+ *
+ * The single rule shared by the advertised-item report and the pre-dispatch
+ * execution gate. Two copies of it drifted once already: a unit test observed
+ * `SKILL_NOT_ADVERTISED:world.place-block` while production observed
+ * `STEP_KIND_UNSUPPORTED:place-station` for the same goal, because each caller
+ * decided in its own order which gate to check first.
+ */
+function unbindableStepReason(
+  step: PlanStep,
+  advertised: ReadonlySet<string>,
+): string | null {
+  if (!advertised.has(step.skillId)) {
+    return `SKILL_NOT_ADVERTISED:${step.skillId}`;
+  }
+  if (step.kind === "mine") return null;
+  if (step.kind === "craft") {
+    if (step.station === null) return null;
+    return COORDINATOR_PLACEABLE_STATIONS.has(step.station)
+      ? placementSupportReason(advertised)
+      : `STATION_UNSUPPORTED:${step.station}`;
+  }
+  if (step.kind === "place-station") {
+    return COORDINATOR_PLACEABLE_STATIONS.has(step.itemName)
+      ? placementSupportReason(advertised)
+      : `STATION_UNSUPPORTED:${step.itemName}`;
+  }
+  return `STEP_KIND_UNSUPPORTED:${step.kind}`;
+}
+
+function placementSupportReason(advertised: ReadonlySet<string>): string | null {
+  for (const skillId of COORDINATOR_PLACEMENT_SKILLS) {
+    if (!advertised.has(skillId)) return `SKILL_NOT_ADVERTISED:${skillId}`;
+  }
+  return null;
+}
 /**
  * 中文与自然英文说法 → 计划物品名。**只影响"这条目标提到了哪个物品"的判定**，
  * 不放宽任何检查：候选永远来自确定性 GoalPlanner 已证明可达的集合，
@@ -912,26 +1006,16 @@ export class CoordinatorLocalPlanner {
     for (const itemName of this.goalPlanner.resourceGraph.knownItemNames()) {
       const plan = this.goalPlanner.plan([{ itemName, count: 1 }], {});
       if (!plan.planned || plan.steps.length === 0) continue;
-      const blocker = plan.steps.find(
-        (step) =>
-          !available.has(skillIdForStepKind[step.kind]) ||
-          !(
-            step.kind === "mine" ||
-            (step.kind === "craft" && step.station === null)
-          ),
-      );
-      if (!blocker) {
+      let reason: string | null = null;
+      for (const step of plan.steps) {
+        reason = unbindableStepReason(step, available);
+        if (reason !== null) break;
+      }
+      if (reason === null) {
         bindable.push(itemName);
         continue;
       }
-      excluded.push({
-        itemName,
-        reason: !available.has(skillIdForStepKind[blocker.kind])
-          ? `SKILL_NOT_ADVERTISED:${skillIdForStepKind[blocker.kind]}`
-          : blocker.kind === "craft"
-            ? `STATION_REQUIRED:${blocker.station ?? "unknown"}`
-            : `STEP_KIND_UNSUPPORTED:${blocker.kind}`,
-      });
+      excluded.push({ itemName, reason });
     }
     return Object.freeze({
       bindable: Object.freeze(bindable),
@@ -1089,11 +1173,7 @@ export class CoordinatorLocalPlanner {
     );
     if (
       plan.steps.some(
-        (step) =>
-          !availableSkillIds.has(step.skillId) ||
-          (step.kind === "craft" && step.station !== null) ||
-          step.kind === "smelt" ||
-          step.kind === "place-station",
+        (step) => unbindableStepReason(step, availableSkillIds) !== null,
       )
     ) {
       throw new LocalPlannerError(
@@ -1103,10 +1183,37 @@ export class CoordinatorLocalPlanner {
     }
 
     let last: LastSkillResult | null = null;
+    // Where each station was actually observed to land, keyed by station item.
+    // Filled only from a Runtime-confirmed placement result, so a later craft
+    // step can never be handed a position the coordinator merely predicted.
+    const placementSites = new Map<string, PlacementPosition>();
     const supervision = await this.planSupervisor.run(
       plan.steps,
       async (step, _attempt): Promise<StepOutcome> => {
         this.assertWithinDeadline(deadlineMs, request.signal);
+        let placementReference: PlacementPosition | null = null;
+        if (step.kind === "place-station") {
+          try {
+            placementReference = await this.observePlacementReference(
+              request,
+              initialRecord,
+              availableSkills,
+              deadlineMs,
+            );
+          } catch (cause) {
+            if (
+              cause instanceof LocalPlannerError &&
+              (cause.code === "PLAN_STEP_DISPATCH_UNAVAILABLE" ||
+                cause.code === "SKILL_INVOCATION_INVALID")
+            ) {
+              return { ok: false, errorCode: cause.code };
+            }
+            throw cause;
+          }
+          if (placementReference === null) {
+            return { ok: false, errorCode: "STEP_TARGET_NOT_FOUND" };
+          }
+        }
         let bound: BoundPlanStep | null;
         try {
           bound = this.bindPlanStep(
@@ -1116,6 +1223,7 @@ export class CoordinatorLocalPlanner {
             step,
             deadlineMs,
             request.signal,
+            { placementSites, placementReference },
           );
         } catch (cause) {
           if (
@@ -1136,6 +1244,15 @@ export class CoordinatorLocalPlanner {
           );
           last = { step, invocation: bound.invocation, result };
           const outcome = stepOutcomeFromResult(step, result);
+          if (outcome.ok && step.kind === "place-station") {
+            // Recorded from the Runtime's read-back position, which it produces
+            // only after confirming a block is really there.
+            const placed = placedStationPosition(result);
+            if (placed === null) {
+              return { ok: false, errorCode: "STEP_OUTPUT_INSUFFICIENT" };
+            }
+            placementSites.set(step.itemName, placed);
+          }
           if (bound.idempotent) return outcome;
           const guarded = nonIdempotentStepOutcome(result, outcome);
           this.logMaskedStepFailure(request, step, outcome, guarded);
@@ -1279,7 +1396,8 @@ export class CoordinatorLocalPlanner {
     availableSkills: readonly BotSkillCatalogEntryV1[],
     step: PlanStep,
     deadlineMs: number,
-    externalSignal?: AbortSignal,
+    externalSignal: AbortSignal | undefined,
+    binding: PlanStepBinding,
   ): BoundPlanStep | null {
     const initialSkill = availableSkills.find(
       ({ skillId }) => skillId === step.skillId,
@@ -1309,7 +1427,12 @@ export class CoordinatorLocalPlanner {
     }
     const dimension = currentRecord.currentStatus?.position?.dimension;
     if (!dimension) return null;
-    const input = this.planStepInput(step, dimension, currentRecord.serverProfileId);
+    const input = this.planStepInput(
+      step,
+      dimension,
+      currentRecord.serverProfileId,
+      binding,
+    );
     if (input === null) return null;
     let trustedInput: SkillJsonValue;
     try {
@@ -1352,6 +1475,7 @@ export class CoordinatorLocalPlanner {
     step: PlanStep,
     dimension: string,
     serverProfileId: string,
+    binding: PlanStepBinding,
   ): SkillJsonValue | null {
     if (step.kind === "mine") {
       if (!step.targetBlock) return null;
@@ -1363,19 +1487,156 @@ export class CoordinatorLocalPlanner {
         serverProfileId,
       };
     }
-    if (step.kind === "craft" && step.station === null) {
+    if (step.kind === "craft") {
+      // A station-backed craft is bound only to a station this same plan placed
+      // and the Runtime confirmed. Anything else would be the coordinator
+      // asserting a workstation exists somewhere it has never observed one.
+      let craftingTable: SkillJsonValue = null;
+      if (step.station !== null) {
+        const site = binding.placementSites.get(step.station);
+        if (site === undefined) return null;
+        craftingTable = { x: site.x, y: site.y, z: site.z };
+      }
       return {
         itemName: step.itemName,
         count: step.runs,
-        craftingTable: null,
+        craftingTable,
         dimension,
         serverProfileId,
       };
     }
-    // Workstations, furnaces, and placement faces must come from a
-    // server-scoped observation provider. The coordinator has no such fact
-    // in the current registry, so it fails closed instead of guessing.
+    if (step.kind === "place-station") {
+      // The reference block comes from a `world.scan` observation taken moments
+      // ago, never from arithmetic on the bot's own position: subtracting one
+      // from y guesses that whatever is underfoot is solid, which is exactly
+      // the guess this method used to refuse to make.
+      const reference = binding.placementReference;
+      if (reference === null) return null;
+      return {
+        itemName: step.itemName,
+        referenceBlock: { x: reference.x, y: reference.y, z: reference.z },
+        face: { ...COORDINATOR_PLACEMENT_FACE },
+        dimension,
+        serverProfileId,
+      };
+    }
+    // Furnaces and villager trades still need facts the coordinator does not
+    // hold, so they keep failing closed instead of guessing.
     return null;
+  }
+
+  /**
+   * Observes a solid block the next station can be built on top of, or null when
+   * none is in reach.
+   *
+   * `world.scan` is idempotent and read-only — it resolves a block name in the
+   * Runtime's own registry and returns only positions it could actually read —
+   * so the coordinator ends up holding an observed fact rather than a prediction.
+   * The candidate list is a list of *names to look for*, not an assumption about
+   * which one is there; whichever the scan returns is what the world has.
+   */
+  private async observePlacementReference(
+    request: LocalPlanRequest,
+    initialRecord: BotRegistryRecord,
+    availableSkills: readonly BotSkillCatalogEntryV1[],
+    deadlineMs: number,
+  ): Promise<PlacementPosition | null> {
+    const dimension = initialRecord.currentStatus?.position?.dimension;
+    if (!dimension) return null;
+    for (const blockName of COORDINATOR_PLACEMENT_GROUND_BLOCKS) {
+      this.assertWithinDeadline(deadlineMs, request.signal);
+      const output = await this.dispatchObservation(
+        request,
+        initialRecord,
+        availableSkills,
+        "world.scan",
+        {
+          blockName,
+          maxCount: COORDINATOR_PLACEMENT_SCAN_MAX_COUNT,
+          maxDistance: COORDINATOR_PLACEMENT_SCAN_MAX_DISTANCE,
+          dimension,
+          serverProfileId: initialRecord.serverProfileId,
+        },
+        deadlineMs,
+      );
+      const reference = nearestPlacementReference(output);
+      if (reference !== null) {
+        this.logPlacementSite(request, blockName);
+        return reference;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Dispatches one read-only observation and returns its output, or null when
+   * the Runtime did not complete it.
+   *
+   * Held to the same context checks as a plan step — same Runtime instance, same
+   * ServerProfile, same advertised schema — because an observation the
+   * coordinator then builds a placement on is trusted input, not a free lookup.
+   * Restricted to idempotent Skills so a retry can never carry a side effect.
+   */
+  private async dispatchObservation(
+    request: LocalPlanRequest,
+    initialRecord: BotRegistryRecord,
+    availableSkills: readonly BotSkillCatalogEntryV1[],
+    skillId: string,
+    input: SkillJsonValue,
+    deadlineMs: number,
+  ): Promise<SkillJsonValue | null> {
+    const initialSkill = availableSkills.find(
+      (candidate) => candidate.skillId === skillId,
+    );
+    if (!initialSkill) {
+      throw new LocalPlannerError(
+        "PLAN_STEP_DISPATCH_UNAVAILABLE",
+        `No advertised skill is available for ${skillId}.`,
+      );
+    }
+    if (!initialSkill.idempotent) {
+      throw new LocalPlannerError(
+        "PLAN_STEP_DISPATCH_UNAVAILABLE",
+        `${skillId} is not idempotent and cannot be used as an observation.`,
+      );
+    }
+    const currentRecord = this.requireUnchangedDispatchContext(
+      request.botId,
+      initialRecord,
+      initialSkill,
+    );
+    let trustedInput: SkillJsonValue;
+    try {
+      trustedInput = validateAdvertisedInput(initialSkill.inputSchema, input);
+    } catch (cause) {
+      throw new LocalPlannerError(
+        "SKILL_INVOCATION_INVALID",
+        cause instanceof LocalPlannerError ? cause.message : `${skillId} input invalid.`,
+      );
+    }
+    this.assertWithinDeadline(deadlineMs, request.signal);
+    const startedAt = this.validNow();
+    const expiresAtMs = Math.min(
+      deadlineMs,
+      startedAt.getTime() + initialSkill.timeoutMs,
+    );
+    const invocation = this.invocation(
+      request,
+      skillId,
+      initialSkill.skillVersion,
+      trustedInput,
+      startedAt,
+      expiresAtMs,
+    );
+    const result = await this.options.transport.sendSkillInvocation(
+      invocation,
+      currentRecord.runtimeInstanceId,
+      boundedAbortSignal(
+        request.signal,
+        Math.max(1, Math.floor(expiresAtMs - startedAt.getTime())),
+      ),
+    );
+    return result.payload.outcome === "completed" ? result.payload.output : null;
   }
 
   private validateRequest(request: LocalPlanRequest): void {
@@ -1514,6 +1775,33 @@ export class CoordinatorLocalPlanner {
         "PLANNER_TIMEOUT",
         "Local planner exceeded or cancelled its total request deadline.",
       );
+    }
+  }
+
+  /**
+   * Records which ground block a placement was sited on.
+   *
+   * The block *name* only. The position stays out for the same reason the
+   * operator goal and Skill inputs do: diagnostics must not become a wider
+   * disclosure channel than the prompt, and a station coordinate is a base
+   * coordinate. The name is what triage actually needs — it says whether the
+   * scan ladder found a site on its first candidate or its last.
+   */
+  private logPlacementSite(
+    request: LocalPlanRequest,
+    referenceBlockName: string,
+  ): void {
+    const logger = this.options.logger;
+    if (!logger) return;
+    try {
+      logger.info("coordinator_planner_placement_site_observed", {
+        traceId: request.traceId,
+        taskId: request.taskId,
+        botId: request.botId,
+        referenceBlockName,
+      });
+    } catch {
+      // Diagnostics must never change what the planner reports.
     }
   }
 
@@ -1762,7 +2050,95 @@ function completedOutputSatisfiesStep(
       output.usedCraftingTable === (step.station !== null)
     );
   }
+  if (step.kind === "place-station") {
+    // `placed: true` alone is the Runtime's word that it tried. The read-back
+    // name and position are what prove the station the plan needs is the one
+    // now standing there, so a later craft binds to an observed block.
+    return (
+      output.placed === true &&
+      output.placedBlockName === step.itemName &&
+      readPosition(output.position ?? null) !== null
+    );
+  }
   return false;
+}
+
+/**
+ * A whole-block position, or null when the value is not one.
+ *
+ * Integers specifically: a fractional coordinate is an entity position, not a
+ * block, and handing one back as a placement site would bind a later craft to a
+ * block address that does not exist.
+ */
+function readPosition(value: SkillJsonValue): PlacementPosition | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const { x, y, z } = value as Record<string, SkillJsonValue>;
+  if (
+    typeof x !== "number" ||
+    typeof y !== "number" ||
+    typeof z !== "number" ||
+    !Number.isInteger(x) ||
+    !Number.isInteger(y) ||
+    !Number.isInteger(z)
+  ) {
+    return null;
+  }
+  return { x, y, z };
+}
+
+/**
+ * Where the Runtime confirmed a station actually landed, or null when its result
+ * does not say.
+ *
+ * Read from the placement output rather than computed as `referenceBlock + face`,
+ * because the coordinator's arithmetic is a prediction while this field is the
+ * Runtime's own read-back of the block it found standing there afterwards.
+ */
+function placedStationPosition(
+  result: SkillExecutionResultV1,
+): PlacementPosition | null {
+  if (result.payload.outcome !== "completed") return null;
+  const output = result.payload.output;
+  if (!output || typeof output !== "object" || Array.isArray(output)) return null;
+  return readPosition((output as Record<string, SkillJsonValue>).position ?? null);
+}
+
+/**
+ * The closest scanned block inside the placement window, or null when the scan
+ * returned nothing usable.
+ *
+ * The window is both-sided on purpose. Below the minimum the match is the block
+ * under the bot's own feet, and building on it would place a station inside the
+ * bot; past the maximum it is out of placement reach and the Runtime would
+ * refuse. Returning null for an empty window makes the step report
+ * STEP_TARGET_NOT_FOUND rather than dispatching a placement that cannot work.
+ */
+function nearestPlacementReference(
+  output: SkillJsonValue | null,
+): PlacementPosition | null {
+  if (!output || typeof output !== "object" || Array.isArray(output)) return null;
+  const matches = (output as Record<string, SkillJsonValue>).matches;
+  if (!Array.isArray(matches)) return null;
+  let best: PlacementPosition | null = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const match of matches) {
+    if (!match || typeof match !== "object" || Array.isArray(match)) continue;
+    const distance = (match as Record<string, SkillJsonValue>).distance;
+    if (
+      typeof distance !== "number" ||
+      !Number.isFinite(distance) ||
+      distance < COORDINATOR_PLACEMENT_MIN_DISTANCE ||
+      distance > COORDINATOR_PLACEMENT_MAX_DISTANCE ||
+      distance >= bestDistance
+    ) {
+      continue;
+    }
+    const position = readPosition(match);
+    if (position === null) continue;
+    best = position;
+    bestDistance = distance;
+  }
+  return best;
 }
 
 function transportFailureCode(cause: unknown): string {

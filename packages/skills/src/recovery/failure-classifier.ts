@@ -175,6 +175,11 @@ const EXPLICIT: Readonly<Record<string, FailureCategory>> = Object.freeze({
   // 所以下一步是重新观察。没有这条显式项它会落到 UNKNOWN，把"走近了但不够近"
   // 当成未知故障升级给人工。
   PATH_TARGET_NOT_REACHED: "STALE_WORLD",
+  // A* 搜完了、确实没有路（pathfinder 的 `NoPath`）。这不是抖动：把同一个
+  // goal 原样重投只会再搜一次同样的空，所以走 REOBSERVE 而不是 RETRY_SAME。
+  // 它与下面的 COLLECT_PATH_SEARCH_EXHAUSTED 必须分开——后者根本没搜完，
+  // 合并两者就等于用"预算不够"冒充"不可达"。
+  COLLECT_TARGET_UNREACHABLE: "STALE_WORLD",
   // 前置条件不满足通常是"世界还没到位"，不是技能坏了：重新观察再试。
   // 但前置条件求值本身抛异常是前置条件的代码有问题，得人来修。
   SKILL_PRECONDITION_FAILED: "STALE_WORLD",
@@ -196,6 +201,11 @@ const EXPLICIT: Readonly<Record<string, FailureCategory>> = Object.freeze({
   ARMOR_ITEM_NOT_IN_INVENTORY: "MISSING_RESOURCE",
   INSUFFICIENT_MATERIALS: "MISSING_RESOURCE",
   TOOL_TIER_INSUFFICIENT: "MISSING_RESOURCE",
+  // 背包里没有任何东西能收获该方块（空手也不行）。缺的是工具，不是世界状态，
+  // 所以重新观察毫无意义——得先去合成/取得工具。这条闸门同时是防 OOM 的：
+  // 放进 collectblock 就会触发 mineflayer-tool equipForBlock 的无界递归
+  // （详见 mineflayer-client.ts canHarvestWithInventory 的实测注释）。
+  COLLECT_TOOL_MISSING: "MISSING_RESOURCE",
   // 熔炼在开炉前就查原料与燃料，两者都能靠补齐子计划解决（燃料同样是可规划物品）。
   SMELT_INPUT_INSUFFICIENT: "MISSING_RESOURCE",
   SMELT_FUEL_INSUFFICIENT: "MISSING_RESOURCE",
@@ -215,6 +225,12 @@ const EXPLICIT: Readonly<Record<string, FailureCategory>> = Object.freeze({
   SKILL_CAPABILITY_FAILED: "TRANSIENT",
   // pathfinder 抛错常是一次性的（区块没加载、目标瞬时被占）：先原样重试。
   PATHFINDER_GOTO_FAILED: "TRANSIENT",
+  // 思考预算用尽（pathfinder 的 `Timeout`）。它**没有**证明目标不可达：实测
+  // 在 runtime 的 tickTimeout 下，一个 700ms 就判得出 noPath 的搜索会被切片到
+  // 5010ms 后报 "Took to long to decide path to goal!"。所以只能按偶发处置——
+  // 区块加载完、附近实体散开后再搜一次是有意义的第一步；TRANSIENT 的阶梯
+  // 第二级本来就是 REOBSERVE，两次都不成会自然收敛到 ABORT。
+  COLLECT_PATH_SEARCH_EXHAUSTED: "TRANSIENT",
 
   // A non-idempotent operation returned an outcome that cannot be proved safe
   // to replay. Never route this through a retry rung.

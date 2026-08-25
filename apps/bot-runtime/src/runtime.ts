@@ -325,6 +325,24 @@ export class SingleBotRuntime {
       // 缓存住就会拿旧档位裁决。闸门本身有频率窗口状态，所以不跨调用复用。
       policyView: (serverProfileId) =>
         new ServerPolicyGate(this.serverPolicyStore.resolve(serverProfileId)),
+      // 终态失败的屏蔽码只说"哪一类坏了"，说不出"为什么"。原因留在这条 warn 里，
+      // 不进结果消息：协议面向协调器,诊断面向运维,两者的收敛面不该混。
+      onFault: (fault) => {
+        this.dependencies.logger.warn(
+          "bot_runtime_skill_fault",
+          this.logFields(
+            {
+              skillVersion: fault.skillVersion,
+              errorCode: fault.errorCode,
+              attempts: fault.attempts,
+              reason: fault.reason,
+            },
+            fault.traceId,
+            fault.taskId,
+            fault.skillId,
+          ),
+        );
+      },
     });
     // §4 的接线：目标分解与恢复阶梯从此走真实派发路径。invoke 直接绑到
     // handleSkillInvocation——同一条路径、同一套协议校验、同一份遥测，

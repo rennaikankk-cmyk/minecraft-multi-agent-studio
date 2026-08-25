@@ -187,9 +187,31 @@ export type SkillExecutionAuthorization = Readonly<{
   allowedCapabilities: ReadonlySet<SkillCapability>;
 }>;
 
+/**
+ * 一次终态失败里被丢掉的那半。`errorCode` 只说得出"哪一类坏了"，`reason` 才说得出
+ * 究竟坏在哪：能力实现里那句 `catch { throw new SkillFault(CODE) }` 会把底层库抛
+ * 出的原因整个吞掉，于是排查只剩翻 mineflayer 自己的输出。这个诊断把原因交还给
+ * 宿主去记，而协议结果一个字不改——上报给协调器的仍然只有 `errorCode`。
+ */
+export type SkillFaultDiagnostic = Readonly<{
+  traceId: string;
+  taskId: string;
+  skillId: string;
+  skillVersion: string;
+  invocationId: string;
+  errorCode: string;
+  attempts: number;
+  /** 底层原因；能力实现没留下任何说明时为 null，不编造替代文本。 */
+  reason: string | null;
+}>;
+
 export type SkillExecutorOptions = Readonly<{
   runtimeInstanceId: string;
   capabilityAdapter?: SkillCapabilityAdapter;
+  /**
+   * 终态失败时收下被屏蔽的原因，仅供宿主侧日志。不参与重试判定，也不进结果载荷。
+   */
+  onFault?: (diagnostic: SkillFaultDiagnostic) => void;
   now?: () => Date;
   random?: () => number;
   messageId?: () => string;

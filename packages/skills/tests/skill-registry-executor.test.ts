@@ -9,6 +9,7 @@ import {
   defineSkill,
   type SkillDefinition,
   type SkillExecutionAuthorization,
+  type SkillExecutorOptions,
 } from "../src/index.js";
 
 const NOW = "2026-07-27T08:00:00.000Z";
@@ -107,13 +108,18 @@ function movementSkill(
   });
 }
 
-function executor(registry: SkillRegistry, capabilityAdapter?: { invoke: ReturnType<typeof vi.fn> }) {
+function executor(
+  registry: SkillRegistry,
+  capabilityAdapter?: { invoke: ReturnType<typeof vi.fn> },
+  onFault?: SkillExecutorOptions["onFault"],
+) {
   return new SkillExecutor(registry, {
     runtimeInstanceId: "runtime-01",
     now: () => new Date(NOW),
     random: () => 0,
     messageId: () => RESULT_ID,
     ...(capabilityAdapter ? { capabilityAdapter } : {}),
+    ...(onFault ? { onFault } : {}),
   });
 }
 
@@ -340,6 +346,136 @@ describe("SkillExecutor", () => {
       { online: true },
     );
     expect(result.payload).toMatchObject({ outcome: "completed", attempts: 2 });
+  });
+
+  /**
+   * 结果消息只带屏蔽码，运维要的"为什么"留在这个钩子里。两半都要成立：终态失败
+   * 必须报出原因，而重试后成功的那次失败不能报——否则日志里会出现一条没有对应
+   * 故障的告警，和真实故障一样刺眼。
+   */
+  it("reports a terminal fault's reason without widening the result message", async () => {
+    const registry = new SkillRegistry();
+    registry.register(
+      defineSkill({
+        ...movementSkill(),
+        id: "observation.fault",
+        requiredCapabilities: [] as const,
+        preconditions: [],
+        execute: async () => {
+          throw new SkillFault(
+            "SKILL_CAPABILITY_FAILED",
+            "goto_failed: no path to target",
+          );
+        },
+      }),
+    );
+    const onFault = vi.fn();
+    const faultInvocation = {
+      ...invocation,
+      payload: { ...invocation.payload, skillId: "observation.fault" },
+    };
+    const result = await executor(registry, undefined, onFault).execute(
+      faultInvocation,
+      authorization({
+        skillId: "observation.fault",
+        allowedCapabilities: new Set(),
+      }),
+      { online: true },
+    );
+
+    expect(result.payload).toMatchObject({
+      outcome: "failed",
+      errorCode: "SKILL_CAPABILITY_FAILED",
+    });
+    // 协议面不变宽：原因不进结果消息。
+    expect(result.payload).not.toHaveProperty("reason");
+    expect(onFault).toHaveBeenCalledTimes(1);
+    expect(onFault.mock.calls[0]![0]).toMatchObject({
+      traceId: "trace-skill-001",
+      skillId: "observation.fault",
+      errorCode: "SKILL_CAPABILITY_FAILED",
+      attempts: 1,
+      reason: "goto_failed: no path to target",
+    });
+  });
+
+  it("does not report a fault the retry ladder recovered from", async () => {
+    const registry = new SkillRegistry();
+    let attempts = 0;
+    registry.register(
+      defineSkill({
+        ...movementSkill(),
+        id: "observation.recovered",
+        requiredCapabilities: [] as const,
+        idempotent: true,
+        retryPolicy: {
+          maxAttempts: 2,
+          baseDelayMs: 10,
+          maxDelayMs: 10,
+          retryableErrorCodes: ["TEMPORARY_FAILURE"],
+        },
+        preconditions: [],
+        execute: async () => {
+          attempts += 1;
+          if (attempts === 1) {
+            throw new SkillFault("TEMPORARY_FAILURE", "chunk_not_loaded");
+          }
+          return { moved: true };
+        },
+      }),
+    );
+    const onFault = vi.fn();
+    const result = await executor(registry, undefined, onFault).execute(
+      {
+        ...invocation,
+        payload: { ...invocation.payload, skillId: "observation.recovered" },
+      },
+      authorization({
+        skillId: "observation.recovered",
+        allowedCapabilities: new Set(),
+      }),
+      { online: true },
+    );
+
+    expect(result.payload).toMatchObject({ outcome: "completed", attempts: 2 });
+    expect(onFault).not.toHaveBeenCalled();
+  });
+
+  /**
+   * 能力实现没留下说明时，SkillFault 自带的占位文本会顶上来。它读着像一句解释，
+   * 实际什么都没说——记成 reason 就等于给运维一条凭空的证据。这里钉住 null。
+   */
+  it("reports a null reason rather than the fault's placeholder text", async () => {
+    const registry = new SkillRegistry();
+    registry.register(
+      defineSkill({
+        ...movementSkill(),
+        id: "observation.silent",
+        requiredCapabilities: [] as const,
+        preconditions: [],
+        execute: async () => {
+          throw new SkillFault("SKILL_CAPABILITY_FAILED");
+        },
+      }),
+    );
+    const onFault = vi.fn();
+    await executor(registry, undefined, onFault).execute(
+      {
+        ...invocation,
+        payload: { ...invocation.payload, skillId: "observation.silent" },
+      },
+      authorization({
+        skillId: "observation.silent",
+        allowedCapabilities: new Set(),
+      }),
+      { online: true },
+    );
+
+    expect(onFault).toHaveBeenCalledTimes(1);
+    expect(onFault.mock.calls[0]![0]).toMatchObject({
+      errorCode: "SKILL_CAPABILITY_FAILED",
+      reason: null,
+    });
   });
 
   it("returns bounded timeout and cancellation outcomes", async () => {

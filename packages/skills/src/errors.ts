@@ -15,10 +15,16 @@ export class SkillFrameworkError extends Error {
   }
 }
 
+/**
+ * `SkillFault` 不带说明时的占位文本。诊断侧要能把它和真正的原因区分开：
+ * 它读起来像一句解释，实际什么都没说，当成 reason 记下去就是凭空造证据。
+ */
+export const SKILL_FAULT_DEFAULT_MESSAGE = "Skill execution failed.";
+
 export class SkillFault extends Error {
   readonly code: string;
 
-  constructor(code: string, message = "Skill execution failed.") {
+  constructor(code: string, message = SKILL_FAULT_DEFAULT_MESSAGE) {
     skillErrorCodeSchema.parse(code);
     super(message);
     this.name = "SkillFault";

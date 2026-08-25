@@ -300,6 +300,7 @@ export {
   type SkillExecutionAuthorization,
   type SkillExecutionContext,
   type SkillExecutorOptions,
+  type SkillFaultDiagnostic,
   type SkillMetadata,
   type SkillPolicyView,
   type SkillPrecondition,
