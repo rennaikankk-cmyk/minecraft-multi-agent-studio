@@ -26,6 +26,7 @@ import {
   controlLinkStopResponseV1Schema,
   controlLinkTaskDetailResponseV1Schema,
   controlLinkTaskListResponseV1Schema,
+  goalResultSummaryFromOutput,
   parseControlLinkClientMessage,
   type ControlLinkAuthenticateV1,
   type ControlLinkGoalErrorCode,
@@ -1950,9 +1951,17 @@ function publicGoalResult(
     outcome: payload.outcome,
     ai,
   } as const;
-  return payload.outcome === "completed"
-    ? base
-    : { ...base, errorCode: payload.errorCode };
+  if (payload.outcome !== "completed") {
+    return { ...base, errorCode: payload.errorCode };
+  }
+  // The Skill's own counts, when it published any. Without them a `completed`
+  // collect that found nothing is indistinguishable on the wire from one that
+  // filled the inventory — both arrive as a bare `outcome: "completed"`.
+  //
+  // Spread rather than assigned, because the completed branch is `.strict()`
+  // and "the Skill published no counts" is spelled by the key being absent.
+  const summary = goalResultSummaryFromOutput(payload.output);
+  return summary === undefined ? base : { ...base, summary };
 }
 
 function goalTaskStatus(

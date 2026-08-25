@@ -761,6 +761,79 @@ describe("Coordinator Control Link server", () => {
     expect(recordError).toHaveBeenCalledTimes(1);
   });
 
+  it("reports a completed Skill's own counts, including zeros", async () => {
+    const planAndDispatch = vi.fn(async () => ({
+      action: "skill_result",
+      reasonCode: "GOAL_COMPLETED",
+      result: {
+        payload: {
+          skillId: "collect.block",
+          skillVersion: "1.0.0",
+          outcome: "completed",
+          // What a live collect reported for trace 80a6506a: it found nothing.
+          // Before the summary field the operator saw the same bare
+          // `outcome: "completed"` a full eight-log collect produces.
+          output: {
+            blockName: "cobblestone",
+            targetsFound: 0,
+            itemsCollected: 0,
+          },
+        },
+      },
+      ai: {
+        attempts: 1,
+        queueTimeMs: 2,
+        executionTimeMs: 55,
+        totalTimeMs: 57,
+      },
+    }));
+    const { registry, url } = await startServer({
+      goalPlanner: { planAndDispatch },
+    });
+    registry.ingest(statusMessage(1), NOW);
+    const { socket, reader } = await authenticate(url);
+    await readSnapshot(reader);
+    const operationId = testUuid(987);
+    socket.send(JSON.stringify(controlLinkGoalRequestV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: testUuid(988),
+      timestamp: NOW.toISOString(),
+      type: "control.link.goal-request.v1",
+      payload: {
+        coordinatorInstanceId: "coordinator-test",
+        clientId: CLIENT_ID,
+        controlApiInstanceId: CONTROL_API_INSTANCE_ID,
+        operationId,
+        taskId: operationId,
+        botId: BOT_ID,
+        actorId: "operator-01",
+        operatorGoal: "采集一些圆石",
+        timeoutMs: 30_000,
+        issuedAt: NOW.toISOString(),
+        expiresAt: new Date(NOW.getTime() + 35_000).toISOString(),
+      },
+    })));
+
+    let response = await reader.next();
+    while (response.type !== "control.link.goal-response.v1") {
+      response = await reader.next();
+    }
+    expect(response).toMatchObject({
+      ok: true,
+      payload: {
+        operationId,
+        result: {
+          action: "skill_result",
+          outcome: "completed",
+          summary: { targetsFound: 0, itemsCollected: 0 },
+        },
+      },
+    });
+    // The allow-list is by name: a block name is not a count, and the goal
+    // response must not become wider than the planner's prompt boundary.
+    expect(JSON.stringify(response)).not.toContain("cobblestone");
+  });
+
   it("streams the submitted task ID from running through completion", async () => {
     let finishGoal!: (value: any) => void;
     const planAndDispatch = vi.fn(

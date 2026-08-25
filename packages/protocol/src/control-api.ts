@@ -56,6 +56,86 @@ const goalAiTimingSchema = z
   })
   .strict();
 
+/**
+ * The numeric counts a completed Skill may publish about what it actually did.
+ *
+ * Allow-listed by name rather than passed through, because a Skill output also
+ * carries block names and world coordinates, and the goal response is an
+ * operator-facing channel that must not become wider than the prompt boundary
+ * the Coordinator already guards. Every name here denotes a count, so together
+ * they answer "how much happened" without saying where.
+ */
+const GOAL_RESULT_SUMMARY_KEYS = Object.freeze([
+  "targetsFound",
+  "itemsCollected",
+  "requestedCount",
+  "craftedCount",
+  "movedCount",
+  "smeltedCount",
+  "changedCount",
+  "capabilityCallCount",
+  "distanceToTarget",
+  "totalScoreBefore",
+  "totalScoreAfter",
+] as const);
+
+const goalResultCountSchema = z
+  .number()
+  .finite()
+  .min(-1_000_000)
+  .max(1_000_000);
+
+/**
+ * At least one count must be present. "The Skill published no counts" is
+ * expressed by omitting the field entirely, so an empty object would be a
+ * second spelling of the same fact and a consumer would have to handle both.
+ */
+const goalResultSummarySchema = z
+  .object(
+    Object.fromEntries(
+      GOAL_RESULT_SUMMARY_KEYS.map((key) => [
+        key,
+        goalResultCountSchema.optional(),
+      ]),
+    ) as {
+      [Key in (typeof GOAL_RESULT_SUMMARY_KEYS)[number]]: z.ZodOptional<
+        typeof goalResultCountSchema
+      >;
+    },
+  )
+  .strict()
+  .refine(
+    (value) => Object.values(value).some((count) => count !== undefined),
+    "A goal result summary must carry at least one count.",
+  );
+
+/**
+ * Extracts the allow-listed counts from a Skill's own output, or undefined when
+ * it published none.
+ *
+ * The transport must not restate these numbers or derive them: `itemsCollected`
+ * is a fact only the Skill observed. Anything absent, non-numeric, or outside
+ * the allow-list is dropped rather than coerced, so a summary that arrives is
+ * always the Skill's own report.
+ */
+export function goalResultSummaryFromOutput(
+  output: unknown,
+): GoalResultSummaryV1 | undefined {
+  if (typeof output !== "object" || output === null || Array.isArray(output)) {
+    return undefined;
+  }
+  const record = output as Record<string, unknown>;
+  const summary: Record<string, number> = {};
+  for (const key of GOAL_RESULT_SUMMARY_KEYS) {
+    const value = record[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      summary[key] = value;
+    }
+  }
+  const parsed = goalResultSummarySchema.safeParse(summary);
+  return parsed.success ? parsed.data : undefined;
+}
+
 const goalDispatchNoopV1Schema = z
   .object({
     action: z.literal("noop"),
@@ -80,6 +160,16 @@ const goalSkillResultCompletedV1Schema = z
   .object({
     ...goalSkillResultCommonShape,
     outcome: z.literal("completed"),
+    /**
+     * Optional because two different facts must stay distinguishable — a Skill
+     * that published no counts, and a goal recorded before this field existed.
+     * Persisted results are re-parsed with the current schema on read-back, so a
+     * required field here would make every historical row unreadable.
+     *
+     * Only the completed branch carries it: an unsuccessful payload has an error
+     * code where its output would be, so there are no counts to report.
+     */
+    summary: goalResultSummarySchema.optional(),
     // Keep the property available to consumers as `undefined`, while
     // rejecting an explicitly supplied error code on successful outcomes.
     errorCode: z.never().optional(),
@@ -353,6 +443,7 @@ export type ControlApiErrorCode = z.infer<typeof controlApiErrorCodeSchema>;
 export type ControlApiErrorV1 = z.infer<typeof controlApiErrorV1Schema>;
 export type BotStreamSnapshotV1 = z.infer<typeof botStreamSnapshotV1Schema>;
 export type BotStreamEventV1 = z.infer<typeof botStreamEventV1Schema>;
+export type GoalResultSummaryV1 = z.infer<typeof goalResultSummarySchema>;
 export type StopBotHttpRequestV1 = z.infer<typeof stopBotHttpRequestV1Schema>;
 export type StopBotHttpResponseV1 = z.infer<typeof stopBotHttpResponseV1Schema>;
 /**
@@ -373,6 +464,12 @@ export type GoalDispatchResultV1 =
       skillVersion: z.infer<typeof skillVersionSchema>;
       outcome: "completed" | "rejected" | "failed" | "cancelled" | "timed_out";
       errorCode?: z.infer<typeof skillErrorCodeSchema> | null | undefined;
+      /**
+       * Present only on a completed outcome, and only when the Skill published
+       * counts. This flat view cannot express that, so it stays optional here
+       * and the runtime schema enforces the narrower rule.
+       */
+      summary?: GoalResultSummaryV1 | undefined;
       ai: z.infer<typeof goalAiTimingSchema>;
     };
 export type SubmitGoalHttpRequestV1 = z.infer<typeof submitGoalHttpRequestV1Schema>;

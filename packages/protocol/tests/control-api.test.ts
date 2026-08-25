@@ -17,6 +17,7 @@ import {
   submitGoalHttpResponseV1Schema,
   dashboardTaskDetailResponseV1Schema,
   dashboardTaskListResponseV1Schema,
+  goalResultSummaryFromOutput,
   publicTaskDetailV1Schema,
   publicTaskSummaryV1Schema,
   taskDetailResponseV1Schema,
@@ -332,6 +333,92 @@ describe("Control API v1 protocol", () => {
         data: { ...failed, errorCode: "not-stable" },
       }).success,
     ).toBe(false);
+  });
+
+  it("carries a completed goal result's own counts and nothing else", () => {
+    const completed = {
+      action: "skill_result" as const,
+      botId: "worker-01",
+      taskId: UUID,
+      reasonCode: "SKILL_COMPLETED",
+      skillId: "collect.block",
+      skillVersion: "1.0.0",
+      outcome: "completed" as const,
+      ai: { attempts: 1, queueTimeMs: 1, executionTimeMs: 2, totalTimeMs: 3 },
+    };
+    const parse = (data: unknown) =>
+      submitGoalHttpResponseV1Schema.safeParse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data,
+      });
+
+    // The zero-count case is the whole point: a collect that found nothing
+    // reported the same bare `completed` as a full one before this field.
+    const withZeros = {
+      ...completed,
+      summary: { targetsFound: 0, itemsCollected: 0 },
+    };
+    expect(parse(withZeros).success).toBe(true);
+    expect(
+      submitGoalHttpResponseV1Schema.parse({
+        schemaVersion: "1.0",
+        requestId: UUID,
+        data: withZeros,
+      }).data,
+    ).toEqual(withZeros);
+
+    // A goal recorded before the field existed is re-parsed on read-back, so
+    // omission has to stay valid.
+    expect(parse(completed).success).toBe(true);
+    // "No counts" is spelled by omitting the field; an empty object would be a
+    // second spelling of the same fact.
+    expect(parse({ ...completed, summary: {} }).success).toBe(false);
+    expect(
+      parse({ ...completed, summary: { blockName: "stone" } }).success,
+    ).toBe(false);
+    expect(
+      parse({ ...completed, summary: { targetsFound: 2_000_000 } }).success,
+    ).toBe(false);
+    // Only the completed branch has an output to report counts from.
+    expect(
+      parse({
+        ...completed,
+        outcome: "failed",
+        errorCode: "COLLECT_TARGET_UNREACHABLE",
+        summary: { targetsFound: 0 },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("extracts only the Skill's own numeric counts from its output", () => {
+    expect(
+      goalResultSummaryFromOutput({
+        blockName: "cobblestone",
+        targetsFound: 0,
+        itemsCollected: 0,
+      }),
+    ).toEqual({ targetsFound: 0, itemsCollected: 0 });
+    expect(
+      goalResultSummaryFromOutput({
+        distanceToTarget: 4.5,
+        totalScoreBefore: -12,
+      }),
+    ).toEqual({ distanceToTarget: 4.5, totalScoreBefore: -12 });
+    // Anything the allow-list does not name, or that is not a finite number,
+    // is dropped rather than coerced.
+    expect(
+      goalResultSummaryFromOutput({
+        position: { x: 1, y: 2, z: 3 },
+        craftedCount: Number.NaN,
+        movedCount: "4",
+        usedCraftingTable: true,
+      }),
+    ).toBeUndefined();
+    expect(goalResultSummaryFromOutput({})).toBeUndefined();
+    expect(goalResultSummaryFromOutput(null)).toBeUndefined();
+    expect(goalResultSummaryFromOutput([1, 2, 3])).toBeUndefined();
+    expect(goalResultSummaryFromOutput("done")).toBeUndefined();
   });
 
   it("validates redacted task history summaries and bounded details", () => {
