@@ -231,6 +231,12 @@ const EXPLICIT: Readonly<Record<string, FailureCategory>> = Object.freeze({
   // 区块加载完、附近实体散开后再搜一次是有意义的第一步；TRANSIENT 的阶梯
   // 第二级本来就是 REOBSERVE，两次都不成会自然收敛到 ABORT。
   COLLECT_PATH_SEARCH_EXHAUSTED: "TRANSIENT",
+  // collectblock 既不 resolve 也不 reject，被本层的界掐断。触发条件是掉落物
+  // 捡拾没有收尾（collectAll 的 Entity 分支两条无界 await，详见
+  // mineflayer-client.ts COLLECT_SETTLE_BUDGET_MS 的实测注释）——方块很可能
+  // 已经挖掉了，只是物品还在地上。所以这是世界状态而不是契约缺陷：重新观察
+  // 后再试是对的，原样重投则会对着已经消失的方块再搜一次。
+  COLLECT_PICKUP_NOT_SETTLED: "STALE_WORLD",
 
   // A non-idempotent operation returned an outcome that cannot be proved safe
   // to replay. Never route this through a retry rung.

@@ -748,6 +748,133 @@ describe("MineflayerBotClient lifecycle", () => {
     expect(collect).not.toHaveBeenCalled();
   });
 
+  it("bounds a collect that neither resolves nor rejects, and cancels the plugin task", async () => {
+    // collectAll 的 Entity 分支有两条永不落定且永不抛错的 await
+    // （CollectBlock.js:49-50），命中时 collect() 会一直吊着，把整个技能合约
+    // 烧光，上层只看到一个没有 onFault 行的 SKILL_TIMEOUT。实测复现：一次
+    // collect() 静默挂了 224 秒直到探针失效保护。
+    vi.useFakeTimers();
+    try {
+      const emitter = new EventEmitter();
+      const bot = emitter as unknown as Bot;
+      const targetPosition = new Vec3(2, 64, 0);
+      // 永不落定：既不 resolve 也不 reject，正是被测的那个形态。
+      const collect = vi.fn(() => new Promise<void>(() => {}));
+      const cancelTask = vi.fn(async () => undefined);
+      const pathfinder = collectPathfinder();
+      Object.assign(bot, {
+        game: { dimension: "overworld" },
+        registry: { blocksByName: { stone: { id: 1 } } },
+        inventory: {
+          items: () => [{ name: "wooden_pickaxe", type: 800, count: 1 }],
+        },
+        entity: { position: new Vec3(0, 64, 0) },
+        world: {},
+        pathfinder,
+        findBlocks: vi.fn(() => [targetPosition]),
+        blockAt: vi.fn(() => harvestableBlock(targetPosition, 1)),
+        collectBlock: {
+          chestLocations: [] as Vec3[],
+          movements: null as Movements | null,
+          collect,
+          cancelTask,
+        },
+      });
+      const client = new MineflayerBotClient(bot, "auto", "isolated-test-profile");
+
+      const pending = client.invokeSkillCapability({
+        ...collectRequest("invocation-collect-stalled"),
+        input: {
+          blockName: "stone",
+          maxCount: 1,
+          maxDistance: 16,
+          dimension: "minecraft:overworld",
+          serverProfileId: "isolated-test-profile",
+        },
+      });
+      const assertion = expect(pending).rejects.toMatchObject({
+        code: "COLLECT_PICKUP_NOT_SETTLED",
+      });
+      await vi.advanceTimersByTimeAsync(25_000);
+      await assertion;
+      // 超时后必须收尾：插件的循环还带着这次的目标，不取消就会污染下一次调用。
+      expect(cancelTask).toHaveBeenCalled();
+      expect(pathfinder.stop).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("swallows the cancelled collect's late rejection instead of leaving it unhandled", async () => {
+    // 超时后 cancelTask 会让 collect() 迟到地抛，那时已经没有 await 在等它。
+    // 当前实现里这是安全的：Promise.race 一进来就给每个入参挂了反应，拒绝算已
+    // 被处理。这条用例把该性质钉住——它不是为了守某个已发生的缺陷，而是防止以后
+    // 有人把竞速改成"先 await 超时、再单独 await collect"之类会让拒绝外泄的形状，
+    // 那种形状下未接住的拒绝按 Node 默认策略会打掉整个 Runtime 进程。
+    vi.useFakeTimers();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const emitter = new EventEmitter();
+      const bot = emitter as unknown as Bot;
+      const targetPosition = new Vec3(2, 64, 0);
+      let failCollect: ((cause: Error) => void) | undefined;
+      const collect = vi.fn(
+        () => new Promise<void>((_resolve, reject) => {
+          failCollect = reject;
+        }),
+      );
+      const cancelTask = vi.fn(async () => {
+        failCollect?.(new Error("Collect task cancelled"));
+      });
+      const pathfinder = collectPathfinder();
+      Object.assign(bot, {
+        game: { dimension: "overworld" },
+        registry: { blocksByName: { stone: { id: 1 } } },
+        inventory: {
+          items: () => [{ name: "wooden_pickaxe", type: 800, count: 1 }],
+        },
+        entity: { position: new Vec3(0, 64, 0) },
+        world: {},
+        pathfinder,
+        findBlocks: vi.fn(() => [targetPosition]),
+        blockAt: vi.fn(() => harvestableBlock(targetPosition, 1)),
+        collectBlock: {
+          chestLocations: [] as Vec3[],
+          movements: null as Movements | null,
+          collect,
+          cancelTask,
+        },
+      });
+      const client = new MineflayerBotClient(bot, "auto", "isolated-test-profile");
+
+      const pending = client.invokeSkillCapability({
+        ...collectRequest("invocation-collect-late-reject"),
+        input: {
+          blockName: "stone",
+          maxCount: 1,
+          maxDistance: 16,
+          dimension: "minecraft:overworld",
+          serverProfileId: "isolated-test-profile",
+        },
+      });
+      const assertion = expect(pending).rejects.toMatchObject({
+        code: "COLLECT_PICKUP_NOT_SETTLED",
+      });
+      await vi.advanceTimersByTimeAsync(25_000);
+      await assertion;
+      expect(cancelTask).toHaveBeenCalled();
+      // 让微任务队列排空，迟到的拒绝若没人接住就会在这一步冒出来。
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      vi.useRealTimers();
+    }
+  });
+
   it("exposes negotiated protocol, feature, and registry facts to skills", () => {
     const emitter = new EventEmitter();
     const bot = emitter as unknown as Bot;

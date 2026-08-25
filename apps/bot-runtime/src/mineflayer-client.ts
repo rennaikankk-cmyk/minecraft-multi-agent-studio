@@ -532,6 +532,24 @@ export function canHarvestWithInventory(
 const COLLECT_PATH_THINK_TIMEOUT_MS = 8_000;
 const COLLECT_PATH_TICK_TIMEOUT_MS = 40;
 
+// collectAll 有两条永不落定的 await，都在 Entity 分支（CollectBlock.js:36-52）：
+//   1. 第 50 行 `yield waitForPickup` 没有超时，而它订阅 entityGone 是在第 49 行
+//      goto **返回之后**（41-48 行建 Promise，49 行才走过去）。掉落物在走过去的
+//      途中被顺路捡走时，entityGone 已经发过了，这个 Promise 永远不 resolve。
+//   2. 第 49 行 GoalFollow(closest, 0) 对着一个会动/已失效的实体要求距离 0。
+//      resetPath 每次都构造新的 AStar 且都能 success，所以 thinkTimeout 永远
+//      不触发，机器人就在原地反复重算而不拒绝。
+// 两条都不抛错，于是 collect() 既不 resolve 也不 reject——实测就是 live 的
+// `dur=60004 SKILL_TIMEOUT` 且没有任何 onFault 行。cobble-earned-probe 复现：
+// 第一轮 Timeout 拒绝，第二轮 collect() 静默挂了 224 秒直到探针自己的失效保护。
+// 掉落物是 mineBlock 在 collect() 跑动中追加的目标（CollectBlock.js:80-83），
+// 前置可达性检查看不到它们，所以这个界只能加在这一层。
+// 25000ms：实测四个 oak_log 目标走完整条 collect（含 GoalFollow 捡拾腿）是
+// 34458ms，单目标 12974ms，而 stone 单目标 goto 就要 19025ms（候选在脚下
+// 12-13 格深）。所以这个界不能小到误伤正常采集，只能用来兜住"永远不落定"：
+// 60s 合约减去最坏一次 travel+dig 后仍有余量，且留够时间把真实原因报上去。
+const COLLECT_SETTLE_BUDGET_MS = 25_000;
+
 // 逐个候选排干一次有界的全占空比搜索，只留下答 success 的目标。
 // 为什么必须前置：collectblock 的 collectAll 对每个目标各做一次 goto，并把
 // 拒绝直接上抛（CollectBlock.js:31，第 33 行还留着 `// TODO:
@@ -1613,9 +1631,32 @@ export class MineflayerBotClient implements BotClient {
         stopOnAbort();
         throw new SkillFault("SKILL_CANCELLED");
       }
-      await this.bot.collectBlock.collect(reachableTargets, {
-        ignoreNoPath: false,
-      });
+      // 给 collect() 套一个静默挂死的界。见 COLLECT_SETTLE_BUDGET_MS：
+      // collectAll 的 Entity 分支有两条永不落定且永不抛错的 await，命中时
+      // collect() 会一直吊着，把整个技能合约烧光，最后报成没有 onFault 行的
+      // SKILL_TIMEOUT——上层看到的是 CONTRACT_BUG，而真实情况是掉落物捡拾
+      // 没有收尾。超时后必须 cancelTask + 停寻路，否则插件的循环会带着
+      // 这次的目标继续跑，污染下一次调用。
+      // 超时之后 cancelTask 会让 collect() 那条 Promise 迟到地抛，但不需要额外
+      // 接一层：Promise.race 一进来就给每个入参都挂了反应，那次拒绝算已被处理，
+      // 不会变成 unhandledRejection。
+      const settled = await Promise.race([
+        this.bot.collectBlock
+          .collect(reachableTargets, { ignoreNoPath: false })
+          .then(() => "resolved" as const),
+        new Promise<"stalled">((resolve) => {
+          const timer = setTimeout(() => resolve("stalled"), COLLECT_SETTLE_BUDGET_MS);
+          if (typeof timer.unref === "function") timer.unref();
+        }),
+      ]);
+      if (settled === "stalled") {
+        await this.bot.collectBlock.cancelTask().catch(() => {});
+        this.stopPathfinder();
+        throw new SkillFault(
+          "COLLECT_PICKUP_NOT_SETTLED",
+          `collectBlock neither resolved nor rejected within ${COLLECT_SETTLE_BUDGET_MS}ms for ${input.data.blockName}.`,
+        );
+      }
     } catch (error) {
       if (error instanceof SkillFault) throw error;
       if (request.signal.aborted) {
