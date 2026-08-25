@@ -18,6 +18,7 @@ import {
   SkillAbortError,
   SkillFault,
   SkillFrameworkError,
+  SkillRefusal,
   SKILL_FAULT_DEFAULT_MESSAGE,
 } from "./errors.js";
 import { ServerPolicyGate } from "./policy/policy-gate.js";
@@ -330,9 +331,14 @@ export class SkillExecutor {
             definition.retryPolicy.retryableErrorCodes.includes(errorCode);
           if (!mayRetry) {
             this.reportFault(invocation, errorCode, attempts, error);
+            // `SkillRefusal` 是抛出点在断言"这次调用什么都没改动"。`rejected` 在
+            // 这份协议里一直就是这个意思——原先八个 rejected 站点全是执行前的
+            // 谢绝——所以拒绝走同一个出口，而不是新加一个字段。`attempts` 保持
+            // 真实值：它记的是"跑了几次"，从来不是"动没动过"，用它兼职表达副作用
+            // 正是屏蔽误判的根源。
             return this.result(
               invocation,
-              "failed",
+              error instanceof SkillRefusal ? "rejected" : "failed",
               attempts,
               undefined,
               errorCode,

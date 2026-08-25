@@ -3,6 +3,7 @@ export {
   SkillFault,
   SkillFrameworkError,
   type SkillFrameworkErrorCode,
+  SkillRefusal,
 } from "./errors.js";
 export {
   COMBAT_CONTROL_TIMEOUT_MS,

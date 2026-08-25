@@ -5,6 +5,7 @@ import {
   SkillExecutor,
   SkillFault,
   SkillFrameworkError,
+  SkillRefusal,
   SkillRegistry,
   defineSkill,
   type SkillDefinition,
@@ -280,6 +281,90 @@ describe("SkillExecutor", () => {
       errorCode: "SKILL_VERSION_UNAVAILABLE",
     });
     expect(handler).not.toHaveBeenCalled();
+  });
+
+  /**
+   * `SkillRefusal` 是抛出点声明"这次调用什么都没改动"，executor 据此报
+   * `rejected`——协议里 rejected 一直就是这个意思。
+   *
+   * 为什么不能沿用 `attempts === 0` 当判据：attempts 在 definition.execute
+   * 一进去就是 1，不管适配器有没有碰过世界。所以这条断言要同时钉住两件事——
+   * 出口是 rejected，而 attempts 仍然如实是 1。把 attempts 抹成 0 会让"跑过一次"
+   * 这个事实消失，遥测再也分不出谢绝和根本没派发。
+   */
+  it("reports a refusal that touched nothing as rejected with the real attempt count", async () => {
+    const registry = new SkillRegistry();
+    registry.register(
+      defineSkill({
+        ...movementSkill(),
+        id: "observation.refusal",
+        requiredCapabilities: [] as const,
+        preconditions: [],
+        execute: async () => {
+          throw new SkillRefusal(
+            "COLLECT_TARGET_UNREACHABLE",
+            "pre-check proved every candidate unreachable",
+          );
+        },
+      }),
+    );
+    const onFault = vi.fn();
+    const refusalInvocation = {
+      ...invocation,
+      payload: { ...invocation.payload, skillId: "observation.refusal" },
+    };
+    const result = await executor(registry, undefined, onFault).execute(
+      refusalInvocation,
+      authorization({
+        skillId: "observation.refusal",
+        allowedCapabilities: new Set(),
+      }),
+      { online: true },
+    );
+
+    expect(result.payload).toMatchObject({
+      outcome: "rejected",
+      attempts: 1,
+      errorCode: "COLLECT_TARGET_UNREACHABLE",
+    });
+    // 拒绝仍然是失败：原因照样进 onFault，协议面照样不带 reason。
+    expect(result.payload).not.toHaveProperty("reason");
+    expect(onFault.mock.calls[0]![0]).toMatchObject({
+      errorCode: "COLLECT_TARGET_UNREACHABLE",
+      reason: "pre-check proved every candidate unreachable",
+    });
+  });
+
+  /** 普通 SkillFault 不许蹭这条通道：可能已经产生副作用，出口必须还是 failed。 */
+  it("keeps a plain fault reported as failed", async () => {
+    const registry = new SkillRegistry();
+    registry.register(
+      defineSkill({
+        ...movementSkill(),
+        id: "observation.plainfault",
+        requiredCapabilities: [] as const,
+        preconditions: [],
+        execute: async () => {
+          throw new SkillFault("COLLECT_TARGET_UNREACHABLE", "NoPath mid-collect");
+        },
+      }),
+    );
+    const result = await executor(registry).execute(
+      {
+        ...invocation,
+        payload: { ...invocation.payload, skillId: "observation.plainfault" },
+      },
+      authorization({
+        skillId: "observation.plainfault",
+        allowedCapabilities: new Set(),
+      }),
+      { online: true },
+    );
+
+    expect(result.payload).toMatchObject({
+      outcome: "failed",
+      errorCode: "COLLECT_TARGET_UNREACHABLE",
+    });
   });
 
   it("blocks capability calls that the skill did not declare", async () => {

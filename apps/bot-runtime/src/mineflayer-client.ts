@@ -26,6 +26,7 @@ import {
   smeltItemCapabilityOutputSchema,
   SAFE_PATH_MAX_DISTANCE,
   SkillFault,
+  SkillRefusal,
   resolveMovementProfile,
   type ServerPolicyLimits,
   safeMovementGotoCapabilityInputSchema,
@@ -1589,7 +1590,10 @@ export class MineflayerBotClient implements BotClient {
     // canHarvestWithInventory 的注释（equipForBlock 无界递归，实测 15ms 递归
     // 2001 层，堆在几十秒内冲到 6GB 并崩溃）。
     if (!canHarvestWithInventory(this.bot, targets[0]!)) {
-      throw new SkillFault(
+      // 同样是"证明什么都没动"的拒绝：闸门就在交给 collectblock 之前，
+      // 背包只被读过。缺工具要走 MISSING_RESOURCE 的补齐阶梯，被屏蔽成
+      // 结果不确定就等于放弃一个本来能自己补齐的计划。
+      throw new SkillRefusal(
         "COLLECT_TOOL_MISSING",
         `No inventory item can harvest ${input.data.blockName}.`,
       );
@@ -1611,7 +1615,14 @@ export class MineflayerBotClient implements BotClient {
     if (reachableTargets.length === 0) {
       // 扫描说"有暴露面"，寻路说"都到不了"——这是世界状态，不是缺陷，
       // 所以带着可达数报出去，让上层重新观察而不是原样重试。
-      throw new SkillFault(
+      //
+      // SkillRefusal 而不是 SkillFault：走到这里一块都没挖、背包没动、
+      // collect() 还没被调用，getPathFromTo 只做搜索不移动机器人。这个事实
+      // 只有这里知道——同一个码在下面的 NoPath catch 里也会抛，但那时
+      // collect() 可能已经挖掉了几块，所以那一处必须留成普通 SkillFault。
+      // 协调器的非幂等屏蔽据此放行，这个步骤才能走到它该走的
+      // REOBSERVE_THEN_RETRY 而不是被升级成人工工单。
+      throw new SkillRefusal(
         "COLLECT_TARGET_UNREACHABLE",
         `All ${targets.length} exposed ${input.data.blockName} candidates failed the reachability pre-check.`,
       );

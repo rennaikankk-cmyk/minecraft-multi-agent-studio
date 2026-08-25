@@ -466,6 +466,10 @@ const SKILL_FAILURE_PATTERNS: readonly RegExp[] = [
   /new SkillFault\(\s*"([A-Z0-9_]+)"/g,
   /new PlanAbort\(\s*"([A-Z0-9_]+)"/g,
   /new SkillAbortError\(\s*"([A-Z0-9_]+)"/g,
+  // SkillRefusal 是 SkillFault 的子类（"证明什么都没动"的拒绝）。它单独列一条，
+  // 因为上面那条正则认的是构造函数名而不是类型层次：只用 SkillRefusal 抛的码
+  // 会整族扫不出来，于是静默落回 UNKNOWN → 直接升级人工。
+  /new SkillRefusal\(\s*"([A-Z0-9_]+)"/g,
   /failureCode:\s*"([A-Z0-9_]+)"/g,
   /\bdeny\(\s*"([A-Z0-9_]+)"/g,
   /"(?:rejected|failed)",\s*[^,)]*,\s*[^,)]*,\s*"([A-Z0-9_]+)"/g,

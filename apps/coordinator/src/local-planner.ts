@@ -1991,14 +1991,19 @@ function nonIdempotentStepOutcome(
   outcome: StepOutcome,
 ): StepOutcome {
   if (outcome.ok) return outcome;
-  if (
-    result.payload.outcome === "rejected" &&
-    result.payload.attempts === 0
-  ) {
-    return outcome;
-  }
-  // A handler may have produced partial side effects before any other terminal
-  // outcome. Only a pre-execution rejection proves a fresh invocation is safe.
+  // `rejected` 就是"谢绝了，什么都没动"。原先还额外要求 attempts === 0，那等于
+  // 用"跑了几次"冒充"动没动过"：executor 的 attempts 在 definition.execute 一进去
+  // 就是 1，不管适配器有没有真的碰过世界。实测代价是 collect.block 的**前置**
+  // 可达性检查（一块都没挖）被当成"可能挖了一半"，真实码
+  // COLLECT_TARGET_UNREACHABLE（STALE_WORLD → REOBSERVE_THEN_RETRY）被改写成
+  // NON_IDEMPOTENT_RESULT_UNCERTAIN（CONTRACT_BUG → ESCALATE_TO_OPERATOR），
+  // 第一次尝试就升级人工、repairStepsInserted=0。
+  //
+  // 不能改成按错误码放行：同一个码会从"动过"和"没动过"两个分支抛出
+  // （collect 的前置检查 vs NoPath catch），只有抛出点知道。所以判据是抛出点
+  // 自己声明的 SkillRefusal → executor 报 rejected，这里只读这一个事实。
+  if (result.payload.outcome === "rejected") return outcome;
+  // 其余终态都可能在失败前留下了部分副作用，重投不安全。
   return { ok: false, errorCode: NON_IDEMPOTENT_RESULT_UNCERTAIN };
 }
 

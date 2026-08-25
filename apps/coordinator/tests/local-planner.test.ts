@@ -1521,11 +1521,16 @@ describe("CoordinatorLocalPlanner", () => {
     expect(sendSkillInvocation).toHaveBeenCalledTimes(2);
   });
 
+  /**
+   * 这三个出口都**可能**已经动过世界：处理器跑起来之后才失败/超时/被取消，
+   * 适配器有没有落下副作用无从判断。非幂等步骤只能屏蔽成结果不确定。
+   *
+   * `rejected` 刻意不在这张表里——它是"证明什么都没改动"的断言，见下一条。
+   */
   it.each([
     ["failed", "SKILL_CAPABILITY_FAILED", 1],
     ["timed_out", "SKILL_TIMEOUT", 1],
     ["cancelled", "SKILL_CANCELLED", 1],
-    ["rejected", "SKILL_PRECONDITION_FAILED", 1],
   ] as const)(
     "does not replay a non-idempotent %s result after execution may have started",
     async (outcome, errorCode, attempts) => {
@@ -1549,6 +1554,80 @@ describe("CoordinatorLocalPlanner", () => {
       expect(sendSkillInvocation).toHaveBeenCalledTimes(2);
     },
   );
+
+  /**
+   * `rejected` 在协议里一直只有一个意思：这次调用被谢绝，世界没被碰过。
+   * executor 的八个 rejected 出口全是派发前的前置检查，而 SkillRefusal 让
+   * 处理器**内部**也能作出同一个断言（背包只被读过、寻路只搜不走）。
+   *
+   * 所以屏蔽不能再看 `attempts`：处理器一进去 attempts 就是 1，这个数字分不出
+   * "谢绝"和"跑了一半"。以前多加的 `attempts === 0` 一条，把缺工具、目标都到不了
+   * 这类**本该自己补齐**的失败一律改判成 CONTRACT_BUG → 人工工单：实测
+   * COLLECT_TARGET_UNREACHABLE 被写成 NON_IDEMPOTENT_RESULT_UNCERTAIN，
+   * repairStepsInserted=0，第一次失败就放弃整个目标。
+   *
+   * 这里钉的就是那条改动：真实码必须活着走到恢复阶梯，而且不许重放。
+   */
+  it("keeps the real code on a rejected non-idempotent result instead of masking it", async () => {
+    const planning = planningRegistry();
+    const info = vi.fn();
+    const warn = vi.fn();
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) =>
+      invocation.payload.skillId === "collect.block"
+        ? // attempts=1：确实派发过一次，谢绝不会把这个事实抹成 0。
+          skillResult(invocation, "rejected", "SKILL_INPUT_INVALID", 1)
+        : skillResult(invocation, "completed"),
+    );
+    const planner = new CoordinatorLocalPlanner({
+      ai: {
+        generate: async (options) =>
+          aiResult(
+            JSON.stringify({
+              action: "plan_items",
+              botId: BOT_ID,
+              taskId: "task-01",
+              goals: [{ itemName: "crafting_table", count: 1 }],
+              reasonCode: "ADVANCE_TASK",
+            }),
+            options.requestId,
+          ),
+      },
+      registry: { get: () => planning.get(BOT_ID, NOW) },
+      transport: { sendSkillInvocation },
+      coordinatorInstanceId: "coordinator-01",
+      logger: { info, warn, error: vi.fn(), debug: vi.fn() } as never,
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    await expect(
+      planner.planAndDispatch(resourcePlanRequest()),
+    ).rejects.toMatchObject({ code: "PLANNER_GOAL_EXECUTION_FAILED" });
+
+    // 屏蔽没有发生：既没有那条诊断，监督链里也不该出现屏蔽码。
+    expect(
+      warn.mock.calls.find(
+        ([event]) => event === "coordinator_planner_step_failure_masked",
+      ),
+    ).toBeUndefined();
+    const supervision = [...info.mock.calls, ...warn.mock.calls].find(
+      ([event]) => event === "coordinator_planner_goal_supervision",
+    );
+    expect(supervision?.[1]).toMatchObject({
+      failureCode: "SKILL_INPUT_INVALID",
+    });
+    expect(JSON.stringify(supervision?.[1])).not.toContain(
+      "NON_IDEMPOTENT_RESULT_UNCERTAIN",
+    );
+    // 不屏蔽 ≠ 可以重放：谢绝的那一步只许派发一次。
+    expect(
+      sendSkillInvocation.mock.calls.filter(
+        ([invocation]) => invocation.payload.skillId === "collect.block",
+      ),
+    ).toHaveLength(1);
+  });
 
   it("fails closed when a non-idempotent transport outcome is unknown", async () => {
     const planning = planningRegistry();
