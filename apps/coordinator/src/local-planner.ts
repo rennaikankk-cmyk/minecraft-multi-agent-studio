@@ -8,6 +8,7 @@ import {
   type ScheduledAIRouter,
 } from "@minecraft-studio/ai-router";
 import {
+  goalResultSummaryFromOutput,
   identifierSchema,
   type BotSkillCatalogEntryV1,
   skillIdentifierSchema,
@@ -899,6 +900,26 @@ export class CoordinatorLocalPlanner {
       dispatchSignal,
     );
     this.assertWithinDeadline(deadlineMs, request.signal);
+    // A one-shot Skill that completed without producing anything is the shape
+    // the deterministic planner exists to serve: the model picked a single
+    // Skill for a goal that needs a chain. Re-ask through the planner rather
+    // than reporting an empty success — the guard below still requires an
+    // acquisition verb and exactly one reachable item, so a goal that is not
+    // provably plannable keeps the result it already has.
+    if (dispatchChangedNothing(result)) {
+      const replanned = await this.retryDeclinedAcquisitionGoal({
+        request,
+        operatorGoal,
+        plannedItemNames,
+        record,
+        availableSkills,
+        deadlineMs,
+      });
+      if (replanned) {
+        this.logEmptyDispatchReplanned(request, decision.skillId);
+        return replanned;
+      }
+    }
     return {
       action: "skill_result",
       reasonCode: decision.reasonCode,
@@ -1806,6 +1827,32 @@ export class CoordinatorLocalPlanner {
   }
 
   /**
+   * Records that a one-shot dispatch which produced nothing was re-planned.
+   *
+   * Without it the second attempt is indistinguishable from a first-pass
+   * plan_items decision, and the operator-visible result no longer mentions the
+   * Skill that was tried first. The Skill id is planner-derived, so this adds no
+   * disclosure the catalog does not already carry.
+   */
+  private logEmptyDispatchReplanned(
+    request: LocalPlanRequest,
+    emptySkillId: string,
+  ): void {
+    const logger = this.options.logger;
+    if (!logger) return;
+    try {
+      logger.warn("coordinator_planner_empty_dispatch_replanned", {
+        traceId: request.traceId,
+        taskId: request.taskId,
+        botId: request.botId,
+        emptySkillId,
+      });
+    } catch {
+      // Diagnostics must never change what the planner reports.
+    }
+  }
+
+  /**
    * Records whether the narrowed re-ask overturned a declined acquisition
    * goal.  The retry is otherwise invisible: a discarded one looks exactly
    * like a first-pass noop from outside the planner.
@@ -2005,6 +2052,46 @@ function nonIdempotentStepOutcome(
   if (result.payload.outcome === "rejected") return outcome;
   // 其余终态都可能在失败前留下了部分副作用，重投不安全。
   return { ok: false, errorCode: NON_IDEMPOTENT_RESULT_UNCERTAIN };
+}
+
+/**
+ * The counts that say the world or the inventory actually moved.
+ *
+ * A deliberate subset of the goal-summary allow-list. The names left out are
+ * measurements, not production: `distanceToTarget: 0` means the bot arrived,
+ * `targetsFound: 0` is an observation, and `totalScoreBefore/After` describe a
+ * ranking. Reading a zero in any of those as "nothing happened" would be exactly
+ * the inversion this predicate exists to avoid.
+ */
+const PRODUCTION_COUNT_KEYS = Object.freeze([
+  "itemsCollected",
+  "craftedCount",
+  "smeltedCount",
+  "movedCount",
+  "changedCount",
+] as const);
+
+/**
+ * True when a completed dispatch published production counts and every one of
+ * them is zero — that is, the Skill succeeded at doing nothing.
+ *
+ * Fails closed in both directions that matter. A Skill that published no
+ * production count at all returns false, because "cannot tell" must not be
+ * spelled the same way as "told us it did nothing". And an unsuccessful outcome
+ * returns false, because an error code already explains itself and re-planning
+ * around it would be guessing at a cause.
+ *
+ * Reads the Skill's own output through the same allow-listed extraction the wire
+ * uses, so the coordinator never derives a count it was not given.
+ */
+function dispatchChangedNothing(result: SkillExecutionResultV1): boolean {
+  if (result.payload.outcome !== "completed") return false;
+  const summary = goalResultSummaryFromOutput(result.payload.output);
+  if (summary === undefined) return false;
+  const produced = PRODUCTION_COUNT_KEYS.map((key) => summary[key]).filter(
+    (count): count is number => count !== undefined,
+  );
+  return produced.length > 0 && produced.every((count) => count === 0);
 }
 
 function skillResultErrorCode(result: SkillExecutionResultV1): string {

@@ -1495,6 +1495,159 @@ describe("CoordinatorLocalPlanner", () => {
     expect(sendSkillInvocation).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * 线上真实形态：模型给一个 `collect.block` 直投去满足需要整条链的目标，
+   * Runtime 诚实报 completed 且 `itemsCollected:0`。旧代码把这个原样当成功返回，
+   * 运维侧看到的响应与真采满了一模一样。
+   */
+  it("re-plans a one-shot dispatch that completed without producing anything", async () => {
+    const planning = planningRegistry();
+    const warn = vi.fn();
+    let dispatches = 0;
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => {
+      dispatches += 1;
+      return dispatches === 1
+        ? skillResult(invocation, "completed", undefined, 1, {
+            blockName: String(inputField(invocation.payload.input, "blockName")),
+            targetsFound: 0,
+            itemsCollected: 0,
+          })
+        : skillResult(invocation, "completed");
+    });
+    const generate = vi.fn(emptyDispatchGenerate());
+    const planner = new CoordinatorLocalPlanner({
+      ai: { generate },
+      registry: { get: () => planning.get(BOT_ID, NOW) },
+      transport: { sendSkillInvocation },
+      coordinatorInstanceId: "coordinator-01",
+      logger: { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() } as never,
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    await expect(
+      planner.planAndDispatch(resourcePlanRequest()),
+    ).resolves.toMatchObject({
+      action: "skill_result",
+      reasonCode: "ADVANCE_TASK",
+      result: { payload: { outcome: "completed" } },
+    });
+    // One empty dispatch, then the three steps the deterministic planner derives.
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(4);
+    expect(generate).toHaveBeenCalledTimes(2);
+    expect(generate.mock.calls[1]![0].requestId).toBe(
+      "plan-request-01:plan-items-retry",
+    );
+    expect(warn).toHaveBeenCalledWith(
+      "coordinator_planner_empty_dispatch_replanned",
+      {
+        traceId: "trace-plan-01",
+        taskId: "task-01",
+        botId: BOT_ID,
+        emptySkillId: "collect.block",
+      },
+    );
+  });
+
+  /**
+   * 三个都必须**不**触发重规划。"看不出来"和"说了它什么都没干"不能同一种拼法，
+   * 而 `targetsFound` 是观测、不是产出——把它的 0 读成"什么都没干"正好把判据反过来。
+   */
+  it.each([
+    ["no production count at all", { blockName: "oak_log" }],
+    ["only a measurement count", { blockName: "oak_log", targetsFound: 0 }],
+  ] as const)(
+    "keeps a completed dispatch that published %s",
+    async (_label, output) => {
+      const planning = planningRegistry();
+      const sendSkillInvocation = vi.fn<
+        SkillInvocationTransport["sendSkillInvocation"]
+      >(async (invocation) =>
+        skillResult(invocation, "completed", undefined, 1, output),
+      );
+      const generate = vi.fn(emptyDispatchGenerate());
+      const planner = new CoordinatorLocalPlanner({
+        ai: { generate },
+        registry: { get: () => planning.get(BOT_ID, NOW) },
+        transport: { sendSkillInvocation },
+        coordinatorInstanceId: "coordinator-01",
+        now: () => NOW,
+        randomId: uuidSequence(),
+      });
+
+      await expect(
+        planner.planAndDispatch(resourcePlanRequest()),
+      ).resolves.toMatchObject({
+        action: "skill_result",
+        result: { payload: { output } },
+      });
+      expect(sendSkillInvocation).toHaveBeenCalledTimes(1);
+      expect(generate).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("keeps an unsuccessful dispatch instead of re-planning around its error", async () => {
+    const planning = planningRegistry();
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) =>
+      skillResult(invocation, "failed", "COLLECT_BLOCKS_FAILED"),
+    );
+    const generate = vi.fn(emptyDispatchGenerate());
+    const planner = new CoordinatorLocalPlanner({
+      ai: { generate },
+      registry: { get: () => planning.get(BOT_ID, NOW) },
+      transport: { sendSkillInvocation },
+      coordinatorInstanceId: "coordinator-01",
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    await expect(
+      planner.planAndDispatch(resourcePlanRequest()),
+    ).resolves.toMatchObject({
+      action: "skill_result",
+      result: { payload: { outcome: "failed", errorCode: "COLLECT_BLOCKS_FAILED" } },
+    });
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an empty dispatch standing when the goal is not a single-item acquisition", async () => {
+    const planning = planningRegistry();
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) =>
+      skillResult(invocation, "completed", undefined, 1, {
+        blockName: "oak_log",
+        targetsFound: 0,
+        itemsCollected: 0,
+      }),
+    );
+    const generate = vi.fn(emptyDispatchGenerate());
+    const planner = new CoordinatorLocalPlanner({
+      ai: { generate },
+      registry: { get: () => planning.get(BOT_ID, NOW) },
+      transport: { sendSkillInvocation },
+      coordinatorInstanceId: "coordinator-01",
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    await expect(
+      planner.planAndDispatch({
+        ...resourcePlanRequest(),
+        operatorGoal: "Equip the best armor already in inventory.",
+      }),
+    ).resolves.toMatchObject({
+      action: "skill_result",
+      result: { payload: { output: { itemsCollected: 0 } } },
+    });
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(1);
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
+
   it("does not accept a completed craft result with partial output", async () => {
     const planning = planningRegistry();
     const sendSkillInvocation = vi.fn<
@@ -2233,6 +2386,45 @@ function resourcePlanner(
     now: () => NOW,
     randomId: uuidSequence(),
   });
+}
+
+/**
+ * 第一遍给 `collect.block` 直投,重问那遍给 plan_items —— 线上那次失败的形状。
+ * 直投的是 `oak_log`:目标里确实提到它(via 木头/原木 别名之外的英文拼写),
+ * 而重问只可能落到协调器自己挑的那个物品上。
+ */
+function emptyDispatchGenerate(): (
+  options: any,
+) => Promise<AIScheduledResult<GenerateResult>> {
+  return async (options) =>
+    aiResult(
+      JSON.stringify(
+        options.requestId.endsWith(":plan-items-retry")
+          ? {
+              action: "plan_items",
+              botId: BOT_ID,
+              taskId: "task-01",
+              goals: [{ itemName: "crafting_table", count: 1 }],
+              reasonCode: "ADVANCE_TASK",
+            }
+          : {
+              action: "invoke_skill",
+              botId: BOT_ID,
+              taskId: "task-01",
+              skillId: "collect.block",
+              skillVersion: "1.0.0",
+              input: {
+                blockName: "oak_log",
+                maxCount: 4,
+                maxDistance: 16,
+                dimension: "minecraft:overworld",
+                serverProfileId: "$CURRENT_SERVER_PROFILE",
+              },
+              reasonCode: "ADVANCE_TASK",
+            },
+      ),
+      options.requestId,
+    );
 }
 
 function resourcePlanRequest(): LocalPlanRequest {
