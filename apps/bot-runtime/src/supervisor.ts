@@ -1,11 +1,12 @@
 import {
   fork,
+  spawn,
   type ChildProcess,
   type ForkOptions,
   type Serializable,
 } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { fileURLToPath } from "node:url";
+import path from "node:path";
 
 import {
   BotState,
@@ -42,9 +43,25 @@ import {
 } from "./supervisor-plan.js";
 
 const MAX_CLOCK_SKEW_MS = 30_000;
-const DEFAULT_CHILD_ENTRY = fileURLToPath(
-  new URL("./supervisor-child.js", import.meta.url),
-);
+const PACKAGED_MODE = process.env.STUDIO_SEA_BUNDLE === "1";
+const SEA_SERVICE_FLAG = "--studio-service";
+const DEFAULT_CHILD_ENTRY = resolveDefaultChildEntry(PACKAGED_MODE);
+
+function resolveDefaultChildEntry(packagedMode: boolean): string {
+  if (packagedMode) {
+    // SEA children must enter through the launcher so the embedded runtime
+    // can dispatch them without recursively starting the whole Studio.
+    return "apps/bot-runtime/dist/supervisor-child.js";
+  }
+  // The supervisor entry is always launched as a process in production. Using
+  // argv keeps the sibling lookup valid for both ESM dist files and the
+  // CommonJS bundle embedded in the Windows SEA executable.
+  const launchedEntry = process.argv[1];
+  if (launchedEntry) {
+    return path.join(path.dirname(path.resolve(launchedEntry)), "supervisor-child.js");
+  }
+  return path.resolve("supervisor-child.js");
+}
 
 export type SupervisorFork = (
   modulePath: string,
@@ -144,8 +161,7 @@ export class BotProcessSupervisor {
     this.config = options.config;
     this.logger = options.logger;
     this.childEntryPath = options.childEntryPath ?? DEFAULT_CHILD_ENTRY;
-    this.forkChild = options.forkChild ?? ((modulePath, forkOptions) =>
-      fork(modulePath, [], forkOptions));
+    this.forkChild = options.forkChild ?? defaultForkChild;
     this.now = options.now ?? (() => new Date());
     this.randomId = options.randomId ?? randomUUID;
     this.randomNonce =
@@ -760,6 +776,12 @@ function childEnvironment(
   for (const name of ["LANG", "LC_ALL", "TZ", "TMPDIR", "TMP", "TEMP"] as const) {
     if (source[name]) environment[name] = source[name];
   }
+  if (PACKAGED_MODE) {
+    environment.STUDIO_SEA_BUNDLE = "1";
+    if (source.STUDIO_BUNDLE_ROOT) {
+      environment.STUDIO_BUNDLE_ROOT = source.STUDIO_BUNDLE_ROOT;
+    }
+  }
   return {
     ...environment,
     NODE_ENV: source.NODE_ENV ?? "production",
@@ -776,6 +798,23 @@ function childEnvironment(
     ),
     BOT_SUPERVISOR_IPC_MAX_QUEUED_BYTES: String(config.ipc.maxQueuedBytes),
   };
+}
+
+function defaultForkChild(
+  modulePath: string,
+  forkOptions: ForkOptions,
+): ChildProcess {
+  if (!PACKAGED_MODE) return fork(modulePath, [], forkOptions);
+
+  // `fork()` places execArgv before the module path, where Node would reject
+  // the application-specific flag as an unknown runtime option. Spawn the SEA
+  // directly instead, putting the launcher dispatch flag after the executable
+  // and preserving the fork-compatible IPC channel and stdio settings.
+  const { execArgv: _execArgv, serialization: _serialization, ...spawnOptions } = forkOptions;
+  return spawn(process.execPath, [SEA_SERVICE_FLAG, modulePath], {
+    ...spawnOptions,
+    windowsHide: true,
+  });
 }
 
 function assertSession(

@@ -16,7 +16,7 @@ describe("Control API configuration", () => {
         {
           subject: "viewer-01",
           tokenSha256: TOKEN_HASH,
-          permissions: ["bot.read"],
+          permissions: ["bot.read", "task.read"],
         },
       ]),
     });
@@ -24,7 +24,13 @@ describe("Control API configuration", () => {
     expect(config).toMatchObject({
       host: "127.0.0.1",
       port: 3210,
-      principals: [{ subject: "viewer-01", tokenSha256: TOKEN_HASH }],
+      principals: [
+        {
+          subject: "viewer-01",
+          tokenSha256: TOKEN_HASH,
+          permissions: ["bot.read", "task.read"],
+        },
+      ],
     });
   });
 

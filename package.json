@@ -14,6 +14,8 @@
     "dev": "pnpm build:packages && pnpm --filter @minecraft-studio/dashboard dev",
     "start": "pnpm build && node scripts/start-studio.mjs",
     "start:services": "node scripts/start-studio.mjs",
+    "build:exe": "node scripts/build-studio-exe.mjs",
+    "build:exe:skip-build": "node scripts/build-studio-exe.mjs --skip-build",
     "bot:start": "pnpm build:packages && pnpm --filter @minecraft-studio/bot-runtime build && pnpm --filter @minecraft-studio/bot-runtime start",
     "bot:supervisor": "pnpm build:packages && pnpm --filter @minecraft-studio/bot-runtime build && pnpm --filter @minecraft-studio/bot-runtime start:supervisor",
     "coordinator:start": "pnpm build:control-plane && pnpm --filter @minecraft-studio/coordinator start",
@@ -44,6 +46,8 @@
   },
   "devDependencies": {
     "@types/node": "26.1.1",
+    "esbuild": "0.28.2",
+    "postject": "1.0.0-alpha.6",
     "typescript": "6.0.3",
     "vitest": "4.1.10"
   }

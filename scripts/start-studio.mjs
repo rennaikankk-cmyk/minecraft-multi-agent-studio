@@ -5,8 +5,16 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { parseEnv } from "node:util";
 
-const repositoryRoot = path.resolve(import.meta.dirname, "..");
-const runtimeRoot = path.join(repositoryRoot, "runtime-data");
+const packagedMode = process.env.STUDIO_SEA_BUNDLE === "1";
+const repositoryRoot = path.resolve(
+  process.env.STUDIO_BUNDLE_ROOT?.trim() || path.resolve(import.meta.dirname, ".."),
+);
+const configRoot = path.resolve(
+  process.env.STUDIO_CONFIG_ROOT?.trim() || repositoryRoot,
+);
+const runtimeRoot = path.resolve(
+  process.env.STUDIO_RUNTIME_ROOT?.trim() || path.join(repositoryRoot, "runtime-data"),
+);
 const logRoot = path.join(runtimeRoot, "logs");
 const secretPath = path.join(runtimeRoot, "local-control-secrets.json");
 const children = new Map();
@@ -20,8 +28,8 @@ process.once("SIGINT", () => void stopAll("SIGINT"));
 process.once("SIGTERM", () => void stopAll("SIGTERM"));
 
 const environmentFileValues = {
-  ...(await loadEnvironmentFile(path.join(repositoryRoot, ".env"))),
-  ...(await loadEnvironmentFile(path.join(repositoryRoot, ".env.local"))),
+  ...(await loadEnvironmentFile(path.join(configRoot, ".env"))),
+  ...(await loadEnvironmentFile(path.join(configRoot, ".env.local"))),
 };
 const hostEnvironment = { ...environmentFileValues, ...process.env };
 const runtimeLinkPort = boundedPort(
@@ -69,7 +77,9 @@ const environment = buildEnvironment(secrets, hostEnvironment, {
 await requireBuildArtifacts([
   "apps/coordinator/dist/main.js",
   "apps/control-api/dist/main.js",
-  "apps/dashboard/.next/BUILD_ID",
+  packagedMode
+    ? "apps/dashboard/.next/standalone/apps/dashboard/.next/BUILD_ID"
+    : "apps/dashboard/.next/BUILD_ID",
   ...(productionTaskDelivery ? ["apps/task-worker/dist/main.js"] : []),
 ]);
 
@@ -105,15 +115,30 @@ try {
     );
   }
 
-  const dashboard = startService(
-    "dashboard",
-    "apps/dashboard/node_modules/next/dist/bin/next",
-    ["start", "--hostname", "127.0.0.1", "--port", String(dashboardPort)],
-    environment,
-    path.join(repositoryRoot, "apps/dashboard"),
-  );
+  const dashboard = packagedMode
+    ? startService(
+        "dashboard",
+        "apps/dashboard/.next/standalone/apps/dashboard/server.js",
+        [],
+        {
+          ...environment,
+          HOSTNAME: "127.0.0.1",
+          PORT: String(dashboardPort),
+        },
+        path.join(repositoryRoot, "apps/dashboard/.next/standalone/apps/dashboard"),
+      )
+    : startService(
+        "dashboard",
+        "apps/dashboard/node_modules/next/dist/bin/next",
+        ["start", "--hostname", "127.0.0.1", "--port", String(dashboardPort)],
+        environment,
+        path.join(repositoryRoot, "apps/dashboard"),
+      );
   await waitForDashboard(dashboard, dashboardUrl, 20_000);
   process.stdout.write(`Minecraft Multi-Agent Studio ready: ${dashboardUrl}\n`);
+  if (packagedMode && hostEnvironment.STUDIO_OPEN_BROWSER?.trim() !== "0") {
+    openDashboardInBrowser(dashboardUrl);
+  }
   process.stdout.write(
     environment.BOT_SUPERVISOR_CONFIG_PATH
       ? "Bot Supervisor enabled from explicit configuration.\n"
@@ -142,7 +167,14 @@ function startService(name, relativeEntry, args, env, cwd = repositoryRoot) {
   if (stopping) throw new Error(`Cannot start ${name} while Studio is stopping.`);
   const entry = path.join(repositoryRoot, relativeEntry);
   const log = createWriteStream(path.join(logRoot, `${name}.log`), { flags: "a" });
-  const child = spawn(process.execPath, ["--import", shutdownPreload, entry, ...args], {
+  const childArgs = packagedMode
+    ? [
+        "--studio-service",
+        path.relative(repositoryRoot, entry).split(path.sep).join("/"),
+        ...args,
+      ]
+    : ["--import", shutdownPreload, entry, ...args];
+  const child = spawn(process.execPath, childArgs, {
     cwd,
     env,
     windowsHide: true,
@@ -170,6 +202,18 @@ function startService(name, relativeEntry, args, env, cwd = repositoryRoot) {
     }
   });
   return service;
+}
+
+function openDashboardInBrowser(url) {
+  const browser = spawn("explorer.exe", [url], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  browser.once("error", (cause) => {
+    process.stderr.write(`Unable to open the Dashboard automatically: ${boundedError(cause)}\n`);
+  });
+  browser.unref();
 }
 
 async function stopAll(reason) {
