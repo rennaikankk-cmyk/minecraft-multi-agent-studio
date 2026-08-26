@@ -449,7 +449,11 @@ describe("PostgresGoalLifecycleStore", () => {
       repository: repository({
         createTask: vi.fn(async () => ({ task: expiredRunning, created: false })),
         getDatabaseTime: vi.fn(async () => NOW),
-        expireLease: vi.fn(async () => failed),
+        recoverExpiredLease: vi.fn(async () => ({
+          task: failed,
+          dispatch: null,
+          outbox: null,
+        })),
         acquireLease,
       }),
       coordinatorInstanceId: "coordinator-test",
@@ -462,6 +466,44 @@ describe("PostgresGoalLifecycleStore", () => {
       snapshot: { status: "failed" },
     });
     expect(acquireLease).not.toHaveBeenCalled();
+  });
+
+  it("rebuilds dispatch state while refreshing an expired assigned lease", async () => {
+    const assigned = task("assigned", {
+      leaseExpiresAt: new Date(NOW.getTime() - 1).toISOString(),
+    });
+    const queued = task("queued", {
+      revision: assigned.revision + 1,
+      updatedAt: NOW.toISOString(),
+    });
+    const recoverExpiredLease = vi.fn(async () => ({
+      task: queued,
+      dispatch: null,
+      outbox: null,
+    }));
+    const expireLease = vi.fn();
+    const store = new PostgresGoalLifecycleStore({
+      repository: repository({
+        getDatabaseTime: vi.fn(async () => NOW),
+        listTaskLifecycle: vi.fn(async () => [assigned]),
+        recoverExpiredLease,
+        expireLease,
+      }),
+      coordinatorInstanceId: "coordinator-test",
+      randomId: () => "99999999-9999-4999-8999-999999999999",
+    });
+
+    await expect(store.refresh(5 * 60_000)).resolves.toMatchObject([
+      { status: "queued" },
+    ]);
+    expect(recoverExpiredLease).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: assigned.taskId,
+        expectedRevision: assigned.revision,
+        reasonCode: "TASK_LEASE_EXPIRED",
+      }),
+    );
+    expect(expireLease).not.toHaveBeenCalled();
   });
 
   it("records unsuccessful planner outcomes as replayable terminal results", async () => {

@@ -466,7 +466,7 @@ export class PostgresGoalLifecycleStore implements GoalLifecycleStore {
       task.leaseExpiresAt !== null &&
       Date.parse(task.leaseExpiresAt) <= now.getTime()
     ) {
-      const recovered = await this.options.repository.expireLease({
+      const recovered = await this.options.repository.recoverExpiredLease({
         schemaVersion: "1.0",
         operationId: this.randomId(),
         taskId: task.taskId,
@@ -474,7 +474,7 @@ export class PostgresGoalLifecycleStore implements GoalLifecycleStore {
         actorId: this.options.coordinatorInstanceId,
         reasonCode: "TASK_LEASE_EXPIRED",
       });
-      return validateGoalTask(recovered, persisted.input);
+      return validateGoalTask(recovered.task, persisted.input);
     }
     if (
       task.status === "queued" &&
