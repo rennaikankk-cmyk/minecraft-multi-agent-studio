@@ -598,10 +598,53 @@ describe("MineflayerBotClient lifecycle", () => {
         client.invokeSkillCapability(collectRequest("invocation-collect-fail")),
       ).rejects.toMatchObject({
         code: expectedCode,
-        message: "Took to long to decide path to goal!",
+        // 底层原因必须原样带走——屏蔽码留给协议,原因留给日志。后面追加的批次
+        // 账目是另一件事(替补有没有登场),所以这里用包含而不是相等。
+        message: expect.stringContaining("Took to long to decide path to goal!"),
       });
     },
   );
+
+  it("says how many proven-reachable batches it actually attempted", async () => {
+    // 实跑那次只能靠 durationMs(12588 → 15754ms)反推替补有没有登场,那是推断
+    // 不是观测。预检查只证明了一个候选时替补席是空的,而"替补上过场也照样超时"
+    // 的下一步正好相反,所以这个数字必须写在 reason 里。
+    const emitter = new EventEmitter();
+    const bot = emitter as unknown as Bot;
+    const rejection = new Error("Took to long to decide path to goal!");
+    rejection.name = "Timeout";
+    Object.assign(bot, {
+      game: { dimension: "overworld" },
+      registry: { blocksByName: { oak_log: { id: 1 } } },
+      inventory: { items: () => [{ name: "wooden_axe", type: 800, count: 1 }] },
+      entity: { position: new Vec3(0, 64, 0) },
+      world: {},
+      findBlocks: vi.fn(() => [new Vec3(1, 64, 1)]),
+      blockAt: vi.fn(() => ({
+        name: "oak_log",
+        type: 1,
+        position: new Vec3(1, 64, 1),
+        boundingBox: "block",
+        canHarvest: () => true,
+      })),
+      pathfinder: collectPathfinder(),
+      collectBlock: {
+        chestLocations: [] as Vec3[],
+        movements: null as Movements | null,
+        collect: vi.fn(async () => {
+          throw rejection;
+        }),
+        cancelTask: vi.fn(async () => undefined),
+      },
+    });
+    const client = new MineflayerBotClient(bot, "auto", "isolated-test-profile");
+
+    await expect(
+      client.invokeSkillCapability(collectRequest("invocation-collect-batches")),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining("attempted 1 of 1 proven-reachable batch"),
+    });
+  });
 
   it("refuses to collect a block nothing in the inventory can harvest", async () => {
     // 实测这不是洁癖检查而是防崩溃：空手对石头 canHarvest(null) 为假，

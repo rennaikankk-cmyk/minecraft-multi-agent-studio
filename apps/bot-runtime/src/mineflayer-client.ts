@@ -1769,6 +1769,9 @@ export class MineflayerBotClient implements BotClient {
 
     const inventoryBefore = this.countInventoryTotal();
     let collectedTargets = 0;
+    // 实跑失败的 reason 此前只有插件转抛的那一句，读不出替补到底有没有登场。
+    // 实测只能靠 durationMs 反推(12588 → 15754ms)，那是推断不是观测。
+    let attemptsMade = 0;
     this.activePathInvocationId = request.invocationId;
     const restoreServerConfirmedDigging =
       this.installServerConfirmedDigging(request.signal);
@@ -1795,6 +1798,7 @@ export class MineflayerBotClient implements BotClient {
       // （NoPath / Timeout）才换：别的错误换个坐标也一样会犯，换了只是白烧预算。
       let lastPathFailure: unknown = null;
       for (const batch of attemptBatches) {
+        attemptsMade += 1;
         try {
           const settled = await Promise.race([
             this.bot.collectBlock
@@ -1844,10 +1848,15 @@ export class MineflayerBotClient implements BotClient {
       // 就是判据。码写成字面量而不是从 helper 返回，是因为分类器测试靠正则扫
       // `new SkillFault("...")` 来发现新码（failure-classifier.test.ts:467）；
       // 藏在 helper 里的码扫不到，就会静默漏收分类。
-      const reason =
+      const pluginReason =
         error instanceof Error && error.message.trim().length > 0
           ? error.message.trim()
           : "collectBlock rejected without a message.";
+      // 带上批次账目。没有它就分不清"替补上过场也照样超时"和"预检查只证明了
+      // 一个候选，替补席根本是空的"——两者的下一步完全相反：前者说明这一带
+      // 确实走不通，后者说明预检查的总预算没给够替补。实测 15754ms 那次属于
+      // 后者，但当时只能靠时长反推。
+      const reason = `${pluginReason} (attempted ${attemptsMade} of ${attemptBatches.length} proven-reachable batch(es))`;
       const failure = error instanceof Error ? error.name : "";
       // A* 搜完了，确实没有路：重新观察，别原样重试。
       if (failure === "NoPath") {
