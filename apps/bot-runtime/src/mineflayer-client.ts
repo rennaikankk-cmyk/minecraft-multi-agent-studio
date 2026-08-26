@@ -573,6 +573,25 @@ const COLLECT_CANDIDATE_POOL_SLACK = 8;
 // COLLECT_PATH_SEARCH_EXHAUSTED（TRANSIENT，可以原样再试）。
 const COLLECT_PRECHECK_TOTAL_BUDGET_MS = 6_000;
 
+// 前置检查是证据，不是保证。实测（task 7bab377b，step 6 oak_log，dur=12588ms）：
+// 前置检查证明了一个候选可达——日志里一条 "Examined ... candidates" 都没有——
+// 随后 collect() 自己的 goto 在同一个目标上以
+// `Timeout: Took to long to decide path to goal!`（goto.js:28，即 path_update
+// 报 status=timeout）被拒。两次搜索并不等价：前置检查用
+// tickTimeout == timeout 背靠背跑满 1500ms，而实跑的 A* 挂在 physicsTick 上
+// 每 ~50ms 只跑 tickTimeout=40ms，且 8000ms 是**墙钟**（astar.js:73），行进途中
+// 的 blockUpdate/chunkColumnLoad 还会 resetPath 并从新位置重新付一次全价
+// （index.js:401/414）。所以"前置证明可达"之后实跑仍然可能判不出路。
+//
+// 于是只交一个已证明的目标就复现了 COLLECT_CANDIDATE_POOL_SLACK 当初要修的那个
+// 形态——一次坏抽样就沉掉整步——只是晚了一层：候选池有替补，交给 collect() 的
+// 批次却没有。多证明一个候选当替补，成本有界（最多一个 1500ms 名额，且仍受
+// 6000ms 总预算约束），换来实跑被拒时还有下一个可以试。
+//
+// 只留 1 个而不是更多：一次替补把最坏成本压在"再一次 goto"，60s 技能合约放得下
+// （实测整步 12588ms）；再多就要拿实测数字说话，而那个数字还没测。
+const COLLECT_LIVE_PATH_SUBSTITUTES = 1;
+
 /**
  * 前置检查的结论。`provenPathless` 是**证明**了没有路的候选数，不是"没成功"的
  * 候选数：两者差在预算用尽的搜索上，而这个差别决定上层走哪条恢复阶梯。
@@ -1686,11 +1705,15 @@ export class MineflayerBotClient implements BotClient {
     // 目标会中止整批（实测 40 个暴露候选里 7 个 noPath）。
     // wanted 用请求量而不是池子大小：池子是替补席，攒够请求量就停手，
     // 免得为了一个只要 1 块的步骤把 9 个候选全排一遍。
+    // 多证明一个候选留作替补：前置检查的可达是证据不是保证，实测证明可达的目标
+    // 仍会在 collect() 自己的 goto 上以 Timeout 被拒（见
+    // COLLECT_LIVE_PATH_SUBSTITUTES）。多出来的候选不交给这一轮 collect()，
+    // 只在实跑被拒后才用。
     const reachability = collectReachableTargets(
       this.bot,
       movements,
       targets,
-      input.data.maxCount,
+      input.data.maxCount + COLLECT_LIVE_PATH_SUBSTITUTES,
     );
     const reachableTargets = reachability.reachable;
     if (reachableTargets.length === 0) {
@@ -1731,7 +1754,21 @@ export class MineflayerBotClient implements BotClient {
       );
     }
 
+    // 一轮只交请求量那么多，替补留到下一轮。批次数因此至多
+    // 1 + COLLECT_LIVE_PATH_SUBSTITUTES。
+    const attemptBatches: Array<typeof reachableTargets> = [];
+    for (
+      let offset = 0;
+      offset < reachableTargets.length;
+      offset += input.data.maxCount
+    ) {
+      attemptBatches.push(
+        reachableTargets.slice(offset, offset + input.data.maxCount),
+      );
+    }
+
     const inventoryBefore = this.countInventoryTotal();
+    let collectedTargets = 0;
     this.activePathInvocationId = request.invocationId;
     const restoreServerConfirmedDigging =
       this.installServerConfirmedDigging(request.signal);
@@ -1754,23 +1791,46 @@ export class MineflayerBotClient implements BotClient {
       // 超时之后 cancelTask 会让 collect() 那条 Promise 迟到地抛，但不需要额外
       // 接一层：Promise.race 一进来就给每个入参都挂了反应，那次拒绝算已被处理，
       // 不会变成 unhandledRejection。
-      const settled = await Promise.race([
-        this.bot.collectBlock
-          .collect(reachableTargets, { ignoreNoPath: false })
-          .then(() => "resolved" as const),
-        new Promise<"stalled">((resolve) => {
-          const timer = setTimeout(() => resolve("stalled"), COLLECT_SETTLE_BUDGET_MS);
-          if (typeof timer.unref === "function") timer.unref();
-        }),
-      ]);
-      if (settled === "stalled") {
-        await this.bot.collectBlock.cancelTask().catch(() => {});
-        this.stopPathfinder();
-        throw new SkillFault(
-          "COLLECT_PICKUP_NOT_SETTLED",
-          `collectBlock neither resolved nor rejected within ${COLLECT_SETTLE_BUDGET_MS}ms for ${input.data.blockName}.`,
-        );
+      // 实跑被拒就换替补，而不是让一次坏抽样沉掉整步。只有寻路类拒绝
+      // （NoPath / Timeout）才换：别的错误换个坐标也一样会犯，换了只是白烧预算。
+      let lastPathFailure: unknown = null;
+      for (const batch of attemptBatches) {
+        try {
+          const settled = await Promise.race([
+            this.bot.collectBlock
+              .collect(batch, { ignoreNoPath: false })
+              .then(() => "resolved" as const),
+            new Promise<"stalled">((resolve) => {
+              const timer = setTimeout(() => resolve("stalled"), COLLECT_SETTLE_BUDGET_MS);
+              if (typeof timer.unref === "function") timer.unref();
+            }),
+          ]);
+          if (settled === "stalled") {
+            await this.bot.collectBlock.cancelTask().catch(() => {});
+            this.stopPathfinder();
+            throw new SkillFault(
+              "COLLECT_PICKUP_NOT_SETTLED",
+              `collectBlock neither resolved nor rejected within ${COLLECT_SETTLE_BUDGET_MS}ms for ${input.data.blockName}.`,
+            );
+          }
+          collectedTargets = batch.length;
+          lastPathFailure = null;
+          break;
+        } catch (error) {
+          if (error instanceof SkillFault) throw error;
+          if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+          const failure = error instanceof Error ? error.name : "";
+          if (failure !== "NoPath" && failure !== "Timeout") throw error;
+          // 已经挖到东西就不换候选：请求量是上限，换一轮会挖过量。挖到多少用
+          // 背包读回判断，不靠插件的返回值猜。
+          if (this.countInventoryTotal() > inventoryBefore) throw error;
+          lastPathFailure = error;
+          // 插件的循环还带着这一批目标，不取消就会污染下一批。
+          await this.bot.collectBlock.cancelTask().catch(() => {});
+          this.stopPathfinder();
+        }
       }
+      if (lastPathFailure !== null) throw lastPathFailure;
     } catch (error) {
       if (error instanceof SkillFault) throw error;
       if (request.signal.aborted) {
@@ -1817,9 +1877,11 @@ export class MineflayerBotClient implements BotClient {
     );
     return collectBlockCapabilityOutputSchema.parse({
       blockName: input.data.blockName,
-      // 报实际交给采集器的数量，而不是扫描命中数：扫到 8 个而只有 1 个走得到时，
-      // 报 8 会让上层的验收谓词（targetsFound >= runs）过得比世界实际情况宽松。
-      targetsFound: reachableTargets.length,
+      // 报真正被采集的那一批的数量，而不是扫描命中数，也不是证明可达的总数：
+      // 扫到 8 个而只有 1 个走得到时，报 8 会让上层的验收谓词
+      // （targetsFound >= runs）过得比世界实际情况宽松。多证明出来的替补同理——
+      // 它没被交给成功的那一轮，报它就是虚高。
+      targetsFound: collectedTargets,
       itemsCollected,
     });
   }

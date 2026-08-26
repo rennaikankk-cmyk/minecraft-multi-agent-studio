@@ -829,6 +829,103 @@ describe("MineflayerBotClient lifecycle", () => {
     );
   });
 
+  it("falls through to a proven substitute when the live walk times out", async () => {
+    // 实测 task 7bab377b step 6（oak_log，dur=12588ms）：前置检查证明了一个候选
+    // 可达（日志里没有任何 "Examined ... candidates" 行），随后 collect() 自己的
+    // goto 在同一个目标上以 `Timeout: Took to long to decide path to goal!`
+    // 被拒。两次搜索不等价——前置检查 tickTimeout == timeout 背靠背跑满，实跑
+    // 每 ~50ms 只跑 40ms 且 8000ms 是墙钟——所以"证明可达"之后实跑仍会判不出路。
+    // 只交一个已证明的目标就等于让一次坏抽样沉掉整步。
+    const emitter = new EventEmitter();
+    const bot = emitter as unknown as Bot;
+    const first = new Vec3(2, 64, 0);
+    const second = new Vec3(5, 64, 0);
+    const timeout = new Error("Took to long to decide path to goal!");
+    timeout.name = "Timeout";
+    const collect = vi.fn(async (batch: Array<{ position: Vec3 }>) => {
+      if (batch[0]?.position.x === first.x) throw timeout;
+    });
+    const cancelTask = vi.fn(async () => undefined);
+    Object.assign(bot, {
+      game: { dimension: "overworld" },
+      registry: { blocksByName: { stone: { id: 1 } } },
+      inventory: { items: () => [{ name: "wooden_pickaxe", type: 800, count: 1 }] },
+      entity: { position: new Vec3(0, 64, 0) },
+      world: {},
+      pathfinder: collectPathfinder(),
+      findBlocks: vi.fn(() => [first, second]),
+      blockAt: vi.fn((position: Vec3) => harvestableBlock(position, 1)),
+      collectBlock: {
+        chestLocations: [] as Vec3[],
+        movements: null as Movements | null,
+        collect,
+        cancelTask,
+      },
+    });
+    const client = new MineflayerBotClient(bot, "auto", "isolated-test-profile");
+
+    await expect(
+      client.invokeSkillCapability({
+        ...collectRequest("invocation-collect-substitute"),
+        input: {
+          blockName: "stone",
+          maxCount: 1,
+          maxDistance: 16,
+          dimension: "minecraft:overworld",
+          serverProfileId: "isolated-test-profile",
+        },
+      }),
+      // 请求量仍然是 1：替补是换一个坐标，不是多挖一块。
+    ).resolves.toMatchObject({ targetsFound: 1 });
+    expect(collect).toHaveBeenCalledTimes(2);
+    expect(collect).toHaveBeenLastCalledWith(
+      [expect.objectContaining({ position: second })],
+      { ignoreNoPath: false },
+    );
+    // 换批次之前必须取消：插件的循环还带着上一批的目标。
+    expect(cancelTask).toHaveBeenCalled();
+  });
+
+  it("does not spend a substitute on a failure that is not about pathing", async () => {
+    // 换个坐标治不了"挖不动/够不到"，只会白烧一轮预算并把真实原因推迟上报。
+    const emitter = new EventEmitter();
+    const bot = emitter as unknown as Bot;
+    const collect = vi.fn(async () => {
+      throw new Error("dig failed");
+    });
+    Object.assign(bot, {
+      game: { dimension: "overworld" },
+      registry: { blocksByName: { stone: { id: 1 } } },
+      inventory: { items: () => [{ name: "wooden_pickaxe", type: 800, count: 1 }] },
+      entity: { position: new Vec3(0, 64, 0) },
+      world: {},
+      pathfinder: collectPathfinder(),
+      findBlocks: vi.fn(() => [new Vec3(2, 64, 0), new Vec3(5, 64, 0)]),
+      blockAt: vi.fn((position: Vec3) => harvestableBlock(position, 1)),
+      collectBlock: {
+        chestLocations: [] as Vec3[],
+        movements: null as Movements | null,
+        collect,
+        cancelTask: vi.fn(async () => undefined),
+      },
+    });
+    const client = new MineflayerBotClient(bot, "auto", "isolated-test-profile");
+
+    await expect(
+      client.invokeSkillCapability({
+        ...collectRequest("invocation-collect-no-substitute"),
+        input: {
+          blockName: "stone",
+          maxCount: 1,
+          maxDistance: 16,
+          dimension: "minecraft:overworld",
+          serverProfileId: "isolated-test-profile",
+        },
+      }),
+    ).rejects.toMatchObject({ code: "COLLECT_BLOCKS_FAILED" });
+    expect(collect).toHaveBeenCalledTimes(1);
+  });
+
   it("reports every candidate proven unreachable as unreachable, not as a budget failure", async () => {
     const emitter = new EventEmitter();
     const bot = emitter as unknown as Bot;
