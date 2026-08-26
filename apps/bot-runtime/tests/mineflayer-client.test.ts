@@ -710,6 +710,124 @@ describe("MineflayerBotClient lifecycle", () => {
     expect(collect).toHaveBeenCalledWith([reachable], { ignoreNoPath: false });
   });
 
+  it("over-fetches candidates so one unreachable nearest hit does not sink the batch", async () => {
+    // findBlocks 的 count 截断发生在 useExtraInfo 过滤之后（blocks.js:199-206），
+    // 所以 count == maxCount 时"最近的 maxCount 个暴露候选"就是全部候选——最近
+    // 那个不可达就没有替补。实测的死法正是这个：只找到 1 个暴露的 oak_log，
+    // 它不可达，整个目标在 step 1 结束、stepsCompleted:0，而世界里明明还有别的
+    // 原木，只是不在"最近 1 个"里。
+    const emitter = new EventEmitter();
+    const bot = emitter as unknown as Bot;
+    const nearestBlocked = new Vec3(2, 64, 0);
+    const fartherReachable = new Vec3(6, 64, 0);
+    const blocked = harvestableBlock(nearestBlocked, 1);
+    const reachable = harvestableBlock(fartherReachable, 1);
+    const collect = vi.fn(async () => undefined);
+    const pathfinder = collectPathfinder();
+    pathfinder.getPathFromTo = vi.fn(function* (
+      _movements: unknown,
+      _start: unknown,
+      goal: { pos?: Vec3 },
+    ) {
+      yield {
+        result: {
+          status: goal.pos?.x === nearestBlocked.x ? "noPath" : "success",
+          path: [],
+          time: 1,
+          visitedNodes: 1,
+        },
+      };
+    }) as never;
+    // 替补只有在 findBlocks 被要求多找时才存在，所以这个替身按请求的 count
+    // 返回：count 只有 1 时它就只交出那个不可达的候选，正是修复前的形态。
+    const findBlocks = vi.fn(({ count }: { count: number }) =>
+      [nearestBlocked, fartherReachable].slice(0, count),
+    );
+    Object.assign(bot, {
+      game: { dimension: "overworld" },
+      registry: { blocksByName: { stone: { id: 1 } } },
+      inventory: { items: () => [{ name: "wooden_pickaxe", type: 800, count: 1 }] },
+      entity: { position: new Vec3(0, 64, 0) },
+      world: {},
+      pathfinder,
+      findBlocks,
+      blockAt: vi.fn((position: Vec3) =>
+        position.x === nearestBlocked.x ? blocked : reachable,
+      ),
+      collectBlock: {
+        chestLocations: [] as Vec3[],
+        movements: null as Movements | null,
+        collect,
+        cancelTask: vi.fn(async () => undefined),
+      },
+    });
+    const client = new MineflayerBotClient(bot, "auto", "isolated-test-profile");
+
+    await expect(
+      client.invokeSkillCapability({
+        ...collectRequest("invocation-collect-pool-slack"),
+        input: {
+          blockName: "stone",
+          maxCount: 1,
+          maxDistance: 16,
+          dimension: "minecraft:overworld",
+          serverProfileId: "isolated-test-profile",
+        },
+      }),
+    ).resolves.toMatchObject({ targetsFound: 1 });
+    // 池子要比需求量大，否则替补根本不在候选里。
+    expect(findBlocks).toHaveBeenCalledWith(
+      expect.objectContaining({ count: 9 }),
+    );
+    // 攒够请求量就停手：只交 1 个目标，不是把整池都交下去。
+    expect(collect).toHaveBeenCalledWith([reachable], { ignoreNoPath: false });
+  });
+
+  it("stops the pre-check at the requested count instead of collecting the whole pool", async () => {
+    // 放大候选池是为了有替补，不是为了多采。若攒够请求量后还继续排，多出来的
+    // 可达候选会一起交给 collect()，于是一个只要 1 块的步骤会去挖 9 块，
+    // 并把 targetsFound 报成 9——规划器的验收谓词拿到的就是个虚高的数字。
+    const emitter = new EventEmitter();
+    const bot = emitter as unknown as Bot;
+    const positions = [0, 1, 2].map((index) => new Vec3(2 + index, 64, 0));
+    const collect = vi.fn(async () => undefined);
+    Object.assign(bot, {
+      game: { dimension: "overworld" },
+      registry: { blocksByName: { stone: { id: 1 } } },
+      inventory: { items: () => [{ name: "wooden_pickaxe", type: 800, count: 1 }] },
+      entity: { position: new Vec3(0, 64, 0) },
+      world: {},
+      // 每个候选都可达，所以"停在请求量"是唯一能让目标数落在 1 的机制。
+      pathfinder: collectPathfinder(),
+      findBlocks: vi.fn(() => positions),
+      blockAt: vi.fn((position: Vec3) => harvestableBlock(position, 1)),
+      collectBlock: {
+        chestLocations: [] as Vec3[],
+        movements: null as Movements | null,
+        collect,
+        cancelTask: vi.fn(async () => undefined),
+      },
+    });
+    const client = new MineflayerBotClient(bot, "auto", "isolated-test-profile");
+
+    await expect(
+      client.invokeSkillCapability({
+        ...collectRequest("invocation-collect-pool-shortcircuit"),
+        input: {
+          blockName: "stone",
+          maxCount: 1,
+          maxDistance: 16,
+          dimension: "minecraft:overworld",
+          serverProfileId: "isolated-test-profile",
+        },
+      }),
+    ).resolves.toMatchObject({ targetsFound: 1 });
+    expect(collect).toHaveBeenCalledWith(
+      [expect.objectContaining({ position: positions[0] })],
+      { ignoreNoPath: false },
+    );
+  });
+
   it("reports every candidate proven unreachable as unreachable, not as a budget failure", async () => {
     const emitter = new EventEmitter();
     const bot = emitter as unknown as Bot;

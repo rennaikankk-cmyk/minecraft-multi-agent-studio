@@ -553,6 +553,26 @@ const COLLECT_SETTLE_BUDGET_MS = 25_000;
 
 const COLLECT_PRECHECK_BUDGET_MS = 1_500;
 
+// 候选池必须比需求量大。findBlocks 的 count 截断发生在 useExtraInfo 过滤**之后**
+// （blocks.js:199-206），所以 count == maxCount 意味着"最近的 N 个暴露候选"就是
+// 全部候选:其中任何一个通不过可达性检查都没有替补。实测就是这么死的——目标
+// 只找到 1 个暴露的 oak_log，它不可达，于是整个目标在 step 1 结束，
+// stepsCompleted:0。世界里当然还有别的原木，只是不在"最近 1 个"里。
+//
+// 池子放大到需求量 + 8（仍受 COLLECT_MAX_COUNT 上限约束）。8 不是随手写的：
+// 实测 40 个暴露 stone 候选里 7 个是 noPath（约 17.5%），一次多看 8 个能把
+// "全军覆没"的概率压到可以忽略，同时最坏成本仍然有界（见下面的总预算）。
+const COLLECT_CANDIDATE_POOL_SLACK = 8;
+
+// 逐候选预算 1500ms 乘以放大后的池子会吃掉整个 60s 合约（32 × 1500 = 48s），
+// 所以放大池子必须同时给检查本身一个总预算。6000ms 按实测最坏定论耗时 678ms
+// 算大约能排完 8 个候选，且给 collect() 自己的 25s 界留足余量。
+//
+// 这不是"调超时掩盖失败"：预算耗尽时不会假装可达，也不会假装证明了不可达——
+// 没检查完的候选让 provenPathless < targets.length 成立，报的就是
+// COLLECT_PATH_SEARCH_EXHAUSTED（TRANSIENT，可以原样再试）。
+const COLLECT_PRECHECK_TOTAL_BUDGET_MS = 6_000;
+
 /**
  * 前置检查的结论。`provenPathless` 是**证明**了没有路的候选数，不是"没成功"的
  * 候选数：两者差在预算用尽的搜索上，而这个差别决定上层走哪条恢复阶梯。
@@ -586,10 +606,20 @@ export function collectReachableTargets<TBlock extends { position: Vec3 }>(
   bot: Pick<Bot, "pathfinder" | "entity" | "world">,
   movements: Movements,
   targets: readonly TBlock[],
+  wanted: number = targets.length,
 ): CollectReachability<TBlock> {
   const reachable: TBlock[] = [];
   let provenPathless = 0;
+  const deadline = Date.now() + COLLECT_PRECHECK_TOTAL_BUDGET_MS;
   for (const target of targets) {
+    // 够数就停：池子放大是为了有替补，不是为了多采。攒到需求量就不再花钱，
+    // 也顺手把交给 collect() 的目标数压在请求量之内。
+    if (reachable.length >= wanted) break;
+    // 总预算是放大池子的必要配套：逐候选 1500ms × 放大后的池子会吃掉整个 60s
+    // 合约。剩下没检查的候选因此既不算可达也不算证明不可达，于是
+    // provenPathless < targets.length 成立，上层收到的是 EXHAUSTED 而不是
+    // 一个冒充定论的 UNREACHABLE。
+    if (Date.now() >= deadline) break;
     const generator = bot.pathfinder.getPathFromTo(
       movements,
       bot.entity.position,
@@ -1564,10 +1594,15 @@ export class MineflayerBotClient implements BotClient {
     // useExtraInfo 而不是事后 filter：过滤发生在距离排序和 count 截断之前，
     // 所以拿到的是最近的**可达**候选。若改成先取 maxCount 个再筛，全埋区域
     // 里筛完就是空数组，等于把"附近有矿但都埋着"报成"附近没有矿"。
+    //
+    // count 要的是需求量 + 余量，不是需求量本身：截断在过滤之后发生，所以
+    // count == maxCount 时"最近的 maxCount 个暴露候选"就是全部候选，任何一个
+    // 通不过可达性检查都没有替补。实测的死法就是这个——只找到 1 个暴露的
+    // oak_log，它不可达，整个目标在 step 1 结束。
     const targetPositions = this.bot.findBlocks({
       matching: blockType.id,
       maxDistance: input.data.maxDistance,
-      count: input.data.maxCount,
+      count: input.data.maxCount + COLLECT_CANDIDATE_POOL_SLACK,
       useExtraInfo: reachableCandidateFilter(this.bot),
     });
     const targets = targetPositions
@@ -1635,7 +1670,14 @@ export class MineflayerBotClient implements BotClient {
 
     // 只把证明得出路径的目标交下去：collectAll 让 goto 的拒绝上抛，一个到不了的
     // 目标会中止整批（实测 40 个暴露候选里 7 个 noPath）。
-    const reachability = collectReachableTargets(this.bot, movements, targets);
+    // wanted 用请求量而不是池子大小：池子是替补席，攒够请求量就停手，
+    // 免得为了一个只要 1 块的步骤把 9 个候选全排一遍。
+    const reachability = collectReachableTargets(
+      this.bot,
+      movements,
+      targets,
+      input.data.maxCount,
+    );
     const reachableTargets = reachability.reachable;
     if (reachableTargets.length === 0) {
       // 两个码，判据是"有没有证明"。主路径的 catch 已经这么分了（NoPath vs
