@@ -551,20 +551,44 @@ const COLLECT_PATH_TICK_TIMEOUT_MS = 40;
 // 60s 合约减去最坏一次 travel+dig 后仍有余量，且留够时间把真实原因报上去。
 const COLLECT_SETTLE_BUDGET_MS = 25_000;
 
-// 逐个候选排干一次有界的全占空比搜索，只留下答 success 的目标。
-// 为什么必须前置：collectblock 的 collectAll 对每个目标各做一次 goto，并把
-// 拒绝直接上抛（CollectBlock.js:31，第 33 行还留着 `// TODO:
-// options.ignoreNoPath`），所以**一个**到不了的目标就会中止整批采集。实测 40 个
-// 暴露候选里有 7 个是 noPath，而选择只按距离排序，撞上纯属运气。
-// tickTimeout == timeout 让切片背靠背跑，wall ≈ compute；1500ms 是实测最坏
-// 定论耗时 678ms 的两倍余量，且仍然有界。
 const COLLECT_PRECHECK_BUDGET_MS = 1_500;
+
+/**
+ * 前置检查的结论。`provenPathless` 是**证明**了没有路的候选数，不是"没成功"的
+ * 候选数：两者差在预算用尽的搜索上，而这个差别决定上层走哪条恢复阶梯。
+ */
+export type CollectReachability<TBlock> = Readonly<{
+  reachable: TBlock[];
+  provenPathless: number;
+}>;
+
+/**
+ * 逐个候选排干一次有界的全占空比搜索，同时记下有多少个是**证明**不可达的。
+ *
+ * 为什么必须前置：collectblock 的 collectAll 对每个目标各做一次 goto，并把
+ * 拒绝直接上抛（CollectBlock.js:31，第 33 行还留着 `// TODO:
+ * options.ignoreNoPath`），所以**一个**到不了的目标就会中止整批采集。实测 40 个
+ * 暴露候选里有 7 个是 noPath，而选择只按距离排序，撞上纯属运气。
+ * tickTimeout == timeout 让切片背靠背跑，wall ≈ compute；1500ms 是实测最坏
+ * 定论耗时 678ms 的两倍余量，且仍然有界。
+ *
+ * 只数 `noPath`，因为 AStar.compute() 只有四个状态（astar.js:66-120）：
+ * `partial` 是切片没跑完，`timeout` 是总预算耗尽，`success` 是找到了，
+ * `noPath` 是开集排空——**只有最后一个**是"这里确实没有路"的证明。而
+ * `timeout` 在本函数这个配置下是真能出现的：tickTimeout == timeout 时第一次
+ * compute() 先撞 tick 检查返回 partial，getPathFromTo 再驱动一次
+ * （index.js:96-100），这次 `now - startTime > timeout` 已经成立就报 timeout。
+ * 把它记成证明会让一个只是没算完的搜索冒充定论，正是
+ * failure-classifier.ts:180 明令不许合并的那两件事。未知状态同样不算证明：
+ * 拿不准时少声称，而不是多声称。
+ */
 export function collectReachableTargets<TBlock extends { position: Vec3 }>(
   bot: Pick<Bot, "pathfinder" | "entity" | "world">,
   movements: Movements,
   targets: readonly TBlock[],
-): TBlock[] {
+): CollectReachability<TBlock> {
   const reachable: TBlock[] = [];
+  let provenPathless = 0;
   for (const target of targets) {
     const generator = bot.pathfinder.getPathFromTo(
       movements,
@@ -581,9 +605,13 @@ export function collectReachableTargets<TBlock extends { position: Vec3 }>(
       status = step.result.status;
       if (status !== "partial") break;
     }
-    if (status === "success") reachable.push(target);
+    if (status === "success") {
+      reachable.push(target);
+      continue;
+    }
+    if (status === "noPath") provenPathless += 1;
   }
-  return reachable;
+  return { reachable, provenPathless };
 }
 
 export function configurePathfinderMovements(
@@ -1607,24 +1635,34 @@ export class MineflayerBotClient implements BotClient {
 
     // 只把证明得出路径的目标交下去：collectAll 让 goto 的拒绝上抛，一个到不了的
     // 目标会中止整批（实测 40 个暴露候选里 7 个 noPath）。
-    const reachableTargets = collectReachableTargets(
-      this.bot,
-      movements,
-      targets,
-    );
+    const reachability = collectReachableTargets(this.bot, movements, targets);
+    const reachableTargets = reachability.reachable;
     if (reachableTargets.length === 0) {
-      // 扫描说"有暴露面"，寻路说"都到不了"——这是世界状态，不是缺陷，
-      // 所以带着可达数报出去，让上层重新观察而不是原样重试。
+      // 两个码，判据是"有没有证明"。主路径的 catch 已经这么分了（NoPath vs
+      // Timeout），前置检查这一层此前把两者合并成不可达，于是一个只是没算完的
+      // 搜索被当成定论上报，白丢一级 RETRY_SAME——failure-classifier.ts:180
+      // 明令这两件事不能合并：UNREACHABLE 是 STALE_WORLD（重新观察或放弃），
+      // SEARCH_EXHAUSTED 是 TRANSIENT（可以原样再试一次）。
+      // 码写成字面量而不是从 helper 返回：分类器测试靠正则扫
+      // `new SkillRefusal("...")` 发现新码（failure-classifier.test.ts:467）。
       //
-      // SkillRefusal 而不是 SkillFault：走到这里一块都没挖、背包没动、
+      // 两处都是 SkillRefusal 而不是 SkillFault：走到这里一块都没挖、背包没动、
       // collect() 还没被调用，getPathFromTo 只做搜索不移动机器人。这个事实
       // 只有这里知道——同一个码在下面的 NoPath catch 里也会抛，但那时
       // collect() 可能已经挖掉了几块，所以那一处必须留成普通 SkillFault。
-      // 协调器的非幂等屏蔽据此放行，这个步骤才能走到它该走的
-      // REOBSERVE_THEN_RETRY 而不是被升级成人工工单。
+      // 协调器的非幂等屏蔽据此放行，这个步骤才能走到它该走的恢复阶梯
+      // 而不是被升级成人工工单。
+      if (reachability.provenPathless < targets.length) {
+        throw new SkillRefusal(
+          "COLLECT_PATH_SEARCH_EXHAUSTED",
+          `Only ${reachability.provenPathless} of ${targets.length} exposed ${input.data.blockName} candidates were proven pathless within the ${COLLECT_PRECHECK_BUDGET_MS}ms pre-check budget.`,
+        );
+      }
+      // 扫描说"有暴露面"，寻路把每一个都排空了开集——这是世界状态，不是缺陷，
+      // 所以带着候选数报出去，让上层重新观察而不是原样重试。
       throw new SkillRefusal(
         "COLLECT_TARGET_UNREACHABLE",
-        `All ${targets.length} exposed ${input.data.blockName} candidates failed the reachability pre-check.`,
+        `All ${targets.length} exposed ${input.data.blockName} candidates were proven unreachable by the pre-check.`,
       );
     }
 

@@ -748,6 +748,49 @@ describe("MineflayerBotClient lifecycle", () => {
     expect(collect).not.toHaveBeenCalled();
   });
 
+  it("reports a pre-check that ran out of budget as exhausted, not as proven unreachable", async () => {
+    // astar.js 的 compute() 只有四个状态，只有 noPath 是"这里确实没有路"的证明；
+    // timeout 只是总预算耗尽（tickTimeout == timeout 时第一片返回 partial，
+    // getPathFromTo 再驱动一次就报 timeout，index.js:96-100）。两者合并会让一个
+    // 没算完的搜索冒充定论，白丢分类器给 TRANSIENT 的那一级 RETRY_SAME
+    // ——failure-classifier.ts:180 明令不许合并。
+    const emitter = new EventEmitter();
+    const bot = emitter as unknown as Bot;
+    const targetPosition = new Vec3(9, 64, 0);
+    const collect = vi.fn(async () => undefined);
+    Object.assign(bot, {
+      game: { dimension: "overworld" },
+      registry: { blocksByName: { stone: { id: 1 } } },
+      inventory: { items: () => [{ name: "wooden_pickaxe", type: 800, count: 1 }] },
+      entity: { position: new Vec3(0, 64, 0) },
+      world: {},
+      pathfinder: collectPathfinder("timeout"),
+      findBlocks: vi.fn(() => [targetPosition]),
+      blockAt: vi.fn(() => harvestableBlock(targetPosition, 1)),
+      collectBlock: {
+        chestLocations: [] as Vec3[],
+        movements: null as Movements | null,
+        collect,
+        cancelTask: vi.fn(async () => undefined),
+      },
+    });
+    const client = new MineflayerBotClient(bot, "auto", "isolated-test-profile");
+
+    await expect(
+      client.invokeSkillCapability({
+        ...collectRequest("invocation-collect-precheck-exhausted"),
+        input: {
+          blockName: "stone",
+          maxCount: 1,
+          maxDistance: 8,
+          dimension: "minecraft:overworld",
+          serverProfileId: "isolated-test-profile",
+        },
+      }),
+    ).rejects.toMatchObject({ code: "COLLECT_PATH_SEARCH_EXHAUSTED" });
+    expect(collect).not.toHaveBeenCalled();
+  });
+
   it("bounds a collect that neither resolves nor rejects, and cancels the plugin task", async () => {
     // collectAll 的 Entity 分支有两条永不落定且永不抛错的 await
     // （CollectBlock.js:49-50），命中时 collect() 会一直吊着，把整个技能合约
@@ -962,7 +1005,9 @@ describe("MineflayerBotClient lifecycle", () => {
  * collect.block 的寻路替身。可达性预检查用 getPathFromTo 排干一个生成器，
  * 所以替身要 yield 一个终态；默认 success 表示"这个目标走得到"。
  */
-function collectPathfinder(status: "success" | "noPath" = "success") {
+function collectPathfinder(
+  status: "success" | "noPath" | "timeout" = "success",
+) {
   return {
     setGoal: vi.fn(),
     setMovements: vi.fn(),
