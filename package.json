@@ -25,7 +25,7 @@
     "test:cpu-resource-manager:node": "pnpm --filter @minecraft-studio/cpu-resource-manager test:node",
     "benchmark:cpu-scheduler": "pnpm --filter @minecraft-studio/cpu-resource-manager benchmark",
     "hardware:profile": "pnpm --filter @minecraft-studio/cpu-resource-manager build && pnpm --filter @minecraft-studio/cpu-resource-manager run profile",
-    "test:task-infra": "pnpm build:packages && pnpm --filter @minecraft-studio/task-worker build && node scripts/run-task-infrastructure-tests.mjs",
+    "test:task-infra": "pnpm build:control-plane && node scripts/run-task-infrastructure-tests.mjs",
     "test:world-memory-infra": "pnpm --filter @minecraft-studio/world-memory build && node scripts/run-world-memory-infrastructure-tests.mjs",
     "test:runtime-link": "pnpm build:control-plane && pnpm --filter @minecraft-studio/bot-runtime build && node scripts/run-runtime-link-acceptance.mjs",
     "test:bot-supervisor": "pnpm build:packages && pnpm --filter @minecraft-studio/bot-runtime test:supervisor",

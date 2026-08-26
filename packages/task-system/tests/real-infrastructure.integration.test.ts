@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 
 import { Queue } from "bullmq";
@@ -43,6 +44,9 @@ const describeReal = runRealInfrastructure ? describe : describe.skip;
 const REAL_TEST_TIMEOUT_MS = 30_000;
 const taskWorkerEntry = fileURLToPath(
   new URL("../../../apps/task-worker/dist/main.js", import.meta.url),
+);
+const coordinatorEntry = fileURLToPath(
+  new URL("../../../apps/coordinator/dist/main.js", import.meta.url),
 );
 
 const migrationFiles = [
@@ -245,6 +249,32 @@ async function waitForTaskWorkerReady(
   child: ChildProcess,
   timeoutMs = 10_000,
 ): Promise<void> {
+  await waitForChildProcessEvent(
+    child,
+    "task_worker_started",
+    "Independent Task Worker",
+    timeoutMs,
+  );
+}
+
+async function waitForCoordinatorDeliveryReady(
+  child: ChildProcess,
+  timeoutMs = 10_000,
+): Promise<void> {
+  await waitForChildProcessEvent(
+    child,
+    "coordinator_task_delivery_started",
+    "Coordinator task delivery",
+    timeoutMs,
+  );
+}
+
+async function waitForChildProcessEvent(
+  child: ChildProcess,
+  event: string,
+  label: string,
+  timeoutMs: number,
+): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
   let output = "";
   await new Promise<void>((resolve, reject) => {
@@ -256,23 +286,43 @@ async function waitForTaskWorkerReady(
     };
     const onData = (chunk: Buffer | string) => {
       output = `${output}${chunk.toString()}`.slice(-8_192);
-      if (output.includes('"event":"task_worker_started"')) {
+      if (output.includes(`"event":"${event}"`)) {
         cleanup();
         resolve();
       }
     };
     const onExit = () => {
       cleanup();
-      reject(new Error("Independent Task Worker exited before readiness."));
+      reject(new Error(`${label} exited before readiness.`));
     };
     child.stdout?.on("data", onData);
     child.stderr?.on("data", onData);
     child.once("exit", onExit);
     timer = setTimeout(() => {
       cleanup();
-      reject(new Error("Independent Task Worker readiness timed out."));
+      reject(new Error(`${label} readiness timed out.`));
     }, timeoutMs);
     timer.unref();
+  });
+}
+
+async function unusedLoopbackPort(): Promise<number> {
+  return await new Promise<number>((resolve, reject) => {
+    const server = createServer();
+    server.unref();
+    server.once("error", reject);
+    server.listen({ host: "127.0.0.1", port: 0 }, () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        server.close();
+        reject(new Error("Failed to allocate an isolated loopback port."));
+        return;
+      }
+      server.close((error) => {
+        if (error) reject(error);
+        else resolve(address.port);
+      });
+    });
   });
 }
 
@@ -328,6 +378,20 @@ async function forceStopTaskWorkerProcess(
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+async function stopCoordinatorProcess(
+  child: ChildProcess,
+  timeoutMs = 5_000,
+): Promise<number | null> {
+  return await stopTaskWorkerProcess(child, timeoutMs);
+}
+
+async function forceStopCoordinatorProcess(
+  child: ChildProcess,
+  timeoutMs = 2_000,
+): Promise<void> {
+  await forceStopTaskWorkerProcess(child, timeoutMs);
 }
 
 describeReal.sequential(
@@ -2237,6 +2301,129 @@ describeReal.sequential(
         if (child.exitCode === null && child.signalCode === null) {
           await stopTaskWorkerProcess(child).catch(async () => {
             await forceStopTaskWorkerProcess(child);
+          });
+        }
+      }
+    }, REAL_TEST_TIMEOUT_MS);
+
+    it("delivers a submitted digest task through the production Coordinator and independent Worker processes", async () => {
+      const [runtimePort, controlPort] = await Promise.all([
+        unusedLoopbackPort(),
+        unusedLoopbackPort(),
+      ]);
+      const worker = spawn(process.execPath, [taskWorkerEntry], {
+        cwd: fileURLToPath(new URL("../../..", import.meta.url)),
+        env: {
+          ...process.env,
+          TASK_WORKER_PURPOSE: "isolated-test",
+          TASK_WORKER_HANDLER_PROFILE: "isolated-acceptance",
+          TASK_POSTGRES_URL: config.postgresUrl,
+          TASK_REDIS_URL: config.redisUrl,
+          TASK_QUEUE_NAME: config.queueName,
+          TASK_INFRA_TEST_NAMESPACE: schemaName,
+          TASK_WORKER_CONCURRENCY: "1",
+        },
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let coordinator: ChildProcess | null = null;
+      try {
+        await waitForTaskWorkerReady(worker);
+        const runtimeSecretSha256 = createHash("sha256")
+          .update("isolated-runtime-link-process-e2e", "utf8")
+          .digest("hex");
+        const controlSecretSha256 = createHash("sha256")
+          .update("isolated-control-link-process-e2e", "utf8")
+          .digest("hex");
+        coordinator = spawn(process.execPath, [coordinatorEntry], {
+          cwd: fileURLToPath(new URL("../../..", import.meta.url)),
+          env: {
+            ...process.env,
+            LOCAL_AI_HUB_URL: "",
+            LOCAL_AI_MODEL: "",
+            COORDINATOR_RUNTIME_LINK_HOST: "127.0.0.1",
+            COORDINATOR_RUNTIME_LINK_PORT: String(runtimePort),
+            COORDINATOR_RUNTIME_LINK_PEERS_JSON: JSON.stringify([
+              {
+                keyId: "integration-runtime-key",
+                botId: "integration-runtime-bot",
+                secretSha256: runtimeSecretSha256,
+              },
+            ]),
+            COORDINATOR_CONTROL_LINK_HOST: "127.0.0.1",
+            COORDINATOR_CONTROL_LINK_PORT: String(controlPort),
+            COORDINATOR_CONTROL_LINK_CLIENTS_JSON: JSON.stringify([
+              {
+                clientId: "integration-control-client",
+                keyId: "integration-control-key",
+                secretSha256: controlSecretSha256,
+                capabilities: ["bot.read", "bot.stop"],
+              },
+            ]),
+            COORDINATOR_TASK_POSTGRES_URL: config.postgresUrl,
+            COORDINATOR_TASK_POSTGRES_SCHEMA: schemaName,
+            COORDINATOR_TASK_DELIVERY: "isolated-test",
+            COORDINATOR_TASK_REDIS_URL: config.redisUrl,
+            COORDINATOR_TASK_QUEUE_NAME: config.queueName,
+            COORDINATOR_TASK_QUEUE_PREFIX: schemaName,
+            COORDINATOR_TASK_DELIVERY_INSTANCE_ID:
+              "integration-production-coordinator-reconciler",
+            COORDINATOR_TASK_OUTBOX_POLL_INTERVAL_MS: "50",
+          },
+          shell: false,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        await waitForCoordinatorDeliveryReady(coordinator);
+
+        const input = {
+          schemaVersion: "1.0" as const,
+          value: { operation: "production-coordinator-process-e2e", count: 1 },
+        };
+        const submitted = await repository.submitTask({
+          ...taskSubmitCommand("isolated.acceptance.digest"),
+          input,
+        });
+        const completed = await waitForTask(
+          repository,
+          submitted.task.taskId,
+          (candidate) => candidate.status === "completed",
+        );
+        const serialized = JSON.stringify(input.value);
+        expect(completed.result).toEqual({
+          schemaVersion: "1.0",
+          kind: "isolated.acceptance.digest.v1",
+          sha256: createHash("sha256")
+            .update(serialized, "utf8")
+            .digest("hex"),
+          byteLength: Buffer.byteLength(serialized, "utf8"),
+        });
+        expect(completed.evidence).toEqual([
+          { kind: "trace", reference: completed.traceId },
+        ]);
+        await expect(
+          repository.getTaskOutbox(
+            submitted.task.taskId,
+            submitted.task.revision,
+          ),
+        ).resolves.toMatchObject({
+          messageId: submitted.outbox.messageId,
+          status: "delivered",
+        });
+        await expect(stopCoordinatorProcess(coordinator)).resolves.toBe(0);
+        await expect(stopTaskWorkerProcess(worker)).resolves.toBe(0);
+      } finally {
+        if (
+          coordinator &&
+          coordinator.exitCode === null &&
+          coordinator.signalCode === null
+        ) {
+          await stopCoordinatorProcess(coordinator).catch(async () => {
+            await forceStopCoordinatorProcess(coordinator!);
+          });
+        }
+        if (worker.exitCode === null && worker.signalCode === null) {
+          await stopTaskWorkerProcess(worker).catch(async () => {
+            await forceStopTaskWorkerProcess(worker);
           });
         }
       }
