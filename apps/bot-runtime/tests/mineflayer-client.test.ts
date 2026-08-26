@@ -47,6 +47,7 @@ vi.mock("mineflayer-pathfinder", () => {
 
 import type { BotClientHandlers } from "../src/client.js";
 import {
+  collectReachableTargets,
   configureSafePathfinderMovements,
   hasReachableFace,
   MineflayerBotClient,
@@ -1477,5 +1478,78 @@ describe("hasReachableFace", () => {
 
     // 区块没加载时乐观放行的代价是上层拿着到不了的目标烧完整条重试阶梯。
     expect(hasReachableFace(world, target)).toBe(false);
+  });
+});
+
+describe("collectReachableTargets", () => {
+  // 总预算 6000ms 配逐候选 1500ms，最多只排得下 4 个候选。实测这条失败的
+  // reason 曾写成 "Only 0 of 9 ... within the 1500ms pre-check budget."，
+  // 读起来像九个都试过了；照那个数字去调 1500ms 只会让能排下的更少。
+  function targetsAt(count: number) {
+    return Array.from({ length: count }, (_unused, index) => ({
+      position: new Vec3(index, 64, 0),
+    }));
+  }
+
+  function pathfinderReturning(
+    statuses: readonly string[],
+    onCall?: () => void,
+  ) {
+    let call = 0;
+    return {
+      pathfinder: {
+        getPathFromTo: vi.fn(function* () {
+          onCall?.();
+          yield { result: { status: statuses[call++] ?? "timeout" } };
+        }),
+      },
+      entity: { position: new Vec3(0, 64, 0) },
+      world: {},
+    } as unknown as Pick<Bot, "pathfinder" | "entity" | "world">;
+  }
+
+  const movements = {} as Movements;
+
+  it("counts only proven-pathless searches and reports how many it examined", () => {
+    const bot = pathfinderReturning(["noPath", "timeout", "noPath"]);
+
+    const result = collectReachableTargets(bot, movements, targetsAt(3), 3);
+
+    expect(result.reachable).toHaveLength(0);
+    // timeout 是预算耗尽,不是"这里没有路"的证明——合并两者会让一个没算完的
+    // 搜索冒充定论,白丢一级 RETRY_SAME。
+    expect(result.provenPathless).toBe(2);
+    expect(result.examined).toBe(3);
+    expect(result.stoppedOnTotalBudget).toBe(false);
+  });
+
+  it("stops at the requested count instead of draining the whole bench", () => {
+    const bot = pathfinderReturning(["success", "success", "success"]);
+
+    const result = collectReachableTargets(bot, movements, targetsAt(3), 1);
+
+    expect(result.reachable).toHaveLength(1);
+    expect(result.examined).toBe(1);
+  });
+
+  it("marks the total budget as the binding constraint when it truncates the sweep", () => {
+    // 每个候选推进 2500ms 的假时钟：第三个之前 6000ms 总预算就到了。
+    vi.useFakeTimers();
+    try {
+      const bot = pathfinderReturning(
+        ["timeout", "timeout", "timeout", "timeout"],
+        () => vi.advanceTimersByTime(2_500),
+      );
+
+      const result = collectReachableTargets(bot, movements, targetsAt(9), 9);
+
+      expect(result.reachable).toHaveLength(0);
+      expect(result.provenPathless).toBe(0);
+      // 九个候选里只排得下三个。没有这个数,上层的 reason 就在暗示九个都试过。
+      expect(result.examined).toBe(3);
+      expect(result.stoppedOnTotalBudget).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

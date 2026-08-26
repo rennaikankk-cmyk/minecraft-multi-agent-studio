@@ -580,6 +580,14 @@ const COLLECT_PRECHECK_TOTAL_BUDGET_MS = 6_000;
 export type CollectReachability<TBlock> = Readonly<{
   reachable: TBlock[];
   provenPathless: number;
+  /**
+   * 实际排过的候选数。它可以远小于 `targets.length`：逐候选 1500ms 配 6000ms
+   * 总预算，最多只排得下 4 个。没有这个数，"0 of 9 proven pathless" 读起来像
+   * 九个都试过了，运维就会去调那个根本没绑住循环的常量。
+   */
+  examined: number;
+  /** 循环是被总预算截断的（true），还是把候选走完了（false）。 */
+  stoppedOnTotalBudget: boolean;
 }>;
 
 /**
@@ -610,6 +618,8 @@ export function collectReachableTargets<TBlock extends { position: Vec3 }>(
 ): CollectReachability<TBlock> {
   const reachable: TBlock[] = [];
   let provenPathless = 0;
+  let examined = 0;
+  let stoppedOnTotalBudget = false;
   const deadline = Date.now() + COLLECT_PRECHECK_TOTAL_BUDGET_MS;
   for (const target of targets) {
     // 够数就停：池子放大是为了有替补，不是为了多采。攒到需求量就不再花钱，
@@ -619,7 +629,11 @@ export function collectReachableTargets<TBlock extends { position: Vec3 }>(
     // 合约。剩下没检查的候选因此既不算可达也不算证明不可达，于是
     // provenPathless < targets.length 成立，上层收到的是 EXHAUSTED 而不是
     // 一个冒充定论的 UNREACHABLE。
-    if (Date.now() >= deadline) break;
+    if (Date.now() >= deadline) {
+      stoppedOnTotalBudget = true;
+      break;
+    }
+    examined += 1;
     const generator = bot.pathfinder.getPathFromTo(
       movements,
       bot.entity.position,
@@ -641,7 +655,7 @@ export function collectReachableTargets<TBlock extends { position: Vec3 }>(
     }
     if (status === "noPath") provenPathless += 1;
   }
-  return { reachable, provenPathless };
+  return { reachable, provenPathless, examined, stoppedOnTotalBudget };
 }
 
 export function configurePathfinderMovements(
@@ -1695,9 +1709,18 @@ export class MineflayerBotClient implements BotClient {
       // 协调器的非幂等屏蔽据此放行，这个步骤才能走到它该走的恢复阶梯
       // 而不是被升级成人工工单。
       if (reachability.provenPathless < targets.length) {
+        // 报"排了几个"和"是哪个预算截断的"，不只报"证明了几个"。
+        // 实测这条 reason 曾是 "Only 0 of 9 ... within the 1500ms pre-check
+        // budget."——九个候选里其实最多排得下 4 个（1500ms × 4 ≈ 6000ms 总预算），
+        // 而句子里唯一出现的数字是那个没绑住循环的 per-candidate 常量。运维照它
+        // 去调 1500ms 只会让能排下的候选更少。两个预算都写出来，再说明是哪一个
+        // 先到,这条失败才是可诊断的。
+        const boundBy = reachability.stoppedOnTotalBudget
+          ? `${COLLECT_PRECHECK_TOTAL_BUDGET_MS}ms total budget`
+          : `${COLLECT_PRECHECK_BUDGET_MS}ms per-candidate budget`;
         throw new SkillRefusal(
           "COLLECT_PATH_SEARCH_EXHAUSTED",
-          `Only ${reachability.provenPathless} of ${targets.length} exposed ${input.data.blockName} candidates were proven pathless within the ${COLLECT_PRECHECK_BUDGET_MS}ms pre-check budget.`,
+          `Examined ${reachability.examined} of ${targets.length} exposed ${input.data.blockName} candidates and proved ${reachability.provenPathless} pathless before the ${boundBy} ran out; none was proven reachable.`,
         );
       }
       // 扫描说"有暴露面"，寻路把每一个都排空了开集——这是世界状态，不是缺陷，
