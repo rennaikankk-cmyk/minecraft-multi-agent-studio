@@ -105,6 +105,34 @@ function repository(overrides: Record<string, unknown>): PostgresTaskRepository 
 }
 
 describe("PostgresGoalLifecycleStore", () => {
+  it("submits production goals through the durable dispatch outbox", async () => {
+    const queued = task("queued", { dispatchBotId: "worker-01" });
+    const submitTask = vi.fn(async () => ({
+      task: queued,
+      created: true,
+      dispatch: {},
+      outbox: {},
+    }));
+    const store = new PostgresGoalLifecycleStore({
+      repository: repository({ submitTask }),
+      coordinatorInstanceId: "coordinator-test",
+    });
+
+    await expect(store.submitQueued(request())).resolves.toMatchObject({
+      taskId: OPERATION_ID,
+      botId: "worker-01",
+      status: "queued",
+    });
+    expect(submitTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskType: "coordinator.goal",
+        handlerVersion: "1.0.0",
+        executionIdempotent: false,
+        dispatchBotId: "worker-01",
+      }),
+    );
+  });
+
   it("verifies the migration contract before loading lifecycle state", async () => {
     const verifyGoalLifecycleSchema = vi.fn(async () => undefined);
     const getDatabaseTime = vi.fn(async () => NOW);
@@ -148,6 +176,23 @@ describe("PostgresGoalLifecycleStore", () => {
       durableGoalFingerprint(original),
     );
     expect(durableGoalFingerprint(differentActor)).not.toBe(
+      durableGoalFingerprint(original),
+    );
+
+    // PostgreSQL JSONB can return the same persisted object in a different
+    // key order after a restart. The durable identity must not change with it.
+    const reordered = {
+      timeoutMs: original.payload.timeoutMs,
+      operatorGoal: original.payload.operatorGoal,
+      botId: original.payload.botId,
+      actorId: original.payload.actorId,
+      clientId: original.payload.clientId,
+      taskId: original.payload.taskId,
+      operationId: original.payload.operationId,
+      kind: "coordinator.goal.v1" as const,
+      schemaVersion: "1.0" as const,
+    };
+    expect(durableGoalFingerprint(reordered)).toBe(
       durableGoalFingerprint(original),
     );
   });

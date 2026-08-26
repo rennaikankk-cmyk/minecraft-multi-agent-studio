@@ -5,12 +5,10 @@ import {
 
 import type { GoalPersistenceConfig } from "./goal-persistence-config.js";
 
-const ISOLATED_DELIVERY_PURPOSE = "isolated-test" as const;
 const ISOLATED_PREFIX_PATTERN = /^studio_test_[a-z0-9_]{8,48}$/u;
 const QUEUE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{2,63}$/u;
 
-export type TaskDeliveryConfig = Readonly<{
-  purpose: typeof ISOLATED_DELIVERY_PURPOSE;
+type TaskDeliveryBaseConfig = Readonly<{
   redisUrl: string;
   queueName: string;
   queuePrefix: string;
@@ -21,6 +19,19 @@ export type TaskDeliveryConfig = Readonly<{
   retryBaseMs: number;
   retryMaxMs: number;
 }>;
+
+export type TaskDeliveryConfig = TaskDeliveryBaseConfig &
+  (
+    | Readonly<{ purpose: "isolated-test" }>
+    | Readonly<{
+        purpose: "production";
+        goalExecution: Readonly<{
+          host: "127.0.0.1" | "::1";
+          port: number;
+          secret: string;
+        }>;
+      }>
+  );
 
 export class TaskDeliveryConfigError extends Error {
   readonly code = "TASK_DELIVERY_CONFIG_INVALID";
@@ -50,8 +61,7 @@ function integer(
 
 /**
  * Delivery is opt-in and intentionally limited to loopback infrastructure.
- * A future production profile must get a separate parser and deployment gate;
- * it must never be enabled by changing a default here.
+ * The production profile selects real handlers, not remote infrastructure.
  */
 export function loadTaskDeliveryConfig(
   environment: NodeJS.ProcessEnv = process.env,
@@ -69,6 +79,9 @@ export function loadTaskDeliveryConfig(
     "COORDINATOR_TASK_OUTBOX_POLL_INTERVAL_MS",
     "COORDINATOR_TASK_OUTBOX_RETRY_BASE_MS",
     "COORDINATOR_TASK_OUTBOX_RETRY_MAX_MS",
+    "COORDINATOR_TASK_EXECUTION_HOST",
+    "COORDINATOR_TASK_EXECUTION_PORT",
+    "COORDINATOR_TASK_EXECUTION_SECRET",
   ] as const;
   const hasDeliveryValues = rawKeys.some(
     (key) => (environment[key]?.trim() ?? "").length > 0,
@@ -76,14 +89,14 @@ export function loadTaskDeliveryConfig(
   if (purpose.length === 0) {
     if (hasDeliveryValues) {
       throw new TaskDeliveryConfigError(
-        "COORDINATOR_TASK_DELIVERY must explicitly select isolated-test.",
+        "COORDINATOR_TASK_DELIVERY must explicitly select a delivery profile.",
       );
     }
     return null;
   }
-  if (purpose !== ISOLATED_DELIVERY_PURPOSE) {
+  if (purpose !== "isolated-test" && purpose !== "production") {
     throw new TaskDeliveryConfigError(
-      "Only the isolated-test task delivery profile is available.",
+      "COORDINATOR_TASK_DELIVERY must be isolated-test or production.",
     );
   }
   if (!persistence) {
@@ -93,19 +106,18 @@ export function loadTaskDeliveryConfig(
   }
 
   const schemaName = persistence.schemaName;
-  if (!ISOLATED_PREFIX_PATTERN.test(schemaName)) {
+  if (purpose === "isolated-test" && !ISOLATED_PREFIX_PATTERN.test(schemaName)) {
     throw new TaskDeliveryConfigError(
       "Isolated task delivery requires a studio_test_ PostgreSQL schema.",
     );
   }
   try {
-    // Re-parse the already validated persistence URL at the isolated boundary
-    // so an explicit delivery profile can never reuse a remote PostgreSQL
-    // endpoint or production-style query options.
+    // Re-parse at the queue boundary so neither profile can silently target a
+    // remote PostgreSQL endpoint.
     parseIsolatedPostgresUrl(persistence.postgresUrl);
   } catch {
     throw new TaskDeliveryConfigError(
-      "COORDINATOR_TASK_POSTGRES_URL must target loopback isolated PostgreSQL.",
+      "COORDINATOR_TASK_POSTGRES_URL must target loopback PostgreSQL.",
     );
   }
   const rawRedisUrl = environment.COORDINATOR_TASK_REDIS_URL?.trim() ?? "";
@@ -119,7 +131,7 @@ export function loadTaskDeliveryConfig(
     redisUrl = parseIsolatedRedisUrl(rawRedisUrl);
   } catch {
     throw new TaskDeliveryConfigError(
-      "COORDINATOR_TASK_REDIS_URL must target loopback isolated Redis.",
+      "COORDINATOR_TASK_REDIS_URL must target loopback Redis.",
     );
   }
 
@@ -130,9 +142,14 @@ export function loadTaskDeliveryConfig(
   }
   const queuePrefix =
     environment.COORDINATOR_TASK_QUEUE_PREFIX?.trim() || schemaName;
-  if (!ISOLATED_PREFIX_PATTERN.test(queuePrefix)) {
+  if (
+    !(purpose === "isolated-test"
+      ? ISOLATED_PREFIX_PATTERN
+      : QUEUE_NAME_PATTERN
+    ).test(queuePrefix)
+  ) {
     throw new TaskDeliveryConfigError(
-      "COORDINATOR_TASK_QUEUE_PREFIX must be a studio_test_ identifier.",
+      "COORDINATOR_TASK_QUEUE_PREFIX is invalid for the selected profile.",
     );
   }
   if (queuePrefix !== schemaName) {
@@ -189,8 +206,7 @@ export function loadTaskDeliveryConfig(
     );
   }
 
-  return {
-    purpose: ISOLATED_DELIVERY_PURPOSE,
+  const base: TaskDeliveryBaseConfig = {
     redisUrl,
     queueName,
     queuePrefix,
@@ -200,5 +216,34 @@ export function loadTaskDeliveryConfig(
     pollIntervalMs,
     retryBaseMs,
     retryMaxMs,
+  };
+  if (purpose === "isolated-test") {
+    return { ...base, purpose };
+  }
+
+  const host = environment.COORDINATOR_TASK_EXECUTION_HOST?.trim() ||
+    "127.0.0.1";
+  if (host !== "127.0.0.1" && host !== "::1") {
+    throw new TaskDeliveryConfigError(
+      "COORDINATOR_TASK_EXECUTION_HOST must be an explicit loopback address.",
+    );
+  }
+  const port = integer(
+    environment.COORDINATOR_TASK_EXECUTION_PORT,
+    3_222,
+    1,
+    65_535,
+    "COORDINATOR_TASK_EXECUTION_PORT",
+  );
+  const secret = environment.COORDINATOR_TASK_EXECUTION_SECRET?.trim() ?? "";
+  if (secret.length < 32 || secret.length > 512) {
+    throw new TaskDeliveryConfigError(
+      "COORDINATOR_TASK_EXECUTION_SECRET must contain 32 to 512 characters.",
+    );
+  }
+  return {
+    ...base,
+    purpose,
+    goalExecution: { host, port, secret },
   };
 }

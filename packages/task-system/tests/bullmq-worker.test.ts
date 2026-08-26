@@ -73,7 +73,9 @@ describe("BullMQ task boundaries", () => {
     ).toThrow();
   });
 
-  it("consumes a preassigned durable lease without acquiring a second lease", async () => {
+  it.each(["completed", "cancelled", "expired"] as const)(
+    "persists a handler-provided %s terminal state without acquiring a second lease",
+    async (terminal) => {
     const taskId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const assignmentLeaseOwner = "coordinator-assignment-01";
     let current: TaskRecord = taskRecordSchema.parse({
@@ -133,39 +135,50 @@ describe("BullMQ task boundaries", () => {
     const acquireLease = vi.fn(async () => {
       throw new Error("worker must not acquire a preassigned lease");
     });
+    const transition = vi.fn(async (input: { to: TaskRecord["status"] }) => {
+      const becomesTerminal = [
+        "completed",
+        "failed",
+        "cancelled",
+        "expired",
+      ].includes(input.to);
+      current = taskRecordSchema.parse({
+        ...current,
+        status: input.to,
+        revision: current.revision + 1,
+        startedAt:
+          input.to === "running"
+            ? "2026-08-22T08:00:01.000Z"
+            : current.startedAt,
+        updatedAt: "2026-08-22T08:00:01.000Z",
+        ...(becomesTerminal
+          ? {
+              assignedBotId: null,
+              leaseOwner: null,
+              leaseExpiresAt: null,
+              finishedAt: "2026-08-22T08:00:01.000Z",
+            }
+          : {}),
+      });
+      return current;
+    });
     const repository = {
       getTask: vi.fn(async () => current),
       getTaskCancellationRequest: vi.fn(async () => null),
       getDatabaseTime: vi.fn(async () => new Date("2026-08-22T08:00:01.000Z")),
       acquireLease,
-      transition: vi.fn(async (input: { to: TaskRecord["status"] }) => {
-        current = taskRecordSchema.parse({
-          ...current,
-          status: input.to,
-          revision: current.revision + 1,
-          startedAt:
-            input.to === "running"
-              ? "2026-08-22T08:00:01.000Z"
-              : current.startedAt,
-          updatedAt: "2026-08-22T08:00:01.000Z",
-          ...(input.to === "completed"
-            ? {
-                assignedBotId: null,
-                leaseOwner: null,
-                leaseExpiresAt: null,
-                finishedAt: "2026-08-22T08:00:01.000Z",
-              }
-            : {}),
-        });
-        return current;
-      }),
+      transition,
     } as unknown as PostgresTaskRepository;
     const handlers = new TaskHandlerRegistry();
     handlers.register({
       taskType: current.taskType,
       handlerVersion: current.handlerVersion,
       idempotent: true,
-      execute: async () => ({ result: { ok: true }, evidence: [] }),
+      execute: async () => ({
+        result: { ok: true },
+        evidence: [],
+        terminal: { status: terminal },
+      }),
     });
     const worker = new BullMqTaskWorker(repository, handlers, {
       redisUrl: "redis://127.0.0.1:6399/0",
@@ -196,8 +209,18 @@ describe("BullMQ task boundaries", () => {
 
     expect(result).toMatchObject({
       taskId,
-      status: "completed",
+      status: terminal === "expired" ? "already-terminal" : terminal,
     });
+    expect(transition).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        to: terminal,
+        reasonCode:
+          terminal === "completed"
+            ? "TASK_HANDLER_COMPLETED"
+            : `TASK_HANDLER_${terminal.toUpperCase()}`,
+      }),
+    );
     expect(acquireLease).not.toHaveBeenCalled();
-  });
+    },
+  );
 });

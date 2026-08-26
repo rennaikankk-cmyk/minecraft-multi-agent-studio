@@ -52,11 +52,11 @@ describe("Coordinator task delivery configuration", () => {
     ).toBeNull();
   });
 
-  it("requires loopback Redis and an isolated PostgreSQL namespace", () => {
+  it("requires loopback infrastructure and an isolated test namespace", () => {
     expect(() =>
       loadTaskDeliveryConfig(
         {
-          COORDINATOR_TASK_DELIVERY: "production",
+          COORDINATOR_TASK_DELIVERY: "unsupported",
           COORDINATOR_TASK_REDIS_URL: "redis://127.0.0.1:6379/15",
         },
         persistence,
@@ -97,6 +97,47 @@ describe("Coordinator task delivery configuration", () => {
           COORDINATOR_TASK_REDIS_URL: "redis://127.0.0.1:6379/15",
         },
         remotePersistence,
+      ),
+    ).toThrow(TaskDeliveryConfigError);
+  });
+
+  it("loads an explicit production profile with an authenticated loopback bridge", () => {
+    expect(
+      loadTaskDeliveryConfig(
+        {
+          COORDINATOR_TASK_DELIVERY: "production",
+          COORDINATOR_TASK_REDIS_URL: "redis://127.0.0.1:6379/0",
+          COORDINATOR_TASK_EXECUTION_SECRET: "s".repeat(32),
+        },
+        { ...persistence, schemaName: "public" },
+      ),
+    ).toMatchObject({
+      purpose: "production",
+      queuePrefix: "public",
+      goalExecution: {
+        host: "127.0.0.1",
+        port: 3_222,
+        secret: "s".repeat(32),
+      },
+    });
+    expect(() =>
+      loadTaskDeliveryConfig(
+        {
+          COORDINATOR_TASK_DELIVERY: "production",
+          COORDINATOR_TASK_REDIS_URL: "redis://127.0.0.1:6379/0",
+          COORDINATOR_TASK_EXECUTION_HOST: "0.0.0.0",
+          COORDINATOR_TASK_EXECUTION_SECRET: "s".repeat(32),
+        },
+        { ...persistence, schemaName: "public" },
+      ),
+    ).toThrow(TaskDeliveryConfigError);
+    expect(() =>
+      loadTaskDeliveryConfig(
+        {
+          COORDINATOR_TASK_DELIVERY: "production",
+          COORDINATOR_TASK_REDIS_URL: "redis://127.0.0.1:6379/0",
+        },
+        { ...persistence, schemaName: "public" },
       ),
     ).toThrow(TaskDeliveryConfigError);
   });

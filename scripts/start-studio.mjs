@@ -37,7 +37,21 @@ const controlApiPort = boundedPort(
   "CONTROL_API_PORT",
 );
 const dashboardPort = boundedPort(hostEnvironment.STUDIO_DASHBOARD_PORT ?? "3000");
-const configuredPorts = [runtimeLinkPort, controlLinkPort, controlApiPort, dashboardPort];
+const productionTaskDelivery =
+  hostEnvironment.COORDINATOR_TASK_DELIVERY?.trim() === "production";
+const goalExecutionPort = productionTaskDelivery
+  ? boundedPort(
+      hostEnvironment.COORDINATOR_TASK_EXECUTION_PORT ?? "3222",
+      "COORDINATOR_TASK_EXECUTION_PORT",
+    )
+  : null;
+const configuredPorts = [
+  runtimeLinkPort,
+  controlLinkPort,
+  controlApiPort,
+  dashboardPort,
+  ...(goalExecutionPort === null ? [] : [goalExecutionPort]),
+];
 if (new Set(configuredPorts).size !== configuredPorts.length) {
   throw new Error("Studio service ports must be unique.");
 }
@@ -49,17 +63,29 @@ const environment = buildEnvironment(secrets, hostEnvironment, {
   runtimeLinkPort,
   controlLinkPort,
   controlApiPort,
+  goalExecutionPort,
 });
 
 await requireBuildArtifacts([
   "apps/coordinator/dist/main.js",
   "apps/control-api/dist/main.js",
   "apps/dashboard/.next/BUILD_ID",
+  ...(productionTaskDelivery ? ["apps/task-worker/dist/main.js"] : []),
 ]);
 
 try {
   const coordinator = startService("coordinator", "apps/coordinator/dist/main.js", [], environment);
   await waitForTcp(coordinator, "127.0.0.1", controlLinkPort, 15_000, "Coordinator Control Link");
+
+  if (productionTaskDelivery) {
+    const taskWorker = startService(
+      "task-worker",
+      "apps/task-worker/dist/main.js",
+      [],
+      environment,
+    );
+    await waitForServiceStable(taskWorker, 500, "Task Worker");
+  }
 
   const controlApi = startService("control-api", "apps/control-api/dist/main.js", [], environment);
   await waitForHttp(
@@ -93,6 +119,9 @@ try {
       ? "Bot Supervisor enabled from explicit configuration.\n"
       : "Control plane ready with no Bot Supervisor configured.\n",
   );
+  if (productionTaskDelivery) {
+    process.stdout.write("Durable Coordinator goal execution is enabled.\n");
+  }
   process.stdout.write(
     environment.LOCAL_AI_HUB_URL && environment.LOCAL_AI_MODEL
       ? `Local AI configured: ${new URL(environment.LOCAL_AI_HUB_URL).origin}\n`
@@ -210,6 +239,9 @@ function buildEnvironment(secrets, hostEnvironment, ports) {
   const controlClientId = hostEnvironment.CONTROL_API_COORDINATOR_LINK_CLIENT_ID || "local-control-api";
   const controlKeyId = hostEnvironment.CONTROL_API_COORDINATOR_LINK_KEY_ID || "control-api-key-01";
   const controlSecret = hostEnvironment.CONTROL_API_COORDINATOR_LINK_SECRET || secrets.controlLinkSecret;
+  const taskExecutionSecret =
+    hostEnvironment.COORDINATOR_TASK_EXECUTION_SECRET ||
+    sha256(`minecraft-studio-task-execution\n${secrets.controlLinkSecret}`);
   const configuredControlClients = hostEnvironment.COORDINATOR_CONTROL_LINK_CLIENTS_JSON?.trim();
   const controlClients = configuredControlClients
     ? validateConfiguredControlClients(
@@ -238,6 +270,15 @@ function buildEnvironment(secrets, hostEnvironment, ports) {
         permissions: ["bot.read", "bot.position.read", "bot.stop", "goal.submit", "task.read"],
       },
     ]);
+  const taskWorkerEnvironment = ports.goalExecutionPort === null
+    ? {}
+    : {
+        COORDINATOR_TASK_EXECUTION_HOST: "127.0.0.1",
+        COORDINATOR_TASK_EXECUTION_PORT: String(ports.goalExecutionPort),
+        COORDINATOR_TASK_EXECUTION_SECRET: taskExecutionSecret,
+        TASK_WORKER_PURPOSE: "production",
+        TASK_WORKER_HANDLER_PROFILE: "coordinator-goal",
+      };
   return {
     ...hostEnvironment,
     COORDINATOR_RUNTIME_LINK_HOST: "127.0.0.1",
@@ -256,9 +297,19 @@ function buildEnvironment(secrets, hostEnvironment, ports) {
     CONTROL_API_COORDINATOR_LINK_SECRET: controlSecret,
     DASHBOARD_CONTROL_API_URL: `http://127.0.0.1:${ports.controlApiPort}`,
     DASHBOARD_CONTROL_API_TOKEN: dashboardToken,
+    ...taskWorkerEnvironment,
     BOT_RUNTIME_LINK_SECRET_STUDIO_BOT_01:
       hostEnvironment.BOT_RUNTIME_LINK_SECRET_STUDIO_BOT_01 || secrets.runtimeSecret,
   };
+}
+
+async function waitForServiceStable(service, durationMs, label) {
+  const deadline = Date.now() + durationMs;
+  while (Date.now() < deadline) {
+    assertServiceAlive(service, label);
+    await delay(50);
+  }
+  assertServiceAlive(service, label);
 }
 
 function validateConfiguredControlClients(raw, clientId, keyId, secret, explicitSecret) {

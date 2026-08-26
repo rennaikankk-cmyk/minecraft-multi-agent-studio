@@ -77,4 +77,26 @@ describe("Task Worker isolated configuration", () => {
       }),
     ).toThrow(TaskWorkerConfigError);
   });
+
+  it("loads the explicit production Coordinator goal profile", () => {
+    expect(
+      loadTaskWorkerConfig({
+        TASK_WORKER_PURPOSE: "production",
+        TASK_WORKER_HANDLER_PROFILE: "coordinator-goal",
+        COORDINATOR_TASK_POSTGRES_URL:
+          "postgresql://studio:secret@127.0.0.1:5432/studio",
+        COORDINATOR_TASK_POSTGRES_SCHEMA: "public",
+        COORDINATOR_TASK_REDIS_URL: "redis://127.0.0.1:6379/0",
+        COORDINATOR_TASK_EXECUTION_SECRET: "x".repeat(32),
+      }),
+    ).toMatchObject({
+      purpose: "production",
+      handlerProfile: "coordinator-goal",
+      schemaName: "public",
+      coordinatorExecution: {
+        url: "http://127.0.0.1:3222",
+        secret: "x".repeat(32),
+      },
+    });
+  });
 });

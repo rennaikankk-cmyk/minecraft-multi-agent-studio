@@ -29,6 +29,26 @@ const taskHandlerResultSchema = z
   .object({
     result: skillJsonValueSchema.nullable(),
     evidence: z.array(taskEvidenceSchema).max(64),
+    terminal: z
+      .discriminatedUnion("status", [
+        z
+          .object({
+            status: z.literal("failed"),
+            failureReason: z
+              .string()
+              .min(3)
+              .max(128)
+              .regex(/^[A-Z][A-Z0-9_]*$/u),
+          })
+          .strict(),
+        z
+          .object({
+            status: z.enum(["completed", "cancelled", "expired"]),
+            failureReason: z.null().optional(),
+          })
+          .strict(),
+      ])
+      .optional(),
   })
   .strict();
 
@@ -117,6 +137,12 @@ type ActiveTaskExecution = {
 export type TaskHandlerResult = Readonly<{
   result: SkillJsonValue | null;
   evidence: readonly z.infer<typeof taskEvidenceSchema>[];
+  terminal?:
+    | Readonly<{ status: "failed"; failureReason: string }>
+    | Readonly<{
+        status: "completed" | "cancelled" | "expired";
+        failureReason?: null;
+      }>;
 }>;
 
 export type TaskHandlerContext = Readonly<{
@@ -1056,22 +1082,34 @@ export class BullMqTaskWorker {
       return requiredTerminalResult(expiredBeforeCompletion);
     }
 
+    const handlerTerminal = handlerResult.terminal ?? {
+      status: "completed" as const,
+      failureReason: null,
+    };
     let completed: TaskRecord;
     try {
       completed = await this.repository.transition({
         schemaVersion: "1.0",
         operationId: deterministicOperationId(
           dispatch.messageId,
-          "task-complete",
+          `task-${handlerTerminal.status}`,
           currentTask.revision,
         ),
         taskId: currentTask.taskId,
         expectedRevision: currentTask.revision,
         actorId: this.options.instanceId,
-        to: "completed",
-        reasonCode: "TASK_HANDLER_COMPLETED",
+        to: handlerTerminal.status,
+        reasonCode:
+          handlerTerminal.status === "completed"
+            ? "TASK_HANDLER_COMPLETED"
+            : handlerTerminal.status === "failed"
+              ? handlerTerminal.failureReason
+              : `TASK_HANDLER_${handlerTerminal.status.toUpperCase()}`,
         leaseOwner: active.leaseOwner,
-        failureReason: null,
+        failureReason:
+          handlerTerminal.status === "failed"
+            ? handlerTerminal.failureReason
+            : null,
         result: handlerResult.result,
         evidence: handlerResult.evidence,
       });
@@ -1114,12 +1152,7 @@ export class BullMqTaskWorker {
         "Task lease expired before completion could be recorded.",
       );
     }
-    return {
-      schemaVersion: "1.0",
-      taskId: completed.taskId,
-      status: "completed",
-      revision: completed.revision,
-    };
+    return requiredTerminalResult(completed);
   }
 
   private async finalizeExpiredBudget(

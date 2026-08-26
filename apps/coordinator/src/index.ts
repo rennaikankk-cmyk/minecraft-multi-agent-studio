@@ -78,6 +78,12 @@ export {
 } from "./control-link-server.js";
 
 export {
+  CoordinatorGoalExecutionServer,
+  type GoalExecutionServerAddress,
+  type GoalExecutionServerOptions,
+} from "./goal-execution-server.js";
+
+export {
   GoalLifecycleStoreError,
   PostgresGoalLifecycleStore,
   durableGoalFingerprint,
@@ -85,6 +91,7 @@ export {
   type GoalLifecycleBeginResult,
   type GoalLifecycleSnapshot,
   type GoalLifecycleStore,
+  type QueuedGoalLifecycleStore,
   type PostgresGoalLifecycleStoreOptions,
 } from "./goal-lifecycle-store.js";
 

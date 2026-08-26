@@ -8,7 +8,6 @@ import type { AddressInfo } from "node:net";
 import type { Duplex } from "node:stream";
 
 import type { AppLogger } from "@minecraft-studio/observability";
-import { AISchedulerError } from "@minecraft-studio/ai-router";
 import {
   CONTROL_LINK_MAX_BOTS,
   CONTROL_LINK_MAX_PAYLOAD_BYTES,
@@ -26,7 +25,6 @@ import {
   controlLinkStopResponseV1Schema,
   controlLinkTaskDetailResponseV1Schema,
   controlLinkTaskListResponseV1Schema,
-  goalResultSummaryFromOutput,
   parseControlLinkClientMessage,
   type ControlLinkAuthenticateV1,
   type ControlLinkGoalErrorCode,
@@ -52,12 +50,16 @@ import {
   type GoalExecutionLease,
   type GoalLifecycleSnapshot,
   type GoalLifecycleStore,
+  type QueuedGoalLifecycleStore,
 } from "./goal-lifecycle-store.js";
 import {
   LocalPlannerError,
   type CoordinatorLocalPlanner,
-  type LocalPlanResult,
 } from "./local-planner.js";
+import {
+  mapGoalExecutionError,
+  projectGoalDispatchResult,
+} from "./goal-execution-result.js";
 import {
   CoordinatorStopError,
   type StopController,
@@ -95,6 +97,7 @@ export type ControlLinkServerOptions = Readonly<{
   stopController: Pick<StopController, "requestStop">;
   goalPlanner?: Pick<CoordinatorLocalPlanner, "planAndDispatch">;
   goalStore?: GoalLifecycleStore;
+  queuedGoalStore?: QueuedGoalLifecycleStore;
   taskHistoryReader?: TaskHistoryReader;
   logger: AppLogger;
   now?: () => Date;
@@ -214,6 +217,14 @@ export class ControlLinkServer {
     if (options.goalPlanner !== undefined && options.goalStore === undefined) {
       throw new TypeError(
         "Control Link goal execution requires durable storage.",
+      );
+    }
+    if (
+      options.queuedGoalStore !== undefined &&
+      (options.goalPlanner === undefined || options.goalStore === undefined)
+    ) {
+      throw new TypeError(
+        "Queued goal execution requires the durable store and local planner.",
       );
     }
     if (options.clients.length === 0 || options.clients.length > 64) {
@@ -1218,6 +1229,10 @@ export class ControlLinkServer {
   }
 
   private async executeGoal(pending: PendingGoal): Promise<void> {
+    if (this.options.queuedGoalStore) {
+      await this.executeQueuedGoal(pending);
+      return;
+    }
     const request = pending.request;
     const controller = pending.controller;
     let lease: GoalExecutionLease | null = null;
@@ -1285,7 +1300,7 @@ export class ControlLinkServer {
       if (timedOut || controller.signal.aborted) {
         throw new Error("goal_timeout");
       }
-      const result = publicGoalResult(request, planResult);
+      const result = projectGoalDispatchResult(request.payload, planResult);
       const terminal = await this.options.goalStore!.recordResult(lease, result);
       this.applyGoalSnapshots([terminal], validNow(this.now()));
       this.rememberCompletedGoal(request.payload.operationId, {
@@ -1306,7 +1321,11 @@ export class ControlLinkServer {
         action: result.action,
       });
     } catch (cause) {
-      let errorCode = goalErrorCode(cause, timedOut, controller.signal.aborted);
+      let errorCode = mapGoalExecutionError(
+        cause,
+        timedOut,
+        controller.signal.aborted,
+      );
       let terminalPersisted = false;
       if (lease) {
         const status = errorCode === "AI_TIMEOUT"
@@ -1369,6 +1388,108 @@ export class ControlLinkServer {
         // originating code stays log-only so triage does not start by
         // guessing which one it was.
         ...plannerDiagnostics(cause),
+      });
+    } finally {
+      clearTimeout(timer);
+      if (this.pendingGoals.get(request.payload.operationId) === pending) {
+        this.pendingGoals.delete(request.payload.operationId);
+      }
+    }
+  }
+
+  private async executeQueuedGoal(pending: PendingGoal): Promise<void> {
+    const request = pending.request;
+    const controller = pending.controller;
+    let submitted = false;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new Error("goal_timeout"));
+    }, request.payload.timeoutMs);
+    try {
+      const queued = await this.options.queuedGoalStore!.submitQueued(request);
+      submitted = true;
+      this.applyGoalSnapshots([queued], validNow(this.now()));
+      const terminal = await this.options.queuedGoalStore!.waitForQueuedTerminal(
+        request.payload.taskId,
+        controller.signal,
+      );
+      this.applyGoalSnapshots([terminal], validNow(this.now()));
+      if (terminal.result !== null) {
+        this.rememberCompletedGoal(request.payload.operationId, {
+          fingerprint: terminal.fingerprint,
+          result: terminal.result,
+          expiresAtMs: validNow(this.now()).getTime() + COMPLETED_GOAL_TTL_MS,
+        });
+        if (!this.stopped) {
+          for (const responder of pending.responders.values()) {
+            this.sendGoalSuccess(responder, request, terminal.result);
+          }
+        }
+        return;
+      }
+
+      const errorCode =
+        terminal.errorCode ?? "CONTROL_LINK_INTERNAL_ERROR";
+      this.rememberCompletedGoal(request.payload.operationId, {
+        fingerprint: terminal.fingerprint,
+        result: null,
+        errorCode,
+        expiresAtMs: validNow(this.now()).getTime() + COMPLETED_GOAL_TTL_MS,
+      });
+      if (!this.stopped) {
+        for (const responder of pending.responders.values()) {
+          this.sendGoalFailure(
+            responder.session,
+            request,
+            errorCode,
+            responder.requestMessageId,
+          );
+        }
+      }
+    } catch (cause) {
+      const errorCode = mapGoalExecutionError(
+        cause,
+        timedOut,
+        controller.signal.aborted,
+      );
+      if (submitted) {
+        await this.options.queuedGoalStore!
+          .requestQueuedCancellation(
+            request.payload.taskId,
+            timedOut ? "AI_TIMEOUT" : "CONTROL_LINK_STOPPED",
+          )
+          .catch((cancellationCause: unknown) => {
+            safeLog(
+              this.options.logger,
+              "error",
+              "coordinator_queued_goal_cancellation_failed",
+              {
+                traceId: request.payload.operationId,
+                taskId: request.payload.taskId,
+                code:
+                  cancellationCause instanceof GoalLifecycleStoreError
+                    ? cancellationCause.code
+                    : "CONTROL_LINK_INTERNAL_ERROR",
+              },
+            );
+          });
+      }
+      if (!this.stopped) {
+        for (const responder of pending.responders.values()) {
+          this.sendGoalFailure(
+            responder.session,
+            request,
+            errorCode,
+            responder.requestMessageId,
+          );
+        }
+      }
+      safeLog(this.options.logger, "warn", "coordinator_queued_goal_failed", {
+        traceId: request.payload.operationId,
+        taskId: request.payload.taskId,
+        botId: request.payload.botId,
+        code: errorCode,
       });
     } finally {
       clearTimeout(timer);
@@ -1921,49 +2042,6 @@ function plannerDiagnostics(
   return { plannerCode: null };
 }
 
-function publicGoalResult(
-  request: ControlLinkGoalRequestV1,
-  result: LocalPlanResult,
-): GoalDispatchResultV1 {
-  const ai = {
-    attempts: result.ai.attempts,
-    queueTimeMs: Math.round(result.ai.queueTimeMs),
-    executionTimeMs: Math.round(result.ai.executionTimeMs),
-    totalTimeMs: Math.round(result.ai.totalTimeMs),
-  };
-  if (result.action === "noop") {
-    return {
-      action: "noop",
-      botId: request.payload.botId,
-      taskId: request.payload.taskId,
-      reasonCode: result.reasonCode,
-      ai,
-    };
-  }
-  const payload = result.result.payload;
-  const base = {
-    action: "skill_result",
-    botId: request.payload.botId,
-    taskId: request.payload.taskId,
-    reasonCode: result.reasonCode,
-    skillId: payload.skillId,
-    skillVersion: payload.skillVersion,
-    outcome: payload.outcome,
-    ai,
-  } as const;
-  if (payload.outcome !== "completed") {
-    return { ...base, errorCode: payload.errorCode };
-  }
-  // The Skill's own counts, when it published any. Without them a `completed`
-  // collect that found nothing is indistinguishable on the wire from one that
-  // filled the inventory — both arrive as a bare `outcome: "completed"`.
-  //
-  // Spread rather than assigned, because the completed branch is `.strict()`
-  // and "the Skill published no counts" is spelled by the key being absent.
-  const summary = goalResultSummaryFromOutput(payload.output);
-  return summary === undefined ? base : { ...base, summary };
-}
-
 function goalTaskStatus(
   result: GoalDispatchResultV1,
 ): PublicCurrentTask["status"] {
@@ -1972,34 +2050,6 @@ function goalTaskStatus(
   if (result.outcome === "cancelled") return "cancelled";
   if (result.outcome === "timed_out") return "expired";
   return "failed";
-}
-
-function goalErrorCode(
-  cause: unknown,
-  timedOut: boolean,
-  aborted = false,
-): ControlLinkGoalErrorCode {
-  if (timedOut) return "AI_TIMEOUT";
-  if (aborted) return "CONTROL_LINK_STOPPED";
-  if (cause instanceof GoalLifecycleStoreError) return cause.code;
-  if (cause instanceof AISchedulerError) {
-    if (cause.code === "AI_QUEUE_FULL") return "AI_QUEUE_FULL";
-    if (cause.code === "AI_REQUEST_TIMEOUT") return "AI_TIMEOUT";
-    return "AI_UNAVAILABLE";
-  }
-  if (cause instanceof LocalPlannerError) {
-    if (cause.code === "PLANNER_TIMEOUT") return "AI_TIMEOUT";
-    if (
-      cause.code === "PLANNER_BOT_UNAVAILABLE" ||
-      cause.code === "PLANNER_BOT_BUSY" ||
-      cause.code === "PLANNER_SAFETY_PAUSED" ||
-      cause.code === "PLANNER_SKILL_CATALOG_UNAVAILABLE"
-    ) {
-      return "BOT_UNAVAILABLE";
-    }
-    return "PLANNER_REJECTED";
-  }
-  return "SKILL_DISPATCH_FAILED";
 }
 
 function goalFingerprint(request: ControlLinkGoalRequestV1): string {

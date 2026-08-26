@@ -262,6 +262,14 @@ export {
 } from "./task-dispatch.js";
 
 export {
+  COORDINATOR_GOAL_EXECUTION_PATH,
+  coordinatorGoalExecutionRequestV1Schema,
+  coordinatorGoalExecutionResponseV1Schema,
+  type CoordinatorGoalExecutionRequestV1,
+  type CoordinatorGoalExecutionResponseV1,
+} from "./goal-execution.js";
+
+export {
   SUPERVISOR_IPC_MAX_BOTS_PER_PROCESS,
   SUPERVISOR_IPC_MAX_PAYLOAD_BYTES,
   parseSupervisorChildMessage,

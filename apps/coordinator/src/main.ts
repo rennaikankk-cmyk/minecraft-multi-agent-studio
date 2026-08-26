@@ -37,6 +37,7 @@ import {
 import { PostgresGoalLifecycleStore } from "./goal-lifecycle-store.js";
 import { PostgresTaskHistoryReader } from "./task-history-reader.js";
 import { ExpiredLeaseRecoveryController } from "./expired-lease-recovery.js";
+import { CoordinatorGoalExecutionServer } from "./goal-execution-server.js";
 import {
   TaskDeliveryConfigError,
   loadTaskDeliveryConfig,
@@ -105,6 +106,7 @@ async function main(): Promise<void> {
   let leaseRecovery: ExpiredLeaseRecoveryController | null = null;
   let taskQueue: BullMqTaskQueue | null = null;
   let outboxReconciler: TaskOutboxReconciler | null = null;
+  let goalExecutionServer: CoordinatorGoalExecutionServer | null = null;
   if (localAIConfig.enabled && localAIConfig.baseUrl && localAIConfig.model) {
     aiRouter = new AIRouter();
     aiRouter.register(
@@ -185,6 +187,11 @@ async function main(): Promise<void> {
       logger,
     });
     if (taskDeliveryConfig) {
+      if (taskDeliveryConfig.purpose === "production" && !localPlanner) {
+        throw new TaskDeliveryConfigError(
+          "Production task delivery requires a configured Local AI planner.",
+        );
+      }
       taskQueue = new BullMqTaskQueue({
         redisUrl: taskDeliveryConfig.redisUrl,
         queueName: taskDeliveryConfig.queueName,
@@ -200,6 +207,14 @@ async function main(): Promise<void> {
         retryBaseMs: taskDeliveryConfig.retryBaseMs,
         retryMaxMs: taskDeliveryConfig.retryMaxMs,
       });
+      if (taskDeliveryConfig.purpose === "production") {
+        goalExecutionServer = new CoordinatorGoalExecutionServer({
+          ...taskDeliveryConfig.goalExecution,
+          repository: taskRepository,
+          planner: localPlanner!,
+          logger,
+        });
+      }
     }
   }
   const controlServer = new ControlLinkServer({
@@ -211,6 +226,9 @@ async function main(): Promise<void> {
     stopController,
     ...(localPlanner ? { goalPlanner: localPlanner } : {}),
     ...(goalStore ? { goalStore } : {}),
+    ...(taskDeliveryConfig?.purpose === "production" && goalStore
+      ? { queuedGoalStore: goalStore }
+      : {}),
     ...(taskHistoryReader ? { taskHistoryReader } : {}),
     logger,
   });
@@ -219,6 +237,7 @@ async function main(): Promise<void> {
   try {
     await taskPool?.verifyConnection();
     await taskQueue?.verifyConnection();
+    await goalExecutionServer?.start();
     const runtimeAddress = await runtimeServer.start();
     const controlAddress = await controlServer.start();
     // PostgreSQL is authoritative for leases. Start bounded recovery only
@@ -263,6 +282,15 @@ async function main(): Promise<void> {
   } catch (cause) {
     if (staleTimer) clearInterval(staleTimer);
     await Promise.allSettled([controlServer.stop(), runtimeServer.stop()]);
+    if (goalExecutionServer) {
+      try {
+        await goalExecutionServer.stop();
+      } catch {
+        logger.error("coordinator_goal_execution_bridge_stop_failed", {
+          code: "GOAL_EXECUTION_BRIDGE_STOP_FAILED",
+        });
+      }
+    }
     if (leaseRecovery) await Promise.allSettled([leaseRecovery.stop()]);
     if (outboxReconciler) await Promise.allSettled([outboxReconciler.stop()]);
     if (taskQueue) await Promise.allSettled([taskQueue.close()]);
@@ -281,6 +309,15 @@ async function main(): Promise<void> {
     // and closing PostgreSQL. Existing leases are then recovered or handed off
     // by the bounded controllers without a new request racing shutdown.
     await Promise.allSettled([controlServer.stop(), runtimeServer.stop()]);
+    if (goalExecutionServer) {
+      try {
+        await goalExecutionServer.stop();
+      } catch {
+        logger.error("coordinator_goal_execution_bridge_stop_failed", {
+          code: "GOAL_EXECUTION_BRIDGE_STOP_FAILED",
+        });
+      }
+    }
     if (leaseRecovery) {
       try {
         await leaseRecovery.stop();

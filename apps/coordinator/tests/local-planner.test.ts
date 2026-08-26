@@ -978,7 +978,7 @@ describe("CoordinatorLocalPlanner", () => {
     ).toBe(false);
   });
 
-  it("still refuses smelting, and names the station that blocked it", async () => {
+  it("refuses smelting when the Runtime does not advertise smelt.item", async () => {
     const placement = placementRegistry();
     const info = vi.fn();
     const warn = vi.fn();
@@ -1006,10 +1006,8 @@ describe("CoordinatorLocalPlanner", () => {
       randomId: uuidSequence(),
     });
 
-    // Crafting a furnace is now reachable — its station is a crafting table.
-    // Smelting *with* one is not: placing a furnace is the easy half, and the
-    // `smelt` step after it still needs fuel accounting the coordinator cannot
-    // bind, so every item behind a furnace stays out.
+    // Furnace placement is supported, but this Runtime catalog still lacks the
+    // non-idempotent smelt skill itself, so the derived plan stays unavailable.
     await expect(
       planner.planAndDispatch({
         ...planRequest(),
@@ -1022,16 +1020,77 @@ describe("CoordinatorLocalPlanner", () => {
     const bindability = info.mock.calls.find(
       ([event]) => event === "coordinator_planner_goal_bindability",
     );
-    // The reason now names the station rather than the step kind: the placement
-    // Skills are advertised, so "unsupported kind" would be the wrong answer.
+    // The skill advertisement gate is shared by bindability reporting and the
+    // execution gate, so the missing skill is the actionable reason.
     expect(
-      bindability?.[1].exclusionReasons["STATION_UNSUPPORTED:furnace"],
+      bindability?.[1].exclusionReasons["SKILL_NOT_ADVERTISED:smelt.item"],
     ).toBeGreaterThan(0);
     const named = warn.mock.calls.find(
       ([event]) => event === "coordinator_planner_goal_named_unbindable_item",
     );
     expect(named?.[1]).toMatchObject({
-      unbindableItems: ["iron_ingot=STATION_UNSUPPORTED:furnace"],
+      unbindableItems: ["iron_ingot=SKILL_NOT_ADVERTISED:smelt.item"],
+    });
+  });
+
+  it("observes a furnace placement and executes the smelt step", async () => {
+    const smelting = smeltingRegistry();
+    const dispatched: string[] = [];
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => {
+      dispatched.push(invocation.payload.skillId);
+      return skillResult(invocation, "completed");
+    });
+    const planner = resourcePlanner(
+      smelting,
+      { sendSkillInvocation },
+      [{ itemName: "iron_ingot", count: 1 }],
+    );
+
+    await expect(
+      planner.planAndDispatch({
+        ...planRequest(),
+        operatorGoal: "Smelt one iron_ingot from nearby resources.",
+      }),
+    ).resolves.toMatchObject({
+      action: "skill_result",
+      result: { payload: { outcome: "completed" } },
+    });
+
+    const scanIndex = dispatched.indexOf("world.scan");
+    const placeIndexes = dispatched
+      .map((skillId, index) => (skillId === "world.place-block" ? index : -1))
+      .filter((index) => index >= 0);
+    const smeltIndex = dispatched.lastIndexOf("smelt.item");
+    expect(scanIndex).toBeGreaterThanOrEqual(0);
+    expect(placeIndexes.length).toBe(2);
+    expect(smeltIndex).toBeGreaterThan(Math.max(...placeIndexes));
+
+    const furnacePlacement = sendSkillInvocation.mock.calls
+      .map(([invocation]) => invocation)
+      .find(
+        (invocation) =>
+          invocation.payload.skillId === "world.place-block" &&
+          inputField(invocation.payload.input, "itemName") === "furnace",
+      )!;
+    expect(furnacePlacement.payload.input).toMatchObject({
+      itemName: "furnace",
+      referenceBlock: { x: 1_236, y: 63, z: -4_321 },
+      face: { x: 0, y: 1, z: 0 },
+      serverProfileId: "isolated-test",
+    });
+
+    const smelt = sendSkillInvocation.mock.calls
+      .map(([invocation]) => invocation)
+      .find((invocation) => invocation.payload.skillId === "smelt.item")!;
+    expect(smelt.payload.input).toMatchObject({
+      inputItemName: "raw_iron",
+      fuelItemName: "oak_planks",
+      fuelCount: 1,
+      count: 1,
+      furnace: { x: 1_236, y: 64, z: -4_321 },
+      serverProfileId: "isolated-test",
     });
   });
 
@@ -2749,6 +2808,65 @@ function placementRegistry(): BotRegistry {
   return planning;
 }
 
+/** The planning catalog plus the observed placement skills and smelt.item. */
+function smeltingRegistry(): BotRegistry {
+  const planning = placementRegistry();
+  const now = NOW.toISOString();
+  const existing = planning.get(BOT_ID, NOW)!.skillCatalog!.skills;
+  planning.ingest({
+    schemaVersion: "1.0",
+    messageId: uuid(5),
+    traceId: "trace-registry",
+    timestamp: now,
+    source: { service: "bot-runtime", instanceId: RUNTIME_ID },
+    botId: BOT_ID,
+    type: "bot.skill-catalog.v1",
+    payload: {
+      serverProfileId: "isolated-test",
+      runtimeInstanceId: RUNTIME_ID,
+      sequence: 5,
+      observedAt: now,
+      minecraftVersion: "1.21.11",
+      protocolVersion: 774,
+      skills: [
+        ...existing,
+        catalogEntry("smelt.item", {
+          type: "object",
+          properties: {
+            inputItemName: { type: "string", minLength: 1, maxLength: 64 },
+            fuelItemName: { type: "string", minLength: 1, maxLength: 64 },
+            fuelCount: { type: "integer", minimum: 1, maximum: 5 },
+            count: { type: "integer", minimum: 1, maximum: 5 },
+            furnace: {
+              type: "object",
+              properties: {
+                x: { type: "integer", minimum: -30_000_000, maximum: 30_000_000 },
+                y: { type: "integer", minimum: -2_048, maximum: 2_048 },
+                z: { type: "integer", minimum: -30_000_000, maximum: 30_000_000 },
+              },
+              required: ["x", "y", "z"],
+              additionalProperties: false,
+            },
+            dimension: { type: "string", minLength: 3, maxLength: 128 },
+            serverProfileId: { type: "string", minLength: 1, maxLength: 128 },
+          },
+          required: [
+            "inputItemName",
+            "fuelItemName",
+            "fuelCount",
+            "count",
+            "furnace",
+            "dimension",
+            "serverProfileId",
+          ],
+          additionalProperties: false,
+        }),
+      ],
+    },
+  }, NOW);
+  return planning;
+}
+
 function aiResult(
   content: string,
   requestId: string,
@@ -2843,6 +2961,28 @@ function completedOutputForInvocation(
       craftedCount: requestedCount * craftYield(itemName),
       usedCraftingTable:
         inputField(invocation.payload.input, "craftingTable") !== null,
+    };
+  }
+  if (invocation.payload.skillId === "smelt.item") {
+    const inputItemName = String(
+      inputField(invocation.payload.input, "inputItemName"),
+    );
+    const fuelItemName = String(
+      inputField(invocation.payload.input, "fuelItemName"),
+    );
+    const requestedCount = Number(
+      inputField(invocation.payload.input, "count"),
+    );
+    const fuelCount = Number(
+      inputField(invocation.payload.input, "fuelCount"),
+    );
+    return {
+      inputItemName,
+      fuelItemName,
+      outputItemName: "iron_ingot",
+      requestedCount,
+      insertedFuelCount: fuelCount,
+      smeltedCount: requestedCount,
     };
   }
   if (invocation.payload.skillId === "world.scan") {

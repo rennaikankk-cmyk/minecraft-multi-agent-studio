@@ -564,13 +564,10 @@ const NON_IDEMPOTENT_RESULT_UNCERTAIN = "NON_IDEMPOTENT_RESULT_UNCERTAIN";
 
 /** The one face a scanned ground block can be built on without further observation. */
 const COORDINATOR_PLACEMENT_FACE = Object.freeze({ x: 0, y: 1, z: 0 });
-/**
- * Stations the coordinator can place. `furnace` is deliberately absent: placing
- * it is the easy half, and the `smelt` step that follows still needs fuel
- * accounting and furnace interaction the coordinator cannot bind.
- */
+/** Stations the coordinator can place after observing a trusted ground block. */
 const COORDINATOR_PLACEABLE_STATIONS: ReadonlySet<string> = new Set([
   "crafting_table",
+  "furnace",
 ]);
 /** Both are needed for any placement: one to observe the site, one to build on it. */
 const COORDINATOR_PLACEMENT_SKILLS = Object.freeze([
@@ -624,6 +621,12 @@ function unbindableStepReason(
   if (step.kind === "mine") return null;
   if (step.kind === "craft") {
     if (step.station === null) return null;
+    return COORDINATOR_PLACEABLE_STATIONS.has(step.station)
+      ? placementSupportReason(advertised)
+      : `STATION_UNSUPPORTED:${step.station}`;
+  }
+  if (step.kind === "smelt") {
+    if (step.station === null) return "STATION_UNSUPPORTED:furnace";
     return COORDINATOR_PLACEABLE_STATIONS.has(step.station)
       ? placementSupportReason(advertised)
       : `STATION_UNSUPPORTED:${step.station}`;
@@ -1536,6 +1539,26 @@ export class CoordinatorLocalPlanner {
         serverProfileId,
       };
     }
+    if (step.kind === "smelt") {
+      // A smelt is bound to the furnace this same plan placed and the Runtime
+      // confirmed. The input/fuel names come from the deterministic plan's
+      // consumption ledger; the model never gets to choose either one.
+      const site = step.station === null
+        ? undefined
+        : binding.placementSites.get(step.station);
+      if (site === undefined) return null;
+      const smelt = smeltInputsForStep(step);
+      if (smelt === null) return null;
+      return {
+        inputItemName: smelt.inputItemName,
+        fuelItemName: smelt.fuelItemName,
+        fuelCount: smelt.fuelCount,
+        count: step.runs,
+        furnace: { x: site.x, y: site.y, z: site.z },
+        dimension,
+        serverProfileId,
+      };
+    }
     if (step.kind === "place-station") {
       // The reference block comes from a `world.scan` observation taken moments
       // ago, never from arithmetic on the bot's own position: subtracting one
@@ -1551,8 +1574,8 @@ export class CoordinatorLocalPlanner {
         serverProfileId,
       };
     }
-    // Furnaces and villager trades still need facts the coordinator does not
-    // hold, so they keep failing closed instead of guessing.
+    // Villager trades still need facts the coordinator does not hold, so they
+    // keep failing closed instead of guessing.
     return null;
   }
 
@@ -2124,6 +2147,42 @@ function assertPlanGoalsGrounded(
   }
 }
 
+type SmeltStepInputs = Readonly<{
+  inputItemName: string;
+  fuelItemName: string;
+  fuelCount: number;
+}>;
+
+/**
+ * Extracts the smelt request from the deterministic planner ledger. A smelt
+ * step consumes exactly one input material plus one selected fuel candidate;
+ * returning null for any malformed shape keeps the coordinator fail-closed.
+ */
+function smeltInputsForStep(step: PlanStep): SmeltStepInputs | null {
+  if (step.kind !== "smelt") return null;
+  const fuel = step.consumes.find(({ itemName }) =>
+    step.fuelCandidates.includes(itemName),
+  );
+  const input = step.consumes.find(({ itemName }) =>
+    !step.fuelCandidates.includes(itemName),
+  );
+  if (
+    !fuel ||
+    !input ||
+    !Number.isSafeInteger(fuel.count) ||
+    fuel.count < 1 ||
+    !Number.isSafeInteger(input.count) ||
+    input.count < 1
+  ) {
+    return null;
+  }
+  return {
+    inputItemName: input.itemName,
+    fuelItemName: fuel.itemName,
+    fuelCount: fuel.count,
+  };
+}
+
 function completedOutputSatisfiesStep(
   step: PlanStep,
   output: SkillJsonValue,
@@ -2150,6 +2209,20 @@ function completedOutputSatisfiesStep(
       Number.isInteger(output.craftedCount) &&
       output.craftedCount >= step.producedCount &&
       output.usedCraftingTable === (step.station !== null)
+    );
+  }
+  if (step.kind === "smelt") {
+    const smelt = smeltInputsForStep(step);
+    return (
+      smelt !== null &&
+      output.inputItemName === smelt.inputItemName &&
+      output.fuelItemName === smelt.fuelItemName &&
+      output.outputItemName === step.itemName &&
+      output.requestedCount === step.runs &&
+      output.insertedFuelCount === smelt.fuelCount &&
+      typeof output.smeltedCount === "number" &&
+      Number.isInteger(output.smeltedCount) &&
+      output.smeltedCount >= step.producedCount
     );
   }
   if (step.kind === "place-station") {
