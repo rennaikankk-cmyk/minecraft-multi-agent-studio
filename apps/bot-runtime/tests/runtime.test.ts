@@ -352,6 +352,119 @@ describe("SingleBotRuntime", () => {
     await runtime.stop();
   });
 
+  it("logs the pre-first-packet status rejection as a warning, then as an error once status has flowed", async () => {
+    // 实测每次启动都恰好有一条 `bot_runtime_status_invalid`，reason
+    // "health is outside the L0 safety boundary."：handleSpawn 在转 online 时
+    // 立刻 emitStatus，而服务端的第一个 health 包还没到，mineflayer 的
+    // bot.health 是 undefined。把这个必然发生的情形记成 error 会训练运维忽略
+    // error 行，而真正的边界违规长得一模一样（同一个字段名、同一句话）——所以
+    // 判据只能是"这条连接发出过状态没有"，不能是消息内容。
+    const messages: BotTelemetryMessageV1[] = [];
+    const client = new FakeBotClient({
+      ...snapshot,
+      health: { ...snapshot.health, current: Number.NaN },
+    });
+    const runtime = new SingleBotRuntime(profile, {
+      createClient: () => client,
+      messageSink: (message) => messages.push(message),
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+
+    runtime.start();
+    client.spawn();
+
+    expect(messages.some(({ type }) => type === "bot.status.v1")).toBe(false);
+    expect(logger.warn).toHaveBeenCalledWith(
+      "bot_runtime_status_invalid",
+      expect.objectContaining({
+        botId: profile.botId,
+        firstStatusPending: true,
+        reason: expect.stringContaining("health"),
+      }),
+    );
+    expect(logger.error).not.toHaveBeenCalledWith(
+      "bot_runtime_status_invalid",
+      expect.anything(),
+    );
+
+    // 服务端补上 health 之后状态发得出去，这条连接的"第一条"就算过了。
+    client.setSnapshot(snapshot);
+    client.stateChanged();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(messages.some(({ type }) => type === "bot.status.v1")).toBe(true);
+
+    // 已经发出过之后再坏，就是真问题：降级不能把它一起吞掉。
+    client.setSnapshot({
+      ...snapshot,
+      health: { ...snapshot.health, current: Number.NaN },
+    });
+    client.stateChanged();
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(logger.error).toHaveBeenCalledWith(
+      "bot_runtime_status_invalid",
+      expect.objectContaining({
+        botId: profile.botId,
+        firstStatusPending: false,
+        reason: expect.stringContaining("health"),
+      }),
+    );
+
+    await runtime.stop();
+  });
+
+  it("treats each reconnect as its own first status, not as an already-flowing one", async () => {
+    // 降级的判据是"这条连接发出过状态没有"，所以它必须按连接重置。重连后
+    // 服务端同样要重新送第一个 health 包，那一条拒绝和首次启动的那条是同一
+    // 件事；不重置就会让重连时的预期情形升级成 error，而这正是本次修复要
+    // 消除的噪声。
+    const clients = [
+      new FakeBotClient(),
+      new FakeBotClient({
+        ...snapshot,
+        health: { ...snapshot.health, current: Number.NaN },
+      }),
+    ];
+    let factoryCalls = 0;
+    const runtime = new SingleBotRuntime(profile, {
+      createClient: () => clients[factoryCalls++]!,
+      messageSink: () => undefined,
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+
+    runtime.start();
+    // 第一条连接一切正常，status 发得出去，标志被置真。
+    clients[0]!.spawn();
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      "bot_runtime_status_invalid",
+      expect.anything(),
+    );
+
+    clients[0]!.disconnect({
+      reason: "network_error",
+      expected: false,
+      detail: "isolated_test_disconnect",
+    });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(factoryCalls).toBe(2);
+    clients[1]!.spawn();
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      "bot_runtime_status_invalid",
+      expect.objectContaining({ firstStatusPending: true }),
+    );
+    expect(logger.error).not.toHaveBeenCalledWith(
+      "bot_runtime_status_invalid",
+      expect.anything(),
+    );
+
+    await runtime.stop();
+  });
+
   it("reconnects with bounded backoff after an unexpected disconnect", async () => {
     const messages: BotTelemetryMessageV1[] = [];
     const clients = [new FakeBotClient(), new FakeBotClient()];

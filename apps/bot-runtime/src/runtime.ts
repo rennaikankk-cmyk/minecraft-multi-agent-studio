@@ -251,6 +251,10 @@ export class SingleBotRuntime {
   private deferredStatusTimer: TimerHandle | null = null;
   private reconnectTimer: TimerHandle | null = null;
   private lastStatusAt = 0;
+  // 本次连接有没有成功发出过一条状态。spawn 之后服务端还没送出第一个 health
+  // 包时快照里 health 是 undefined，L0 边界据此拒绝——这是每次启动都会发生的
+  // 预期情形，不是缺陷。用它把"第一条还没成"和"已经成过又坏了"分开。
+  private statusEmittedForConnection = false;
   private minecraftVersionCompatibility: MinecraftVersionCompatibility | null =
     null;
   private skillCompatibilityEnvironment: SkillCompatibilityEnvironment | null =
@@ -920,6 +924,8 @@ export class SingleBotRuntime {
     }
     this.state = "online";
     this.reconnectAttempts = 0;
+    // 每条连接各自算一次：重连后同样要等服务端补上第一个 health 包。
+    this.statusEmittedForConnection = false;
     this.emitVersion();
     this.emitSkillCatalog();
     this.startStatusTimer(generation);
@@ -1098,16 +1104,31 @@ export class SingleBotRuntime {
       });
       this.lastStatusSequence = sequence;
       this.lastStatusAt = this.now().getTime();
+      this.statusEmittedForConnection = true;
       this.emit(message);
     } catch (cause) {
       // Without the originating reason this event cannot distinguish a
       // transient pre-first-packet field from a real boundary violation or a
       // protocol schema regression. The message comes from our own schemas and
       // safety boundary, which name fields rather than values.
-      this.dependencies.logger.error(
-        "bot_runtime_status_invalid",
-        this.logFields({ reason: statusFailureReason(cause) }),
-      );
+      //
+      // 严重级按"这条连接发出过状态没有"分。实测每次启动都会有恰好一条：
+      // handleSpawn 在 online 转换里立刻 emitStatus，而服务端的第一个 health
+      // 包还没到，快照里 health 是 undefined，L0 边界拒绝（reason:
+      // "health is outside the L0 safety boundary."）。把这个预期情形记成
+      // error 会训练运维忽略 error 行，而真正的边界违规也长这样——所以降级的
+      // 判据不能是"消息里含 health"，只能是"第一条还没发出去过"。已经发出过
+      // 之后再坏，说明服务端已经在送状态了，那就是真问题，仍然 error。
+      const reason = statusFailureReason(cause);
+      const fields = this.logFields({
+        reason,
+        firstStatusPending: !this.statusEmittedForConnection,
+      });
+      if (this.statusEmittedForConnection) {
+        this.dependencies.logger.error("bot_runtime_status_invalid", fields);
+      } else {
+        this.dependencies.logger.warn("bot_runtime_status_invalid", fields);
+      }
     }
   }
 
