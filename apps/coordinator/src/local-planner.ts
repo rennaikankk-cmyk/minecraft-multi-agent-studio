@@ -296,9 +296,19 @@ export function buildLocalPlannerPlanItemsRetrySchema(
  *
  * 放宽的只是"这句话是不是在要东西"，不是任何安全判定：候选仍只能来自
  * 确定性规划器已证明可达的集合，且必须唯一命中，否则照样返回 null。
+ *
+ * 2026-08-26：上一轮补齐仍然漏了中文最常用的"获得"。实测一条 live 目标
+ * "获得一把木镐" 因此降级成 noop/NO_SAFE_SKILL——别名表里 `木镐` 在，
+ * 只是动词没登记；同一句换成"获取"立刻解析出 wooden_pickaxe。同批实测为 null
+ * 的还有 得到/拿到/弄/搞/我要 和英文的 get/need，一并登记。
+ * 未登记"整"("整一把木镐")：它会撞上"整个""整理"，收益不值这个误判。
+ *
+ * 拉丁一侧只加**前置** \b：这样 craft 仍然吃得下 crafting、get 吃得下 getting，
+ * 而 forget/target/budget 里的 get 不再算命中——顺带收掉了 determine 里的 mine、
+ * remake 里的 make 这类既有的误命中。中日韩没有 \b 意义上的词边界，所以分成两支。
  */
 const PLAN_ITEMS_ACQUISITION_GOAL_PATTERN =
-  /(?:obtain|craft|make|build|gather|collect|acquire|mine|smelt|获取|制作|采集|收集|合成|做|造|挖|烧)/iu;
+  /(?:\b(?:obtain|craft|make|build|gather|collect|acquire|mine|smelt|get|need|want|fetch|bring)|获取|获得|得到|拿到|制作|采集|收集|合成|做|造|挖|烧|弄|搞|我要|想要|需要|给我)/iu;
 
 /**
  * Names the single trusted item a declined goal is asking to acquire, or null

@@ -2282,6 +2282,60 @@ describe("plannedAcquisitionGoalItem", () => {
       ),
     ).toBeNull();
   });
+
+  it("registers the colloquial acquisition verbs a live goal actually used", () => {
+    // 2026-08-26 实测：一条 live 目标"获得一把木镐"走到 noop/NO_SAFE_SKILL，
+    // 根因只是"获得"没登记（同一句换"获取"立刻解析）。下面每一行当时都返回
+    // null，全部是这次登记要覆盖的。
+    const reachableGraph = vanillaResourceRecipes.map((recipe) => recipe.itemName);
+    for (const goal of [
+      "获得一把木镐",
+      "得到一把木镐",
+      "拿到一把木镐",
+      "帮我弄一把木镐",
+      "搞一把木镐",
+      "我要一把木镐",
+      "想要一把木镐",
+      "需要一把木镐",
+      "给我一把木镐",
+      "get a wooden pickaxe",
+      "I need a wooden pickaxe",
+      "I want a wooden pickaxe",
+    ]) {
+      expect(
+        plannedAcquisitionGoalItem(goal, reachableGraph),
+        `${goal} should resolve to wooden_pickaxe`,
+      ).toBe("wooden_pickaxe");
+    }
+  });
+
+  it("keeps a Latin verb from matching inside an unrelated word", () => {
+    // 拉丁一侧只有前置 \b：get 吃得下 getting，但 forget/target 里的 get 不算。
+    // 这一半是收紧，不是放宽——没有它，"别忘了"这类句子会被读成取得请求。
+    const reachableGraph = vanillaResourceRecipes.map((recipe) => recipe.itemName);
+    expect(
+      plannedAcquisitionGoalItem("Determine whether cobblestone is nearby.", reachableGraph),
+    ).toBeNull();
+    expect(
+      plannedAcquisitionGoalItem("Forget the cobblestone for now.", reachableGraph),
+    ).toBeNull();
+    // 后缀仍要吃得下，否则登记等于没登记。
+    expect(
+      plannedAcquisitionGoalItem("Getting one crafting_table would help.", reachableGraph),
+    ).toBe("crafting_table");
+  });
+
+  it("still declines a multi-item goal phrased with a newly registered verb", () => {
+    // 放宽的只是"这句话是不是在要东西"。唯一命中那一半必须原样保住，
+    // 否则新动词就成了替操作者挑一样东西的入口。
+    const reachableGraph = vanillaResourceRecipes.map((recipe) => recipe.itemName);
+    expect(
+      plannedAcquisitionGoalItem("获得一把木镐和一些圆石", reachableGraph),
+    ).toBeNull();
+    expect(plannedAcquisitionGoalItem("我要一个熔炉和一把石镐", reachableGraph)).toBeNull();
+    // 可达集合也仍然是闸门。
+    expect(plannedAcquisitionGoalItem("获得一把木镐", ["furnace"])).toBeNull();
+  });
 });
 
 describe("buildLocalPlannerPlanItemsRetrySchema", () => {
