@@ -5,6 +5,13 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { parseEnv } from "node:util";
 
+import {
+  createLocalBotSlots,
+  discoverLocalAI,
+  loadLocalAIKeyFile,
+  StudioLocalManager,
+} from "./studio-local-manager.mjs";
+
 const packagedMode = process.env.STUDIO_SEA_BUNDLE === "1";
 const repositoryRoot = path.resolve(
   process.env.STUDIO_BUNDLE_ROOT?.trim() || path.resolve(import.meta.dirname, ".."),
@@ -18,6 +25,7 @@ const runtimeRoot = path.resolve(
 const logRoot = path.join(runtimeRoot, "logs");
 const secretPath = path.join(runtimeRoot, "local-control-secrets.json");
 const children = new Map();
+let studioManager = null;
 let stopping = false;
 let stopPromise = null;
 const shutdownPreload = `data:text/javascript,${encodeURIComponent(
@@ -31,7 +39,10 @@ const environmentFileValues = {
   ...(await loadEnvironmentFile(path.join(configRoot, ".env"))),
   ...(await loadEnvironmentFile(path.join(configRoot, ".env.local"))),
 };
-const hostEnvironment = { ...environmentFileValues, ...process.env };
+const hostEnvironment = await loadLocalAIKeyFile(
+  { ...environmentFileValues, ...process.env },
+  configRoot,
+);
 const runtimeLinkPort = boundedPort(
   hostEnvironment.COORDINATOR_RUNTIME_LINK_PORT ?? "3220",
   "COORDINATOR_RUNTIME_LINK_PORT",
@@ -45,6 +56,10 @@ const controlApiPort = boundedPort(
   "CONTROL_API_PORT",
 );
 const dashboardPort = boundedPort(hostEnvironment.STUDIO_DASHBOARD_PORT ?? "3000");
+const managerPort = boundedPort(
+  hostEnvironment.STUDIO_MANAGER_PORT ?? "3230",
+  "STUDIO_MANAGER_PORT",
+);
 const productionTaskDelivery =
   hostEnvironment.COORDINATOR_TASK_DELIVERY?.trim() === "production";
 const goalExecutionPort = productionTaskDelivery
@@ -58,6 +73,7 @@ const configuredPorts = [
   controlLinkPort,
   controlApiPort,
   dashboardPort,
+  managerPort,
   ...(goalExecutionPort === null ? [] : [goalExecutionPort]),
 ];
 if (new Set(configuredPorts).size !== configuredPorts.length) {
@@ -67,16 +83,36 @@ await assertPortsAvailable(configuredPorts);
 const dashboardUrl = `http://127.0.0.1:${dashboardPort}`;
 await mkdir(logRoot, { recursive: true });
 const secrets = await loadOrCreateSecrets();
-const environment = buildEnvironment(secrets, hostEnvironment, {
+const runtimeMasterSecret = firstValidSecret(
+  hostEnvironment.BOT_RUNTIME_LINK_SECRET_STUDIO_BOT_01,
+  hostEnvironment.BOT_RUNTIME_LINK_SECRET,
+  secrets.runtimeSecret,
+);
+const botSlots = withConfiguredFirstSlotKey(
+  createLocalBotSlots(runtimeMasterSecret, 16),
+  hostEnvironment.BOT_RUNTIME_LINK_KEY_ID,
+);
+const aiDiscovery = await discoverLocalAI(hostEnvironment);
+const effectiveHostEnvironment = aiDiscovery.config
+  ? {
+      ...hostEnvironment,
+      LOCAL_AI_PROVIDER: aiDiscovery.config.provider,
+      LOCAL_AI_HUB_URL: aiDiscovery.config.baseUrl,
+      LOCAL_AI_MODEL: aiDiscovery.config.model,
+    }
+  : hostEnvironment;
+const environment = buildEnvironment(secrets, effectiveHostEnvironment, {
   runtimeLinkPort,
   controlLinkPort,
   controlApiPort,
+  managerPort,
   goalExecutionPort,
-});
+}, botSlots);
 
 await requireBuildArtifacts([
   "apps/coordinator/dist/main.js",
   "apps/control-api/dist/main.js",
+  "apps/bot-runtime/dist/index.js",
   packagedMode
     ? "apps/dashboard/.next/standalone/apps/dashboard/.next/BUILD_ID"
     : "apps/dashboard/.next/BUILD_ID",
@@ -106,10 +142,30 @@ try {
     "Control API",
   );
 
+  studioManager = new StudioLocalManager({
+    repositoryRoot,
+    runtimeRoot,
+    port: managerPort,
+    token: environment.DASHBOARD_STUDIO_MANAGER_TOKEN,
+    slots: botSlots,
+    aiStatus: aiDiscovery.status,
+    environment,
+    runtimeLinkPort,
+    packagedMode,
+  });
+  await studioManager.start();
+
   if (environment.BOT_SUPERVISOR_CONFIG_PATH) {
     startService(
       "bot-supervisor",
       "apps/bot-runtime/dist/supervisor-main.js",
+      [],
+      environment,
+    );
+  } else if (environment.BOT_SERVER_PROFILE_PATH) {
+    startService(
+      "bot-runtime-explicit",
+      "apps/bot-runtime/dist/index.js",
       [],
       environment,
     );
@@ -142,7 +198,9 @@ try {
   process.stdout.write(
     environment.BOT_SUPERVISOR_CONFIG_PATH
       ? "Bot Supervisor enabled from explicit configuration.\n"
-      : "Control plane ready with no Bot Supervisor configured.\n",
+      : environment.BOT_SERVER_PROFILE_PATH
+        ? "Single Bot Runtime enabled from explicit ServerProfile.\n"
+        : "Local Bot Manager ready for Dashboard-created runtimes.\n",
   );
   if (productionTaskDelivery) {
     process.stdout.write("Durable Coordinator goal execution is enabled.\n");
@@ -155,7 +213,7 @@ try {
   process.stdout.write(
     environment.COORDINATOR_TASK_POSTGRES_URL
       ? "Durable task history configured; the Coordinator will verify the pre-applied schema.\n"
-      : "Durable task history is not configured and will remain unavailable.\n",
+      : "Desktop task history is active in process memory for this session.\n",
   );
 } catch (cause) {
   process.stderr.write(`${boundedError(cause)}\n`);
@@ -221,6 +279,10 @@ async function stopAll(reason) {
   stopping = true;
   stopPromise = (async () => {
     process.stdout.write(`Stopping Studio services: ${reason}\n`);
+    if (studioManager) {
+      await studioManager.stop();
+      studioManager = null;
+    }
     const running = [...children.values()];
     await Promise.all(running.map((service) => stopService(service)));
   })();
@@ -271,15 +333,14 @@ async function loadOrCreateSecrets() {
   }
 }
 
-function buildEnvironment(secrets, hostEnvironment, ports) {
-  const runtimePeers = hostEnvironment.COORDINATOR_RUNTIME_LINK_PEERS_JSON ||
-    JSON.stringify([
-      {
-        keyId: "runtime-key-01",
-        botId: "studio-bot-01",
-        secretSha256: sha256(secrets.runtimeSecret),
-      },
-    ]);
+function buildEnvironment(secrets, hostEnvironment, ports, botSlots) {
+  const postgresConfigured = Boolean(
+    hostEnvironment.COORDINATOR_TASK_POSTGRES_URL?.trim(),
+  );
+  const runtimePeers = buildRuntimePeers(
+    hostEnvironment.COORDINATOR_RUNTIME_LINK_PEERS_JSON,
+    botSlots,
+  );
   const controlClientId = hostEnvironment.CONTROL_API_COORDINATOR_LINK_CLIENT_ID || "local-control-api";
   const controlKeyId = hostEnvironment.CONTROL_API_COORDINATOR_LINK_KEY_ID || "control-api-key-01";
   const controlSecret = hostEnvironment.CONTROL_API_COORDINATOR_LINK_SECRET || secrets.controlLinkSecret;
@@ -341,10 +402,65 @@ function buildEnvironment(secrets, hostEnvironment, ports) {
     CONTROL_API_COORDINATOR_LINK_SECRET: controlSecret,
     DASHBOARD_CONTROL_API_URL: `http://127.0.0.1:${ports.controlApiPort}`,
     DASHBOARD_CONTROL_API_TOKEN: dashboardToken,
+    DASHBOARD_STUDIO_MANAGER_URL: `http://127.0.0.1:${ports.managerPort}`,
+    DASHBOARD_STUDIO_MANAGER_TOKEN: dashboardToken,
+    COORDINATOR_TASK_POSTGRES_SCHEMA: postgresConfigured
+      ? hostEnvironment.COORDINATOR_TASK_POSTGRES_SCHEMA
+      : "",
+    COORDINATOR_LOCAL_MEMORY_MODE:
+      postgresConfigured ? "0" : "1",
     ...taskWorkerEnvironment,
     BOT_RUNTIME_LINK_SECRET_STUDIO_BOT_01:
       hostEnvironment.BOT_RUNTIME_LINK_SECRET_STUDIO_BOT_01 || secrets.runtimeSecret,
   };
+}
+
+function buildRuntimePeers(raw, botSlots) {
+  let peers = [];
+  if (raw?.trim()) {
+    try {
+      peers = JSON.parse(raw);
+    } catch {
+      throw new Error("COORDINATOR_RUNTIME_LINK_PEERS_JSON is invalid JSON.");
+    }
+    if (!Array.isArray(peers)) {
+      throw new Error("COORDINATOR_RUNTIME_LINK_PEERS_JSON must be an array.");
+    }
+  }
+  for (const slot of botSlots) {
+    const byKey = peers.find((entry) => entry?.keyId === slot.keyId);
+    const byBot = peers.find((entry) => entry?.botId === slot.botId);
+    const existing = byKey ?? byBot;
+    if (existing) {
+      if (
+        existing.keyId !== slot.keyId ||
+        existing.botId !== slot.botId ||
+        existing.secretSha256 !== slot.secretSha256
+      ) {
+        throw new Error(
+          `Runtime Link ACL conflicts with managed Bot slot ${slot.botId}.`,
+        );
+      }
+      continue;
+    }
+    peers.push({
+      keyId: slot.keyId,
+      botId: slot.botId,
+      secretSha256: slot.secretSha256,
+    });
+  }
+  return JSON.stringify(peers);
+}
+
+function withConfiguredFirstSlotKey(slots, configuredKeyId) {
+  const keyId = configuredKeyId?.trim();
+  if (!keyId) return slots;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(keyId)) {
+    throw new Error("BOT_RUNTIME_LINK_KEY_ID is invalid.");
+  }
+  return slots.map((slot, index) =>
+    index === 0 ? Object.freeze({ ...slot, keyId }) : slot,
+  );
 }
 
 async function waitForServiceStable(service, durationMs, label) {
@@ -391,7 +507,10 @@ function validateConfiguredPrincipals(raw, token, explicitToken) {
   if (!matching || !Array.isArray(matching.permissions) || !matching.permissions.includes("bot.read")) {
     throw new Error("Dashboard Control API credentials do not match the configured ACL.");
   }
-  return raw;
+  if (!matching.permissions.includes("task.read")) {
+    matching.permissions = [...matching.permissions, "task.read"];
+  }
+  return JSON.stringify(principals);
 }
 
 async function requireBuildArtifacts(relativePaths) {
@@ -535,6 +654,12 @@ async function stopService(service) {
 
 function validSecret(value) {
   return typeof value === "string" && value.length >= 32 && value.length <= 512;
+}
+
+function firstValidSecret(...values) {
+  const selected = values.find(validSecret);
+  if (!selected) throw new Error("No valid local Runtime Link secret is available.");
+  return selected;
 }
 
 function sha256(value) {

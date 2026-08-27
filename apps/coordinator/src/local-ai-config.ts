@@ -3,6 +3,7 @@ export type LocalAIConfig = Readonly<{
   provider: LocalAIProvider;
   baseUrl: string | null;
   model: string | null;
+  apiKey: string | null;
   maxConcurrency: number;
   maxQueue: number;
   perBotConcurrency: number;
@@ -30,14 +31,22 @@ export function loadLocalAIConfig(
 ): LocalAIConfig {
   const rawUrl = env.LOCAL_AI_HUB_URL?.trim() ?? "";
   const rawModel = env.LOCAL_AI_MODEL?.trim() ?? "";
+  const rawApiKey = env.LOCAL_AI_API_KEY?.trim() ?? "";
   const provider = localAIProvider(env.LOCAL_AI_PROVIDER);
+  if (rawApiKey.length > 4_096) {
+    throw new LocalAIConfigError(
+      "LOCAL_AI_LIMIT_INVALID",
+      "Local AI API key is too long.",
+    );
+  }
   if (!rawUrl && !rawModel) {
     return {
       enabled: false,
       provider,
       baseUrl: null,
       model: null,
-      maxConcurrency: 4,
+      apiKey: null,
+      maxConcurrency: 12,
       maxQueue: 64,
       perBotConcurrency: 1,
       requestTimeoutMs: 30_000,
@@ -78,7 +87,7 @@ export function loadLocalAIConfig(
     );
   }
 
-  const maxConcurrency = integer(env.AI_MAX_CONCURRENCY, 4, 1, 64);
+  const maxConcurrency = integer(env.AI_MAX_CONCURRENCY, 12, 1, 64);
   const maxQueue = integer(env.AI_MAX_QUEUE, 64, 1, 10_000);
   const perBotConcurrency = integer(
     env.AI_PER_BOT_CONCURRENCY,
@@ -97,6 +106,7 @@ export function loadLocalAIConfig(
     provider,
     baseUrl: url.origin,
     model: rawModel,
+    apiKey: rawApiKey || null,
     maxConcurrency,
     maxQueue,
     perBotConcurrency,

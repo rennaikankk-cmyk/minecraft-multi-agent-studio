@@ -97,6 +97,7 @@ describe('VLLMAdapter', () => {
     expect(url).toBe('http://192.168.100.2:8000/v1/chat/completions');
     expect(JSON.parse(String(init?.body))).toMatchObject({
       model: 'test-model',
+      chat_template_kwargs: { enable_thinking: false },
       response_format: {
         type: 'json_schema',
         json_schema: {
@@ -106,6 +107,34 @@ describe('VLLMAdapter', () => {
         },
       },
     });
+  });
+
+  it('sends an optional bearer token to authenticated vLLM endpoints', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith('/health')) return new Response('ok', { status: 200 });
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: 'ready' } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = new VLLMAdapter('http://127.0.0.1:8001', 'ornith15-heretic', 'test-api-key');
+
+    await expect(adapter.health()).resolves.toMatchObject({ available: true });
+    await adapter.generate({
+      prompt: 'ready',
+      maxTokens: 8,
+      temperature: 0,
+      timeoutMs: 5_000,
+      traceId: 'trace-vllm-auth',
+    });
+
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer test-api-key');
+    }
   });
 
   it('removes JSON Schema propertyNames unsupported by vLLM grammar compilation', async () => {

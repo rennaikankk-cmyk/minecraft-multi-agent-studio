@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 
 import { BotDashboard } from "@/components/bot-dashboard";
+import { StudioBotManager } from "@/components/studio-bot-manager";
 
 export const metadata: Metadata = {
   title: "机器人 · Minecraft Multi-Agent Studio",
@@ -17,6 +18,7 @@ export default function BotsPage() {
           流不可用时自动退回轮询并明确标注；本页永远不展示模拟机器人。
         </p>
       </header>
+      <StudioBotManager />
       <BotDashboard />
     </main>
   );

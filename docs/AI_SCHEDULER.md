@@ -5,13 +5,19 @@
 ## 默认配置
 
 ```text
-AI_MAX_CONCURRENCY=4
+AI_MAX_CONCURRENCY=12
 AI_MAX_QUEUE=64
 AI_PER_BOT_CONCURRENCY=1
 AI_REQUEST_TIMEOUT_MS=30000
 ```
 
-并发值 `4` 来自当前已有 Spark 基准，正式值必须由 `1/2/4/8/10` 并发矩阵重新验证。`maxQueue` 只统计等待请求，不包含正在执行的请求。
+For an authenticated OpenAI-compatible vLLM endpoint, set `LOCAL_AI_API_KEY`
+in the local, ignored environment file, or point `LOCAL_AI_API_KEY_FILE` at a
+private file containing `LOCAL_AI_API_KEY` or `VLLM_API_KEY`. `AI_MAX_CONCURRENCY` is the global
+number of in-flight requests across all Bots; `AI_PER_BOT_CONCURRENCY` is the
+per-Bot limit, and `AI_MAX_QUEUE` bounds requests waiting for a slot.
+
+全局并发上限为 `12`，低于当前 Spark vLLM 的 `max-num-seqs=16`。`maxQueue` 只统计等待请求，不包含正在执行的请求。
 
 ## 优先级
 
@@ -31,7 +37,7 @@ AI_REQUEST_TIMEOUT_MS=30000
 
 ```ts
 const scheduler = new AIRequestScheduler({
-  maxConcurrency: 4,
+  maxConcurrency: 12,
   maxQueue: 64,
   perBotConcurrency: 1,
   defaultTimeoutMs: 30_000,

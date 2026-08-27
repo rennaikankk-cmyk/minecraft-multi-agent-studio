@@ -11,6 +11,25 @@ export {
 } from "./environment.js";
 
 export {
+  studioAiProviderSchema,
+  studioAiStateSchema,
+  studioAiStatusV1Schema,
+  studioCreateBotRequestV1Schema,
+  studioManagedBotProcessStateSchema,
+  studioManagedBotResponseV1Schema,
+  studioManagedBotV1Schema,
+  studioManagerErrorCodeSchema,
+  studioManagerErrorV1Schema,
+  studioManagerStatusV1Schema,
+  type StudioAiStatusV1,
+  type StudioCreateBotRequestV1,
+  type StudioManagedBotResponseV1,
+  type StudioManagedBotV1,
+  type StudioManagerErrorCode,
+  type StudioManagerStatusV1,
+} from "./studio-manager.js";
+
+export {
   botDetailResponseV1Schema,
   botListResponseV1Schema,
   botStreamEventV1Schema,

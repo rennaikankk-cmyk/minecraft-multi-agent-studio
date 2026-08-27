@@ -28,7 +28,7 @@ if (process.arch !== "x64" && process.arch !== "arm64") {
 
 const skipBuild = process.argv.includes("--skip-build");
 if (!skipBuild) {
-  await run("pnpm.cmd", ["build"], repositoryRoot);
+  await run(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "pnpm build"], repositoryRoot);
 }
 
 await rm(buildRoot, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
@@ -43,6 +43,10 @@ await mkdir(path.join(stagingRoot, "scripts"), { recursive: true });
 await copyFile(
   path.join(repositoryRoot, "scripts", "start-studio.mjs"),
   path.join(stagingRoot, "scripts", "start-studio.mjs"),
+);
+await copyFile(
+  path.join(repositoryRoot, "scripts", "studio-local-manager.mjs"),
+  path.join(stagingRoot, "scripts", "studio-local-manager.mjs"),
 );
 await writeFile(
   path.join(stagingRoot, "package.json"),

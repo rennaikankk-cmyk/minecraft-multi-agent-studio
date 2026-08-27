@@ -34,8 +34,15 @@ import {
   GoalPersistenceConfigError,
   loadGoalPersistenceConfig,
 } from "./goal-persistence-config.js";
-import { PostgresGoalLifecycleStore } from "./goal-lifecycle-store.js";
-import { PostgresTaskHistoryReader } from "./task-history-reader.js";
+import {
+  PostgresGoalLifecycleStore,
+  type GoalLifecycleStore,
+} from "./goal-lifecycle-store.js";
+import {
+  PostgresTaskHistoryReader,
+  type TaskHistoryReader,
+} from "./task-history-reader.js";
+import { InMemoryGoalLifecycleStore } from "./in-memory-goal-store.js";
 import { ExpiredLeaseRecoveryController } from "./expired-lease-recovery.js";
 import { CoordinatorGoalExecutionServer } from "./goal-execution-server.js";
 import {
@@ -56,14 +63,17 @@ async function main(): Promise<void> {
     goalPersistenceConfig,
     instanceId,
   );
+  const localMemoryMode =
+    process.env.COORDINATOR_LOCAL_MEMORY_MODE?.trim() === "1";
   if (
     localAIConfig.enabled &&
     localAIConfig.baseUrl &&
     localAIConfig.model &&
-    !goalPersistenceConfig
+    !goalPersistenceConfig &&
+    !localMemoryMode
   ) {
     throw new GoalPersistenceConfigError(
-      "Local goal planning requires COORDINATOR_TASK_POSTGRES_URL.",
+      "Local goal planning requires PostgreSQL or explicit desktop memory mode.",
     );
   }
   const registry = new BotRegistry({
@@ -101,8 +111,14 @@ async function main(): Promise<void> {
   let localPlanner: CoordinatorLocalPlanner | undefined;
   let taskPool: PgTaskPoolAdapter | null = null;
   let taskRepository: PostgresTaskRepository | null = null;
-  let goalStore: PostgresGoalLifecycleStore | undefined;
-  let taskHistoryReader: PostgresTaskHistoryReader | undefined;
+  const memoryGoalStore =
+    !goalPersistenceConfig && localMemoryMode
+      ? new InMemoryGoalLifecycleStore()
+      : null;
+  let goalStore: GoalLifecycleStore | undefined = memoryGoalStore ?? undefined;
+  let taskHistoryReader: TaskHistoryReader | undefined =
+    memoryGoalStore ?? undefined;
+  let queuedGoalStore: PostgresGoalLifecycleStore | undefined;
   let leaseRecovery: ExpiredLeaseRecoveryController | null = null;
   let taskQueue: BullMqTaskQueue | null = null;
   let outboxReconciler: TaskOutboxReconciler | null = null;
@@ -112,7 +128,11 @@ async function main(): Promise<void> {
     aiRouter.register(
       localAIConfig.provider === "ollama"
         ? new OllamaAdapter(localAIConfig.baseUrl, localAIConfig.model)
-        : new VLLMAdapter(localAIConfig.baseUrl, localAIConfig.model),
+        : new VLLMAdapter(
+            localAIConfig.baseUrl,
+            localAIConfig.model,
+            localAIConfig.apiKey,
+          ),
     );
     aiScheduler = new AIRequestScheduler({
       maxConcurrency: localAIConfig.maxConcurrency,
@@ -137,7 +157,9 @@ async function main(): Promise<void> {
       assignment,
       verifyAssignmentLease: async (lease) => {
         const repository = taskRepository;
-        if (!repository) return false;
+        if (!repository) {
+          return memoryGoalStore?.isAssignmentLeaseActive(lease) ?? false;
+        }
         try {
           return await repository.isTaskAssignmentLeaseActive(lease);
         } catch {
@@ -160,7 +182,7 @@ async function main(): Promise<void> {
     taskRepository = new PostgresTaskRepository(taskPool, {
       dispatchSourceInstanceId: instanceId,
     });
-    goalStore = new PostgresGoalLifecycleStore({
+    queuedGoalStore = new PostgresGoalLifecycleStore({
       repository: taskRepository,
       coordinatorInstanceId: instanceId,
       resolveBotContext: (botId) => {
@@ -178,6 +200,7 @@ async function main(): Promise<void> {
         };
       },
     });
+    goalStore = queuedGoalStore;
     taskHistoryReader = new PostgresTaskHistoryReader({
       repository: taskRepository,
     });
@@ -226,8 +249,8 @@ async function main(): Promise<void> {
     stopController,
     ...(localPlanner ? { goalPlanner: localPlanner } : {}),
     ...(goalStore ? { goalStore } : {}),
-    ...(taskDeliveryConfig?.purpose === "production" && goalStore
-      ? { queuedGoalStore: goalStore }
+    ...(taskDeliveryConfig?.purpose === "production" && queuedGoalStore
+      ? { queuedGoalStore }
       : {}),
     ...(taskHistoryReader ? { taskHistoryReader } : {}),
     logger,

@@ -109,6 +109,10 @@ export {
   type TaskHistoryReader,
   type TaskHistoryReaderErrorCode,
 } from "./task-history-reader.js";
+export {
+  InMemoryGoalLifecycleStore,
+  type InMemoryGoalLifecycleStoreOptions,
+} from "./in-memory-goal-store.js";
 
 export {
   ExpiredLeaseRecoveryController,

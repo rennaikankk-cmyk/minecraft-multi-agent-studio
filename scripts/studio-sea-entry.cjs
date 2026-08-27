@@ -126,6 +126,7 @@ function isCompleteBundle(cacheRoot, completeMarker, fingerprint) {
     if (readFileSync(completeMarker, "utf8").trim() !== fingerprint) return false;
     for (const required of [
       "scripts/start-studio.mjs",
+      "scripts/studio-local-manager.mjs",
       "apps/coordinator/dist/main.js",
       "apps/control-api/dist/main.js",
       "apps/dashboard/.next/standalone/apps/dashboard/server.js",

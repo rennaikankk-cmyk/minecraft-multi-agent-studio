@@ -161,7 +161,7 @@ export class AIRequestScheduler {
 
   constructor(options: AIRequestSchedulerOptions = {}) {
     this.maxConcurrency = boundedInteger(
-      options.maxConcurrency ?? 4,
+      options.maxConcurrency ?? 12,
       1,
       64,
       'maxConcurrency',

@@ -89,7 +89,7 @@ ssh -i "$env:USERPROFILE\.ssh\dgx_spark_ed25519" `
 LOCAL_AI_PROVIDER=ollama
 LOCAL_AI_HUB_URL=http://127.0.0.1:11435
 LOCAL_AI_MODEL=qwen-fast:latest
-AI_MAX_CONCURRENCY=4
+AI_MAX_CONCURRENCY=12
 AI_MAX_QUEUE=64
 AI_PER_BOT_CONCURRENCY=1
 AI_REQUEST_TIMEOUT_MS=120000
@@ -100,7 +100,7 @@ JSON Schema 格式约束。若 Spark 上另行运行了 OpenAI-compatible vLLM �
 `LOCAL_AI_PROVIDER` 改为 `vllm`，再把 `LOCAL_AI_HUB_URL` 改为该服务的 origin。不要把
 SSH 私钥、API 凭据、正式服地址、白名单或基地坐标写进环境变量以外的提示词、日志或模型上下文。
 
-并发 `4` 是现有基准的暂定值。完成本机到 Spark 的新一轮 52 请求基准后，以报告的
+并发 `12` 是当前部署上限，必须保持低于 Spark vLLM 的 `max-num-seqs`。完成本机到 Spark 的新一轮请求基准后，以报告的
 零错误推荐值为准。Spark 不可用时高层目标 fail-closed，Bot Runtime 的 L0 安全与
 当前确定性 Skill 不依赖模型继续工作。
 
