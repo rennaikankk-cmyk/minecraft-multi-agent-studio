@@ -154,7 +154,7 @@ export function createLocalBotSlots(masterSecret, count = 16) {
   if (typeof masterSecret !== "string" || masterSecret.length < 32) {
     throw new TypeError("Local Bot slot secret is invalid.");
   }
-  if (!Number.isSafeInteger(count) || count < 1 || count > 32) {
+  if (!Number.isSafeInteger(count) || count < 1 || count > 16) {
     throw new TypeError("Local Bot slot count is invalid.");
   }
   return Array.from({ length: count }, (_, index) => {
@@ -577,7 +577,10 @@ export class StudioLocalManager {
       schemaVersion: "1.0",
       id: `local-${config.botId}`,
       botId: config.botId,
-      purpose: "isolated-test",
+      // Manager-created profiles are real-server targets. Keeping this
+      // separate from isolated-test prevents test-only boundary probing from
+      // being enabled by a Dashboard-created Bot.
+      purpose: "managed",
       networkScope,
       host: config.serverHost,
       port: config.serverPort,

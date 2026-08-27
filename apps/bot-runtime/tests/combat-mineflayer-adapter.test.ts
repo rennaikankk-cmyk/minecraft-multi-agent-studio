@@ -14,7 +14,6 @@ function fakeBot(overrides: Record<string, unknown> = {}): Bot {
     uuid: "11111111-1111-4111-8111-111111111111",
     position: { x: 0, y: 64, z: 0 },
     velocity: { x: 0, y: 0, z: 0 },
-    health: 20,
     yaw: 0,
     pitch: 0,
     onGround: true,
@@ -44,6 +43,7 @@ function fakeBot(overrides: Record<string, unknown> = {}): Bot {
   const controls = new Map<string, boolean>();
   const bot = {
     entity: self,
+    health: 20,
     entities: { "1": self, "42": enemy },
     game: { dimension: "overworld" },
     player: { ping: 25 },
@@ -175,8 +175,8 @@ describe("MineflayerCombatAdapter", () => {
 
   it.each([
     ["health", (bot: Bot) => {
-      const view = bot as unknown as { entity: Record<string, unknown> };
-      view.entity.health = undefined;
+      const view = bot as unknown as { health: unknown };
+      view.health = undefined;
     }],
     ["yaw", (bot: Bot) => {
       const view = bot as unknown as { entity: Record<string, unknown> };

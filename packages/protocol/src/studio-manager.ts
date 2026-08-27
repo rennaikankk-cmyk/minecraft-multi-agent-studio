@@ -57,11 +57,11 @@ export const studioManagerStatusV1Schema = z
     schemaVersion: z.literal("1.0"),
     generatedAt: timestampSchema,
     ai: studioAiStatusV1Schema,
-    bots: z.array(studioManagedBotV1Schema).max(32),
+    bots: z.array(studioManagedBotV1Schema).max(16),
     capabilities: z
       .object({
         createBot: z.boolean(),
-        maxBots: z.number().int().min(0).max(32),
+        maxBots: z.number().int().min(0).max(16),
       })
       .strict(),
   })

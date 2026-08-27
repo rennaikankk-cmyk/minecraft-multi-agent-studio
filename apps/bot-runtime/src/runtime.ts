@@ -1409,6 +1409,13 @@ export class SingleBotRuntime {
     // 背包占用与 position 同源同帧：分两次读会让"够不着"和"装不下"基于两个
     // 不同时刻的世界状态，前置条件就不再是一致快照的纯判断了。
     let inventory: BotClientSnapshot["safety"]["inventory"] | null = null;
+    // Mining skills need an explicit safety fact. Unknown state stays unsafe;
+    // only a live client snapshot can clear the flags for this invocation.
+    let safety = {
+      lavaAdjacent: true,
+      waterAdjacent: true,
+      voidRisk: true,
+    };
     if (this.state === "online" && this.client) {
       try {
         const snapshot = this.client.snapshot();
@@ -1417,20 +1424,37 @@ export class SingleBotRuntime {
           serverProfileId: this.profile.id,
         };
         inventory = snapshot.safety.inventory;
+        safety = {
+          // Mineflayer exposes current liquid contact at this boundary. The
+          // execution adapter still re-checks each target before digging.
+          lavaAdjacent: snapshot.safety.inLava,
+          waterAdjacent: snapshot.safety.inWater,
+          voidRisk: snapshot.position.y <= -58,
+        };
       } catch {
         position = null;
         inventory = null;
       }
     }
+    const policy = this.serverPolicyStore.resolve(this.profile.id);
     return {
       online: this.state === "online",
       normalActionsAllowed: this.canAcceptNormalActions(),
       serverProfileId: this.profile.id,
+      isolatedTestServer: this.profile.purpose === "isolated-test",
+      policyLimits: {
+        allowSprint: policy.limits.allowSprint,
+        allowSprintJumpCombo: policy.limits.allowSprintJumpCombo,
+        allowAirStrafe: policy.limits.allowAirStrafe,
+        maxFallBlocks: policy.limits.maxFallBlocks,
+      },
+      safety,
       combatAvailable:
         this.combatDriver !== null &&
         this.client?.combatObservation !== undefined &&
         this.client?.executeCombatAction !== undefined,
       combatObservationAvailable: this.combatObservationAvailable(),
+      retreatInProgress: this.combatDriver?.status().stance === "retreating",
       position,
       inventory,
     };

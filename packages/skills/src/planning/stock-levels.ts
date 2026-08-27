@@ -105,7 +105,13 @@ export const storeSortInputSchema = z.object({
 }).strict();
 export type StoreSortInput = z.infer<typeof storeSortInputSchema>;
 
-const observedPositionSchema = scopedPositionSchema;
+const observedPositionSchema = z.object({
+  x: z.number().finite().min(-30_000_000).max(30_000_000),
+  y: z.number().finite().min(-2_048).max(2_048),
+  z: z.number().finite().min(-30_000_000).max(30_000_000),
+  dimension: dimensionSchema,
+  serverProfileId: identifierSchema,
+}).strict();
 const storageStateSchema = z.object({
   online: z.boolean(),
   normalActionsAllowed: z.boolean(),
@@ -230,4 +236,3 @@ export const stockLevelSkill = defineSkill({
   preconditions: [],
   execute: async (_context, input) => stockLevelOutputSchema.parse({ decisions: evaluateStockLevels(input.levels, input.counts) }),
 });
-

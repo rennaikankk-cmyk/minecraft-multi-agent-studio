@@ -2,7 +2,8 @@ param(
   [string]$JavaExecutable = $env:MC_TEST_JAVA_EXE,
   [string]$ServerDirectory = $env:MC_TEST_SERVER_DIR,
   [string]$ServerProfilePath = $env:BOT_SERVER_PROFILE_PATH,
-  [string]$PnpmExecutable = $env:MC_TEST_PNPM_EXE
+  [string]$PnpmExecutable = $env:MC_TEST_PNPM_EXE,
+  [string]$ServerPort = $env:MC_TEST_SERVER_PORT
 )
 
 $ErrorActionPreference = "Stop"
@@ -115,6 +116,16 @@ if ([string]::IsNullOrWhiteSpace($ServerProfilePath)) {
 if ([string]::IsNullOrWhiteSpace($PnpmExecutable)) {
   $PnpmExecutable = Get-Command pnpm.cmd -ErrorAction Stop | Select-Object -ExpandProperty Source
 }
+if ([string]::IsNullOrWhiteSpace($ServerPort)) {
+  $ServerPort = "25565"
+}
+if ($ServerPort -notmatch "^[0-9]+$") {
+  throw "MC_TEST_SERVER_PORT must be an integer between 1024 and 65535."
+}
+$serverPortValue = [int]$ServerPort
+if ($serverPortValue -lt 1024 -or $serverPortValue -gt 65535) {
+  throw "MC_TEST_SERVER_PORT must be an integer between 1024 and 65535."
+}
 
 $JavaExecutable = [IO.Path]::GetFullPath($JavaExecutable)
 if (-not (Test-Path -LiteralPath $JavaExecutable -PathType Leaf)) {
@@ -187,7 +198,7 @@ foreach ($line in Get-Content -LiteralPath $propertiesPath -Encoding utf8) {
 }
 $requiredProperties = @{
   "server-ip" = "127.0.0.1"
-  "server-port" = "25565"
+  "server-port" = "$serverPortValue"
   "online-mode" = "false"
   "enable-rcon" = "false"
   "enable-query" = "false"
@@ -195,9 +206,11 @@ $requiredProperties = @{
   "level-name" = "world"
   "force-gamemode" = "true"
   "gamemode" = "survival"
+  "difficulty" = "easy"
   "spawn-animals" = "false"
   "spawn-monsters" = "false"
   "spawn-npcs" = "false"
+  "max-players" = "2"
 }
 foreach ($entry in $requiredProperties.GetEnumerator()) {
   if ($properties[$entry.Key] -ne $entry.Value) {
@@ -215,8 +228,9 @@ $requiredProfile = @{
   "purpose" = "isolated-test"
   "networkScope" = "loopback"
   "host" = "127.0.0.1"
-  "port" = 25565
-  "username" = "StudioBot"
+  "port" = $serverPortValue
+  "botId" = "studio-bot-01"
+  "username" = "StudioBot01"
   "auth" = "offline"
 }
 foreach ($entry in $requiredProfile.GetEnumerator()) {
@@ -227,10 +241,20 @@ foreach ($entry in $requiredProfile.GetEnumerator()) {
 if ($serverProfile.minecraftVersion -notin @("auto", "1.21.8")) {
   throw "Unsafe isolated ServerProfile field: minecraftVersion"
 }
+if ($null -eq $serverProfile.combat -or
+    $serverProfile.combat.enabled -ne $true -or
+    $serverProfile.combat.stance -ne "preserve-life") {
+  throw "Isolated ServerProfile must enable preserve-life combat for the two-Bot acceptance."
+}
+foreach ($username in @("StudioBot01", "StudioBot02")) {
+  if (@($serverProfile.combat.whitelist.usernames) -notcontains $username) {
+    throw "Isolated ServerProfile combat whitelist is missing $username."
+  }
+}
 
-$existingListener = Get-NetTCPConnection -LocalPort 25565 -State Listen -ErrorAction SilentlyContinue
+$existingListener = Get-NetTCPConnection -LocalPort $serverPortValue -State Listen -ErrorAction SilentlyContinue
 if ($null -ne $existingListener) {
-  throw "Port 25565 is already in use; refusing to stop or reuse an unknown process."
+  throw "Port $serverPortValue is already in use; refusing to stop or reuse an unknown process."
 }
 
 New-Item -ItemType Directory -Path $acceptanceRoot -Force | Out-Null
@@ -246,6 +270,7 @@ foreach ($artifact in @($readyFile, $skillSetupRequest, $skillSetupReady, $testS
 $serverProcess = $null
 $testProcess = $null
 $serverStopSent = $false
+$fixtureLoaded = $false
 $serverStartedAt = [DateTime]::UtcNow
 $previousProfile = $env:BOT_SERVER_PROFILE_PATH
 $previousRealTest = $env:RUN_REAL_MC_TEST
@@ -315,32 +340,75 @@ try {
       $fixtureSentinel = "MMS_FIXTURE_READY_V1"
       $fixtureLogBaseline = Get-Content -LiteralPath $latestServerLog -Raw -ErrorAction Stop
       foreach ($command in @(
-        "forceload add -8 -6 10 6",
-        "gamemode survival StudioBot",
-        "clear StudioBot",
-        "effect clear StudioBot",
-        "fill -8 60 -6 10 100 6 minecraft:air replace",
-        "fill -8 64 -6 10 70 6 minecraft:barrier outline",
-        "fill -7 64 -5 9 64 5 minecraft:stone replace",
-        "kill @e[type=!minecraft:player,x=-8,y=60,z=-6,dx=18,dy=40,dz=12]",
-        "tp StudioBot 0 65 0",
+        "forceload add -40 -40 60 40",
+        "gamemode survival StudioBot01",
+        "gamemode survival StudioBot02",
+        "clear StudioBot01",
+        "clear StudioBot02",
+        "effect clear StudioBot01",
+        "effect clear StudioBot02",
+        "fill -8 60 -8 30 100 8 minecraft:air replace",
+        "fill -8 64 -8 30 70 8 minecraft:barrier outline",
+        "fill -7 64 -7 29 64 7 minecraft:stone replace",
+        "kill @e[type=!minecraft:player,x=-8,y=60,z=-8,dx=38,dy=40,dz=16]",
+        "tp StudioBot01 0 65 0",
+        "tp StudioBot02 20 65 0",
+        "setblock -1 65 0 minecraft:stone replace",
+        "setblock -1 66 0 minecraft:stone replace",
+        "setblock -2 65 0 minecraft:stone replace",
+        "setblock -2 66 0 minecraft:stone replace",
         "setblock 5 65 0 minecraft:oak_log replace",
         "setblock 5 65 2 minecraft:air replace",
         "setblock 5 65 -2 minecraft:chest replace",
         "setblock 3 65 -2 minecraft:furnace replace",
-        "give StudioBot minecraft:oak_planks 4",
-        "give StudioBot minecraft:cobblestone 5",
-        "give StudioBot minecraft:iron_helmet 1",
-        "give StudioBot minecraft:iron_chestplate 1",
-        "give StudioBot minecraft:iron_leggings 1",
-        "give StudioBot minecraft:iron_boots 1",
-        "give StudioBot minecraft:raw_iron 1",
-        "give StudioBot minecraft:coal 1",
-        "execute if entity @a[name=StudioBot,gamemode=survival,x=0,y=65,z=0,distance=..1] if block -8 70 -6 minecraft:barrier if block 5 65 0 minecraft:oak_log if block 5 65 2 minecraft:air if block 5 65 -2 minecraft:chest if block 3 65 -2 minecraft:furnace run say $fixtureSentinel",
-        "forceload remove -8 -6 10 6"
+        "setblock 3 65 2 minecraft:shulker_box replace",
+        "setblock 21 65 0 minecraft:stone replace",
+        "setblock 21 66 0 minecraft:stone replace",
+        "setblock 22 65 0 minecraft:stone replace",
+        "setblock 22 66 0 minecraft:stone replace",
+        "setblock 25 65 0 minecraft:oak_log replace",
+        "setblock 25 65 2 minecraft:air replace",
+        "setblock 25 65 -2 minecraft:chest replace",
+        "setblock 23 65 -2 minecraft:furnace replace",
+        "setblock 23 65 2 minecraft:shulker_box replace",
+        "setblock 1 65 4 minecraft:iron_ore replace",
+        "setblock 2 65 4 minecraft:iron_ore replace",
+        "setblock 3 65 4 minecraft:iron_ore replace",
+        "setblock 21 65 4 minecraft:iron_ore replace",
+        "setblock 22 65 4 minecraft:iron_ore replace",
+        "setblock 23 65 4 minecraft:iron_ore replace",
+        'summon minecraft:villager 0 65 2 {NoAI:1b,Invulnerable:1b,PersistenceRequired:1b,VillagerData:{type:"minecraft:plains",profession:"minecraft:farmer",level:1},Offers:{Recipes:[{buy:{id:"minecraft:coal",count:1},sell:{id:"minecraft:emerald",count:1},maxUses:8,rewardExp:0b}]}}',
+        'summon minecraft:villager 20 65 2 {NoAI:1b,Invulnerable:1b,PersistenceRequired:1b,VillagerData:{type:"minecraft:plains",profession:"minecraft:farmer",level:1},Offers:{Recipes:[{buy:{id:"minecraft:coal",count:1},sell:{id:"minecraft:emerald",count:1},maxUses:8,rewardExp:0b}]}}',
+        'summon minecraft:zombie 2 65 2 {NoAI:1b,Invulnerable:1b,PersistenceRequired:1b}',
+        'summon minecraft:zombie 24 65 2 {NoAI:1b,Invulnerable:1b,PersistenceRequired:1b}',
+        "give StudioBot01 minecraft:oak_planks 64",
+        "give StudioBot01 minecraft:cobblestone 64",
+        "give StudioBot01 minecraft:iron_helmet 1",
+        "give StudioBot01 minecraft:iron_chestplate 1",
+        "give StudioBot01 minecraft:iron_leggings 1",
+        "give StudioBot01 minecraft:iron_boots 1",
+        "give StudioBot01 minecraft:raw_iron 1",
+        "give StudioBot01 minecraft:coal 2",
+        "give StudioBot01 minecraft:iron_pickaxe 1",
+        "give StudioBot01 minecraft:iron_sword 1",
+        "give StudioBot01 minecraft:bread 8",
+        "give StudioBot02 minecraft:oak_planks 64",
+        "give StudioBot02 minecraft:cobblestone 64",
+        "give StudioBot02 minecraft:iron_helmet 1",
+        "give StudioBot02 minecraft:iron_chestplate 1",
+        "give StudioBot02 minecraft:iron_leggings 1",
+        "give StudioBot02 minecraft:iron_boots 1",
+        "give StudioBot02 minecraft:raw_iron 1",
+        "give StudioBot02 minecraft:coal 2",
+        "give StudioBot02 minecraft:iron_pickaxe 1",
+        "give StudioBot02 minecraft:iron_sword 1",
+        "give StudioBot02 minecraft:bread 8",
+        "say $fixtureSentinel",
+        "execute if entity @a[name=StudioBot01,gamemode=survival,x=0,y=65,z=0,distance=..1] if entity @a[name=StudioBot02,gamemode=survival,x=20,y=65,z=0,distance=..1] if block -8 70 -8 minecraft:barrier if block -1 65 0 minecraft:stone if block 5 65 0 minecraft:oak_log if block 5 65 -2 minecraft:chest if block 3 65 -2 minecraft:furnace if block 3 65 2 minecraft:shulker_box if block 1 65 4 minecraft:iron_ore if block 25 65 0 minecraft:oak_log if block 25 65 -2 minecraft:chest if block 23 65 -2 minecraft:furnace if block 23 65 2 minecraft:shulker_box if block 21 65 4 minecraft:iron_ore if entity @e[type=minecraft:villager,x=0,y=65,z=2,distance=..2] if entity @e[type=minecraft:villager,x=20,y=65,z=2,distance=..2] if entity @e[type=minecraft:zombie,x=2,y=65,z=2,distance=..2] if entity @e[type=minecraft:zombie,x=24,y=65,z=2,distance=..2] run say $fixtureSentinel"
       )) {
         $serverProcess.StandardInput.WriteLine($command)
       }
+      $fixtureLoaded = $true
       $serverProcess.StandardInput.Flush()
       $fixtureDeadline = [DateTime]::UtcNow.AddSeconds(30)
       $fixtureReady = $false
@@ -389,6 +457,10 @@ try {
   }
   if ($null -ne $serverProcess -and -not $serverProcess.HasExited) {
     try {
+      if ($fixtureLoaded) {
+        $serverProcess.StandardInput.WriteLine("forceload remove -40 -40 60 40")
+        $serverProcess.StandardInput.Flush()
+      }
       $serverProcess.StandardInput.WriteLine("stop")
       $serverProcess.StandardInput.Flush()
       if (-not $serverProcess.WaitForExit(20000)) {

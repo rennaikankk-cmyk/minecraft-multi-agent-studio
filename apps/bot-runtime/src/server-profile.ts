@@ -78,6 +78,16 @@ export const serverProfileCombatConfigSchema = z
   })
   .strict();
 
+/**
+ * A profile created by the Desktop Manager targets an operator-owned real
+ * server. It remains distinct from the disposable isolated-test profile so
+ * test-only policy probing cannot be enabled accidentally on a managed bot.
+ */
+export const serverProfilePurposeSchema = z.enum([
+  "isolated-test",
+  "managed",
+]);
+
 function isLoopbackHost(host: string): boolean {
   const normalized = host.toLowerCase();
   if (normalized === "localhost" || normalized === "::1") return true;
@@ -139,7 +149,7 @@ export const serverProfileSchema = z
       .min(1)
       .max(128)
       .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u),
-    purpose: z.literal("isolated-test"),
+    purpose: serverProfilePurposeSchema,
     networkScope: z.enum(["loopback", "private-lan"]),
     host: z.string().trim().min(1).max(253),
     port: z.number().int().min(1).max(65_535),
@@ -192,6 +202,7 @@ export const serverProfileSchema = z
   });
 
 export type ServerProfile = z.infer<typeof serverProfileSchema>;
+export type ServerProfilePurpose = z.infer<typeof serverProfilePurposeSchema>;
 export type ServerProfileCombatConfig = z.infer<
   typeof serverProfileCombatConfigSchema
 >;

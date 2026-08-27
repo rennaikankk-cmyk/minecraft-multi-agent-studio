@@ -204,6 +204,22 @@ const COLLECT_SERVER_CORRECTION_GRACE_MS = 300;
 // `block_dig` status 2 = finish digging; the pre-1.19 positional ack echoes it.
 const BLOCK_DIG_STATUS_FINISH = 2;
 
+// Mining uses the same bounded pathfinder contract as collection, but executes
+// one planner step at a time so every break can be checked against the live
+// world before the next one starts.
+const MINE_PATH_THINK_TIMEOUT_MS = 8_000;
+const MINE_PATH_TICK_TIMEOUT_MS = 40;
+const MINE_TARGET_REACH_DISTANCE = 4.0;
+const MINE_BACKFILL_ITEMS = [
+  "cobblestone",
+  "stone",
+  "dirt",
+  "andesite",
+  "diorite",
+  "granite",
+  "deepslate",
+] as const;
+
 type BlockPosition = Readonly<{ x: number; y: number; z: number }>;
 
 type MineflayerWireClient = {
@@ -211,6 +227,11 @@ type MineflayerWireClient = {
   off?: (event: string, listener: (packet: unknown) => void) => void;
   removeListener?: (event: string, listener: (packet: unknown) => void) => void;
 };
+
+type InventorySyncWaiter = Readonly<{
+  promise: Promise<void>;
+  cancel: () => void;
+}>;
 
 type AuthoritativeBlockUpdate = Readonly<{
   position: BlockPosition;
@@ -993,6 +1014,23 @@ export class MineflayerBotClient implements BotClient {
       request.capability === "world.interact" &&
       request.operation === "block.place-safe"
     ) {
+      const blueprintInput = buildBlueprintCapabilityInputSchema.safeParse(request.input);
+      if (blueprintInput.success) {
+        const { target, blueprintIndex: _blueprintIndex, ...placement } = blueprintInput.data;
+        const expectedTarget = {
+          x: placement.referenceBlock.x + placement.face.x,
+          y: placement.referenceBlock.y + placement.face.y,
+          z: placement.referenceBlock.z + placement.face.z,
+        };
+        if (
+          target.x !== expectedTarget.x ||
+          target.y !== expectedTarget.y ||
+          target.z !== expectedTarget.z
+        ) {
+          throw new SkillFault("BLUEPRINT_STEP_BLOCKED");
+        }
+        return this.invokePlaceBlock({ ...request, input: placement });
+      }
       return this.invokePlaceBlock(request);
     }
     if (
@@ -1097,8 +1135,13 @@ export class MineflayerBotClient implements BotClient {
     if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
     this.assertServerProfileMatch(input.data.serverProfileId);
     this.assertDimensionMatch(input.data.dimension);
-    const output = await digShelter(this.bot, this.serverProfileId!, input.data, request.signal);
-    return shelterDigCapabilityOutputSchema.parse(output);
+    const restoreServerConfirmedDigging = this.installServerConfirmedDigging(request.signal);
+    try {
+      const output = await digShelter(this.bot, this.serverProfileId!, input.data, request.signal);
+      return shelterDigCapabilityOutputSchema.parse(output);
+    } finally {
+      restoreServerConfirmedDigging();
+    }
   }
 
   private async invokeMinePlan(request: SkillCapabilityRequest): Promise<unknown> {
@@ -1107,12 +1150,189 @@ export class MineflayerBotClient implements BotClient {
     if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
     this.assertServerProfileMatch(input.data.serverProfileId);
     this.assertDimensionMatch(input.data.dimension);
-    const plan = (input.data as { plan?: unknown }).plan;
-    if (plan === undefined) throw new SkillFault("MINE_RUNTIME_NOT_WIRED");
-    // Mining execution is kept behind a dedicated bounded adapter. Returning a
-    // planner result as a success would silently claim blocks were broken, so
-    // until that adapter is supplied we fail closed with an auditable code.
-    throw new SkillFault("MINE_RUNTIME_NOT_WIRED");
+    const plan = input.data.plan;
+    if (
+      plan.targetItem !== input.data.targetItem ||
+      plan.yLevel !== input.data.yLevel ||
+      plan.steps.length > input.data.maxBlocks * 2
+    ) {
+      throw new SkillFault("MINE_PLAN_MISMATCH");
+    }
+
+    const restoreServerConfirmedDigging = this.installServerConfirmedDigging(request.signal);
+    try {
+      for (let stepIndex = 0; stepIndex < plan.steps.length; stepIndex += 1) {
+        const step = plan.steps[stepIndex]!;
+        if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+        if (step.targetItem !== input.data.targetItem || step.index !== stepIndex) {
+          throw new SkillFault("MINE_PLAN_MISMATCH");
+        }
+        if (step.kind === "return") {
+          await this.moveMineToTarget(
+            request,
+            new Vec3(step.position.x, step.position.y, step.position.z),
+            false,
+          );
+          continue;
+        }
+
+        const targetPosition = new Vec3(step.position.x, step.position.y, step.position.z);
+        await this.moveMineToTarget(request, targetPosition, true);
+        const target = this.bot.blockAt(targetPosition);
+        if (
+          !target ||
+          target.boundingBox === "empty" ||
+          !this.matchesBlockName(target.name, input.data.targetItem)
+        ) {
+          throw new SkillFault("MINE_NO_TARGET");
+        }
+        if (!hasReachableFace(this.bot, targetPosition)) {
+          throw new SkillFault("COLLECT_TARGET_UNREACHABLE");
+        }
+        if (
+          typeof target.canHarvest !== "function" ||
+          !canHarvestWithInventory(this.bot, target)
+        ) {
+          throw new SkillFault("COLLECT_TOOL_MISSING");
+        }
+
+        const tool = this.bot.inventory.items().find((item) =>
+          target.canHarvest(item.type) === true,
+        );
+        if (!tool) throw new SkillFault("COLLECT_TOOL_MISSING");
+        try {
+          await this.bot.equip(tool, "hand");
+          await this.bot.dig(target);
+        } catch (error) {
+          if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+          throw new SkillFault(
+            "MINE_DIG_FAILED",
+            error instanceof Error && error.message.trim().length > 0
+              ? error.message.trim()
+              : undefined,
+          );
+        }
+
+        const broken = this.bot.blockAt(targetPosition);
+        if (!broken || broken.boundingBox !== "empty") {
+          throw new SkillFault("MINE_BLOCK_NOT_CONFIRMED");
+        }
+        if (step.backfill) await this.backfillMineStep(request, targetPosition);
+      }
+    } finally {
+      restoreServerConfirmedDigging();
+      this.bot.clearControlStates();
+      this.stopPathfinder();
+    }
+    return (isBranch ? mineBranchCapabilityOutputSchema : mineVeinCapabilityOutputSchema).parse(plan);
+  }
+
+  private matchesBlockName(actual: string, requested: string): boolean {
+    const unqualified = requested.includes(":")
+      ? requested.slice(requested.indexOf(":") + 1)
+      : requested;
+    return actual === requested || actual === unqualified;
+  }
+
+  private async moveMineToTarget(
+    request: SkillCapabilityRequest,
+    target: Vec3,
+    lookAtBlock: boolean,
+  ): Promise<void> {
+    if (!this.bot.pathfinder) throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE");
+    if (this.activePathInvocationId !== null) throw new SkillFault("BOT_MOVEMENT_BUSY");
+    const current = this.bot.entity.position;
+    const distance = current.distanceTo(target);
+    if (!Number.isFinite(distance) || distance > SAFE_PATH_MAX_DISTANCE) {
+      throw new SkillFault("TARGET_OUT_OF_SAFE_RANGE");
+    }
+    const movements = configureSafePathfinderMovements(new Movements(this.bot));
+    this.bot.pathfinder.setMovements(movements);
+    this.bot.pathfinder.thinkTimeout = MINE_PATH_THINK_TIMEOUT_MS;
+    this.bot.pathfinder.tickTimeout = MINE_PATH_TICK_TIMEOUT_MS;
+    this.activePathInvocationId = request.invocationId;
+    const stopOnAbort = () => this.stopPathfinder();
+    request.signal.addEventListener("abort", stopOnAbort, { once: true });
+    try {
+      if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      await this.bot.pathfinder.goto(
+        lookAtBlock
+          ? new goals.GoalLookAtBlock(target, this.bot.world)
+          : new goals.GoalNear(target.x, target.y, target.z, 1),
+      );
+    } catch (error) {
+      if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      const reason =
+        error instanceof Error && error.message.trim().length > 0
+          ? `${error.name}: ${error.message.trim()}`
+          : undefined;
+      throw new SkillFault(
+        error instanceof Error && error.name === "NoPath"
+          ? "COLLECT_TARGET_UNREACHABLE"
+          : "MINE_PATH_FAILED",
+        reason,
+      );
+    } finally {
+      request.signal.removeEventListener("abort", stopOnAbort);
+      if (this.activePathInvocationId === request.invocationId) {
+        this.activePathInvocationId = null;
+      }
+    }
+    const finalDistance = this.bot.entity.position.distanceTo(target);
+    const allowedDistance = lookAtBlock ? MINE_TARGET_REACH_DISTANCE : 1.5;
+    if (!Number.isFinite(finalDistance) || finalDistance > allowedDistance) {
+      throw new SkillFault("MINE_TARGET_OUT_OF_REACH");
+    }
+  }
+
+  private async backfillMineStep(
+    request: SkillCapabilityRequest,
+    targetPosition: Vec3,
+  ): Promise<void> {
+    const target = this.bot.blockAt(targetPosition);
+    if (target && target.boundingBox !== "empty") {
+      throw new SkillFault("MINE_BLOCK_NOT_CONFIRMED");
+    }
+    const item = this.bot.inventory.items().find((candidate) =>
+      MINE_BACKFILL_ITEMS.includes(
+        candidate.name as (typeof MINE_BACKFILL_ITEMS)[number],
+      ),
+    );
+    if (!item) throw new SkillFault("MINE_BACKFILL_MATERIAL_MISSING");
+    for (const [dx, dy, dz] of CANDIDATE_FACES) {
+      const referencePosition = targetPosition.offset(dx, dy, dz);
+      const reference = this.bot.blockAt(referencePosition);
+      if (
+        !reference ||
+        reference.boundingBox === "empty" ||
+        CANDIDATE_FACE_LIQUIDS.has(reference.name)
+      ) {
+        continue;
+      }
+      try {
+        await this.invokePlaceBlock({
+          ...request,
+          input: {
+            itemName: item.name,
+            referenceBlock: {
+              x: referencePosition.x,
+              y: referencePosition.y,
+              z: referencePosition.z,
+            },
+            face: { x: -dx, y: -dy, z: -dz },
+            dimension: normalizeDimension(String(this.bot.game.dimension)),
+            serverProfileId: this.serverProfileId,
+          },
+        });
+        return;
+      } catch (error) {
+        if (error instanceof SkillFault && error.code === "PLACE_TARGET_OCCUPIED") {
+          continue;
+        }
+        if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      }
+    }
+    throw new SkillFault("MINE_BACKFILL_FAILED");
   }
 
   private async invokeTradeVillager(request: SkillCapabilityRequest): Promise<unknown> {
@@ -1121,7 +1341,13 @@ export class MineflayerBotClient implements BotClient {
     this.assertServerProfileMatch(input.data.serverProfileId);
     this.assertDimensionMatch(input.data.dimension);
     const entities = Object.values(this.bot.entities ?? {}) as Array<any>;
-    const villager = entities.find((entity) => String(entity?.id) === input.data.villagerEntityId);
+    const villager = entities
+      .filter((entity) => String(entity?.name ?? "").toLowerCase() === "villager")
+      .filter((entity) => input.data.villagerEntityId === "nearest" || String(entity?.id) === input.data.villagerEntityId)
+      .sort((left, right) =>
+        this.bot.entity.position.distanceTo(left.position) -
+        this.bot.entity.position.distanceTo(right.position),
+      )[0];
     if (!villager) throw new SkillFault("VILLAGER_NOT_FOUND");
     const distance = this.bot.entity.position.distanceTo(villager.position);
     if (!Number.isFinite(distance) || distance > 3.8) throw new SkillFault("VILLAGER_OUT_OF_REACH");
@@ -1142,7 +1368,7 @@ export class MineflayerBotClient implements BotClient {
       const uses = Number(trade?.nbTradeUses ?? trade?.uses ?? 0);
       const maximum = Number(trade?.maximumNbTradeUses ?? trade?.maxUses ?? 0);
       if (trade?.tradeDisabled === true || (maximum > 0 && uses >= maximum)) throw new SkillFault("TRADE_DISABLED");
-      const realPrice = Math.max(0, Number(trade?.inputItem1?.count ?? trade?.price ?? 0));
+      const realPrice = Math.max(0, Number(trade?.realPrice ?? trade?.inputItem1?.count ?? trade?.price ?? 0));
       const specialPrice = Math.max(0, Number(trade?.specialPrice ?? realPrice));
       if (realPrice > input.data.maxUnitPrice || specialPrice > input.data.maxUnitPrice) throw new SkillFault("TRADE_PRICE_UNACCEPTABLE");
       const paymentName = String(trade?.inputItem1?.name ?? trade?.inputItem1?.type ?? "");
@@ -1152,13 +1378,18 @@ export class MineflayerBotClient implements BotClient {
       const beforeReceived = this.countInventoryItem(input.data.wantItem);
       const maxAvailable = maximum > 0 ? Math.max(0, maximum - uses) : input.data.maxTrades;
       const times = Math.min(input.data.maxTrades, maxAvailable);
-      await botWithTrade.trade(villager, index, times);
+      await botWithTrade.trade(window, index, times);
+      // Mineflayer copies merchant-window slots back into the player
+      // inventory when the window closes. Read deltas only after that sync;
+      // otherwise a successful server-side trade is reported as uncertain.
+      window.close?.();
+      window = null;
       const spent = Math.max(0, beforeSpent - this.countInventoryItem(paymentName));
       const received = Math.max(0, this.countInventoryItem(input.data.wantItem) - beforeReceived);
       const completedTrades = Math.min(times, received > 0 ? Math.max(1, Math.floor(received / Math.max(1, Number(trade?.outputItem?.count ?? 1)))) : Math.floor(spent / Math.max(1, realPrice)));
       if (completedTrades < 1) throw new SkillFault("NON_IDEMPOTENT_RESULT_UNCERTAIN");
       return tradeVillagerCapabilityOutputSchema.parse({
-        villagerEntityId: input.data.villagerEntityId,
+        villagerEntityId: String(villager.id),
         wantItem: input.data.wantItem,
         requestedTrades: input.data.maxTrades,
         completedTrades,
@@ -1237,6 +1468,11 @@ export class MineflayerBotClient implements BotClient {
     this.bot.pathfinder.thinkTimeout = 5_000;
     this.bot.pathfinder.tickTimeout = 20;
     this.activePathInvocationId = request.invocationId;
+    // GoalNear measures integer path nodes, while the public contract measures
+    // the entity position. Reserve half a block for the entity's offset inside
+    // its current node so a radius-1 goal cannot resolve one block away and
+    // then fail the postcondition at roughly 1.58 blocks.
+    const pathfinderRadius = Math.max(0, input.data.radius - 0.5);
 
     const stopOnAbort = () => this.stopPathfinder();
     request.signal.addEventListener("abort", stopOnAbort, { once: true });
@@ -1250,7 +1486,7 @@ export class MineflayerBotClient implements BotClient {
           input.data.target.x,
           input.data.target.y,
           input.data.target.z,
-          input.data.radius,
+          pathfinderRadius,
         ),
       );
     } catch (error) {
@@ -1420,20 +1656,24 @@ export class MineflayerBotClient implements BotClient {
       .reduce((total, item) => total + item.count, 0);
   }
 
-  private async waitForCollectedInventorySync(
+  private prepareCollectedInventorySync(
     inventoryBefore: number,
     signal: AbortSignal,
-  ): Promise<void> {
-    if (this.countInventoryTotal() > inventoryBefore || signal.aborted) return;
+  ): InventorySyncWaiter {
+    if (this.countInventoryTotal() > inventoryBefore || signal.aborted) {
+      return { promise: Promise.resolve(), cancel: () => {} };
+    }
 
     const inventory = this.bot.inventory;
     if (
       typeof inventory.on !== "function" ||
       typeof inventory.off !== "function"
     ) {
-      return;
+      return { promise: Promise.resolve(), cancel: () => {} };
     }
-    await new Promise<void>((resolve) => {
+
+    let cancelWait: () => void = () => {};
+    const promise = new Promise<void>((resolve) => {
       let settled = false;
       let timeout: ReturnType<typeof setTimeout> | null = null;
       const finish = () => {
@@ -1444,6 +1684,7 @@ export class MineflayerBotClient implements BotClient {
         signal.removeEventListener("abort", finish);
         resolve();
       };
+      cancelWait = finish;
       const onUpdate = () => {
         if (this.countInventoryTotal() > inventoryBefore) finish();
       };
@@ -1455,6 +1696,7 @@ export class MineflayerBotClient implements BotClient {
       // after the initial check but before updateSlot was bound.
       onUpdate();
     });
+    return { promise, cancel: () => cancelWait() };
   }
 
   /**
@@ -1768,7 +2010,14 @@ export class MineflayerBotClient implements BotClient {
     }
 
     const inventoryBefore = this.countInventoryTotal();
+    // Register before collectBlock starts. The dropped-entity event can arrive
+    // before Mineflayer applies the corresponding inventory slot update.
+    const inventorySync = this.prepareCollectedInventorySync(
+      inventoryBefore,
+      request.signal,
+    );
     let collectedTargets = 0;
+    let collectionSucceeded = false;
     // 实跑失败的 reason 此前只有插件转抛的那一句，读不出替补到底有没有登场。
     // 实测只能靠 durationMs 反推(12588 → 15754ms)，那是推断不是观测。
     let attemptsMade = 0;
@@ -1818,6 +2067,7 @@ export class MineflayerBotClient implements BotClient {
             );
           }
           collectedTargets = batch.length;
+          collectionSucceeded = true;
           lastPathFailure = null;
           break;
         } catch (error) {
@@ -1869,6 +2119,7 @@ export class MineflayerBotClient implements BotClient {
       }
       throw new SkillFault("COLLECT_BLOCKS_FAILED", reason);
     } finally {
+      if (!collectionSucceeded) inventorySync.cancel();
       request.signal.removeEventListener("abort", stopOnAbort);
       if (this.activePathInvocationId === request.invocationId) {
         this.activePathInvocationId = null;
@@ -1876,9 +2127,9 @@ export class MineflayerBotClient implements BotClient {
       restoreServerConfirmedDigging();
     }
 
-    // collectblock resolves when the dropped entity disappears. Mineflayer can
-    // receive that packet before the corresponding inventory slot update.
-    await this.waitForCollectedInventorySync(inventoryBefore, request.signal);
+    // collectblock resolves when the dropped entity disappears. The waiter was
+    // armed before collection so a fast slot packet cannot be missed.
+    await inventorySync.promise;
 
     const itemsCollected = Math.max(
       0,

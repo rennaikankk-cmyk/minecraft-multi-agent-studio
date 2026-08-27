@@ -121,7 +121,10 @@ export const mineVeinInputSchema = z.object({
 }).strict();
 export type MineVeinInput = z.infer<typeof mineVeinInputSchema>;
 
-const observedPositionSchema = positionSchema.extend({
+const observedPositionSchema = z.object({
+  x: z.number().finite().min(-30_000_000).max(30_000_000),
+  y: z.number().finite().min(-2_048).max(2_048),
+  z: z.number().finite().min(-30_000_000).max(30_000_000),
   dimension: dimensionSchema,
   serverProfileId: identifierSchema,
 }).strict();
@@ -233,7 +236,19 @@ export function planVeinMine(input: MineVeinInput, safety = input.safety): MineP
 async function executeMine<TInput extends MineBranchInput | MineVeinInput>(context: Parameters<typeof defineSkill>[0] extends never ? never : any, input: TInput, planner: (value: TInput, safety: MineSafetyFacts | undefined) => MinePlan, operation: string): Promise<z.infer<typeof planOutputSchema>> {
   const plan = planner(input, input.safety);
   if (!plan.ok) throw new SkillFault(plan.failureCode);
-  const output = await context.callCapability("world.interact", operation, { ...input, plan });
+  // The planner keeps `ok` and top-level `exclusions` for its internal
+  // decision record, but the capability contract only accepts the executable
+  // plan fields. Passing the union member through unchanged makes strict Zod
+  // validation reject every otherwise valid mine invocation.
+  const executablePlan = planOutputSchema.parse({
+    targetItem: plan.targetItem,
+    yLevel: plan.yLevel,
+    steps: plan.steps,
+    estimatedDurationMs: plan.estimatedDurationMs,
+    exposureScore: plan.exposureScore,
+    oreConfidence: plan.oreConfidence,
+  });
+  const output = await context.callCapability("world.interact", operation, { ...input, plan: executablePlan });
   return planOutputSchema.parse(output);
 }
 

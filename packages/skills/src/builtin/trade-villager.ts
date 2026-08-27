@@ -1,7 +1,7 @@
 import { identifierSchema } from "@minecraft-studio/protocol";
 import { z } from "zod";
 
-import { defineSkill, type SkillPolicyView } from "../types.js";
+import { defineSkill } from "../types.js";
 
 export const TRADE_VILLAGER_TIMEOUT_MS = 30_000;
 export const TRADE_MAX_TRADES = 64;
@@ -30,7 +30,11 @@ export type TradeVillagerInput = z.infer<typeof tradeVillagerInputSchema>;
 
 export const tradeVillagerStateSchema = z.object({
   online: z.boolean(), normalActionsAllowed: z.boolean(), serverProfileId: identifierSchema,
-  position: observedPositionSchema.nullable(), villager: villagerObservationSchema.nullable(),
+  position: observedPositionSchema.nullable(),
+  // Offers become authoritative only after opening the server-owned merchant
+  // window. Runtime capability execution performs that read, so a stale
+  // pre-open observation must not block a valid trade.
+  villager: villagerObservationSchema.nullable().optional(),
 }).strip();
 export type TradeVillagerState = z.infer<typeof tradeVillagerStateSchema>;
 
@@ -47,10 +51,6 @@ export const tradeVillagerOutputSchema = z.object({
 export const tradeVillagerCapabilityInputSchema = tradeVillagerInputSchema;
 export const tradeVillagerCapabilityOutputSchema = tradeVillagerOutputSchema;
 
-function withinReach(input: TradeVillagerInput, state: TradeVillagerState, policy: SkillPolicyView): boolean {
-  return state.villager !== null && state.villager.entityId === input.villagerEntityId && policy.checkBlockReach(state.villager.distance).allowed;
-}
-
 export const tradeVillagerSkill = defineSkill({
   id: "trade.villager", version: "1.0.0", inputSchema: tradeVillagerInputSchema, outputSchema: tradeVillagerOutputSchema, stateSchema: tradeVillagerStateSchema,
   compatibility: { variants: [{ id: "portable", requirements: [], verifiedMinecraftVersions: [] }] },
@@ -60,14 +60,6 @@ export const tradeVillagerSkill = defineSkill({
     { id: "bot.online", failureCode: "BOT_NOT_ONLINE", check: (_input, state) => state.online },
     { id: "l0.normal-actions-allowed", failureCode: "NORMAL_ACTIONS_PAUSED", check: (_input, state) => state.normalActionsAllowed },
     { id: "target.server-profile-matches", failureCode: "TARGET_SERVER_PROFILE_MISMATCH", check: (input, state) => input.serverProfileId === state.serverProfileId },
-    { id: "villager.present", failureCode: "VILLAGER_NOT_FOUND", check: (input, state) => state.villager !== null && state.villager.entityId === input.villagerEntityId },
-    { id: "villager.within-reach", failureCode: "VILLAGER_OUT_OF_REACH", check: withinReach },
-    { id: "trade.offer-found", failureCode: "TRADE_OFFER_NOT_FOUND", check: (_input, state) => state.villager !== null && state.villager.offerFound },
-    { id: "trade.enabled", failureCode: "TRADE_DISABLED", check: (_input, state) => state.villager !== null && !state.villager.tradeDisabled && state.villager.nbTradeUses < state.villager.maximumNbTradeUses },
-    { id: "trade.price-within-limit", failureCode: "TRADE_PRICE_UNACCEPTABLE", check: (input, state) => state.villager !== null && state.villager.realPrice <= input.maxUnitPrice && state.villager.specialPrice <= input.maxUnitPrice },
-    { id: "trade.input-in-inventory", failureCode: "TRADE_ITEM_NOT_IN_INVENTORY", check: (_input, state) => state.villager !== null && state.villager.inputItemAvailable },
-    { id: "inventory.has-room", failureCode: "INVENTORY_FULL", check: (_input, state) => state.villager !== null && state.villager.inventoryHasRoom },
   ],
   execute: async (context, input) => tradeVillagerCapabilityOutputSchema.parse(await context.callCapability("world.interact", "trade.villager-safe", tradeVillagerCapabilityInputSchema.parse(input))),
 });
-

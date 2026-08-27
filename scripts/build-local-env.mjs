@@ -34,6 +34,7 @@ const runtimeLinkPeers = [
 ];
 
 const assignments = new Map([
+  ["STUDIO_MAX_BOTS", "16"],
   ["CONTROL_API_AUTH_JSON", `'${JSON.stringify(principals)}'`],
   ["COORDINATOR_CONTROL_LINK_CLIENTS_JSON", `'${JSON.stringify(controlLinkClients)}'`],
   ["CONTROL_API_COORDINATOR_LINK_SECRET", controlLinkSecret],

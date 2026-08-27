@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -105,6 +105,11 @@ test("creates authenticated Bot slots deterministically", () => {
   assert.notEqual(first[1].secret, SECRET);
 });
 
+test("supports the real-server slot ceiling of sixteen", () => {
+  assert.equal(createLocalBotSlots(SECRET, 16).length, 16);
+  assert.throws(() => createLocalBotSlots(SECRET, 17), /slot count is invalid/);
+});
+
 test("creates and reloads a managed Bot through the loopback API", async (context) => {
   const runtimeRoot = await mkdtemp(path.join(tmpdir(), "studio-manager-test-"));
   context.after(() => rm(runtimeRoot, { recursive: true, force: true }));
@@ -140,6 +145,14 @@ test("creates and reloads a managed Bot through the loopback API", async (contex
   });
   assert.equal(createdResponse.status, 201);
   assert.equal((await createdResponse.json()).bot.botId, "studio-bot-01");
+  const createdProfile = JSON.parse(
+    await readFile(
+      path.join(runtimeRoot, "bots", "studio-bot-01", "server-profile.json"),
+      "utf8",
+    ),
+  );
+  assert.equal(createdProfile.purpose, "managed");
+  assert.equal(createdProfile.networkScope, "loopback");
   await manager.stop();
 
   const reloaded = new StudioLocalManager(options);

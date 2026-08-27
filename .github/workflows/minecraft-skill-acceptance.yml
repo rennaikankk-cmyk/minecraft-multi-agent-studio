@@ -105,7 +105,7 @@ jobs:
             "level-name=world"
             "force-gamemode=true"
             "spawn-protection=0"
-            "difficulty=peaceful"
+            "difficulty=easy"
             "gamemode=survival"
             "spawn-animals=false"
             "spawn-monsters=false"
@@ -123,8 +123,16 @@ jobs:
             host = "127.0.0.1"
             port = 25565
             minecraftVersion = "1.21.8"
-            username = "StudioBot"
+            username = "StudioBot01"
             auth = "offline"
+            combat = @{
+              enabled = $true
+              stance = "preserve-life"
+              whitelist = @{
+                usernames = @("StudioBot01", "StudioBot02")
+                uuids = @()
+              }
+            }
             statusIntervalMs = 1000
             heartbeatIntervalMs = 5000
             stopGracePeriodMs = 5000

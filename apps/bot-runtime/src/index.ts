@@ -98,10 +98,12 @@ export {
   ServerProfileError,
   loadServerProfile,
   serverProfileCombatConfigSchema,
+  serverProfilePurposeSchema,
   serverProfileSchema,
   type ServerProfile,
   type ServerProfileCombatConfig,
   type ServerProfileErrorCode,
+  type ServerProfilePurpose,
 } from "./server-profile.js";
 export {
   BotSupervisorConfigError,

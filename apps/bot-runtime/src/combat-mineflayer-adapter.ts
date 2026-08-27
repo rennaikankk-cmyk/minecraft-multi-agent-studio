@@ -32,6 +32,7 @@ type EntityLike = MineflayerCombatEntityView &
   }>;
 type CombatBotLike = Readonly<{
   entity?: EntityLike;
+  health?: unknown;
   entities?: Readonly<Record<string, EntityLike>>;
   inventory?: Readonly<{
     items?: () => readonly ItemLike[];
@@ -227,7 +228,9 @@ export class MineflayerCombatAdapter {
     // These values are required by the deterministic driver. Do not turn a
     // pre-spawn/partially populated Mineflayer entity into a fabricated safe
     // snapshot (for example health=0 or onGround=false).
-    const health = finiteNumber(self.health) ? Number(self.health) : null;
+    // Mineflayer exposes the local player's health on `bot.health`; entity
+    // health is optional and is primarily populated for observed mobs.
+    const health = finiteNumber(bot.health) ? Number(bot.health) : null;
     const yaw = finiteNumber(self.yaw) ? Number(self.yaw) : null;
     const pitch = finiteNumber(self.pitch) ? Number(self.pitch) : null;
     if (

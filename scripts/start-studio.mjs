@@ -88,8 +88,14 @@ const runtimeMasterSecret = firstValidSecret(
   hostEnvironment.BOT_RUNTIME_LINK_SECRET,
   secrets.runtimeSecret,
 );
+const maxBots = boundedCount(
+  hostEnvironment.STUDIO_MAX_BOTS ?? "16",
+  "STUDIO_MAX_BOTS",
+  1,
+  16,
+);
 const botSlots = withConfiguredFirstSlotKey(
-  createLocalBotSlots(runtimeMasterSecret, 16),
+  createLocalBotSlots(runtimeMasterSecret, maxBots),
   hostEnvironment.BOT_RUNTIME_LINK_KEY_ID,
 );
 const aiDiscovery = await discoverLocalAI(hostEnvironment);
@@ -672,6 +678,17 @@ function boundedPort(value, name = "STUDIO_DASHBOARD_PORT") {
     throw new Error(`${name} is invalid.`);
   }
   return port;
+}
+
+function boundedCount(value, name, minimum, maximum) {
+  if (!/^[0-9]+$/u.test(String(value))) {
+    throw new Error(`${name} is invalid.`);
+  }
+  const count = Number(value);
+  if (!Number.isSafeInteger(count) || count < minimum || count > maximum) {
+    throw new Error(`${name} must be between ${minimum} and ${maximum}.`);
+  }
+  return count;
 }
 
 function boundedError(cause) {
