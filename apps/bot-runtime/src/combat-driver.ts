@@ -164,6 +164,10 @@ export type CombatPrimitiveAction =
       position: CombatVector3;
     }>
   | Readonly<{
+      /** 引爆范围内全部水晶（打碎即爆）。 */
+      kind: "DETONATE_CRYSTALS";
+    }>
+  | Readonly<{
       kind: "PACKET_MINE";
       assignments: readonly CombatMineAssignment[];
     }>;
@@ -1688,7 +1692,7 @@ export class CombatDriver {
     }
 
     const movement = this.policyGate.checkMovement({
-      sprint: action.sprint,
+      sprint: "sprint" in action ? action.sprint : false,
       jump: false,
       airStrafe: false,
       fallBlocks: observation.self.onGround

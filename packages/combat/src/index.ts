@@ -246,3 +246,30 @@ export {
   type MeleeControlFrame,
   type MeleeMovementContext,
 } from "./melee-controller.js";
+
+export {
+  anchorBurstTiming,
+  CRYSTAL_SEARCH_RADIUS,
+  detonateCrystals,
+  DETONATE_RADIUS,
+  enumerateCrystalCandidates,
+  placeCrystal,
+} from "./crystal-executor.js";
+export {
+  primeWTap,
+  selectWTapStrategy,
+  S_TAP_PRESS_MS,
+  W_TAP_RELEASE_MS,
+  type WTapContext,
+  type WTapStrategy,
+} from "./wtap-engine.js";
+export {
+  eatGoldenApple,
+  shouldBlockShield,
+  shouldEatGoldenApple,
+  startShieldBlock,
+  stopShieldBlock,
+  throwPotionAtSelf,
+  type CombatBotConsumableView,
+  type ConsumableAction,
+} from "./consumables.js";

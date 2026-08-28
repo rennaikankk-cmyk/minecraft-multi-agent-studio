@@ -8,8 +8,15 @@ import {
 import {
   HitWindowTracker,
   TotemPopTracker,
+  detonateCrystals,
+  enumerateCrystalCandidates,
   explosionRuleSetForMinecraftVersion,
   inCriticalWindow,
+  meleeControlFrame,
+  MELEE_CONTROL_FRAME_MS,
+  placeCrystal,
+  primeWTap,
+  selectWTapStrategy,
   primeCritical,
   releaseCriticalPriming,
   selectCriticalStrategy,
@@ -536,7 +543,29 @@ export class MineflayerCombatAdapter {
       },
       entities,
       weapons,
-      crystalCandidates: null,
+      // CrystalEngine 的候选枚举（此前恒 null，评分引擎永远不被触发）：
+      // 以最近敌对实体为中心扫黑曜石/基岩承载。无目标时给空数组而不是
+      // null——null 语义是"不知道"，空数组是"确认没有"。
+      crystalCandidates: (() => {
+        const hostile = Object.values(bot.entities ?? {}).find(
+          (entity) =>
+            entity !== bot.entity &&
+            (entity as { isValid?: boolean }).isValid !== false &&
+            (entity as { type?: string }).type === "player",
+        );
+        const targetPos = (hostile as { position?: Vec3 } | undefined)?.position;
+        if (!targetPos) return [];
+        try {
+          // The combat package uses its own lightweight vector; pass a real
+          // Vec3 so blockAt receives the same type the rest of the adapter uses.
+          return enumerateCrystalCandidates(
+            bot as never,
+            new Vec3(targetPos.x, targetPos.y, targetPos.z) as never,
+          ) as never;
+        } catch {
+          return [];
+        }
+      })(),
       mineCandidates: null,
       hazards: this.hazardsAround(position),
     };
@@ -650,7 +679,18 @@ export class MineflayerCombatAdapter {
           } else if (critical.strategy === "PACKET_CRIT") {
             primeCritical(critBotView, "PACKET_CRIT");
           }
+          // ---- W-Tap（sprint reset）：贴脸 Combo 减少自身被弹开 ----
+          const wtap = selectWTapStrategy({
+            health: Number((bot as { health?: number }).health ?? 20),
+            targetDistance: distance,
+            inCombo: distance < 2.5,
+          });
+          const restoreWTap = primeWTap(
+            critBotView as unknown as { setControlState: (n: string, s: boolean) => void },
+            wtap,
+          );
           await bot.attack(target);
+          restoreWTap();
           releaseCriticalPriming(critBotView);
           return { outcome: "executed", executedAtMs: this.clock() };
         }
@@ -696,7 +736,23 @@ export class MineflayerCombatAdapter {
             await this.applyMovement(action.direction, action.sprint, action.durationMs, signal);
           }
           return { outcome: "executed", executedAtMs: this.clock() };
-        case "PLACE_CRYSTAL":
+        case "PLACE_CRYSTAL": {
+          const placed = await placeCrystal(
+            bot as never,
+            action.position as never,
+          );
+          return placed
+            ? { outcome: "executed", executedAtMs: this.clock() }
+            : { outcome: "failed", reasonCode: "COMBAT_CRYSTAL_PLACE_FAILED" };
+        }
+        case "DETONATE_CRYSTALS": {
+          const count = await detonateCrystals(bot as never);
+          return {
+            outcome: count > 0 ? "executed" : "skipped",
+            executedAtMs: this.clock(),
+            ...(count > 0 ? { reasonCode: `CRYSTALS_DETONATED:${count}` } : { reasonCode: "NO_CRYSTALS_IN_RANGE" }),
+          } as never;
+        }
         case "PACKET_MINE":
           return { outcome: "unavailable", reasonCode: "COMBAT_ACTION_ADAPTER_UNAVAILABLE" };
       }
