@@ -35,22 +35,24 @@ U9 AI settings are server-side only. Put them in `.env` or `.env.local` (the lat
 overrides `.env`); never use a `NEXT_PUBLIC_` variable:
 
 ```text
-LOCAL_AI_PROVIDER=ollama
-LOCAL_AI_HUB_URL=http://127.0.0.1:11435
-LOCAL_AI_MODEL=qwen-fast:latest
+LOCAL_AI_PROVIDER=vllm
+LOCAL_AI_HUB_URL=
+LOCAL_AI_MODEL=
 AI_MAX_CONCURRENCY=12
 AI_MAX_QUEUE=64
 AI_PER_BOT_CONCURRENCY=1
 AI_REQUEST_TIMEOUT_MS=120000
 ```
 
-The local port is a read-only SSH tunnel to Spark Ollama (`127.0.0.1:11434` on Spark). If the
-tunnel is not running, the Coordinator reports Local AI as unavailable and fails closed. The
-native Ollama adapter uses `think: false` and a JSON Schema response to reserve the bounded
-planning budget for the decision. Use `LOCAL_AI_PROVIDER=vllm` for an OpenAI-compatible vLLM
-origin instead. The model name and endpoint must match the model service actually verified on Spark. Do not put
-credentials, production server addresses, player allow-lists or base coordinates in prompts or
-logs. See `docs/LOCAL_AI_PROMPTS.md` for the tunnel command and safe goal examples.
+The desktop launcher probes the approved Spark hosts and ports, reads the model list from the
+service that is actually online, and injects the discovered provider, origin, and model into the
+Coordinator. The currently verified instance is OpenAI-compatible vLLM at
+`http://192.168.100.2:8001` serving `ornith15-heretic`; this is observed state, not a hardcoded
+dependency. If the service is unavailable, the Coordinator reports Local AI as unavailable and
+fails closed. Set all three `LOCAL_AI_PROVIDER`, `LOCAL_AI_HUB_URL`, and `LOCAL_AI_MODEL` values
+only when intentionally pinning an approved endpoint. Do not put credentials, production server
+addresses, player allow-lists or base coordinates in prompts or logs. See
+`docs/LOCAL_AI_PROMPTS.md` for discovery and safe goal examples.
 
 See `docs/AI_SCHEDULER.md` for queue semantics and priority assignments. The full local
 Studio launcher reads `.env` and `.env.local` before starting services:

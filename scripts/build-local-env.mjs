@@ -43,9 +43,9 @@ const assignments = new Map([
   ["BOT_RUNTIME_LINK_KEY_ID", "bot-runtime-key-01"],
   ["BOT_RUNTIME_LINK_SECRET", runtimeLinkSecret],
   ["BOT_RUNTIME_LINK_SECRET_STUDIO_BOT_01", runtimeLinkSecret],
-  // Bot Runtime fail-closes without a profile path, so a regenerated .env that
-  // inherits the template's empty value silently stops the bot from starting.
-  ["BOT_SERVER_PROFILE_PATH", "runtime-data/isolated-test/server-profile.json"],
+  // Normal desktop startup is Manager-first. Isolated Bot Runtime tests provide
+  // their profile explicitly and must not be enabled by regenerating .env.
+  ["BOT_SERVER_PROFILE_PATH", ""],
   // Durable tasks stay disabled until a real PostgreSQL URL is supplied.
   // loadGoalPersistenceConfig rejects a schema without a URL, so pin both
   // empty here rather than relying on the template's default.

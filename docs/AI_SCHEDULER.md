@@ -8,7 +8,7 @@
 AI_MAX_CONCURRENCY=12
 AI_MAX_QUEUE=64
 AI_PER_BOT_CONCURRENCY=1
-AI_REQUEST_TIMEOUT_MS=30000
+AI_REQUEST_TIMEOUT_MS=120000
 ```
 
 桌面启动器会在启动 Coordinator 前扫描批准的 Spark 主机和端口，读取
@@ -56,7 +56,7 @@ const scheduler = new AIRequestScheduler({
   maxConcurrency: 12,
   maxQueue: 64,
   perBotConcurrency: 1,
-  defaultTimeoutMs: 30_000,
+  defaultTimeoutMs: 120_000,
   onEvent: recordSchedulerEvent,
 });
 
@@ -71,7 +71,7 @@ const result = await ai.generate({
   prompt,
   maxTokens: 512,
   temperature: 0,
-  timeoutMs: 30_000,
+  timeoutMs: 120_000,
 });
 ```
 

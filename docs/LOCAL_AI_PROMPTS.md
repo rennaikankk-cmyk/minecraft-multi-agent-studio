@@ -1,7 +1,7 @@
 # Local AI 提示词与执行边界
 
 当前运行时规划提示词在 `apps/coordinator/src/planner-prompts.ts`，版本为
-`minecraft-local-planner-v3`。代码中的版本化字符串是唯一运行时事实源；修改提示词时
+`minecraft-local-planner-v11`。代码中的版本化字符串是唯一运行时事实源；修改提示词时
 必须同时升级版本并重跑 Coordinator、Protocol、Runtime Link 测试。
 
 Planner 发给模型的 JSON 上下文有固定的 128 KiB UTF-8 上限。Operator goal、Bot 状态、
@@ -70,35 +70,33 @@ Registry 注入真实值。模型自行填写服务器标识会被拒绝。
 
 ## Spark 配置
 
-当前已验证的 Spark 运行时是 Ollama，而不是直接暴露 vLLM `/health` 的服务。推荐在
-Windows 主机上先建立只读 SSH 本地转发，再让 Studio 只访问本机回环地址：
+正常启动不需要手工固定端口或模型。`pnpm start` / `pnpm start:services` 会先扫描
+`STUDIO_SPARK_HOSTS` 与 `STUDIO_SPARK_PORTS`，对 vLLM 读取 `/v1/models`、对 Ollama
+读取 `/api/tags`，然后把实际发现的 provider、origin 和模型 ID 注入 Coordinator。
+`STUDIO_SPARK_STARTUP_WAIT_MS` 为仍在启动的 Spark 提供有界重试窗口；服务不可用时
+Planner 保持 fail-closed。`pnpm dev` 只启动 Dashboard，不会建立这条服务链路。
 
-```powershell
-ssh -i "$env:USERPROFILE\.ssh\dgx_spark_ed25519" `
-  -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes -N `
-  -L 127.0.0.1:11435:127.0.0.1:11434 `
-  rennaikank@192.168.100.2
-```
+当前已验证的运行实例是 `http://192.168.100.2:8001` 上的 OpenAI-compatible vLLM，
+模型 ID 为 `ornith15-heretic`。这只是本次运行事实，不会被硬编码；启动器始终以
+`/v1/models` 或 `/api/tags` 当前返回的在线服务和模型为准。
 
-已验证模型列表包含 `qwen-fast:latest` 与 `qwen3.8-27b-abliterated:latest`。本仓库的本机
-`.env.local` 已选择前者；该文件被 `.gitignore` 排除，不应提交。
-
-在仓库根目录的本机 `.env` 或 `.env.local` 配置以下服务端变量，不使用 `NEXT_PUBLIC_`：
+默认自动发现配置如下，不使用 `NEXT_PUBLIC_`：
 
 ```dotenv
-LOCAL_AI_PROVIDER=ollama
-LOCAL_AI_HUB_URL=http://127.0.0.1:11435
-LOCAL_AI_MODEL=qwen-fast:latest
+LOCAL_AI_PROVIDER=vllm
+LOCAL_AI_HUB_URL=
+LOCAL_AI_MODEL=
 AI_MAX_CONCURRENCY=12
 AI_MAX_QUEUE=64
 AI_PER_BOT_CONCURRENCY=1
 AI_REQUEST_TIMEOUT_MS=120000
 ```
 
-`ollama` 使用原生 `/api/tags` 和 `/api/chat`，并向支持思考的模型发送 `think: false` 与
-JSON Schema 格式约束。若 Spark 上另行运行了 OpenAI-compatible vLLM 服务，将
-`LOCAL_AI_PROVIDER` 改为 `vllm`，再把 `LOCAL_AI_HUB_URL` 改为该服务的 origin。不要把
-SSH 私钥、API 凭据、正式服地址、白名单或基地坐标写进环境变量以外的提示词、日志或模型上下文。
+如果确实需要固定已批准的服务，可同时填写 `LOCAL_AI_PROVIDER`、`LOCAL_AI_HUB_URL`
+和 `LOCAL_AI_MODEL`；这会优先使用显式端点，而不是自动发现。`ollama` 使用原生
+`/api/tags` 和 `/api/chat`，vLLM 使用 OpenAI-compatible `/v1/models` 和
+`/v1/chat/completions`。不要把 SSH 私钥、API 凭据、正式服地址、白名单或基地坐标
+写进环境变量以外的提示词、日志或模型上下文。
 
 并发 `12` 是当前部署上限，必须保持低于 Spark vLLM 的 `max-num-seqs`。完成本机到 Spark 的新一轮请求基准后，以报告的
 零错误推荐值为准。Spark 不可用时高层目标 fail-closed，Bot Runtime 的 L0 安全与
