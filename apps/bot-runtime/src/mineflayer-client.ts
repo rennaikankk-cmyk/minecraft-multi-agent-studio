@@ -65,6 +65,7 @@ import type {
   CombatDriverObservation,
   CombatPrimitiveAction,
 } from "./combat-driver.js";
+import { attachServerAuth, resolveServerAuthPassword } from "@minecraft-studio/combat";
 import { MineflayerCombatAdapter } from "./combat-mineflayer-adapter.js";
 import { observeSite, digShelter } from "./site-shelter-adapter.js";
 
@@ -1101,6 +1102,8 @@ export class MineflayerBotClient implements BotClient {
   private readonly anarchyNavigation: boolean = false;
   /** chat 监听只绑一次（多次 spawn 不重复叠加）。 */
   private chatBound = false;
+  /** 服务器认证监听的清理函数（断线/spawn 重建时调用）。 */
+  private serverAuthDetach: (() => void) | null = null;
   /** 最近一次熔炉掠夺的物品名（诊断留痕，不参与计数）。 */
   private lastFurnaceLoot: string[] = [];
   readonly movementController: MovementController;
@@ -1164,6 +1167,34 @@ export class MineflayerBotClient implements BotClient {
         ? Number(bot.health)
         : null;
       this.bindInventoryEvents();
+      // 服务器注册/登录自动认证（AuthMe 等）：监听提示消息 → 发命令。
+      // 每次连接只挂一次；密码从环境变量取，绝不入 profile。
+      if (this.serverAuthDetach) {
+        this.serverAuthDetach();
+        this.serverAuthDetach = null;
+      }
+      const env = process.env as Record<string, string | undefined>;
+      const authPassword = this.serverProfileId
+        ? resolveServerAuthPassword(this.serverProfileId, env)
+        : "";
+      // botId 作为密码键比 serverProfileId 更稳定（跨服同名 bot 复用）。
+      const botIdPassword = (bot as { username?: string }).username
+        ? resolveServerAuthPassword((bot as { username: string }).username, env)
+        : "";
+      const effectivePassword = botIdPassword || authPassword;
+      if (effectivePassword) {
+        this.serverAuthDetach = attachServerAuth(
+          bot as never,
+          { password: effectivePassword, promptTimeoutMs: 10_000, confirmTimeoutMs: 8_000 },
+          (state, detail) => {
+            if (state !== "idle") {
+              this.handlers?.onStateChanged?.();
+            }
+            // 认证成功/失败是重要事件，通过 worldState 的 nearbyBlocks 变更
+            // 间接让协调器看到 bot 活了——不需要专门通道。
+          },
+        );
+      }
       if (!this.chatBound) {
         this.chatBound = true;
         // 只上报玩家聊天（第二参为玩家名时）；服务器广播/系统消息不进指挥通道。

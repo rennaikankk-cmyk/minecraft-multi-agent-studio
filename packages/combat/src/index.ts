@@ -273,3 +273,15 @@ export {
   type CombatBotConsumableView,
   type ConsumableAction,
 } from "./consumables.js";
+
+export {
+  attachServerAuth,
+  DEFAULT_AUTH_CONFIG,
+  isLoginPrompt,
+  isRegisterPrompt,
+  isSuccessPrompt,
+  resolveServerAuthPassword,
+  serverAuthPasswordEnvVar,
+  type AuthState,
+  type ServerAuthConfig,
+} from "./server-auth.js";
