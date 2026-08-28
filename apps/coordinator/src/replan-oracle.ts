@@ -30,7 +30,17 @@ export const replanStrategies = [
   "widen-exploration",
   "defer-longer",
   "substitute-resource",
+  /** 切换战斗立场（受信菜单项：只有三个白名单立场可选）。 */
+  "combat-stance",
 ] as const;
+
+export const replanStances = [
+  "preserve-life",
+  "expendable",
+  "aggressive",
+] as const;
+
+export type ReplanStance = (typeof replanStances)[number];
 
 export type ReplanStrategy = (typeof replanStrategies)[number];
 
@@ -46,6 +56,8 @@ const replanDecisionSchema = z
       .optional(),
     /** widen-exploration / defer-longer 的档位参数。 */
     magnitude: z.enum(["small", "medium", "large"]).nullable().optional(),
+    /** combat-stance 时必填，其余必须为 null/缺省。 */
+    stance: z.enum(replanStances).nullable().optional(),
   })
   .strict();
 
@@ -53,6 +65,7 @@ export type ReplanDecision = Readonly<{
   strategy: ReplanStrategy;
   substituteItem: string | null;
   magnitude: "small" | "medium" | "large" | null;
+  stance: ReplanStance | null;
 }>;
 
 /** 各需求允许的替代资源（全部在确定性资源图与别名表内）。 */
@@ -66,6 +79,7 @@ const SUBSTITUTIONS: Readonly<Record<SurvivalNeedKey, readonly string[]>> = Obje
   WEAPON_RECOVERY: Object.freeze([]),
   ARMOR: Object.freeze([]),
   EQUIP_ARMOR: Object.freeze([]),
+  DEATH_RECOVERY: Object.freeze([]),
   SHIELD: Object.freeze([]),
   SHELTER: Object.freeze([]),
   FOOD_SECURITY: Object.freeze([]),
@@ -105,6 +119,7 @@ export function buildReplanPrompt(input: Readonly<{
       { strategy: "widen-exploration", meaning: "explore much farther out (magnitude: small|medium|large)" },
       { strategy: "defer-longer", meaning: "park this need longer and work on others (magnitude: small|medium|large)" },
       { strategy: "substitute-resource", meaning: "acquire an alternative item that fills the same need (substituteItem must be from allowedSubstitutes)" },
+      { strategy: "combat-stance", meaning: "switch combat stance (stance: preserve-life|expendable|aggressive)" },
     ],
     allowedSubstitutes: input.substitutes,
     answerAs: "a single JSON object {strategy, substituteItem, magnitude}",
@@ -155,6 +170,7 @@ export async function askReplanOracle(options: {
     strategy: decision.strategy,
     substituteItem: decision.substituteItem ?? null,
     magnitude: decision.magnitude ?? null,
+    stance: decision.stance ?? null,
   };
 }
 
@@ -166,14 +182,29 @@ export function sanitizeReplanDecision(
   decision: ReplanDecision,
   needKey: SurvivalNeedKey,
 ): ReplanDecision {
+  const fallback: ReplanDecision = {
+    strategy: "rotate-sector",
+    substituteItem: null,
+    magnitude: null,
+    stance: null,
+  };
   if (decision.strategy === "substitute-resource") {
     const allowed = substitutionAllowlist(needKey);
     if (!decision.substituteItem || !allowed.includes(decision.substituteItem)) {
-      return { strategy: "rotate-sector", substituteItem: null, magnitude: null };
+      return fallback;
     }
-    return { ...decision, magnitude: null };
+    return { ...decision, magnitude: null, stance: null };
   }
-  return { strategy: decision.strategy, substituteItem: null, magnitude: decision.magnitude };
+  if (decision.strategy === "combat-stance") {
+    if (!decision.stance) return fallback;
+    return { ...decision, substituteItem: null, magnitude: null };
+  }
+  return {
+    strategy: decision.strategy,
+    substituteItem: null,
+    magnitude: decision.magnitude,
+    stance: null,
+  };
 }
 
 export function replanRequestId(botId: string): string {

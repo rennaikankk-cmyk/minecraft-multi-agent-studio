@@ -3548,6 +3548,22 @@ function deterministicSkillDecision(
       reasonCode: "DETERMINISTIC_FOOD",
     };
   }
+  if (parsed.kind === "combat-stance") {
+    const stanceVersion = advertisedVersion("combat.stance");
+    if (stanceVersion === null) return null;
+    return {
+      action: "invoke_skill",
+      botId: request.botId,
+      taskId: request.taskId,
+      skillId: "combat.stance",
+      skillVersion: stanceVersion,
+      input: {
+        stance: parsed.stance,
+        serverProfileId: TRUSTED_SERVER_PROFILE_PLACEHOLDER,
+      },
+      reasonCode: "DETERMINISTIC_STANCE",
+    };
+  }
   if (parsed.kind === "equip-armor") {
     const equipVersion = advertisedVersion("inventory.equip-armor");
     if (equipVersion === null) return null;

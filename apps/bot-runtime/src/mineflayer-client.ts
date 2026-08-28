@@ -3787,6 +3787,11 @@ export class MineflayerBotClient implements BotClient {
         this.activePathInvocationId = null;
       }
       restoreServerConfirmedDigging();
+      // 移动租约必须在这里归还：anarchy 实测抓到的泄漏——采集成功或失败
+      // 后租约被无限期持有，后续一切移动类技能永远 BOT_MOVEMENT_BUSY。
+      // （safe 模式几乎总在"找不到暴露目标"处提前拒绝，没走到拿租约这步，
+      // 所以这个洞一直没暴露。）release 的 onRelease 回调会停掉移动原语。
+      lease.release(lease.signal.aborted ? "cancelled" : "completed");
     }
 
     // collectblock resolves when the dropped entity disappears. The waiter was
@@ -5457,11 +5462,39 @@ function waitForDurationOrAbort(
   });
 }
 
+/**
+ * 正版凭据的环境变量名：botId 里的非字母数字折成下划线后大写。
+ * 例：studio-bot-01 -> STUDIO_BOT_PASSWORD_STUDIO_BOT_01。
+ */
+export function botPasswordEnvVar(botId: string): string {
+  return `STUDIO_BOT_PASSWORD_${botId.replace(/[^A-Za-z0-9]/gu, "_").toUpperCase()}`;
+}
+
+function resolveOnlinePassword(botId: string): string {
+  const value = process.env[botPasswordEnvVar(botId)]?.trim() ?? "";
+  if (!value) {
+    throw new Error(
+      `Online auth requires ${botPasswordEnvVar(botId)} in the environment; refusing to silently fall back to offline mode.`,
+    );
+  }
+  return value;
+}
+
 export function createMineflayerClient(
   profile: ServerProfile,
   worldState = new WorldStateStore(),
 ): BotClient {
-  const bot = createBot(createMineflayerOptions(profile));
+  const base = createMineflayerOptions(profile);
+  const bot = createBot(
+    profile.auth === "online"
+      ? {
+          ...base,
+          // 我们的 "online" 档映射到 mineflayer 的微软登录；密码只进进程内存。
+          auth: "microsoft" as const,
+          password: resolveOnlinePassword(profile.botId),
+        }
+      : base,
+  );
   bot.loadPlugin(pathfinder);
   // collectblock 会自动加载它依赖的 mineflayer-tool（两者均 MIT，供应链已锁定）。
   bot.loadPlugin(collectBlockPlugin);
@@ -5481,7 +5514,9 @@ export function createMineflayerOptions(profile: ServerProfile) {
     host: profile.host,
     port: profile.port,
     username: profile.username,
-    auth: profile.auth,
+    // offline 档直连；online 档的 microsoft 映射与密码注入在
+    // createMineflayerClient 里做（密码绝不进入本函数的纯返回值）。
+    ...(profile.auth === "offline" ? { auth: "offline" as const } : {}),
     ...(version === false ? {} : { version }),
     hideErrors: true,
     logErrors: false,

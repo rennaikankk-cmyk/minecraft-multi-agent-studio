@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "1.0",
+  "id": "anarchy-local-test",
+  "botId": "studio-bot-01",
+  "purpose": "anarchy",
+  "networkScope": "loopback",
+  "host": "127.0.0.1",
+  "port": 25565,
+  "minecraftVersion": "auto",
+  "username": "StudioBot01",
+  "auth": "offline",
+  "navigation": "anarchy",
+  "combat": {
+    "enabled": true,
+    "stance": "aggressive",
+    "whitelist": { "usernames": ["StudioBot01"], "uuids": [] }
+  },
+  "statusIntervalMs": 1000,
+  "heartbeatIntervalMs": 5000,
+  "stopGracePeriodMs": 5000,
+  "reconnect": { "enabled": true, "maxAttempts": 20, "baseDelayMs": 2000, "maxDelayMs": 60000 }
+}

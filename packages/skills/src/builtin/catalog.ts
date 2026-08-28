@@ -2,6 +2,7 @@ import { buildSkillStatusCatalog, type SkillStatusEntry } from "../skill-status.
 import type { SkillDefinition } from "../types.js";
 import { collectBlockSkill } from "./collect-block.js";
 import { combatDisengageSkill, combatEngageSkill } from "./combat-control.js";
+import { combatStanceSkill } from "./combat-stance.js";
 import { containerTransferSkill } from "./container-transfer.js";
 import { craftItemSkill } from "./craft-item.js";
 import { equipArmorSkill } from "./equip-armor.js";
@@ -40,6 +41,7 @@ export const builtinSkills: readonly AnySkillDefinition[] = Object.freeze([
   equipArmorSkill,
   combatEngageSkill,
   combatDisengageSkill,
+  combatStanceSkill,
   scanBlocksSkill,
   collectBlockSkill,
   craftItemSkill,

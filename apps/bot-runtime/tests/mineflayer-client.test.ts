@@ -1396,7 +1396,8 @@ describe("MineflayerBotClient lifecycle", () => {
     });
     expect(collect).toHaveBeenCalledTimes(2);
     expect(collect.mock.calls.every(([targets]) => targets.length === 1)).toBe(true);
-    expect(cancelTask).toHaveBeenCalledTimes(2);
+    // 租约归还触发的停止原语会多调一次幂等的 cancelTask。
+    expect(cancelTask).toHaveBeenCalledTimes(3);
   });
 
   it.each([

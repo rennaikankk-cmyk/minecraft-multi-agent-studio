@@ -54,7 +54,7 @@ const combatWhitelistUuidSchema = z.string().refine(
 export const serverProfileCombatConfigSchema = z
   .object({
     enabled: z.boolean(),
-    stance: z.enum(["preserve-life", "expendable"]),
+    stance: z.enum(["preserve-life", "expendable", "aggressive"]),
     whitelist: z
       .object({
         usernames: z
@@ -194,7 +194,12 @@ export const serverProfileSchema = z
       .min(3)
       .max(16)
       .regex(MINECRAFT_USERNAME_PATTERN),
-    auth: z.literal("offline"),
+    /**
+     * offline = 离线/破解服；online = 正版账号。凭据**绝不**写入本文件：
+     * online 的密码从环境变量 STUDIO_BOT_PASSWORD_<BOT_ID>（非法字符折成
+     * 下划线）读取，找不到即拒绝启动——不静默降级成离线模式。
+     */
+    auth: z.enum(["offline", "online"]),
     combat: serverProfileCombatConfigSchema.optional(),
     /** 导航档位；缺省 safe。anarchy purpose 建议配 anarchy（也可手动选 safe）。 */
     navigation: serverProfileNavigationSchema.optional(),

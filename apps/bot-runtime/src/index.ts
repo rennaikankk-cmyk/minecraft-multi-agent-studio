@@ -46,7 +46,14 @@ void main().catch((error: unknown) => {
   } else if (error instanceof RuntimeLinkClientError) {
     logger.error("runtime_link_start_failed", { code: error.code });
   } else {
-    logger.error("bot_runtime_start_failed", { code: "UNEXPECTED_ERROR" });
+    logger.error("bot_runtime_start_failed", {
+      code: "UNEXPECTED_ERROR",
+      detail: (error instanceof Error ? error.stack ?? error.message : String(error))
+        .split("\n")
+        .slice(0, 4)
+        .join(" | ")
+        .slice(0, 500),
+    });
   }
   process.exitCode = 1;
 });

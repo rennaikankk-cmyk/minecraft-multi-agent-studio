@@ -157,6 +157,32 @@ describe("assessSurvivalNeeds", () => {
     expect(needs.find((n) => n.key === "TOOL_RECOVERY")).toBeUndefined();
   });
 
+  it("demands death-point recovery while the drop is fresh and unreached", () => {
+    const diedAt = new Date(Date.now() - 2 * 60_000).toISOString();
+    const needs = assess({
+      inventory: [],
+      foodLevel: 20,
+      lastDeath: { x: 120, y: 64, z: -80, dimension: "minecraft:overworld", diedAt },
+    });
+    expect(needs[0]).toMatchObject({
+      key: "DEATH_RECOVERY",
+      score: 85,
+      operatorGoal:
+        "移动到坐标 x=120 y=64 z=-80 附近，回收死亡掉落物",
+    });
+  });
+
+  it("drops death recovery once the bot has reached the drop point", () => {
+    const diedAt = new Date(Date.now() - 2 * 60_000).toISOString();
+    const needs = assess({
+      inventory: [],
+      foodLevel: 20,
+      position: { x: 118, y: 64, z: -78 },
+      lastDeath: { x: 120, y: 64, z: -80, dimension: "minecraft:overworld", diedAt },
+    });
+    expect(needs.find((n) => n.key === "DEATH_RECOVERY")).toBeUndefined();
+  });
+
   it("never explores on an empty food reserve", () => {
     const needs = assess({
       inventory: [{ itemName: "diamond_pickaxe", count: 1 }],
@@ -182,10 +208,24 @@ function assess(options: {
   foodLevel?: number;
   armorPoints?: number;
   shelterBuilt?: boolean;
+  position?: { x: number; y: number; z: number };
+  lastDeath?: {
+    x: number;
+    y: number;
+    z: number;
+    dimension: string;
+    diedAt: string;
+  };
 }): ReturnType<typeof assessSurvivalNeeds> {
   return assessSurvivalNeeds({
     shelterBuilt: options.shelterBuilt ?? false,
-    record: record(options.inventory, options.foodLevel ?? 20, options.armorPoints ?? 0),
+    record: record(
+      options.inventory,
+      options.foodLevel ?? 20,
+      options.armorPoints ?? 0,
+      options.position,
+      options.lastDeath,
+    ),
   });
 }
 
@@ -193,6 +233,14 @@ function record(
   inventory: ReadonlyArray<{ itemName: string; count: number }>,
   foodLevel: number,
   armorPoints: number,
+  position?: { x: number; y: number; z: number },
+  lastDeath?: {
+    x: number;
+    y: number;
+    z: number;
+    dimension: string;
+    diedAt: string;
+  },
 ): BotRegistryRecord {
   return {
     botId: "studio-bot-01",
@@ -213,7 +261,13 @@ function record(
       health: { current: 20, maximum: 20 },
       food: { level: foodLevel, saturation: 5 },
       armorPoints,
-      position: { x: 0, y: 64, z: 0, dimension: "minecraft:overworld" },
+      position: {
+        x: position?.x ?? 0,
+        y: position?.y ?? 64,
+        z: position?.z ?? 0,
+        dimension: "minecraft:overworld",
+      },
+      ...(lastDeath ? { lastDeath } : {}),
       latencyMs: 10,
       currentTask: null,
       safety: {

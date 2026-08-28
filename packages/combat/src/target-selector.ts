@@ -75,7 +75,8 @@ export type CombatTargetDecision = Readonly<{
 const POLICY_BOUNDS = {
   minimumEngageHealth: { minimum: 1, maximum: 20 },
   minimumTotemCount: { minimum: 0, maximum: 36 },
-  maximumHostileCount: { minimum: 1, maximum: 32 },
+  // 上界 99：主动出击立场用"敌对数不设限"（99 = 实战中的不设限）。
+  maximumHostileCount: { minimum: 1, maximum: 99 },
   maximumEngageDistance: { minimum: 1, maximum: 64 },
 } as const;
 
@@ -112,7 +113,11 @@ export function validateEngagementPolicy(
       );
     }
   }
-  if (policy.stance !== "preserve-life" && policy.stance !== "expendable") {
+  if (
+    policy.stance !== "preserve-life" &&
+    policy.stance !== "expendable" &&
+    policy.stance !== "aggressive"
+  ) {
     throw new CombatPolicyError("交战策略 stance 越界，拒绝使用该策略。");
   }
   if (typeof policy.respectGearGap !== "boolean") {

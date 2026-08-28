@@ -105,6 +105,18 @@ describe("deterministic goal parsing", () => {
     ).toBeNull();
   });
 
+  it("parses the coordinator stance template with whitelisted stances only", () => {
+    expect(parseDeterministicGoal("切换战斗立场为 aggressive", [])).toEqual({
+      kind: "combat-stance",
+      stance: "aggressive",
+    });
+    expect(parseDeterministicGoal("切换战斗立场为 pacifist", [])).toBeNull();
+    expect(parseDeterministicGoal("切换战斗立场为 expendable", [])).toEqual({
+      kind: "combat-stance",
+      stance: "expendable",
+    });
+  });
+
   it("dispatches to the first matching template in a fixed order", () => {
     expect(parseDeterministicGoal("获取 oak_log", BINDABLE)).toMatchObject({
       kind: "acquire-item",

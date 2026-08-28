@@ -22,7 +22,13 @@ export type CombatSurvivalStance =
   /** 保命优先：无图腾即失败降级，立即撤退。 */
   | "preserve-life"
   /** 可弃：无图腾属于正常状态，允许在没有图腾的情况下继续交战直到死亡。 */
-  | "expendable";
+  | "expendable"
+  /**
+   * 主动出击：expendable 的全部语义 + 更低的交战门槛（4 血才收手、
+   * 敌对数不再设限）。无规则服对开挂对手的进攻性立场，由神谕或
+   * 运维显式切换，不是默认。
+   */
+  | "aggressive";
 
 export const DEFAULT_SURVIVAL_STANCE: CombatSurvivalStance = "preserve-life";
 
@@ -36,11 +42,20 @@ export function totemAbsenceForcesRetreat(
   return stance === "preserve-life";
 }
 
+/** 主动出击立场：交战阈值全面压低（TargetSelector/RetreatController 消费）。 */
+export function isAggressiveStance(stance: CombatSurvivalStance): boolean {
+  return stance === "aggressive";
+}
+
 export function validateSurvivalStance(
   stance: CombatSurvivalStance,
 ): CombatSurvivalStance {
-  if (stance !== "preserve-life" && stance !== "expendable") {
-    throw new TypeError("存活立场只能是 preserve-life 或 expendable。");
+  if (
+    stance !== "preserve-life" &&
+    stance !== "expendable" &&
+    stance !== "aggressive"
+  ) {
+    throw new TypeError("存活立场只能是 preserve-life、expendable 或 aggressive。");
   }
   return stance;
 }

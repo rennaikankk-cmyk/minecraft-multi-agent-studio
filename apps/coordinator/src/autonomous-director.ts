@@ -164,6 +164,10 @@ export class AutonomousDirector implements AutonomousTaskSource {
   private readonly explorationRadiusStep = new Map<string, number>();
   private readonly nextExplorationAt = new Map<string, number>();
   private readonly shelterDirectionCursor = new Map<string, number>();
+  /** 已完成回收的死亡时间戳（diedAt），防止反复回同一个死点。 */
+  private readonly recoveredDeaths = new Map<string, Set<string>>();
+  /** 神谕给出的一次性立场切换，下一次调度前消费（优先于普通需求）。 */
+  private readonly pendingStanceSwitches = new Map<string, "preserve-life" | "expendable" | "aggressive">();
   /** 神谕给出的一次性替代资源（needKey → item），用一次即消费。 */
   private readonly pendingSubstitutes = new Map<
     string,
@@ -277,6 +281,21 @@ export class AutonomousDirector implements AutonomousTaskSource {
   private maybeStart(record: BotRegistryRecord): void {
     if (!this.started || !eligibleForAutonomy(record)) return;
     if (this.active.has(record.botId)) return;
+    // 神谕的立场切换是单目标指令：优先于任何需求评估立即下发。
+    const pendingStance = this.pendingStanceSwitches.get(record.botId);
+    if (pendingStance !== undefined && !this.tasks.get(record.botId)) {
+      this.pendingStanceSwitches.delete(record.botId);
+      this.dispatchSingleGoal(record, {
+        needKey: "EQUIP_ARMOR",
+        key: "stance-switch",
+        title: "切换战斗立场",
+        operatorGoal: `切换战斗立场为 ${pendingStance}`,
+        reason: `replan combat-stance -> ${pendingStance}`,
+        blockName: null,
+        directionalMining: false,
+      });
+      return;
+    }
     const existing = this.tasks.get(record.botId);
     const nowMs = validDate(this.now()).getTime();
     if (existing && isActiveTask(existing.status)) return;
@@ -313,6 +332,27 @@ export class AutonomousDirector implements AutonomousTaskSource {
    * selects the same need; state changes (task success, inventory delta,
    * respawn) re-assess on the next tick.
    */
+  private dispatchSingleGoal(
+    record: BotRegistryRecord,
+    goal: AutonomousGoal,
+  ): void {
+    const taskId = identifierSchema.parse(this.randomId());
+    const controller = new AbortController();
+    this.active.set(record.botId, {
+      taskId,
+      controller,
+      promise: Promise.resolve(),
+    });
+    const promise = this.runTask(record, taskId, goal, controller);
+    this.active.set(record.botId, { taskId, controller, promise });
+    void promise
+      .finally(() => {
+        const current = this.active.get(record.botId);
+        if (current?.taskId === taskId) this.active.delete(record.botId);
+      })
+      .catch(() => undefined);
+  }
+
   private selectGoal(
     record: BotRegistryRecord,
     nowMs: number,
@@ -320,6 +360,9 @@ export class AutonomousDirector implements AutonomousTaskSource {
     const needs = assessSurvivalNeeds({
       record,
       shelterBuilt: this.shelterBuilt.has(record.botId),
+      recoveredDeaths: [
+        ...(this.recoveredDeaths.get(record.botId) ?? []),
+      ],
     });
     const eligible = needs.filter(
       (need) =>
@@ -790,6 +833,12 @@ export class AutonomousDirector implements AutonomousTaskSource {
         }
         break;
       }
+      case "combat-stance": {
+        if (sanitized.stance) {
+          this.pendingStanceSwitches.set(botId, sanitized.stance);
+        }
+        break;
+      }
       case "rotate-sector":
       default:
         break;
@@ -800,6 +849,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
       strategy: sanitized.strategy,
       substituteItem: sanitized.substituteItem,
       magnitude: sanitized.magnitude,
+      stance: sanitized.stance,
     });
   }
 
@@ -835,6 +885,15 @@ export class AutonomousDirector implements AutonomousTaskSource {
     if (status === "completed") {
       this.consecutiveNeedFailures.set(failureKey, 0);
       if (goal.needKey === "SHELTER") this.shelterBuilt.add(botId);
+      if (goal.needKey === "DEATH_RECOVERY") {
+        const record = this.options.registry.get(botId, validDate(this.now()));
+        const diedAt = record?.currentStatus?.lastDeath?.diedAt;
+        if (diedAt) {
+          const set = this.recoveredDeaths.get(botId) ?? new Set<string>();
+          set.add(diedAt);
+          this.recoveredDeaths.set(botId, set);
+        }
+      }
     } else if (status === "failed") {
       const failures = (this.consecutiveNeedFailures.get(failureKey) ?? 0) + 1;
       this.consecutiveNeedFailures.set(failureKey, failures);

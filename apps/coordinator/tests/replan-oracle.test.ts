@@ -31,14 +31,14 @@ describe("replan oracle", () => {
         { strategy: "substitute-resource", substituteItem: "diamond", magnitude: null },
         "COAL_RESERVE",
       ),
-    ).toEqual({ strategy: "rotate-sector", substituteItem: null, magnitude: null });
+    ).toEqual({ strategy: "rotate-sector", substituteItem: null, magnitude: null, stance: null });
 
     expect(
       sanitizeReplanDecision(
         { strategy: "substitute-resource", substituteItem: "charcoal", magnitude: "large" },
         "COAL_RESERVE",
       ),
-    ).toEqual({ strategy: "substitute-resource", substituteItem: "charcoal", magnitude: null });
+    ).toEqual({ strategy: "substitute-resource", substituteItem: "charcoal", magnitude: null, stance: null });
   });
 
   it("strips substitute parameters from non-substitute strategies", () => {
@@ -47,7 +47,7 @@ describe("replan oracle", () => {
         { strategy: "widen-exploration", substituteItem: "coal", magnitude: "large" },
         "COAL_RESERVE",
       ),
-    ).toEqual({ strategy: "widen-exploration", substituteItem: null, magnitude: "large" });
+    ).toEqual({ strategy: "widen-exploration", substituteItem: null, magnitude: "large", stance: null });
   });
 
   it("exposes no substitutions for needs without safe alternates", () => {

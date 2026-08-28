@@ -930,6 +930,17 @@ export const botStatusV1Schema = z
         // Authenticated Runtime-to-Coordinator fact used by deterministic goal
         // planning. Public bot projections deliberately omit this field.
         inventory: botInventorySchema.optional(),
+        /** 最近一次死亡的事实（坐标/维度/时间），供死亡点回收决策消费。 */
+        lastDeath: z
+          .object({
+            x: z.number().finite(),
+            y: z.number().finite(),
+            z: z.number().finite(),
+            dimension: z.string().min(3).max(128),
+            diedAt: timestampSchema,
+          })
+          .strict()
+          .optional(),
         position: botPositionSchema,
         latencyMs: z.number().int().nonnegative().max(120_000).nullable(),
         currentTask: currentTaskSchema.nullable(),

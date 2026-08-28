@@ -26,7 +26,7 @@
 - 自相矛盾的证据组合**拒绝装载**，例如"真实服跑过但运行时没接线"。
 - 只有四道闸全绿才允许对外称"已验证"（`evidenceSupportsVerifiedClaim`）。
 
-当前注册表包含 22 个技能；已接入 Runtime 的条目保持 **Partial**，其余规划/策略条目标为 **Experimental**。所有技能仍缺 `isolated-server-scenarios` 与 `cross-version-matrix` 两道真实环境闸。
+当前注册表包含 23 个技能；已接入 Runtime 的条目保持 **Partial**，其余规划/策略条目标为 **Experimental**。所有技能仍缺 `isolated-server-scenarios` 与 `cross-version-matrix` 两道真实环境闸。
 真实隔离服六类场景与 1.21.8 跨版本矩阵一次没跑过。这与编译产物里的
 `verification=unverified` 是同一个事实的两种表述（AGENTS.md §8：无隔离测试服时不得声称联机测试通过）。
 
@@ -34,7 +34,7 @@
 
 - Skill ID 后的 SemVer 表示技能输入、输出和行为契约，不表示 Minecraft 服务器版本。
 - 每个 Skill 另有有序 `compatibility.variants`。Runtime 只使用连接后真实协商出的版本/协议，以及当前 registry 的 feature、物品、方块、实体和显式服务端能力探针解析变体；不以 `minVersion/maxVersion` 一刀切。
-- 当前目录中的 22 个 Skill 都声明无额外资源要求的 `portable` 变体；只有证据中的 `runtime-wiring=true` 条目可由 Runtime 执行，其余条目保持 `Experimental`。跨版本真实场景矩阵尚未执行，所以目录上报 `availability=available`、`verification=unverified`，不冒充实机已验证。
+- 当前目录中的 23 个 Skill 都声明无额外资源要求的 `portable` 变体；只有证据中的 `runtime-wiring=true` 条目可由 Runtime 执行，其余条目保持 `Experimental`。跨版本真实场景矩阵尚未执行，所以目录上报 `availability=available`、`verification=unverified`，不冒充实机已验证。
 - 新版本特色 Skill 必须声明它实际依赖的 feature/资源；如果还依赖服务器插件、数据包或规则，则必须等待显式探针。能力为 `unknown` 时 fail-closed，不从版本号猜测。
 - `collect.block`、`craft.item`、`world.place-block` 和 `container.transfer` 当前仍接收目标版本 registry 的原生资源名。兼容变体可以表达旧/新 ID 的替代顺序，但规划器使用的语义资源别名尚未接入。
 
@@ -316,6 +316,31 @@
 - 一次也没取到产物报 `SMELT_OUTPUT_NOT_CONFIRMED`——不伪造成功。
 - 等待产出是 250ms 一轮的 `update` 事件轮询，总时长由 60 秒技能超时兜住；超时与外部取消都会关炉退出。
 - L0 暂停、Runtime 停止、超时或外部取消都会中断，且 `finally` 关炉不吞掉失败。
+
+## `combat.stance@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`combat.control`
+- 风险：R1
+- 适配器操作：`combat.stance-set`
+- 超时：2 秒
+- 自动重试：无（幂等：切到当前立场立即成功）
+
+输入：
+
+```json
+{ "stance": "aggressive", "serverProfileId": "anarchy-main" }
+```
+
+输出遥测：`stance`（切换后的立场）、`changed`。
+
+约束：
+
+- 立场是运维/受信调用方（Dashboard 目标、重规划神谕 combat-stance 菜单项）的**显式配置**，
+  不是 AI 推断的结论（AGENTS.md §0.2）。
+- `preserve-life`：无图腾即撤退；`expendable`：无图腾照打；`aggressive`：expendable 语义
+  + 交战门槛压低（4 血收手、敌对数不限、64 格交战距离）。
+- 切换重建受立场影响的控制器（目标选择/撤退/图腾管理），连接与策略闸状态不动。
 
 ## `food.secure@1.0.0`
 

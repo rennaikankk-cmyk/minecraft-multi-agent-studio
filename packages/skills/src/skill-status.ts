@@ -208,6 +208,10 @@ const EVIDENCE: Readonly<Record<string, SkillEvidence>> = Object.freeze({
     offlineTests: true, runtimeWiring: true,
     isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
   },
+  "combat.stance": {
+    offlineTests: true, runtimeWiring: true,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
   "food.secure": {
     offlineTests: true, runtimeWiring: true,
     isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],

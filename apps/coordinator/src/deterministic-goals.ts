@@ -88,13 +88,19 @@ export type ParsedEquipGoal = Readonly<{
   kind: "equip-armor";
 }>;
 
+export type ParsedStanceGoal = Readonly<{
+  kind: "combat-stance";
+  stance: "preserve-life" | "expendable" | "aggressive";
+}>;
+
 export type DeterministicGoal =
   | ParsedAcquisitionGoal
   | ParsedMovementGoal
   | ParsedScanGoal
   | ParsedFoodGoal
   | ParsedShelterGoal
-  | ParsedEquipGoal;
+  | ParsedEquipGoal
+  | ParsedStanceGoal;
 
 /**
  * 解析一条目标文本。识别顺序刻意固定：先看采集动词+唯一物品（这是自由
@@ -115,6 +121,8 @@ export function parseDeterministicGoal(
   if (food !== null) return food;
   const equip = parseEquipGoal(operatorGoal);
   if (equip !== null) return equip;
+  const stance = parseStanceGoal(operatorGoal);
+  if (stance !== null) return stance;
   return parseShelterGoal(operatorGoal);
 }
 
@@ -226,6 +234,20 @@ export function parseShelterGoal(operatorGoal: string): ParsedShelterGoal | null
   const depth = Number(match[2]);
   if (!Number.isSafeInteger(depth) || depth < 1 || depth > 4) return null;
   return { kind: "dig-shelter", direction, depth, sealItemName };
+}
+
+/**
+ * 协调器立场模板："切换战斗立场为 {stance}"。立场集合与 combat.stance
+ * 技能的输入枚举一致——白名单外的一句话不会被解析。
+ */
+export function parseStanceGoal(operatorGoal: string): ParsedStanceGoal | null {
+  const match =
+    /切换战斗立场为\s*(preserve-life|expendable|aggressive)/u.exec(operatorGoal);
+  if (match === null) return null;
+  return {
+    kind: "combat-stance",
+    stance: match[1] as ParsedStanceGoal["stance"],
+  };
 }
 
 /**

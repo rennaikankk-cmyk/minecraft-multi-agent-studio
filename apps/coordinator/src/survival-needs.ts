@@ -48,6 +48,7 @@ export const SAFE_FOOD_ITEM_NAMES: ReadonlySet<string> = new Set([
 export type SurvivalNeedKey =
   | "FOOD_SECURITY"
   | "EQUIP_ARMOR"
+  | "DEATH_RECOVERY"
   | "TOOL_RECOVERY"
   | "WEAPON_RECOVERY"
   | "TOOL_PROGRESSION"
@@ -85,6 +86,8 @@ export type SurvivalAssessmentInput = Readonly<{
   record: BotRegistryRecord;
   /** 该 Bot 是否已成功挖过避难所（进程内记忆，重启后重来是安全侧的失败）。 */
   shelterBuilt: boolean;
+  /** 已完成回收的死亡时间戳（diedAt ISO 串），避免反复回同一个死点。 */
+  recoveredDeaths?: readonly string[];
 }>;
 
 /**
@@ -94,6 +97,7 @@ export type SurvivalAssessmentInput = Readonly<{
 const PRIORITY_ORDER: readonly SurvivalNeedKey[] = Object.freeze([
   "FOOD_SECURITY",
   "EQUIP_ARMOR",
+  "DEATH_RECOVERY",
   "TOOL_RECOVERY",
   "WEAPON_RECOVERY",
   "TOOL_PROGRESSION",
@@ -132,6 +136,14 @@ const COAL_MINIMUM = 8;
 const IRON_MINIMUM = 6;
 const TORCH_MINIMUM = 16;
 const DIAMOND_PICKAXE_RESERVE = 3;
+/** 死亡点回收窗口：掉落物 5 分钟后开始消失，留 15 分钟是保守上限。 */
+const DEATH_RECOVERY_WINDOW_MS = 15 * 60_000;
+/** 距死点多近算"已到达"（掉落物碰撞拾取半径外扩）。 */
+const DEATH_RECOVERY_ARRIVAL_BLOCKS = 6;
+
+function validNow(): Date {
+  return new Date();
+}
 
 const PICKAXE_TIERS = ["wooden_pickaxe", "stone_pickaxe", "iron_pickaxe", "diamond_pickaxe"] as const;
 const TOOL_SOURCE_BLOCKS = ["oak_log", "stone", "iron_ore", "diamond_ore"] as const;
@@ -155,6 +167,36 @@ export function assessSurvivalNeeds(
     needs.push(foodNeed(FOOD_TARGET - safeFood, foodLevel < 16 ? 78 : 52, safeFood, "minimum"));
   } else if (safeFood < FOOD_TARGET) {
     needs.push(foodNeed(FOOD_TARGET - safeFood, 34, safeFood, "target"));
+  }
+
+  // ---- 死亡点回收：装备掉在原地，走过去就自动拾取（MC 的掉落物靠
+  // 碰撞拾取）。15 分钟内、8 格外、未回收过的死亡点是最有价值的单目标。
+  const lastDeath = status?.lastDeath ?? null;
+  if (
+    lastDeath &&
+    status?.position &&
+    !(input.recoveredDeaths ?? []).includes(lastDeath.diedAt)
+  ) {
+    const deathAgeMs = Date.parse(lastDeath.diedAt);
+    const distance = Math.hypot(
+      status.position.x - lastDeath.x,
+      status.position.y - lastDeath.y,
+      status.position.z - lastDeath.z,
+    );
+    if (
+      Number.isFinite(deathAgeMs) &&
+      validNow().getTime() - deathAgeMs <= DEATH_RECOVERY_WINDOW_MS &&
+      distance > DEATH_RECOVERY_ARRIVAL_BLOCKS
+    ) {
+      needs.push({
+        key: "DEATH_RECOVERY",
+        score: 85,
+        reason: `gear dropped ${Math.round(distance)} blocks away ${Math.round((validNow().getTime() - deathAgeMs) / 60_000)}min ago`,
+        title: "回收死亡掉落",
+        operatorGoal: `移动到坐标 x=${lastDeath.x} y=${lastDeath.y} z=${lastDeath.z} 附近，回收死亡掉落物`,
+        sourceBlock: null,
+      });
+    }
   }
 
   // ---- 工具阶梯：Goal Graph 的主干。每档只看"有没有"，链路（木/石/铁）

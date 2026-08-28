@@ -36,6 +36,7 @@ import {
   type CombatReflexProbeReport,
   type CombatSurvivalStance,
   type CombatTargetRefusalCode,
+  validateSurvivalStance,
   type CombatThreat,
   type CombatVector3,
   type CombatWeaponCandidate,
@@ -271,11 +272,26 @@ const ANARCHY_RETREAT_POLICY = Object.freeze({
   respectGearGap: false,
 });
 
+const AGGRESSIVE_ENGAGEMENT_POLICY = Object.freeze({
+  ...ANARCHY_ENGAGEMENT_POLICY,
+  minimumEngageHealth: 4,
+  maximumHostileCount: 99,
+  maximumEngageDistance: 64,
+});
+
+const AGGRESSIVE_RETREAT_POLICY = Object.freeze({
+  ...ANARCHY_RETREAT_POLICY,
+  emergencyHealth: 3,
+  withdrawHealth: 4,
+  outnumberedAbove: 99,
+});
+
 export class CombatDriver {
   private readonly identity: CombatIdentityRegistry;
   private readonly threatAnalyzer: ThreatAnalyzer;
-  private readonly targetSelector: TargetSelector;
-  private readonly retreatController: RetreatController;
+  /** 立场切换会重建（setStance），故非 readonly。 */
+  private targetSelector: TargetSelector;
+  private retreatController: RetreatController;
   private readonly retaliationTargetSelector: TargetSelector;
   private readonly retaliationRetreatController: RetreatController;
   private readonly predictionEngine = new PredictionEngine();
@@ -291,6 +307,8 @@ export class CombatDriver {
   private movementController: MovementController;
   private lastObservedAtMs: number | null = null;
   private reflexProbe: CombatReflexProbeReport | null;
+  /** 当前立场：构造后可由 combat.stance 技能切换（神谕/运维入口）。 */
+  private currentStance: CombatSurvivalStance;
   private reflexClearance: CombatReflexDecision;
   private operationTail: Promise<void> = Promise.resolve();
   private connectionAbortController = new AbortController();
@@ -304,6 +322,7 @@ export class CombatDriver {
       throw new TypeError("Combat policy and whitelist must use the same server profile.");
     }
     this.policyGate = config.policyGate;
+    this.currentStance = config.stance;
     this.identity = CombatIdentityRegistry.fromOperatorConfig({
       provenance: "operator-config",
       serverProfileId: config.serverProfileId,
@@ -314,11 +333,11 @@ export class CombatDriver {
     const anarchy = config.combatIntensity === "anarchy";
     this.threatAnalyzer = new ThreatAnalyzer(this.identity);
     this.targetSelector = new TargetSelector({
-      ...(anarchy ? ANARCHY_ENGAGEMENT_POLICY : DEFAULT_ENGAGEMENT_POLICY),
+      ...this.engagementPolicyFor(anarchy, config.stance),
       stance: config.stance,
     });
     this.retreatController = new RetreatController({
-      ...(anarchy ? ANARCHY_RETREAT_POLICY : DEFAULT_RETREAT_POLICY),
+      ...this.retreatPolicyFor(anarchy, config.stance),
       stance: config.stance,
     });
     this.retaliationTargetSelector = new TargetSelector({
@@ -2014,8 +2033,48 @@ export class CombatDriver {
     }
   }
 
+  private engagementPolicyFor(
+    anarchy: boolean,
+    stance: CombatSurvivalStance,
+  ) {
+    if (stance === "aggressive") return AGGRESSIVE_ENGAGEMENT_POLICY;
+    return anarchy ? ANARCHY_ENGAGEMENT_POLICY : DEFAULT_ENGAGEMENT_POLICY;
+  }
+
+  private retreatPolicyFor(
+    anarchy: boolean,
+    stance: CombatSurvivalStance,
+  ) {
+    if (stance === "aggressive") return AGGRESSIVE_RETREAT_POLICY;
+    return anarchy ? ANARCHY_RETREAT_POLICY : DEFAULT_RETREAT_POLICY;
+  }
+
+  /** 当前立场（combat.stance 技能与状态遥测消费）。 */
+  survivalStance(): CombatSurvivalStance {
+    return this.currentStance;
+  }
+
+  /**
+   * 切换存活立场（神谕"combat-stance"菜单项的执行面）。重建受立场影响
+   * 的控制器，保持连接/策略/节奏状态不动——这是一次纯战术参数切换。
+   */
+  setStance(next: CombatSurvivalStance): CombatSurvivalStance {
+    this.currentStance = validateSurvivalStance(next);
+    const anarchy = this.config.combatIntensity === "anarchy";
+    this.targetSelector = new TargetSelector({
+      ...this.engagementPolicyFor(anarchy, this.currentStance),
+      stance: this.currentStance,
+    });
+    this.retreatController = new RetreatController({
+      ...this.retreatPolicyFor(anarchy, this.currentStance),
+      stance: this.currentStance,
+    });
+    this.totemManager = this.newTotemManager(this.currentStance);
+    return this.currentStance;
+  }
+
   private newTotemManager(
-    stance: CombatSurvivalStance = this.config.stance,
+    stance: CombatSurvivalStance = this.currentStance,
   ): TotemManager {
     return new TotemManager({
       ...DEFAULT_TOTEM_POLICY,

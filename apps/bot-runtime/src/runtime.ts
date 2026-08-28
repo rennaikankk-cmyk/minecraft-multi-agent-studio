@@ -60,7 +60,11 @@ import {
   type SkillCompatibilityResolution,
   type SkillExecutionAuthorization,
 } from "@minecraft-studio/skills";
-import { combatControlInputSchema } from "@minecraft-studio/skills";
+import {
+  combatControlInputSchema,
+  combatStanceCapabilityInputSchema,
+  combatStanceCapabilityOutputSchema,
+} from "@minecraft-studio/skills";
 import { z } from "zod";
 
 import {
@@ -334,6 +338,14 @@ export class SingleBotRuntime {
     { fingerprint: string; result: Promise<BotStopResultV1> }
   >();
   private readonly activeSkillControllers = new Map<string, AbortController>();
+  /** 最近一次死亡事实；由 death 事件写入，随 status 上报供回收决策。 */
+  private lastDeath: {
+    x: number;
+    y: number;
+    z: number;
+    dimension: string;
+    diedAt: string;
+  } | null = null;
   private readonly activeSkillTasks = new Map<
     string,
     Readonly<{
@@ -1193,6 +1205,7 @@ export class SingleBotRuntime {
           food: snapshot.food,
           armorPoints: snapshot.armorPoints,
           inventory: snapshot.inventory,
+          ...(this.lastDeath ? { lastDeath: this.lastDeath } : {}),
           position: snapshot.position,
           latencyMs: snapshot.latencyMs,
           currentTask: this.currentTaskTelemetry(),
@@ -1871,6 +1884,29 @@ export class SingleBotRuntime {
     ) {
       return this.invokeCombatControl(request, activeClient, isCombatDisengage);
     }
+    if (
+      request.capability === "combat.control" &&
+      request.operation === "combat.stance-set"
+    ) {
+      // 立场切换是驱动内参数变更，不经过实体客户端；没有战斗驱动时如实拒绝。
+      if (!this.combatDriver) {
+        throw new SkillFault("COMBAT_DRIVER_UNAVAILABLE");
+      }
+      const input = combatStanceCapabilityInputSchema.safeParse(request.input);
+      if (!input.success) {
+        throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+      }
+      const before = this.combatDriver.survivalStance();
+      const after = this.combatDriver.setStance(input.data.stance);
+      this.dependencies.logger.info("bot_runtime_combat_stance_set", this.logFields({
+        from: before,
+        to: after,
+      }));
+      return combatStanceCapabilityOutputSchema.parse({
+        stance: after,
+        changed: after !== before,
+      });
+    }
     if (!activeClient.invokeSkillCapability) {
       throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE");
     }
@@ -2049,6 +2085,15 @@ export class SingleBotRuntime {
     }>,
   ): void {
     if (generation !== this.generation || this.stopping) return;
+    if (info.position && info.dimension) {
+      this.lastDeath = {
+        x: Math.floor(info.position.x),
+        y: Math.floor(info.position.y),
+        z: Math.floor(info.position.z),
+        dimension: info.dimension,
+        diedAt: this.now().toISOString(),
+      };
+    }
     this.cancelActiveSkills();
     this.cancelRunningCoordinatorTasks();
     this.safetyController.reset();

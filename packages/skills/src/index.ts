@@ -91,6 +91,14 @@ export {
   scanBlocksStateSchema,
 } from "./builtin/scan-blocks.js";
 export {
+  combatStanceCapabilityInputSchema,
+  combatStanceCapabilityOutputSchema,
+  combatStanceInputSchema,
+  combatStanceOutputSchema,
+  combatStanceSkill,
+  combatStanceStateSchema,
+} from "./builtin/combat-stance.js";
+export {
   SECURE_FOOD_MAX_TARGET,
   SECURE_FOOD_TIMEOUT_MS,
   secureFoodCapabilityInputSchema,
