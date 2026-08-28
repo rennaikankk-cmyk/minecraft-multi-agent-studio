@@ -1618,9 +1618,23 @@ describe("SingleBotRuntime", () => {
     client.spawn();
     await vi.advanceTimersByTimeAsync(0);
 
+    // 第一份危急观测只建立基线（稳定低血不再立刻断线——那会把低血重连
+    // 变成断线死循环）；血量继续下降的第二份观测才触发边界上的断线保号。
     expect(client.actionCalls.map(({ kind }) => kind)).toEqual([
       "PAUSE_NORMAL_TASKS",
+      "CONSUME_SAFE_FOOD",
     ]);
+    expect(client.closeCalls).toBe(0);
+    expect(runtime.getState()).toBe("online");
+
+    // 推过动作冷却期，第二份（正在下降的）危急观测才会产生新动作。
+    await vi.advanceTimersByTimeAsync(6_000);
+    client.setSnapshot({ ...snapshot, health: { current: 2, maximum: 20 } });
+    client.stateChanged();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // EMERGENCY_STOP 不经过 client.actionCalls：它在 runtime 边界直接走
+    // performStop。断言降血后的断线保号效果本身。
     expect(client.closeCalls).toBe(1);
     expect(runtime.getState()).toBe("offline");
     expect(runtime.getMetricsSnapshot()).toEqual(
