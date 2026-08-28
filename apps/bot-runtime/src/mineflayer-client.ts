@@ -1884,11 +1884,14 @@ export class MineflayerBotClient implements BotClient {
       .map((position) => this.bot.blockAt(position))
       .filter((block): block is NonNullable<typeof block> => block !== null);
     if (targets.length === 0) {
-      return collectBlockCapabilityOutputSchema.parse({
-        blockName: input.data.blockName,
-        targetsFound: 0,
-        itemsCollected: 0,
-      });
+      // No target is a proved no-op: findBlocks/blockAt only read the loaded
+      // world, and collectBlock has not started. Report it as a refusal so a
+      // multi-step planner can reobserve or explore instead of treating a
+      // zero-count `completed` result as an uncertain non-idempotent action.
+      throw new SkillRefusal(
+        "COLLECT_TARGET_UNREACHABLE",
+        `No exposed ${input.data.blockName} target was found within ${input.data.maxDistance} blocks.`,
+      );
     }
 
     // 采集途中不允许插件把物品倒进任何箱子——入库是 container.transfer

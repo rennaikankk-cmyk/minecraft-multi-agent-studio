@@ -21,6 +21,7 @@ function registerBot(
   options: Readonly<{
     serverProfileId?: string;
     health?: number;
+    maximumHealth?: number | null;
     food?: number;
     armorPoints?: number;
     latencyMs?: number;
@@ -43,7 +44,10 @@ function registerBot(
       sequence: 1,
       observedAt: timestamp,
       connectionState: "online",
-      health: { current: options.health ?? 20, maximum: 20 },
+      health: {
+        current: options.health ?? 20,
+        maximum: options.maximumHealth === undefined ? 20 : options.maximumHealth,
+      },
       food: { level: options.food ?? 20, saturation: 5 },
       armorPoints: options.armorPoints ?? 20,
       position: { x: 0, y: 64, z: 0, dimension: "minecraft:overworld" },
@@ -195,6 +199,19 @@ describe("BotAssignmentService", () => {
       releasedLeaseIds: [first.leaseId],
     });
     expect(service.acquire(request("task-01"), BASE_TIME).botId).toBe("worker-b");
+  });
+
+  it("accepts a live Bot when Mineflayer has not advertised max health", () => {
+    const registry = new BotRegistry({ staleAfterMs: 5_000 });
+    registerBot(registry, "worker-unknown-max", "runtime-unknown-max", {
+      maximumHealth: null,
+    });
+    const service = new BotAssignmentService({ registry, now: () => BASE_TIME });
+
+    expect(service.rank(request("task-unknown-max"), BASE_TIME)).toHaveLength(1);
+    expect(service.acquire(request("task-unknown-max"), BASE_TIME).botId).toBe(
+      "worker-unknown-max",
+    );
   });
 
   it("fails closed for a busy or explicitly unavailable preferred Bot", () => {

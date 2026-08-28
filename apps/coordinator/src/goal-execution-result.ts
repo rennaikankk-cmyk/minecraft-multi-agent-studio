@@ -6,6 +6,7 @@ import {
 } from "@minecraft-studio/protocol";
 
 import { GoalLifecycleStoreError } from "./goal-lifecycle-store.js";
+import { BotAssignmentError } from "./bot-assignment.js";
 import {
   LocalPlannerError,
   type LocalPlanResult,
@@ -56,6 +57,7 @@ export function mapGoalExecutionError(
   if (timedOut) return "AI_TIMEOUT";
   if (aborted) return "CONTROL_LINK_STOPPED";
   if (cause instanceof GoalLifecycleStoreError) return cause.code;
+  if (cause instanceof BotAssignmentError) return "BOT_UNAVAILABLE";
   if (cause instanceof AISchedulerError) {
     if (cause.code === "AI_QUEUE_FULL") return "AI_QUEUE_FULL";
     if (cause.code === "AI_REQUEST_TIMEOUT") return "AI_TIMEOUT";

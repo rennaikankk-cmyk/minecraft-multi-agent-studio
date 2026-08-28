@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -8,6 +9,7 @@ import test from "node:test";
 import {
   createLocalBotSlots,
   discoverLocalAI,
+  discoverLocalAIWithRetry,
   loadLocalAIKeyFile,
   StudioLocalManager,
 } from "./studio-local-manager.mjs";
@@ -73,6 +75,38 @@ test("uses the local API key when probing an authenticated vLLM endpoint", async
     model: "ornith15-heretic",
   });
   assert.equal(discovered.status.state, "connected");
+});
+
+test("retries Spark discovery during the bounded startup window and selects the current model", async (context) => {
+  const readyAt = Date.now() + 80;
+  const server = createServer((request, response) => {
+    if (request.url !== "/v1/models") {
+      response.writeHead(404).end();
+      return;
+    }
+    response.setHeader("Content-Type", "application/json");
+    response.end(JSON.stringify({
+      data: Date.now() >= readyAt ? [{ id: "ornith15-heretic" }] : [],
+    }));
+  });
+  await listen(server);
+  context.after(() => close(server));
+  const address = server.address();
+  assert(address && typeof address !== "string");
+
+  const discovered = await discoverLocalAIWithRetry(
+    {
+      STUDIO_SPARK_HOSTS: "127.0.0.1",
+      STUDIO_SPARK_PORTS: String(address.port),
+    },
+    { startupWaitMs: 500, retryIntervalMs: 25 },
+  );
+  assert.deepEqual(discovered.config, {
+    provider: "vllm",
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    model: "ornith15-heretic",
+  });
+  assert.equal(discovered.status.model, "ornith15-heretic");
 });
 
 test("loads a private vLLM key file without changing endpoint discovery settings", async (context) => {
@@ -169,6 +203,127 @@ test("creates and reloads a managed Bot through the loopback API", async (contex
   assert.equal(status.bots[0].processState, "running");
 });
 
+test("cleans up a forced Bot stop before a restart can reuse its slot", async () => {
+  const manager = new StudioLocalManager({
+    repositoryRoot: process.cwd(),
+    runtimeRoot: await mkdtemp(path.join(tmpdir(), "studio-manager-stop-test-")),
+    port: 0,
+    token: TOKEN,
+    slots: createLocalBotSlots(SECRET, 1),
+    aiStatus: unavailableStatus(),
+    environment: { STUDIO_SPARK_AUTO_DISCOVERY: "0" },
+    runtimeLinkPort: 3220,
+    packagedMode: false,
+    stopTimeoutMs: 5,
+    forceKillWaitMs: 5,
+  });
+  const config = {
+    botId: "studio-bot-01",
+    username: "StudioBot1",
+    serverHost: "127.0.0.1",
+    serverPort: 25565,
+    minecraftVersion: "auto",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    processState: "running",
+    lastError: null,
+  };
+  const child = new EventEmitter();
+  child.exitCode = null;
+  child.connected = true;
+  child.send = (_message, callback) => {
+    child.connected = false;
+    callback?.(null);
+  };
+  child.disconnect = () => {
+    child.connected = false;
+  };
+  child.kill = () => {
+    child.exitCode = 0;
+    return true;
+  };
+  manager.configs.set(config.botId, config);
+  manager.processes.set(config.botId, {
+    child,
+    log: { end() {} },
+    logClosed: false,
+    stopping: false,
+  });
+
+  await manager.stopBot(config.botId);
+
+  assert.equal(manager.processes.has(config.botId), false);
+  assert.equal(config.processState, "stopped");
+  assert.equal(child.exitCode, 0);
+  await rm(manager.runtimeRoot, { recursive: true, force: true });
+});
+
+test("ignores a stale Runtime error after a restarted Bot owns the slot", async () => {
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "studio-manager-error-test-"));
+  await mkdir(path.join(runtimeRoot, "logs"), { recursive: true });
+  const children = [];
+  const manager = new StudioLocalManager({
+    repositoryRoot: process.cwd(),
+    runtimeRoot,
+    port: 0,
+    token: TOKEN,
+    slots: createLocalBotSlots(SECRET, 1),
+    aiStatus: unavailableStatus(),
+    environment: { STUDIO_SPARK_AUTO_DISCOVERY: "0" },
+    runtimeLinkPort: 3220,
+    packagedMode: false,
+    spawn: () => {
+      const child = new EventEmitter();
+      child.stdout = fakeOutputStream();
+      child.stderr = fakeOutputStream();
+      child.exitCode = null;
+      child.connected = false;
+      child.pid = children.length + 1;
+      child.kill = () => {
+        child.exitCode = 0;
+        queueMicrotask(() => child.emit("exit", 0, null));
+        return true;
+      };
+      children.push(child);
+      return child;
+    },
+    stopTimeoutMs: 50,
+    forceKillWaitMs: 50,
+  });
+  const config = {
+    botId: "studio-bot-01",
+    username: "StudioBot1",
+    serverHost: "127.0.0.1",
+    serverPort: 25565,
+    minecraftVersion: "auto",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    processState: "stopped",
+    lastError: null,
+  };
+  manager.configs.set(config.botId, config);
+
+  await manager.startBot(config.botId);
+  const first = children[0];
+  const firstManaged = manager.processes.get(config.botId);
+  assert(first && firstManaged);
+  firstManaged.stopping = true;
+  first.exitCode = 0;
+  first.emit("exit", 0, null);
+
+  await manager.startBot(config.botId);
+  const second = children[1];
+  assert(second);
+  assert.equal(config.processState, "running");
+
+  first.emit("error", new Error("stale process failure"));
+
+  assert.equal(config.processState, "running");
+  assert.equal(config.lastError, null);
+  await manager.stopBot(config.botId);
+  await rm(runtimeRoot, { recursive: true, force: true });
+});
+
 function fakeStart(manager) {
   return async (botId) => {
     const config = manager.configs.get(botId);
@@ -176,6 +331,13 @@ function fakeStart(manager) {
     config.processState = "running";
     config.updatedAt = new Date().toISOString();
   };
+}
+
+function fakeOutputStream() {
+  const stream = new EventEmitter();
+  stream.setEncoding = () => undefined;
+  stream.pipe = () => stream;
+  return stream;
 }
 
 function unavailableStatus() {

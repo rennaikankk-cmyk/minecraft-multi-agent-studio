@@ -151,6 +151,22 @@ export {
 } from "./local-planner.js";
 
 export {
+  AutonomousConfigError,
+  loadAutonomousConfig,
+  type AutonomousConfig,
+  type AutonomousConfigErrorCode,
+} from "./autonomous-config.js";
+
+export {
+  AUTONOMOUS_GOAL_SEQUENCE,
+  AutonomousDirector,
+  type AutonomousDirectorOptions,
+  type AutonomousTaskListener,
+  type AutonomousTaskSource,
+  type AutonomousTaskView,
+} from "./autonomous-director.js";
+
+export {
   MAX_LOCAL_PLANNER_PROMPT_BYTES,
   LOCAL_PLANNER_PROMPT_VERSION,
   LOCAL_PLANNER_SYSTEM_PROMPT,

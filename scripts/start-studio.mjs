@@ -7,7 +7,7 @@ import { parseEnv } from "node:util";
 
 import {
   createLocalBotSlots,
-  discoverLocalAI,
+  discoverLocalAIWithRetry,
   loadLocalAIKeyFile,
   StudioLocalManager,
 } from "./studio-local-manager.mjs";
@@ -98,7 +98,7 @@ const botSlots = withConfiguredFirstSlotKey(
   createLocalBotSlots(runtimeMasterSecret, maxBots),
   hostEnvironment.BOT_RUNTIME_LINK_KEY_ID,
 );
-const aiDiscovery = await discoverLocalAI(hostEnvironment);
+const aiDiscovery = await discoverLocalAIWithRetry(hostEnvironment);
 const effectiveHostEnvironment = aiDiscovery.config
   ? {
       ...hostEnvironment,
@@ -651,11 +651,21 @@ async function stopService(service) {
     if (process.platform === "win32" && child.connected) {
       child.send({ type: "studio.shutdown" }, (error) => {
         if (error && child.exitCode === null) child.kill("SIGTERM");
+        disconnectChild(child);
       });
     } else {
       child.kill("SIGTERM");
     }
   });
+}
+
+function disconnectChild(child) {
+  if (!child.connected || typeof child.disconnect !== "function") return;
+  try {
+    child.disconnect();
+  } catch {
+    // The child may have exited between the connected check and disconnect.
+  }
 }
 
 function validSecret(value) {

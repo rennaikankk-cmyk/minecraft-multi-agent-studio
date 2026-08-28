@@ -690,6 +690,34 @@ describe("MineflayerBotClient lifecycle", () => {
     expect(collect).not.toHaveBeenCalled();
   });
 
+  it("refuses an empty resource search before entering collectblock", async () => {
+    const emitter = new EventEmitter();
+    const bot = emitter as unknown as Bot;
+    const collect = vi.fn(async () => undefined);
+    Object.assign(bot, {
+      game: { dimension: "overworld" },
+      registry: { blocksByName: { oak_log: { id: 49 } } },
+      inventory: { items: () => [] },
+      entity: { position: new Vec3(0, 64, 0) },
+      world: {},
+      pathfinder: collectPathfinder(),
+      findBlocks: vi.fn(() => []),
+      blockAt: vi.fn(() => null),
+      collectBlock: {
+        chestLocations: [] as Vec3[],
+        movements: null as Movements | null,
+        collect,
+        cancelTask: vi.fn(async () => undefined),
+      },
+    });
+    const client = new MineflayerBotClient(bot, "auto", "isolated-test-profile");
+
+    await expect(
+      client.invokeSkillCapability(collectRequest("invocation-collect-empty")),
+    ).rejects.toMatchObject({ code: "COLLECT_TARGET_UNREACHABLE" });
+    expect(collect).not.toHaveBeenCalled();
+  });
+
   it("drops targets the bounded pre-check proves unreachable instead of aborting the batch", async () => {
     // CollectBlock.js:33 的 `// TODO: options.ignoreNoPath` 意味着 collectAll
     // 里任一目标 goto 被拒就中止整批。实测 40 个暴露目标里 7 个是 noPath，

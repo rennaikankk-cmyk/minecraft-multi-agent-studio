@@ -1,5 +1,6 @@
 param(
   [string]$JavaExecutable = $env:MC_TEST_JAVA_EXE,
+  [string]$RuntimeRoot = $env:MC_TEST_RUNTIME_ROOT,
   [string]$ServerDirectory = $env:MC_TEST_SERVER_DIR,
   [string]$ServerProfilePath = $env:BOT_SERVER_PROFILE_PATH,
   [string]$PnpmExecutable = $env:MC_TEST_PNPM_EXE,
@@ -27,7 +28,13 @@ function Ensure-FileHashCommand {
 Ensure-FileHashCommand
 
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
-$runtimeRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot "runtime-data\isolated-test"))
+$runtimeRootCandidate = if ([string]::IsNullOrWhiteSpace($RuntimeRoot)) {
+  Join-Path $projectRoot "runtime-data\isolated-test"
+} elseif ([IO.Path]::IsPathRooted($RuntimeRoot)) {
+  $RuntimeRoot
+} else {
+  Join-Path $projectRoot $RuntimeRoot
+}
 
 function Assert-ContainedPath {
   param(
@@ -90,7 +97,7 @@ function Assert-NoReparsePointUnderRoot {
   }
 }
 
-$runtimeRoot = Assert-ContainedPath -Candidate $runtimeRoot -Root $projectRoot -Label "Runtime directory"
+$runtimeRoot = Assert-ContainedPath -Candidate $runtimeRootCandidate -Root $projectRoot -Label "Runtime directory"
 Assert-NoReparsePointInPath -Path $runtimeRoot -Label "Runtime directory"
 if (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) {
   throw "Runtime directory is missing; run scripts/prepare-isolated-minecraft.ps1 first."

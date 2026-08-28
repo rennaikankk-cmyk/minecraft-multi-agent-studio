@@ -19,7 +19,17 @@ const DEFAULT_SPARK_HOSTS = Object.freeze([
   "spark.local",
   "127.0.0.1",
 ]);
-const DEFAULT_SPARK_PORTS = Object.freeze([18100, 8000, 8001, 11434]);
+// Keep the historical loopback tunnels in the discovery set as well as the
+// directly reachable Spark service ports. The endpoint probe still requires a
+// real /v1/models or /api/tags response before any service is selected.
+const DEFAULT_SPARK_PORTS = Object.freeze([
+  18100,
+  18102,
+  8000,
+  8001,
+  11434,
+  11435,
+]);
 const MAX_REQUEST_BYTES = 16 * 1024;
 const BOT_ID_PATTERN = /^studio-bot-([0-9]{2})$/u;
 const USERNAME_PATTERN = /^[A-Za-z0-9_]{3,16}$/u;
@@ -99,7 +109,7 @@ export async function discoverLocalAI(environment = process.env) {
   const candidates = [];
   for (const host of hosts) {
     for (const port of ports) {
-      const provider = port === 11434 ? "ollama" : "vllm";
+      const provider = port === 11434 || port === 11435 ? "ollama" : "vllm";
       candidates.push({
         provider,
         baseUrl: `http://${urlHost(host)}:${port}`,
@@ -148,6 +158,44 @@ export async function discoverLocalAI(environment = process.env) {
       "未在已批准的 Spark 主机和端口上发现推理服务。",
     ),
   };
+}
+
+/**
+ * Spark is often brought up a few seconds before or after the desktop
+ * launcher. Give the configured/discovered endpoint a bounded startup window
+ * so a transient boot race does not permanently disable the Coordinator for
+ * the whole Studio process.
+ */
+export async function discoverLocalAIWithRetry(
+  environment = process.env,
+  options = {},
+) {
+  const startupWaitMs = boundedDiscoveryWait(
+    options.startupWaitMs ?? environment.STUDIO_SPARK_STARTUP_WAIT_MS,
+    15_000,
+    "STUDIO_SPARK_STARTUP_WAIT_MS",
+  );
+  const retryIntervalMs = boundedDiscoveryWait(
+    options.retryIntervalMs,
+    1_000,
+    "Spark discovery retry interval",
+  );
+  let latest = await discoverLocalAI(environment);
+  if (
+    latest.config ||
+    latest.status.state === "disabled" ||
+    startupWaitMs === 0
+  ) {
+    return latest;
+  }
+
+  const deadline = Date.now() + startupWaitMs;
+  while (Date.now() < deadline) {
+    await delay(Math.min(retryIntervalMs, deadline - Date.now()));
+    latest = await discoverLocalAI(environment);
+    if (latest.config) return latest;
+  }
+  return latest;
 }
 
 export function createLocalBotSlots(masterSecret, count = 16) {
@@ -377,7 +425,7 @@ export class StudioLocalManager {
     const args = this.options.packagedMode
       ? ["--studio-service", "apps/bot-runtime/dist/index.js"]
       : ["--import", shutdownPreload, entry];
-    const child = spawn(process.execPath, args, {
+    const child = (this.options.spawn ?? spawn)(process.execPath, args, {
       cwd: this.options.repositoryRoot,
       env: {
         ...this.options.environment,
@@ -398,18 +446,30 @@ export class StudioLocalManager {
     child.stderr.pipe(log, { end: false });
     this.observeRuntimeOutput(config, child.stdout);
     this.observeRuntimeOutput(config, child.stderr);
-    this.processes.set(botId, { child, log });
+    const managed = {
+      child,
+      log,
+      logClosed: false,
+      stopping: false,
+    };
+    this.processes.set(botId, managed);
     config.processState = "running";
     config.updatedAt = new Date().toISOString();
     child.once("error", (cause) => {
+      const current = this.processes.get(botId);
+      if (current?.child !== child) return;
       config.processState = "error";
       config.lastError = boundedError(cause);
       config.updatedAt = new Date().toISOString();
     });
     child.once("exit", (code, signal) => {
       const current = this.processes.get(botId);
-      if (current?.child === child) this.processes.delete(botId);
-      log.end();
+      const isCurrent = current?.child === child;
+      if (isCurrent) this.processes.delete(botId);
+      closeManagedLog(managed);
+      // A forced stop can be followed by a delayed exit event. A newer
+      // Runtime must remain authoritative when that old event arrives.
+      if (!isCurrent && managed.stopping) return;
       config.updatedAt = new Date().toISOString();
       if (this.stopping || config.processState === "stopping") {
         config.processState = "stopped";
@@ -424,38 +484,72 @@ export class StudioLocalManager {
 
   async stopBot(botId) {
     const config = this.configs.get(botId);
-    const process = this.processes.get(botId);
-    if (!config || !process || process.child.exitCode !== null) {
-      if (config) config.processState = "stopped";
+    const managed = this.processes.get(botId);
+    const child = managed?.child;
+    if (!config || !managed || child.exitCode !== null) {
+      if (managed && this.processes.get(botId) === managed) {
+        this.processes.delete(botId);
+      }
+      if (config) {
+        config.processState = "stopped";
+        config.updatedAt = new Date().toISOString();
+      }
       return;
     }
+    managed.stopping = true;
     config.processState = "stopping";
     config.updatedAt = new Date().toISOString();
     await new Promise((resolve) => {
       let settled = false;
+      let timer;
+      let forceKillTimer;
       const finish = () => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        if (forceKillTimer) clearTimeout(forceKillTimer);
+        if (this.processes.get(botId) === managed) {
+          this.processes.delete(botId);
+        }
+        closeManagedLog(managed);
         resolve();
       };
-      const timer = setTimeout(() => {
-        if (process.child.exitCode === null) process.child.kill("SIGKILL");
-        finish();
-      }, 10_000);
-      process.child.once("exit", finish);
-      if (process.child.connected) {
-        process.child.send({ type: "studio.shutdown" }, (error) => {
-          if (error && process.child.exitCode === null) {
-            process.child.kill("SIGTERM");
+      const forceKill = () => {
+        if (child.exitCode !== null) {
+          finish();
+          return;
+        }
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // The exit event or bounded fallback below still completes cleanup.
+        }
+        if (!settled) {
+          forceKillTimer = setTimeout(
+            finish,
+            this.options.forceKillWaitMs ?? 2_000,
+          );
+        }
+      };
+      timer = setTimeout(() => {
+        forceKill();
+      }, this.options.stopTimeoutMs ?? 10_000);
+      child.once("exit", finish);
+      if (child.connected) {
+        child.send({ type: "studio.shutdown" }, (error) => {
+          if (error && child.exitCode === null) {
+            child.kill("SIGTERM");
           }
+          disconnectChild(child);
         });
       } else {
-        process.child.kill("SIGTERM");
+        child.kill("SIGTERM");
       }
     });
-    config.processState = "stopped";
-    config.updatedAt = new Date().toISOString();
+    if (!this.processes.has(botId) || this.processes.get(botId) === managed) {
+      config.processState = "stopped";
+      config.updatedAt = new Date().toISOString();
+    }
   }
 
   observeRuntimeOutput(config, stream) {
@@ -622,6 +716,21 @@ export class StudioLocalManager {
   }
 }
 
+function closeManagedLog(managed) {
+  if (managed.logClosed) return;
+  managed.logClosed = true;
+  managed.log.end();
+}
+
+function disconnectChild(child) {
+  if (!child.connected || typeof child.disconnect !== "function") return;
+  try {
+    child.disconnect();
+  } catch {
+    // The child may have exited between the connected check and disconnect.
+  }
+}
+
 async function probeExplicitEndpoint(rawUrl, provider, preferredModel, apiKey, source) {
   const baseUrl = safeOrigin(rawUrl);
   if (!baseUrl) return null;
@@ -679,6 +788,18 @@ export async function probeAIEndpoint(candidate, timeoutMs = 1_200) {
   } catch {
     return null;
   }
+}
+
+function boundedDiscoveryWait(raw, fallback, name) {
+  const value = raw === undefined || raw === "" ? fallback : Number(raw);
+  if (!Number.isSafeInteger(value) || value < 0 || value > 120_000) {
+    throw new Error(`${name} must be between 0 and 120000.`);
+  }
+  return value;
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function discoveryHosts(raw) {

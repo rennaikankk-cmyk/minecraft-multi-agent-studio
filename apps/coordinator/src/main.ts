@@ -18,6 +18,11 @@ import {
 import { BotRegistry } from "./bot-registry.js";
 import { BotAssignmentService } from "./bot-assignment.js";
 import {
+  AutonomousConfigError,
+  loadAutonomousConfig,
+} from "./autonomous-config.js";
+import { AutonomousDirector } from "./autonomous-director.js";
+import {
   ControlLinkConfigError,
   loadControlLinkConfig,
 } from "./control-link-config.js";
@@ -57,6 +62,7 @@ async function main(): Promise<void> {
   const runtimeConfig = loadRuntimeLinkConfig();
   const controlConfig = loadControlLinkConfig();
   const localAIConfig = loadLocalAIConfig();
+  const autonomousConfig = loadAutonomousConfig();
   const goalPersistenceConfig = loadGoalPersistenceConfig();
   const taskDeliveryConfig = loadTaskDeliveryConfig(
     process.env,
@@ -123,6 +129,7 @@ async function main(): Promise<void> {
   let taskQueue: BullMqTaskQueue | null = null;
   let outboxReconciler: TaskOutboxReconciler | null = null;
   let goalExecutionServer: CoordinatorGoalExecutionServer | null = null;
+  let autonomousDirector: AutonomousDirector | null = null;
   if (localAIConfig.enabled && localAIConfig.baseUrl && localAIConfig.model) {
     aiRouter = new AIRouter();
     aiRouter.register(
@@ -172,6 +179,17 @@ async function main(): Promise<void> {
       coordinatorInstanceId: instanceId,
       logger,
     });
+    if (autonomousConfig.enabled) {
+      autonomousDirector = new AutonomousDirector({
+        registry,
+        planner: localPlanner,
+        intervalMs: autonomousConfig.intervalMs,
+        goalTimeoutMs: autonomousConfig.goalTimeoutMs,
+        failureCooldownMs: autonomousConfig.failureCooldownMs,
+        terminalRetentionMs: autonomousConfig.terminalRetentionMs,
+        logger,
+      });
+    }
   }
   if (goalPersistenceConfig) {
     taskPool = new PgTaskPoolAdapter({
@@ -247,12 +265,16 @@ async function main(): Promise<void> {
     clients: controlConfig.clients,
     registry,
     stopController,
+    assignment,
     ...(localPlanner ? { goalPlanner: localPlanner } : {}),
     ...(goalStore ? { goalStore } : {}),
     ...(taskDeliveryConfig?.purpose === "production" && queuedGoalStore
       ? { queuedGoalStore }
       : {}),
     ...(taskHistoryReader ? { taskHistoryReader } : {}),
+    ...(autonomousDirector
+      ? { autonomousTaskSource: autonomousDirector }
+      : {}),
     logger,
   });
   let staleTimer: ReturnType<typeof setInterval> | null = null;
@@ -263,6 +285,7 @@ async function main(): Promise<void> {
     await goalExecutionServer?.start();
     const runtimeAddress = await runtimeServer.start();
     const controlAddress = await controlServer.start();
+    autonomousDirector?.start();
     // PostgreSQL is authoritative for leases. Start bounded recovery only
     // after readiness and both control endpoints are available, so recovered
     // outbox records are not created during a partially started process.
@@ -302,8 +325,14 @@ async function main(): Promise<void> {
     } else {
       logger.info("coordinator_local_ai_disabled", { available: false });
     }
+    logger.info("coordinator_autonomy_configured", {
+      enabled: autonomousDirector !== null,
+      intervalMs: autonomousConfig.intervalMs,
+      goalTimeoutMs: autonomousConfig.goalTimeoutMs,
+    });
   } catch (cause) {
     if (staleTimer) clearInterval(staleTimer);
+    if (autonomousDirector) await Promise.allSettled([autonomousDirector.stop()]);
     await Promise.allSettled([controlServer.stop(), runtimeServer.stop()]);
     if (goalExecutionServer) {
       try {
@@ -326,6 +355,7 @@ async function main(): Promise<void> {
     if (stopping) return;
     stopping = true;
     if (staleTimer) clearInterval(staleTimer);
+    if (autonomousDirector) await autonomousDirector.stop();
     aiScheduler?.close("coordinator shutdown");
     logger.info("coordinator_stopping", { signal });
     // Stop accepting new control/runtime work before draining durable delivery
@@ -388,7 +418,8 @@ void main().catch((cause: unknown) => {
       cause instanceof ControlLinkConfigError ||
       cause instanceof LocalAIConfigError ||
       cause instanceof GoalPersistenceConfigError
-      || cause instanceof TaskDeliveryConfigError
+      || cause instanceof TaskDeliveryConfigError ||
+      cause instanceof AutonomousConfigError
       ? cause.code
       : "COORDINATOR_START_FAILED";
   logger.error("coordinator_start_failed", { code });

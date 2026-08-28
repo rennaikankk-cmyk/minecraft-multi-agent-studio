@@ -11,6 +11,22 @@ AI_PER_BOT_CONCURRENCY=1
 AI_REQUEST_TIMEOUT_MS=30000
 ```
 
+桌面启动器会在启动 Coordinator 前扫描批准的 Spark 主机和端口，读取
+`/v1/models`，并把当前可用的模型 ID 传给 Coordinator。Spark 若仍在启动，
+`STUDIO_SPARK_STARTUP_WAIT_MS` 提供有界重试窗口；找不到服务时保持 fail-closed。
+
+本地 AI 可用时，Coordinator 默认会为每个空闲且通过 L0 安全检查的 Bot 自动领取
+有限的生存工作。该路径和 Dashboard 目标共用同一个 Scheduler、Bot assignment 与
+Runtime Link；人工目标获得同一 Bot 的独占租约后，自主任务会等待。关闭自动工作：
+
+```text
+STUDIO_AUTONOMY_ENABLED=0
+```
+
+自主序列从木材、工作台、工具、圆石、熔炉、铁和安全避难所开始；每个 Bot 单独维护
+进度，失败会进入冷却并继续尝试后续工作。它不会绕过 Skill 输入校验、服务器策略或
+L0 安全暂停。
+
 For an authenticated OpenAI-compatible vLLM endpoint, set `LOCAL_AI_API_KEY`
 in the local, ignored environment file, or point `LOCAL_AI_API_KEY_FILE` at a
 private file containing `LOCAL_AI_API_KEY` or `VLLM_API_KEY`. `AI_MAX_CONCURRENCY` is the global
