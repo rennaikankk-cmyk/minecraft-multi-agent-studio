@@ -15,6 +15,11 @@ import {
   CoordinatorLocalPlanner,
   LocalPlannerError,
 } from "./local-planner.js";
+import {
+  assessSurvivalNeeds,
+  type SurvivalNeed,
+  type SurvivalNeedKey,
+} from "./survival-needs.js";
 
 type PublicTask = NonNullable<PublicBotDetailV1["currentTask"]>;
 type TaskStatus = PublicTask["status"];
@@ -27,70 +32,6 @@ const ACTIVE_TASK_STATUSES = new Set<TaskStatus>([
   "waiting",
   "paused",
 ]);
-
-export const AUTONOMOUS_GOAL_SEQUENCE = Object.freeze([
-  Object.freeze({
-    key: "oak_log",
-    title: "收集基础木材",
-    operatorGoal: "获取 oak_log",
-  }),
-  Object.freeze({
-    key: "crafting_table",
-    title: "制作工作台",
-    operatorGoal: "获取 crafting_table",
-  }),
-  Object.freeze({
-    key: "wooden_pickaxe",
-    title: "制作木镐",
-    operatorGoal: "获取 wooden_pickaxe",
-  }),
-  Object.freeze({
-    key: "cobblestone",
-    title: "采集圆石",
-    operatorGoal: "获取 cobblestone",
-  }),
-  Object.freeze({
-    key: "stone_pickaxe",
-    title: "制作石镐",
-    operatorGoal: "获取 stone_pickaxe",
-  }),
-  Object.freeze({
-    key: "furnace",
-    title: "制作熔炉",
-    operatorGoal: "获取 furnace",
-  }),
-  Object.freeze({
-    key: "coal",
-    title: "采集燃料",
-    operatorGoal: "获取 coal",
-  }),
-  Object.freeze({
-    key: "raw_iron",
-    title: "采集铁矿",
-    operatorGoal: "获取 raw_iron",
-  }),
-  Object.freeze({
-    key: "iron_ingot",
-    title: "完成铁锭熔炼",
-    operatorGoal: "获取 iron_ingot",
-  }),
-  Object.freeze({
-    key: "dirt",
-    title: "准备避难所材料",
-    operatorGoal: "获取 dirt",
-  }),
-  Object.freeze({
-    key: "shelter",
-    title: "建立安全避难所",
-    operatorGoal: "在当前维度向 north 挖一个 2 格深的安全避难所，并用 dirt 封口",
-  }),
-] as const);
-
-type AutonomousGoal = Readonly<{
-  key: (typeof AUTONOMOUS_GOAL_SEQUENCE)[number]["key"];
-  title: string;
-  operatorGoal: string;
-}>;
 
 export type AutonomousTaskView = PublicTask;
 
@@ -115,8 +56,9 @@ export type AutonomousDirectorOptions = Readonly<{
 }>;
 
 type InternalTask = PublicTask & {
-  goalKey: string;
+  needKey: SurvivalNeedKey;
   goal: string;
+  reason: string;
   terminalExpiresAtMs: number | null;
 };
 
@@ -130,17 +72,15 @@ type AutonomousPlanResult = Awaited<
   ReturnType<CoordinatorLocalPlanner["planAndDispatch"]>
 >;
 
-type ResourceRecoveryResult = Readonly<{
-  retry: AutonomousPlanResult | null;
-  keepGoal: boolean;
-}>;
-
-type ScannedResourcePosition = Readonly<{
-  x: number;
-  y: number;
-  z: number;
-  distance: number;
-}>;
+/**
+ * 沿矿脉继续开掘比换区更优的源方块（与 collect.block 的楼梯回退配合）：
+ * 地下矿脉目标换一个水平探索点等于丢掉已有的开掘进度。
+ */
+const DIRECTIONAL_SOURCE_BLOCKS = new Set([
+  "iron_ore",
+  "coal_ore",
+  "diamond_ore",
+]);
 
 /**
  * These are failures where the deterministic Runtime has searched the local
@@ -155,38 +95,12 @@ const RESOURCE_RECOVERY_FAILURE_CODES = new Set([
   "COLLECT_PICKUP_NOT_SETTLED",
 ]);
 
-/** The first resource needed by each autonomous milestone. */
-const AUTONOMOUS_RESOURCE_BLOCKS: Readonly<Record<string, string>> = Object.freeze({
-  oak_log: "oak_log",
-  crafting_table: "oak_log",
-  wooden_pickaxe: "oak_log",
-  cobblestone: "stone",
-  stone_pickaxe: "stone",
-  furnace: "stone",
-  coal: "coal_ore",
-  raw_iron: "iron_ore",
-  iron_ingot: "iron_ore",
-  dirt: "dirt",
-  shelter: "dirt",
-});
-
-const AUTONOMOUS_DIRECTIONAL_MINING_GOALS = new Set([
-  "coal",
-  "raw_iron",
-  "iron_ingot",
-]);
-
-const AUTONOMOUS_EXPLORATION_OFFSETS = Object.freeze([
-  Object.freeze({ x: 12, z: 0 }),
-  Object.freeze({ x: 0, z: 12 }),
-  Object.freeze({ x: -12, z: 0 }),
-  Object.freeze({ x: 0, z: -12 }),
-]);
 const AUTONOMOUS_SCAN_MAX_DISTANCE = 64;
-const AUTONOMOUS_SCAN_MAX_COUNT = 16;
-const AUTONOMOUS_RECOVERY_TIMEOUT_MS = 30_000;
 const AUTONOMOUS_MAX_RESOURCE_CANDIDATES = 4;
+const AUTONOMOUS_RECOVERY_TIMEOUT_MS = 30_000;
 const AUTONOMOUS_EXPLORATION_COOLDOWN_MS = 60_000;
+/** 探索半径逐次放大；坐标永远来自 Bot 真实位置的确定性偏移。 */
+const AUTONOMOUS_EXPLORATION_RADII = Object.freeze([48, 96, 160, 224]);
 const AUTONOMOUS_SHELTER_DIRECTIONS = Object.freeze([
   "north",
   "east",
@@ -194,15 +108,27 @@ const AUTONOMOUS_SHELTER_DIRECTIONS = Object.freeze([
   "west",
 ] as const);
 const AUTONOMOUS_SHELTER_MATERIALS = Object.freeze([
-  "dirt",
   "cobblestone",
+  "dirt",
 ] as const);
+/** 同一需求连续失败这么多次后，冷却窗口内不再选中它（livelock 防护）。 */
+const AUTONOMOUS_NEED_FAILURE_LIMIT = 3;
+const AUTONOMOUS_NEED_SUPPRESSION_MS = 120_000;
+
+type ScannedResourcePosition = Readonly<{
+  x: number;
+  y: number;
+  z: number;
+  distance: number;
+}>;
 
 /**
- * Gives every idle, healthy Runtime a bounded survival task. The director
- * owns no Minecraft primitive: it only supplies an internal goal to the same
+ * Keeps every idle, healthy Runtime working on its own survival. The director
+ * owns no Minecraft primitive: survival-needs turns Bot state into the next
+ * need deterministically, and every need is served through the same
  * Coordinator planner used by the Dashboard, so all Skill and L0 gates stay
- * in one execution path.
+ * in one execution path. Spark is never in this loop — the needs ladder and
+ * its goal templates are fully deterministic.
  */
 export class AutonomousDirector implements AutonomousTaskSource {
   private readonly now: () => Date;
@@ -211,8 +137,11 @@ export class AutonomousDirector implements AutonomousTaskSource {
   private readonly tasks = new Map<string, InternalTask>();
   private readonly active = new Map<string, ActiveRun>();
   private readonly nextGoalAt = new Map<string, number>();
-  private readonly goalCursor = new Map<string, number>();
+  private readonly shelterBuilt = new Set<string>();
+  private readonly consecutiveNeedFailures = new Map<string, number>();
+  private readonly needSuppressedUntil = new Map<string, number>();
   private readonly explorationCursor = new Map<string, number>();
+  private readonly explorationRadiusStep = new Map<string, number>();
   private readonly nextExplorationAt = new Map<string, number>();
   private readonly shelterDirectionCursor = new Map<string, number>();
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -332,23 +261,8 @@ export class AutonomousDirector implements AutonomousTaskSource {
     }
     if ((this.nextGoalAt.get(record.botId) ?? 0) > nowMs) return;
 
-    const goalIndex = nextAutonomousGoalIndex(
-      record,
-      this.goalCursor.get(record.botId) ?? 0,
-    );
-    this.goalCursor.set(record.botId, goalIndex);
-    const baseGoal = AUTONOMOUS_GOAL_SEQUENCE[
-      goalIndex % AUTONOMOUS_GOAL_SEQUENCE.length
-    ]!;
-    const goal = baseGoal.key === "shelter"
-      ? {
-          ...baseGoal,
-          operatorGoal: this.nextShelterGoal(
-            record.botId,
-            shelterMaterial(record) ?? "dirt",
-          ),
-        }
-      : baseGoal;
+    const goal = this.selectGoal(record, nowMs);
+    if (goal === null) return;
     const taskId = identifierSchema.parse(this.randomId());
     const controller = new AbortController();
     const placeholder: ActiveRun = {
@@ -357,7 +271,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
       promise: Promise.resolve(),
     };
     this.active.set(record.botId, placeholder);
-    const promise = this.runTask(record, taskId, goal, goalIndex, controller);
+    const promise = this.runTask(record, taskId, goal, controller);
     this.active.set(record.botId, { taskId, controller, promise });
     void promise
       .finally(() => {
@@ -367,23 +281,154 @@ export class AutonomousDirector implements AutonomousTaskSource {
       .catch(() => undefined);
   }
 
+  /**
+   * Pure selection over the needs ladder: score-ordered needs from
+   * survival-needs, minus suppressed ones, with exploration coordinates and
+   * shelter direction bound from per-Bot cursors. The same Bot state always
+   * selects the same need; state changes (task success, inventory delta,
+   * respawn) re-assess on the next tick.
+   */
+  private selectGoal(
+    record: BotRegistryRecord,
+    nowMs: number,
+  ): AutonomousGoal | null {
+    const needs = assessSurvivalNeeds({
+      record,
+      shelterBuilt: this.shelterBuilt.has(record.botId),
+    });
+    const eligible = needs.filter(
+      (need) =>
+        (this.needSuppressedUntil.get(`${record.botId}:${need.key}`) ?? 0) <=
+        nowMs,
+    );
+    const chosen = eligible[0];
+    if (chosen === undefined) return null;
+    return this.bindGoal(record, chosen, nowMs);
+  }
+
+  /** 把需求意图绑定成可下发的具体目标（方向/封口料/探索坐标）。 */
+  private bindGoal(
+    record: BotRegistryRecord,
+    need: SurvivalNeed,
+    nowMs: number,
+  ): AutonomousGoal | null {
+    if (need.key === "EXPLORATION") {
+      if ((this.nextExplorationAt.get(record.botId) ?? 0) > nowMs) return null;
+      const target = this.explorationTarget(record);
+      if (target === null) return null;
+      return {
+        needKey: need.key,
+        key: "exploration",
+        title: `${need.title} (${target.blockName})`,
+        operatorGoal: `移动到坐标 x=${target.x} y=${target.y} z=${target.z} 附近，继续观察 ${target.blockName} 方块`,
+        reason: need.reason,
+        blockName: target.blockName,
+        directionalMining: false,
+      };
+    }
+    if (need.key === "SHELTER") {
+      const direction = this.nextShelterDirection(record.botId);
+      const seal = shelterMaterial(record) ?? "dirt";
+      return {
+        needKey: need.key,
+        key: "shelter",
+        title: need.title,
+        operatorGoal: `在当前维度向 ${direction} 挖一个 2 格深的安全避难所，并用 ${seal} 封口`,
+        reason: need.reason,
+        blockName: null,
+        directionalMining: false,
+      };
+    }
+    if (need.key === "FOOD_SECURITY") {
+      return {
+        needKey: need.key,
+        key: "food",
+        title: need.title,
+        operatorGoal: need.operatorGoal,
+        reason: need.reason,
+        blockName: null,
+        directionalMining: false,
+      };
+    }
+    return {
+      needKey: need.key,
+      key: need.key,
+      title: need.title,
+      operatorGoal: need.operatorGoal,
+      reason: need.reason,
+      blockName: need.sourceBlock,
+      directionalMining: need.sourceBlock !== null &&
+        DIRECTIONAL_SOURCE_BLOCKS.has(need.sourceBlock),
+    };
+  }
+
+  /** 扇区轮转 + 半径递增的确定性探索；多 Bot 天然错开起始扇区。 */
+  private explorationTarget(
+    record: BotRegistryRecord,
+  ): { x: number; y: number; z: number; blockName: string } | null {
+    const position = record.currentStatus?.position;
+    if (!position) return null;
+    const cursor = this.explorationCursor.get(record.botId) ?? 0;
+    const step = this.explorationRadiusStep.get(record.botId) ?? 0;
+    const radius = AUTONOMOUS_EXPLORATION_RADII[
+      Math.min(step, AUTONOMOUS_EXPLORATION_RADII.length - 1)
+    ]!;
+    // 基于稳定 botId 哈希的扇区偏移：同批 Bot 各自从不同扇区开始扫。
+    const sectorBase = stableSector(record.botId);
+    const sector = (sectorBase + cursor) % 8;
+    const angle = (sector / 8) * Math.PI * 2;
+    const x = Math.floor(position.x + Math.cos(angle) * radius);
+    const z = Math.floor(position.z + Math.sin(angle) * radius);
+    this.explorationCursor.set(record.botId, cursor + 1);
+    this.explorationRadiusStep.set(
+      record.botId,
+      Math.min(step + 1, AUTONOMOUS_EXPLORATION_RADII.length - 1),
+    );
+    return {
+      x,
+      y: Math.floor(position.y),
+      z,
+      blockName: explorationFocusBlock(record),
+    };
+  }
+
+  private nextShelterDirection(botId: string): string {
+    const index = this.shelterDirectionCursor.get(botId) ?? 0;
+    this.shelterDirectionCursor.set(
+      botId,
+      (index + 1) % AUTONOMOUS_SHELTER_DIRECTIONS.length,
+    );
+    return AUTONOMOUS_SHELTER_DIRECTIONS[
+      index % AUTONOMOUS_SHELTER_DIRECTIONS.length
+    ]!;
+  }
+
   private async runTask(
     record: BotRegistryRecord,
     taskId: string,
     goal: AutonomousGoal,
-    goalIndex: number,
     controller: AbortController,
   ): Promise<void> {
     const startedAt = validDate(this.now()).toISOString();
-    const taskTitle = `自主任务: ${goal.title}`;
+    // 标题带"为什么"：Dashboard 里直接能看到 WOOD_RESERVE 3/16 这种依据，
+    // 而不是一行 walking。
+    const taskTitle = `自主任务: ${goal.title}（${goal.reason}）`;
     this.setTask(record.botId, {
       taskId,
       title: taskTitle,
       status: "running",
       startedAt,
-      goalKey: goal.key,
+      needKey: goal.needKey,
       goal: goal.operatorGoal,
+      reason: goal.reason,
       terminalExpiresAtMs: null,
+    });
+    this.log("info", "coordinator_autonomous_need_selected", {
+      botId: record.botId,
+      taskId,
+      needKey: goal.needKey,
+      goal: goal.key,
+      reason: goal.reason,
     });
     try {
       let result = await this.options.planner.planAndDispatch({
@@ -413,19 +458,12 @@ export class AutonomousDirector implements AutonomousTaskSource {
           status = taskStatusFromPlanResult(result, controller.signal);
         }
       }
-      this.finishTask(
-        record.botId,
-        taskId,
-        goal,
-        goalIndex,
-        status,
-        status === "completed" ||
-          (status !== "cancelled" && !keepGoal),
-      );
+      this.finishTask(record.botId, taskId, goal, status, keepGoal);
       this.log("info", "coordinator_autonomous_goal_finished", {
         botId: record.botId,
         taskId,
-        goalKey: goal.key,
+        needKey: goal.needKey,
+        goal: goal.key,
         outcome: status,
         ...(keepGoal ? { recovery: "retry_same_goal" } : {}),
         ...(result.action === "noop" ? { reasonCode: result.reasonCode } : {}),
@@ -445,18 +483,12 @@ export class AutonomousDirector implements AutonomousTaskSource {
         );
         keepGoal = recovery.keepGoal;
       }
-      this.finishTask(
-        record.botId,
-        taskId,
-        goal,
-        goalIndex,
-        status,
-        status !== "cancelled" && !keepGoal,
-      );
+      this.finishTask(record.botId, taskId, goal, status, keepGoal);
       this.log("warn", "coordinator_autonomous_goal_failed", {
         botId: record.botId,
         taskId,
-        goalKey: goal.key,
+        needKey: goal.needKey,
+        goal: goal.key,
         code: cause instanceof LocalPlannerError ? cause.code : "DIRECTOR_FAILED",
         error: boundedError(cause),
         ...(keepGoal ? { recovery: "retry_same_goal" } : {}),
@@ -467,8 +499,8 @@ export class AutonomousDirector implements AutonomousTaskSource {
   /**
    * Move a resource goal forward after a local target-search failure. The
    * scan result is a Runtime observation; coordinates are never guessed from
-   * the Bot's position. When no target is visible, a small relative move gives
-   * the next round a new loaded area while retaining the same milestone.
+   * the Bot's position. When no target is visible, a sector-rotating move
+   * gives the next round a new loaded area while retaining the same need.
    */
   private async recoverResourceGoal(
     record: BotRegistryRecord,
@@ -483,13 +515,13 @@ export class AutonomousDirector implements AutonomousTaskSource {
     }
     // This code means the block may already have been broken while the plugin
     // failed to close its dropped-entity wait. Moving to a new area would add
-    // noise and can duplicate collection, so retain the milestone and let the
+    // noise and can duplicate collection, so retain the need and let the
     // next inventory-aware plan re-observe it.
     if (failureCode === "COLLECT_PICKUP_NOT_SETTLED") {
       this.setRecoveryTask(record.botId, taskId, "自主恢复: 核对采集结果");
       return { retry: null, keepGoal: true };
     }
-    const blockName = AUTONOMOUS_RESOURCE_BLOCKS[goal.key];
+    const blockName = goal.blockName;
     if (!blockName || controller.signal.aborted) {
       return { retry: null, keepGoal: true };
     }
@@ -500,7 +532,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
     // current endpoint on the next autonomous round.
     if (
       failureCode === "COLLECT_TARGET_UNREACHABLE" &&
-      AUTONOMOUS_DIRECTIONAL_MINING_GOALS.has(goal.key)
+      goal.directionalMining
     ) {
       this.setRecoveryTask(
         record.botId,
@@ -510,7 +542,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
       this.log("info", "coordinator_autonomous_recovery_mining_continues", {
         botId: record.botId,
         taskId,
-        goalKey: goal.key,
+        needKey: goal.needKey,
         blockName,
         failureCode,
       });
@@ -521,7 +553,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
     this.log("info", "coordinator_autonomous_recovery_started", {
       botId: record.botId,
       taskId,
-      goalKey: goal.key,
+      needKey: goal.needKey,
       blockName,
       failureCode,
     });
@@ -553,7 +585,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
       const moved = await this.dispatchInternal(
         record.botId,
         taskId,
-        movementGoal(match, blockName),
+        `移动到坐标 x=${match.x} y=${match.y} z=${match.z} 附近，继续观察 ${blockName} 方块`,
         controller,
       ).catch((cause) => {
         this.logRecoveryFailure(record.botId, taskId, "move-to-resource", cause);
@@ -575,7 +607,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
         this.log("info", "coordinator_autonomous_recovery_succeeded", {
           botId: record.botId,
           taskId,
-          goalKey: goal.key,
+          needKey: goal.needKey,
           blockName,
         });
         return { retry, keepGoal: false };
@@ -589,22 +621,25 @@ export class AutonomousDirector implements AutonomousTaskSource {
       this.log("info", "coordinator_autonomous_recovery_exploration_cooldown", {
         botId: record.botId,
         taskId,
-        goalKey: goal.key,
+        needKey: goal.needKey,
         blockName,
         retryAtMs: nextExplorationAt,
       });
       return { retry: null, keepGoal: true };
     }
 
-    this.setRecoveryTask(record.botId, taskId, `自主恢复: 探索 ${blockName}`);
     this.nextExplorationAt.set(
       record.botId,
       nowMs + AUTONOMOUS_EXPLORATION_COOLDOWN_MS,
     );
+    const target = this.explorationTarget(record);
+    const explorationGoal = target === null
+      ? `继续观察 ${blockName} 方块所在区域`
+      : `移动到坐标 x=${target.x} y=${target.y} z=${target.z} 附近，继续观察 ${blockName} 方块`;
     const moved = await this.dispatchInternal(
       record.botId,
       taskId,
-      this.explorationGoal(record.botId, blockName),
+      explorationGoal,
       controller,
     ).catch((cause) => {
       this.logRecoveryFailure(record.botId, taskId, "explore", cause);
@@ -614,7 +649,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
     this.log("info", "coordinator_autonomous_recovery_explored", {
       botId: record.botId,
       taskId,
-      goalKey: goal.key,
+      needKey: goal.needKey,
       blockName,
       moved: planCompleted(moved),
     });
@@ -642,36 +677,6 @@ export class AutonomousDirector implements AutonomousTaskSource {
     });
   }
 
-  private explorationGoal(botId: string, blockName: string): string {
-    const current = this.options.registry.get(botId, validDate(this.now()));
-    const position = current?.currentStatus?.position;
-    if (!position) {
-      return `继续观察 ${blockName} 方块所在区域`;
-    }
-    const index = this.explorationCursor.get(botId) ?? 0;
-    this.explorationCursor.set(
-      botId,
-      (index + 1) % AUTONOMOUS_EXPLORATION_OFFSETS.length,
-    );
-    const offset = AUTONOMOUS_EXPLORATION_OFFSETS[index % AUTONOMOUS_EXPLORATION_OFFSETS.length]!;
-    const x = Math.floor(position.x) + offset.x;
-    const y = Math.floor(position.y);
-    const z = Math.floor(position.z) + offset.z;
-    return `移动到坐标 x=${x} y=${y} z=${z} 附近，继续观察 ${blockName} 方块`;
-  }
-
-  private nextShelterGoal(botId: string, sealItemName: string): string {
-    const index = this.shelterDirectionCursor.get(botId) ?? 0;
-    this.shelterDirectionCursor.set(
-      botId,
-      (index + 1) % AUTONOMOUS_SHELTER_DIRECTIONS.length,
-    );
-    const direction = AUTONOMOUS_SHELTER_DIRECTIONS[
-      index % AUTONOMOUS_SHELTER_DIRECTIONS.length
-    ]!;
-    return `在当前维度向 ${direction} 挖一个 2 格深的安全避难所，并用 ${sealItemName} 封口`;
-  }
-
   private setRecoveryTask(botId: string, taskId: string, title: string): void {
     const current = this.tasks.get(botId);
     if (!current || current.taskId !== taskId || current.status !== "running") return;
@@ -696,16 +701,30 @@ export class AutonomousDirector implements AutonomousTaskSource {
     botId: string,
     taskId: string,
     goal: AutonomousGoal,
-    goalIndex: number,
     status: TaskStatus,
-    advanceGoal = true,
+    keepGoal: boolean,
   ): void {
     const nowMs = validDate(this.now()).getTime();
-    if (advanceGoal) {
-      this.goalCursor.set(
-        botId,
-        (goalIndex + 1) % AUTONOMOUS_GOAL_SEQUENCE.length,
-      );
+    const failureKey = `${botId}:${goal.needKey}`;
+    if (status === "completed") {
+      this.consecutiveNeedFailures.set(failureKey, 0);
+      if (goal.needKey === "SHELTER") this.shelterBuilt.add(botId);
+    } else if (status === "failed") {
+      const failures = (this.consecutiveNeedFailures.get(failureKey) ?? 0) + 1;
+      this.consecutiveNeedFailures.set(failureKey, failures);
+      if (failures >= AUTONOMOUS_NEED_FAILURE_LIMIT) {
+        this.needSuppressedUntil.set(
+          failureKey,
+          nowMs + AUTONOMOUS_NEED_SUPPRESSION_MS,
+        );
+        this.consecutiveNeedFailures.set(failureKey, 0);
+        this.log("warn", "coordinator_autonomous_need_suppressed", {
+          botId,
+          needKey: goal.needKey,
+          failures,
+          suppressedUntilMs: nowMs + AUTONOMOUS_NEED_SUPPRESSION_MS,
+        });
+      }
     }
     this.nextGoalAt.set(
       botId,
@@ -745,6 +764,21 @@ export class AutonomousDirector implements AutonomousTaskSource {
     }
   }
 }
+
+type AutonomousGoal = Readonly<{
+  needKey: SurvivalNeedKey;
+  key: string;
+  title: string;
+  operatorGoal: string;
+  reason: string;
+  blockName: string | null;
+  directionalMining: boolean;
+}>;
+
+type ResourceRecoveryResult = Readonly<{
+  retry: AutonomousPlanResult | null;
+  keepGoal: boolean;
+}>;
 
 function eligibleForAutonomy(record: BotRegistryRecord): boolean {
   if (record.connectionState !== "online") return false;
@@ -836,32 +870,6 @@ function taskStatusFromPlanResult(
         : "failed";
 }
 
-function nextAutonomousGoalIndex(
-  record: BotRegistryRecord,
-  cursor: number,
-): number {
-  const inventory = new Map(
-    (record.currentStatus?.inventory ?? []).map(({ itemName, count }) => [
-      itemName,
-      count,
-    ] as const),
-  );
-  for (let offset = 0; offset < AUTONOMOUS_GOAL_SEQUENCE.length; offset += 1) {
-    const index = cursor + offset;
-    const goal = AUTONOMOUS_GOAL_SEQUENCE[index % AUTONOMOUS_GOAL_SEQUENCE.length]!;
-    // Cobblestone is already guaranteed by the earlier tool/furnace loop and
-    // is a valid shelter seal. Do not strand an underground Bot trying to
-    // reach surface dirt when it already carries a safer building block.
-    if (goal.key === "dirt" && shelterMaterialFromInventory(inventory) !== null) {
-      continue;
-    }
-    if (goal.key === "shelter" || (inventory.get(goal.key) ?? 0) < 1) {
-      return index;
-    }
-  }
-  return cursor;
-}
-
 function planCompleted(result: AutonomousPlanResult | null): boolean {
   return result?.action === "skill_result" && result.result.payload.outcome === "completed";
 }
@@ -884,13 +892,6 @@ function scannedResourcePositions(
     .sort((left, right) => left.distance - right.distance);
 }
 
-function movementGoal(
-  match: ScannedResourcePosition,
-  blockName: string,
-): string {
-  return `移动到坐标 x=${match.x} y=${match.y} z=${match.z} 附近，继续观察 ${blockName} 方块`;
-}
-
 function shelterMaterial(record: BotRegistryRecord): string | null {
   const inventory = new Map(
     (record.currentStatus?.inventory ?? []).map(({ itemName, count }) => [
@@ -898,15 +899,25 @@ function shelterMaterial(record: BotRegistryRecord): string | null {
       count,
     ] as const),
   );
-  return shelterMaterialFromInventory(inventory);
-}
-
-function shelterMaterialFromInventory(
-  inventory: ReadonlyMap<string, number>,
-): string | null {
   return AUTONOMOUS_SHELTER_MATERIALS.find(
     (itemName) => (inventory.get(itemName) ?? 0) > 0,
   ) ?? null;
+}
+
+/** 探索焦点方块：按进度选最有价值的下一资源，而不是随机看。 */
+function explorationFocusBlock(record: BotRegistryRecord): string {
+  const inventory = new Map(
+    (record.currentStatus?.inventory ?? []).map(({ itemName, count }) => [
+      itemName,
+      count,
+    ] as const),
+  );
+  // 高档镐蕴含低档能力，按"最高档"判断而不是逐档存在性。
+  if ((inventory.get("diamond_pickaxe") ?? 0) > 0) return "diamond_ore";
+  if ((inventory.get("iron_pickaxe") ?? 0) > 0) return "diamond_ore";
+  if ((inventory.get("stone_pickaxe") ?? 0) > 0) return "iron_ore";
+  if ((inventory.get("wooden_pickaxe") ?? 0) > 0) return "stone";
+  return "oak_log";
 }
 
 function distanceTo(
@@ -914,4 +925,13 @@ function distanceTo(
   target: Readonly<{ x: number; y: number; z: number }>,
 ): number {
   return Math.hypot(position.x - target.x, position.y - target.y, position.z - target.z);
+}
+
+/** 稳定的扇区基址（0–7）：同号 Bot 每次从同一扇区起步，不同号错开。 */
+function stableSector(botId: string): number {
+  let hash = 0;
+  for (const char of botId) {
+    hash = (hash * 31 + char.charCodeAt(0)) % 1_000_003;
+  }
+  return hash % 8;
 }

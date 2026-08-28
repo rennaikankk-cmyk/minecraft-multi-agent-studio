@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   AIRouter,
   AIRequestScheduler,
+  AISchedulerError,
   OllamaAdapter,
   ScheduledAIRouter,
   VLLMAdapter,
@@ -160,11 +161,19 @@ async function main(): Promise<void> {
         });
       },
     });
+  }
+  // 自主生存链的全部目标都走确定性派发，模型只是非模板目标的兜底。所以
+  // planner 在没有 Local AI 时也要构造：兜底换成一个永远诚實拒绝的桩
+  // （AI_UNAVAILABLE），确定性目标照常 0 次模型调用地运转——这与
+  // AGENTS.md §0.4"AI 宕机 fail-closed 到确定性层，而不是停下"一致。
+  // 此前整个 AutonomousDirector 被装配在 Spark 配置块里，Spark 不可用
+  // 时自主生存完全停摆，而它本来一步都不需要模型。
+  if (localAIConfig.enabled && localAIConfig.baseUrl && localAIConfig.model) {
     const taskPersistence = await createTaskStateMachine();
     taskPool = taskPersistence.pool;
     const taskStateMachine = taskPersistence.stateMachine;
     localPlanner = new CoordinatorLocalPlanner({
-      ai: new ScheduledAIRouter(aiRouter, aiScheduler),
+      ai: new ScheduledAIRouter(aiRouter!, aiScheduler!),
       registry,
       assignment,
       verifyAssignmentLease: async (lease) => {
@@ -184,17 +193,39 @@ async function main(): Promise<void> {
       coordinatorInstanceId: instanceId,
       logger,
     });
-    if (autonomousConfig.enabled) {
-      autonomousDirector = new AutonomousDirector({
-        registry,
-        planner: localPlanner,
-        intervalMs: autonomousConfig.intervalMs,
-        goalTimeoutMs: autonomousConfig.goalTimeoutMs,
-        failureCooldownMs: autonomousConfig.failureCooldownMs,
-        terminalRetentionMs: autonomousConfig.terminalRetentionMs,
-        logger,
-      });
-    }
+  } else {
+    localPlanner = new CoordinatorLocalPlanner({
+      ai: {
+        generate: async (request) => {
+          throw new AISchedulerError(
+            "AI_REQUEST_FAILED",
+            "No Local AI hub is configured; only deterministic goal templates are served.",
+            request.requestId,
+          );
+        },
+      },
+      registry,
+      assignment,
+      verifyAssignmentLease: async (lease) =>
+        memoryGoalStore?.isAssignmentLeaseActive(lease) ?? false,
+      transport: runtimeServer,
+      coordinatorInstanceId: instanceId,
+      logger,
+    });
+    logger.warn("coordinator_planner_deterministic_only", {
+      detail: "Local AI is not configured; model fallback will reject with AI_UNAVAILABLE.",
+    });
+  }
+  if (autonomousConfig.enabled) {
+    autonomousDirector = new AutonomousDirector({
+      registry,
+      planner: localPlanner,
+      intervalMs: autonomousConfig.intervalMs,
+      goalTimeoutMs: autonomousConfig.goalTimeoutMs,
+      failureCooldownMs: autonomousConfig.failureCooldownMs,
+      terminalRetentionMs: autonomousConfig.terminalRetentionMs,
+      logger,
+    });
   }
   if (goalPersistenceConfig) {
     taskPool = new PgTaskPoolAdapter({

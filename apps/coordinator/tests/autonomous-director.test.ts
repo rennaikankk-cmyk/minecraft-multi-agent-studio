@@ -1,8 +1,5 @@
 import type { BotRegistryRecord } from "../src/bot-registry.js";
-import {
-  AUTONOMOUS_GOAL_SEQUENCE,
-  AutonomousDirector,
-} from "../src/autonomous-director.js";
+import { AutonomousDirector } from "../src/autonomous-director.js";
 import { describe, expect, it, vi } from "vitest";
 
 const NOW = new Date("2026-08-28T00:00:00.000Z");
@@ -36,23 +33,23 @@ describe("AutonomousDirector", () => {
     });
 
     director.start();
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await flushDirector();
 
     expect(planAndDispatch).toHaveBeenCalledTimes(2);
     expect(
       new Set(planAndDispatch.mock.calls.map(([request]) => request.botId)),
     ).toEqual(new Set(["studio-bot-01", "studio-bot-02"]));
+    // Empty inventory with a full bar: the tool ladder outranks food topping-up.
     expect(planAndDispatch.mock.calls[0]?.[0]).toMatchObject({
-      operatorGoal: AUTONOMOUS_GOAL_SEQUENCE[0].operatorGoal,
+      operatorGoal: "获取 wooden_pickaxe",
       timeoutMs: 60_000,
     });
     expect(director.getCurrentTask("studio-bot-01")).toMatchObject({
       status: "failed",
-      title: "自主任务: 收集基础木材",
+      title: expect.stringContaining("wooden_pickaxe"),
     });
     expect(director.getCurrentTask("studio-bot-01")).not.toHaveProperty("goal");
-    expect(director.getCurrentTask("studio-bot-01")).not.toHaveProperty("goalKey");
+    expect(director.getCurrentTask("studio-bot-01")).not.toHaveProperty("needKey");
 
     director.start();
     expect(planAndDispatch).toHaveBeenCalledTimes(2);
@@ -87,13 +84,44 @@ describe("AutonomousDirector", () => {
     });
 
     director.start();
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await flushDirector();
     await director.stop();
 
     expect(planAndDispatch).not.toHaveBeenCalled();
   });
 
-  it("skips autonomous milestones already present in the runtime inventory", async () => {
+  it("prioritises food over tools when the hunger bar is running low", async () => {
+    const record = readyRecord("studio-bot-01");
+    record.currentStatus!.food.level = 12;
+    const registry = {
+      list: vi.fn(() => [record]),
+      get: vi.fn(() => record),
+      subscribe: vi.fn(() => () => undefined),
+    };
+    const planAndDispatch = vi.fn(async () => noopPlanResult());
+    const director = new AutonomousDirector({
+      registry,
+      planner: { planAndDispatch },
+      intervalMs: 60_000,
+      goalTimeoutMs: 60_000,
+      failureCooldownMs: 5_000,
+      terminalRetentionMs: 10_000,
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    director.start();
+    await flushDirector();
+    await director.stop();
+
+    // Empty food reserve at food<=16 is the emergency branch (92) and must
+    // outrank the wooden pickaxe (75).
+    expect(planAndDispatch.mock.calls[0]?.[0].operatorGoal).toBe(
+      "获取 12 份安全食物",
+    );
+  });
+
+  it("advances the tool ladder from real inventory state", async () => {
     const record = readyRecord("studio-bot-01");
     record.currentStatus!.inventory = [
       { itemName: "oak_log", count: 4 },
@@ -118,17 +146,47 @@ describe("AutonomousDirector", () => {
     });
 
     director.start();
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await flushDirector();
+    await director.stop();
 
     expect(planAndDispatch).toHaveBeenCalledTimes(1);
     expect(planAndDispatch.mock.calls[0]?.[0].operatorGoal).toBe(
-      AUTONOMOUS_GOAL_SEQUENCE[3].operatorGoal,
+      "获取 stone_pickaxe",
     );
     expect(director.getCurrentTask(record.botId)).toMatchObject({
-      title: "自主任务: 采集圆石",
+      title: expect.stringContaining("stone_pickaxe"),
     });
+  });
+
+  it("re-bootstraps after a death wipe by re-deriving basic needs", async () => {
+    const record = readyRecord("studio-bot-01");
+    record.currentStatus!.inventory = [];
+    const registry = {
+      list: vi.fn(() => [record]),
+      get: vi.fn(() => record),
+      subscribe: vi.fn(() => () => undefined),
+    };
+    const planAndDispatch = vi.fn(async () => noopPlanResult());
+    const director = new AutonomousDirector({
+      registry,
+      planner: { planAndDispatch },
+      intervalMs: 60_000,
+      goalTimeoutMs: 60_000,
+      failureCooldownMs: 5_000,
+      terminalRetentionMs: 10_000,
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    director.start();
+    await flushDirector();
     await director.stop();
+
+    // Empty inventory selects the same first goal as a fresh spawn; death
+    // recovery is the needs ladder itself, not a special case.
+    expect(planAndDispatch.mock.calls[0]?.[0].operatorGoal).toBe(
+      "获取 wooden_pickaxe",
+    );
   });
 
   it("schedules a healthy Bot when max health is unknown in live telemetry", async () => {
@@ -155,7 +213,7 @@ describe("AutonomousDirector", () => {
     });
 
     director.start();
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await flushDirector();
     await director.stop();
 
     expect(planAndDispatch).toHaveBeenCalledTimes(1);
@@ -168,11 +226,6 @@ describe("AutonomousDirector", () => {
       get: vi.fn(() => record),
       subscribe: vi.fn(() => () => undefined),
     };
-    let resolvePlan: ((value: {
-      action: "noop";
-      reasonCode: "NO_SAFE_SKILL";
-      ai: never;
-    }) => void) | undefined;
     const planAndDispatch = vi.fn(
       ({ signal }: { signal?: AbortSignal }) =>
         new Promise<{
@@ -180,7 +233,6 @@ describe("AutonomousDirector", () => {
           reasonCode: "NO_SAFE_SKILL";
           ai: never;
         }>((resolve) => {
-          resolvePlan = resolve;
           signal?.addEventListener("abort", () => {
             resolve({ action: "noop", reasonCode: "NO_SAFE_SKILL", ai: undefined as never });
           }, { once: true });
@@ -208,8 +260,6 @@ describe("AutonomousDirector", () => {
       status: "cancelled",
     });
     expect(planAndDispatch.mock.calls[0]?.[0].signal?.aborted).toBe(true);
-
-    resolvePlan?.({ action: "noop", reasonCode: "NO_SAFE_SKILL", ai: undefined as never });
     await director.stop();
   });
 
@@ -224,7 +274,7 @@ describe("AutonomousDirector", () => {
     const planAndDispatch = vi.fn(async (request: { botId: string; operatorGoal: string }) => {
       plannerCalls.push({ botId: request.botId, operatorGoal: request.operatorGoal });
       if (request.botId === "studio-bot-02") return noopPlanResult();
-      if (request.operatorGoal === AUTONOMOUS_GOAL_SEQUENCE[0].operatorGoal) {
+      if (request.operatorGoal === "获取 wooden_pickaxe") {
         const attempts = plannerCalls.filter(({ botId, operatorGoal }) =>
           botId === request.botId && operatorGoal === request.operatorGoal,
         ).length;
@@ -269,24 +319,23 @@ describe("AutonomousDirector", () => {
     });
 
     director.start();
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await flushDirector();
 
     expect(plannerCalls.filter(({ botId }) => botId === "studio-bot-01").map(({ operatorGoal }) => operatorGoal)).toEqual([
-      AUTONOMOUS_GOAL_SEQUENCE[0].operatorGoal,
+      "获取 wooden_pickaxe",
       expect.stringContaining("oak_log 方块分布"),
       expect.stringContaining("x=10 y=70 z=0"),
-      AUTONOMOUS_GOAL_SEQUENCE[0].operatorGoal,
+      "获取 wooden_pickaxe",
     ]);
     expect(plannerCalls.filter(({ botId }) => botId === "studio-bot-02")).toHaveLength(1);
     expect(director.getCurrentTask("studio-bot-01")).toMatchObject({
       status: "completed",
-      title: "自主任务: 收集基础木材",
+      title: expect.stringContaining("wooden_pickaxe"),
     });
     await director.stop();
   });
 
-  it("explores and retains the same milestone when a resource is not visible", async () => {
+  it("explores outward and retains the same need when a resource is not visible", async () => {
     const record = readyRecord("studio-bot-01");
     let nowMs = NOW.getTime();
     const registryListeners = new Set<(record: BotRegistryRecord) => void>();
@@ -299,7 +348,7 @@ describe("AutonomousDirector", () => {
       }),
     };
     const planAndDispatch = vi.fn(async (request: { operatorGoal: string }) => {
-      if (request.operatorGoal === AUTONOMOUS_GOAL_SEQUENCE[0].operatorGoal) {
+      if (request.operatorGoal === "获取 wooden_pickaxe") {
         return failedPlanResult("COLLECT_TARGET_UNREACHABLE");
       }
       if (request.operatorGoal.includes("方块分布")) {
@@ -335,38 +384,40 @@ describe("AutonomousDirector", () => {
     });
 
     director.start();
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await flushDirector();
 
     expect(planAndDispatch).toHaveBeenCalledTimes(3);
-    expect(planAndDispatch.mock.calls[2]?.[0].operatorGoal).toContain(
-      "x=12 y=64 z=0",
-    );
-    expect(planAndDispatch.mock.calls[2]?.[0].operatorGoal).toContain("oak_log");
+    const explorationGoal = planAndDispatch.mock.calls[2]?.[0].operatorGoal ?? "";
+    expect(explorationGoal).toMatch(/^移动到坐标 x=-?\d+ y=64 z=-?\d+ 附近，继续观察 oak_log 方块$/);
+    // The first exploration ring is 48 blocks from the real position (0, 64, 0).
+    const coords = /x=(-?\d+) y=(-?\d+) z=(-?\d+)/.exec(explorationGoal)!;
+    const distance = Math.hypot(Number(coords[1]), Number(coords[3]));
+    expect(distance).toBeGreaterThanOrEqual(40);
     expect(director.getCurrentTask("studio-bot-01")).toMatchObject({
       status: "failed",
-      title: "自主任务: 收集基础木材",
+      title: expect.stringContaining("wooden_pickaxe"),
     });
 
-    // A later liveness event starts the same milestone after the cooldown;
-    // the director must not skip straight to crafting-table work.
+    // A later liveness event retries the same need after the cooldown; the
+    // director must not silently abandon the tool ladder.
     nowMs += 11_000;
     registryListeners.forEach((listener) => listener(record));
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(planAndDispatch.mock.calls[3]?.[0].operatorGoal).toBe(
-      AUTONOMOUS_GOAL_SEQUENCE[0].operatorGoal,
+      "获取 wooden_pickaxe",
     );
     await director.stop();
   });
 
-  it("continues directed coal mining without dispatching a surface movement", async () => {
+  it("continues directed mining without dispatching a surface movement", async () => {
     const record = readyRecord("studio-bot-01");
     record.currentStatus!.inventory = [
-      { itemName: "oak_log", count: 4 },
+      { itemName: "cooked_beef", count: 12 },
+      { itemName: "oak_log", count: 16 },
       { itemName: "crafting_table", count: 1 },
-      { itemName: "wooden_pickaxe", count: 1 },
       { itemName: "cobblestone", count: 8 },
       { itemName: "stone_pickaxe", count: 1 },
+      { itemName: "stone_sword", count: 1 },
       { itemName: "furnace", count: 1 },
     ];
     let nowMs = NOW.getTime();
@@ -394,12 +445,13 @@ describe("AutonomousDirector", () => {
     });
 
     director.start();
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await flushDirector();
 
+    // With stone tools done, the ladder demands the iron pickaxe whose source
+    // is iron ore; an unreachable ore target keeps mining in place.
     expect(planAndDispatch).toHaveBeenCalledTimes(1);
     expect(planAndDispatch.mock.calls[0]?.[0].operatorGoal).toBe(
-      AUTONOMOUS_GOAL_SEQUENCE[6].operatorGoal,
+      "获取 iron_pickaxe",
     );
     expect(
       planAndDispatch.mock.calls.some(([request]) =>
@@ -408,79 +460,26 @@ describe("AutonomousDirector", () => {
     ).toBe(false);
     expect(director.getCurrentTask(record.botId)).toMatchObject({
       status: "failed",
-      title: "自主恢复: 继续定向开掘 coal_ore",
+      title: "自主恢复: 继续定向开掘 iron_ore",
     });
 
     nowMs += 11_000;
     registryListeners.forEach((listener) => listener(record));
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await flushDirector();
 
     expect(planAndDispatch).toHaveBeenCalledTimes(2);
     expect(planAndDispatch.mock.calls[1]?.[0].operatorGoal).toBe(
-      AUTONOMOUS_GOAL_SEQUENCE[6].operatorGoal,
+      "获取 iron_pickaxe",
     );
     await director.stop();
   });
 
-  it("moves from a failed shelter to its missing material milestone", async () => {
+  it("seals a shelter with carried cobblestone when everything else is satisfied", async () => {
     const record = readyRecord("studio-bot-01");
-    record.currentStatus!.inventory = AUTONOMOUS_GOAL_SEQUENCE
-      .filter(({ key }) => key !== "shelter")
-      .map(({ key }) => ({ itemName: key, count: 1 }));
-    let nowMs = NOW.getTime();
-    const registryListeners = new Set<(record: BotRegistryRecord) => void>();
-    const registry = {
-      list: vi.fn(() => [record]),
-      get: vi.fn(() => record),
-      subscribe: vi.fn((listener: (record: BotRegistryRecord) => void) => {
-        registryListeners.add(listener);
-        return () => registryListeners.delete(listener);
-      }),
-    };
-    const planAndDispatch = vi.fn(async () =>
-      failedPlanResult("ITEM_NOT_IN_INVENTORY"),
-    );
-    const director = new AutonomousDirector({
-      registry,
-      planner: { planAndDispatch },
-      intervalMs: 60_000,
-      goalTimeoutMs: 60_000,
-      failureCooldownMs: 5_000,
-      terminalRetentionMs: 10_000,
-      now: () => new Date(nowMs),
-      randomId: uuidSequence(),
-    });
-
-    director.start();
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(planAndDispatch.mock.calls[0]?.[0].operatorGoal).toBe(
-      AUTONOMOUS_GOAL_SEQUENCE.at(-1)?.operatorGoal,
-    );
-
-    record.currentStatus!.inventory = record.currentStatus!.inventory?.filter(
-      ({ itemName }) => itemName !== "dirt" && itemName !== "cobblestone",
-    );
-    nowMs += 11_000;
-    registryListeners.forEach((listener) => listener(record));
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    await new Promise<void>((resolve) => setImmediate(resolve));
-
-    expect(planAndDispatch.mock.calls[1]?.[0].operatorGoal).toBe(
-      "获取 cobblestone",
-    );
-    expect(director.getCurrentTask(record.botId)).toMatchObject({
-      title: "自主任务: 采集圆石",
-    });
-    await director.stop();
-  });
-
-  it("uses carried cobblestone instead of searching for surface dirt", async () => {
-    const record = readyRecord("studio-bot-01");
-    record.currentStatus!.inventory = AUTONOMOUS_GOAL_SEQUENCE
-      .filter(({ key }) => key !== "dirt" && key !== "shelter")
-      .map(({ key }) => ({ itemName: key, count: 1 }));
+    record.currentStatus!.armorPoints = 20;
+    record.currentStatus!.inventory = satisfiedInventory().concat([
+      { itemName: "cobblestone", count: 16 },
+    ]);
     const registry = {
       list: vi.fn(() => [record]),
       get: vi.fn(() => record),
@@ -508,16 +507,17 @@ describe("AutonomousDirector", () => {
       "在当前维度向 north 挖一个 2 格深的安全避难所，并用 cobblestone 封口",
     );
     expect(director.getCurrentTask(record.botId)).toMatchObject({
-      title: "自主任务: 建立安全避难所",
+      title: expect.stringContaining("避难所"),
     });
     await director.stop();
   });
 
-  it("rotates autonomous shelter direction after a blocked attempt", async () => {
+  it("rotates shelter direction, then suppresses the need after repeated failure", async () => {
     const record = readyRecord("studio-bot-01");
-    record.currentStatus!.inventory = AUTONOMOUS_GOAL_SEQUENCE
-      .filter(({ key }) => key !== "shelter")
-      .map(({ key }) => ({ itemName: key, count: 1 }));
+    record.currentStatus!.armorPoints = 20;
+    record.currentStatus!.inventory = satisfiedInventory().concat([
+      { itemName: "dirt", count: 16 },
+    ]);
     let nowMs = NOW.getTime();
     const registryListeners = new Set<(record: BotRegistryRecord) => void>();
     const registry = {
@@ -556,9 +556,68 @@ describe("AutonomousDirector", () => {
       "在当前维度向 north 挖一个 2 格深的安全避难所，并用 dirt 封口",
       "在当前维度向 east 挖一个 2 格深的安全避难所，并用 dirt 封口",
       "在当前维度向 south 挖一个 2 格深的安全避难所，并用 dirt 封口",
-      "在当前维度向 west 挖一个 2 格深的安全避难所，并用 dirt 封口",
+      expect.stringMatching(/^移动到坐标/),
     ]);
+    // The third failure suppresses SHELTER for the cooldown window; a later
+    // kick may dispatch other needs (e.g. exploration) but never a fourth
+    // identical shelter attempt.
+    const shelterAttempts = planAndDispatch.mock.calls.filter(
+      ([request]) => request.operatorGoal.includes("安全避难所"),
+    ).length;
+    expect(shelterAttempts).toBe(3);
     await director.stop();
+  });
+
+  it("explores new sectors once every survival need is satisfied", async () => {
+    const record = readyRecord("studio-bot-01");
+    record.currentStatus!.armorPoints = 20;
+    record.currentStatus!.inventory = satisfiedInventory().concat([
+      { itemName: "dirt", count: 16 },
+    ]);
+    let nowMs = NOW.getTime();
+    const registryListeners = new Set<(record: BotRegistryRecord) => void>();
+    const registry = {
+      list: vi.fn(() => [record]),
+      get: vi.fn(() => record),
+      subscribe: vi.fn((listener: (record: BotRegistryRecord) => void) => {
+        registryListeners.add(listener);
+        return () => registryListeners.delete(listener);
+      }),
+    };
+    // First the bot finishes its one-time shelter, then nothing is left but
+    // exploration toward the next tier's ore.
+    const planAndDispatch = vi.fn(async (request: { operatorGoal: string }) =>
+      request.operatorGoal.includes("安全避难所")
+        ? completedPlanResult("shelter.dig", {})
+        : noopPlanResult(),
+    );
+    const director = new AutonomousDirector({
+      registry,
+      planner: { planAndDispatch },
+      intervalMs: 60_000,
+      goalTimeoutMs: 60_000,
+      failureCooldownMs: 5_000,
+      terminalRetentionMs: 10_000,
+      now: () => new Date(nowMs),
+      randomId: uuidSequence(),
+    });
+
+    director.start();
+    await flushDirector();
+    // A completed goal cools down for intervalMs before the next dispatch.
+    nowMs += 61_000;
+    registryListeners.forEach((listener) => listener(record));
+    await flushDirector();
+    await director.stop();
+
+    expect(planAndDispatch.mock.calls[0]?.[0].operatorGoal).toContain(
+      "安全避难所",
+    );
+    // Fully-equipped, sheltered bot keeps working: exploration toward the
+    // next tier's ore instead of looping on wood or re-digging shelters.
+    expect(planAndDispatch.mock.calls[1]?.[0].operatorGoal).toMatch(
+      /^移动到坐标 x=-?\d+ y=64 z=-?\d+ 附近，继续观察 diamond_ore 方块$/,
+    );
   });
 });
 
@@ -593,6 +652,26 @@ function completedPlanResult(skillId: string, output: unknown): never {
     result: { payload: { outcome: "completed", output } },
     ai: {},
   } as never;
+}
+
+/** Every survival need satisfied except SHELTER (memory-gated, starts false). */
+function satisfiedInventory(): ReadonlyArray<{ itemName: string; count: number }> {
+  return [
+    { itemName: "cooked_beef", count: 12 },
+    { itemName: "oak_log", count: 16 },
+    { itemName: "diamond_pickaxe", count: 1 },
+    { itemName: "diamond_sword", count: 1 },
+    { itemName: "diamond_helmet", count: 1 },
+    { itemName: "diamond_chestplate", count: 1 },
+    { itemName: "diamond_leggings", count: 1 },
+    { itemName: "diamond_boots", count: 1 },
+    { itemName: "diamond", count: 3 },
+    { itemName: "iron_ingot", count: 6 },
+    { itemName: "shield", count: 1 },
+    { itemName: "chest", count: 1 },
+    { itemName: "coal", count: 8 },
+    { itemName: "torch", count: 16 },
+  ];
 }
 
 function readyRecord(botId: string, maximumHealth: number | null = 20): BotRegistryRecord {
