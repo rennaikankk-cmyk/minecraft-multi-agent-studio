@@ -20,7 +20,13 @@ export type BotClientSnapshot = {
   health: { current: number; maximum: number | null };
   food: { level: number; saturation: number };
   armorPoints: number | null;
-  inventory: readonly Readonly<{ itemName: string; count: number }>[];
+  inventory: readonly Readonly<{
+    itemName: string;
+    count: number;
+    /** 工具类物品的耐久读数；非耐久物品省略。 */
+    durability?: number;
+    maxDurability?: number;
+  }>[];
   position: BotPosition;
   latencyMs: number | null;
   safety: {

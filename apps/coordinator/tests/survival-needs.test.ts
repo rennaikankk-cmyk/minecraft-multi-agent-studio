@@ -128,6 +128,36 @@ describe("assessSurvivalNeeds", () => {
     });
   });
 
+  it("replaces a worn pickaxe before it breaks", () => {
+    const needs = assess({
+      inventory: [{
+        itemName: "stone_pickaxe",
+        count: 1,
+        durability: 8,
+        maxDurability: 132,
+      }],
+      foodLevel: 20,
+    });
+    const recovery = needs.find((n) => n.key === "TOOL_RECOVERY");
+    expect(recovery).toMatchObject({
+      operatorGoal: "获取 2 个 stone_pickaxe",
+      reason: expect.stringContaining("durability 6%"),
+      sourceBlock: "stone",
+    });
+    // 耐久恢复压过梯队推进：镐子断掉等于采集链停摆。
+    expect(recovery?.score).toBeGreaterThan(
+      needs.find((n) => n.key === "TOOL_PROGRESSION")?.score ?? 0,
+    );
+  });
+
+  it("ignores durability when the runtime has not reported it", () => {
+    const needs = assess({
+      inventory: [{ itemName: "stone_pickaxe", count: 1 }],
+      foodLevel: 20,
+    });
+    expect(needs.find((n) => n.key === "TOOL_RECOVERY")).toBeUndefined();
+  });
+
   it("never explores on an empty food reserve", () => {
     const needs = assess({
       inventory: [{ itemName: "diamond_pickaxe", count: 1 }],

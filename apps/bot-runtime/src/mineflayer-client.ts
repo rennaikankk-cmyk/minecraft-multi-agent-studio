@@ -972,6 +972,31 @@ function readMaximumHealth(bot: Bot): number | null {
     : null;
 }
 
+/**
+ * 工具耐久读数（剩余值）。与 worldStateSnapshot 同一语义：mineflayer 的
+ * Item 携带 maxDurability 与 durabilityUsed（已损耗），剩余 = max − used。
+ * 非耐久物品返回 null。
+ */
+function toolDurability(item: {
+  maxDurability?: number;
+  durabilityUsed?: number;
+}): { durability: number; maxDurability: number } | null {
+  const maxDurability = item.maxDurability;
+  if (
+    typeof maxDurability !== "number" ||
+    !Number.isFinite(maxDurability) ||
+    maxDurability <= 0
+  ) {
+    return null;
+  }
+  const used = item.durabilityUsed;
+  const durability =
+    typeof used === "number" && Number.isFinite(used) && used > 0
+      ? Math.max(0, Math.round(maxDurability - used))
+      : Math.round(maxDurability);
+  return { durability, maxDurability: Math.round(maxDurability) };
+}
+
 function readArmorPoints(bot: Bot): number | null {
   try {
     const destinations = ["head", "torso", "legs", "feet"] as const;
@@ -1196,7 +1221,7 @@ export class MineflayerBotClient implements BotClient {
       inventoryEnd >= inventoryStart
         ? this.bot.inventory.slots.slice(inventoryStart, inventoryEnd)
         : [];
-    const inventoryCounts = new Map<string, number>();
+    const inventoryCounts = new Map<string, { count: number; durability?: { durability: number; maxDurability: number } }>();
     for (const item of this.bot.inventory.items()) {
       if (
         typeof item.name !== "string" ||
@@ -1205,10 +1230,14 @@ export class MineflayerBotClient implements BotClient {
       ) {
         continue;
       }
-      inventoryCounts.set(
-        item.name,
-        (inventoryCounts.get(item.name) ?? 0) + item.count,
-      );
+      const existing = inventoryCounts.get(item.name);
+      // 工具类不堆叠：耐久取该名下任意一件的读数即可。协调器用它在
+      // 工具断掉之前提前补替代品，而不是等 COLLECT_TOOL_MISSING。
+      const durability = existing?.durability ?? toolDurability(item);
+      inventoryCounts.set(item.name, {
+        count: (existing?.count ?? 0) + item.count,
+        ...(durability ? { durability } : {}),
+      });
     }
     return {
       health: {
@@ -1222,7 +1251,16 @@ export class MineflayerBotClient implements BotClient {
       armorPoints: readArmorPoints(this.bot),
       inventory: [...inventoryCounts.entries()]
         .sort(([left], [right]) => left.localeCompare(right))
-        .map(([itemName, count]) => ({ itemName, count })),
+        .map(([itemName, entry]) => ({
+          itemName,
+          count: entry.count,
+          ...(entry.durability
+            ? {
+                durability: entry.durability.durability,
+                maxDurability: entry.durability.maxDurability,
+              }
+            : {}),
+        })),
       position: {
         x: position.x,
         y: position.y,

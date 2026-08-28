@@ -158,6 +158,11 @@ export type RuntimeDependencies = {
   randomId?: () => string;
   /** Optional measured probe report; absent is deliberately NO_PROBE_DATA. */
   combatReflexProbe?: CombatReflexProbeReport | null;
+  /**
+   * 运行时完整停止后的通知（含停止原因）。宿主用它实现 L0 断线保号的
+   * 退避重启：直接重启会被同一群怪再打一次，形成分钟级循环。
+   */
+  onStopped?: (reason: string) => void;
 };
 
 export type RuntimeStopOutcome =
@@ -815,6 +820,7 @@ export class SingleBotRuntime {
         expected: true,
       });
     }
+    this.dependencies.onStopped?.(reason);
     return { confirmed: true };
   }
 

@@ -765,8 +765,34 @@ const botInventorySchema = z
       .object({
         itemName: skillIdentifierSchema,
         count: z.number().int().positive().max(1_000_000),
+        /** 工具耐久（可选）：协调器据此在工具断掉前补替代品。 */
+        durability: z.number().int().min(0).max(10_000).optional(),
+        maxDurability: z.number().int().min(1).max(10_000).optional(),
       })
-      .strict(),
+      .strict()
+      .superRefine((entry, context) => {
+        if (
+          (entry.durability === undefined) !==
+          (entry.maxDurability === undefined)
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["durability"],
+            message: "Durability fields must appear together.",
+          });
+        }
+        if (
+          entry.durability !== undefined &&
+          entry.maxDurability !== undefined &&
+          entry.durability > entry.maxDurability
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["durability"],
+            message: "Durability cannot exceed max durability.",
+          });
+        }
+      }),
   )
   .max(256)
   .superRefine((items, context) => {

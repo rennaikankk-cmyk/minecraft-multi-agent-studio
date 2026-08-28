@@ -19,12 +19,38 @@ export type BotRuntimeHostOptions = Readonly<{
   onFatal?: (error: RuntimeLinkClientError) => Promise<void> | void;
 }>;
 
+/**
+ * L0 断线保号后的重连退避。实测痛点：2 血断线→进程被启动器立即重启→
+ * 原地重连进同一群怪→再被打→再断线，形成分钟级死循环。退避让世界先
+ * 变化（天亮/怪物游走），配合"稳定低血只吃不断线"的 L0 语义，重连后
+ * 才有机会回血重建。连续多次仍触发则停手——那说明该位置本身不安全。
+ */
+const DEFAULT_EMERGENCY_RESTART_COOLDOWN_MS = 60_000;
+const DEFAULT_EMERGENCY_RESTART_MAX = 3;
+
+function boundedEnvInteger(
+  raw: string | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    return fallback;
+  }
+  return parsed;
+}
+
 export class BotRuntimeHost {
   readonly runtime: SingleBotRuntime;
 
   private readonly runtimeLink: RuntimeLinkClient;
   private started = false;
   private stopPromise: Promise<RuntimeStopOutcome> | null = null;
+  private emergencyRestarts = 0;
+  private emergencyRestartTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly emergencyRestartCooldownMs: number;
+  private readonly emergencyRestartMax: number;
 
   constructor(private readonly options: BotRuntimeHostOptions) {
     let runtimeLink: RuntimeLinkClient | null = null;
@@ -35,7 +61,20 @@ export class BotRuntimeHost {
         runtimeLink?.publishTelemetry(message);
       },
       logger: options.logger,
+      onStopped: (reason) => this.handleRuntimeStopped(reason),
     });
+    this.emergencyRestartCooldownMs = boundedEnvInteger(
+      process.env.BOT_EMERGENCY_RESTART_COOLDOWN_MS,
+      DEFAULT_EMERGENCY_RESTART_COOLDOWN_MS,
+      5_000,
+      600_000,
+    );
+    this.emergencyRestartMax = boundedEnvInteger(
+      process.env.BOT_EMERGENCY_RESTART_MAX,
+      DEFAULT_EMERGENCY_RESTART_MAX,
+      0,
+      100,
+    );
     this.runtimeLink = runtimeLink = new RuntimeLinkClient({
       config: options.runtimeLinkConfig,
       botId: options.profile.botId,
@@ -78,7 +117,48 @@ export class BotRuntimeHost {
     return this.stopPromise;
   }
 
+  /**
+   * Only L0 emergency stops qualify for the backoff restart; operator-driven
+   * stops (SIGINT/SIGTERM, coordinator stop) stay down, and the restart
+   * budget only counts emergency cycles.
+   */
+  private handleRuntimeStopped(reason: string): void {
+    if (reason !== "l0_emergency_stop") return;
+    if (!this.options.profile.reconnect.enabled) return;
+    if (this.emergencyRestarts >= this.emergencyRestartMax) {
+      this.options.logger.warn("bot_runtime_emergency_restart_budget_exhausted", {
+        attempts: this.emergencyRestarts,
+        botId: this.options.profile.botId,
+      });
+      return;
+    }
+    if (this.emergencyRestartTimer) return;
+    this.emergencyRestartTimer = setTimeout(() => {
+      this.emergencyRestartTimer = null;
+      this.emergencyRestarts += 1;
+      // 允许新的 stop 生命周期；运行时在 offline 状态下可以重新 start。
+      this.stopPromise = null;
+      this.options.logger.info("bot_runtime_emergency_restart", {
+        attempt: this.emergencyRestarts,
+        cooldownMs: this.emergencyRestartCooldownMs,
+        botId: this.options.profile.botId,
+      });
+      try {
+        this.runtime.start();
+      } catch (cause) {
+        this.options.logger.error("bot_runtime_emergency_restart_failed", {
+          error: cause instanceof Error ? cause.message.slice(0, 200) : String(cause),
+        });
+      }
+    }, this.emergencyRestartCooldownMs);
+    this.emergencyRestartTimer.unref?.();
+  }
+
   private async performStop(reason: string): Promise<RuntimeStopOutcome> {
+    if (this.emergencyRestartTimer) {
+      clearTimeout(this.emergencyRestartTimer);
+      this.emergencyRestartTimer = null;
+    }
     const outcome = await this.runtime.stop(reason);
     await this.runtimeLink.close();
     this.started = false;

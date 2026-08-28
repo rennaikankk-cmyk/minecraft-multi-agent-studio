@@ -45,6 +45,8 @@ export const SAFE_FOOD_ITEM_NAMES: ReadonlySet<string> = new Set([
 export type SurvivalNeedKey =
   | "FOOD_SECURITY"
   | "EQUIP_ARMOR"
+  | "TOOL_RECOVERY"
+  | "WEAPON_RECOVERY"
   | "TOOL_PROGRESSION"
   | "WOOD_RESERVE"
   | "WEAPON"
@@ -89,6 +91,8 @@ export type SurvivalAssessmentInput = Readonly<{
 const PRIORITY_ORDER: readonly SurvivalNeedKey[] = Object.freeze([
   "FOOD_SECURITY",
   "EQUIP_ARMOR",
+  "TOOL_RECOVERY",
+  "WEAPON_RECOVERY",
   "TOOL_PROGRESSION",
   "WOOD_RESERVE",
   "WEAPON",
@@ -138,7 +142,7 @@ export function assessSurvivalNeeds(
 
   const safeFood = countSafeFood(inventory);
   const foodLevel = status?.food.level ?? 20;
-  const woodUnits = (inventory.get("oak_log") ?? 0) + Math.floor((inventory.get("oak_planks") ?? 0) / 4);
+  const woodUnits = (inventory.get("oak_log")?.count ?? 0) + Math.floor((inventory.get("oak_planks")?.count ?? 0) / 4);
 
   // ---- 食物安全：曲线而非开关。饿着肚子时储备不足急剧升权；饱腹时
   // 只做"顺手补到 12"的低权维护，不挡工具进度。
@@ -152,13 +156,49 @@ export function assessSurvivalNeeds(
 
   // ---- 工具阶梯：Goal Graph 的主干。每档只看"有没有"，链路（木/石/铁）
   // 由确定性 GoalPlanner 倒推，这里不重复描述依赖。
-  const pickaxeTier = PICKAXE_TIERS.findIndex((name) => (inventory.get(name) ?? 0) > 0);
+  const pickaxeTier = PICKAXE_TIERS.findIndex((name) => (inventory.get(name)?.count ?? 0) > 0);
   if (pickaxeTier < 0) {
     needs.push(itemNeed("TOOL_PROGRESSION", 75, "wooden_pickaxe", "no pickaxe at all", 1, "oak_log"));
   } else if (pickaxeTier < PICKAXE_TIERS.length - 1) {
     const next = PICKAXE_TIERS[pickaxeTier + 1]!;
     const score = pickaxeTier === 0 ? 65 : pickaxeTier === 1 ? 55 : 42;
     needs.push(itemNeed("TOOL_PROGRESSION", score, next, `pickaxe tier ${PICKAXE_TIERS[pickaxeTier]} < next ${next}`, 1, TOOL_SOURCE_BLOCKS[pickaxeTier + 1] ?? null));
+  }
+
+  // ---- 耐久恢复：当前主力工具磨损到阈值之下就补一件备用（目标数 = 现有+1，
+  // 确定性规划器据此真的多合一件）。镐子在路上断掉等于整个采集链停摆，
+  // 所以分数压过梯队推进。
+  const TOOL_DURABILITY_FRACTION = 0.2;
+  if (pickaxeTier >= 0) {
+    const current = PICKAXE_TIERS[pickaxeTier]!;
+    const fraction = durabilityFraction(inventory.get(current));
+    if (fraction < TOOL_DURABILITY_FRACTION) {
+      const owned = inventory.get(current)?.count ?? 1;
+      needs.push(itemNeed(
+        "TOOL_RECOVERY",
+        68,
+        current,
+        `${current} durability ${(fraction * 100).toFixed(0)}% < ${(TOOL_DURABILITY_FRACTION * 100).toFixed(0)}%`,
+        owned + 1,
+        TOOL_SOURCE_BLOCKS[pickaxeTier] ?? null,
+      ));
+    }
+  }
+  for (const sword of ["stone_sword", "iron_sword", "diamond_sword"] as const) {
+    const entry = inventory.get(sword);
+    if ((entry?.count ?? 0) === 0) continue;
+    const fraction = durabilityFraction(entry);
+    if (fraction < TOOL_DURABILITY_FRACTION) {
+      needs.push(itemNeed(
+        "WEAPON_RECOVERY",
+        48,
+        sword,
+        `${sword} durability ${(fraction * 100).toFixed(0)}% < ${(TOOL_DURABILITY_FRACTION * 100).toFixed(0)}%`,
+        (entry?.count ?? 1) + 1,
+        sword === "stone_sword" ? "stone" : "iron_ore",
+      ));
+      break;
+    }
   }
 
   // ---- 木料储备：工具之外持续补充的建筑/燃料本钱。
@@ -169,16 +209,16 @@ export function assessSurvivalNeeds(
   }
 
   // ---- 武器：石器时代之后必须有；铁器时代升铁剑。
-  if (pickaxeTier >= 1 && (inventory.get("stone_sword") ?? 0) === 0 && (inventory.get("iron_sword") ?? 0) === 0 && (inventory.get("diamond_sword") ?? 0) === 0) {
+  if (pickaxeTier >= 1 && (inventory.get("stone_sword")?.count ?? 0) === 0 && (inventory.get("iron_sword")?.count ?? 0) === 0 && (inventory.get("diamond_sword")?.count ?? 0) === 0) {
     needs.push(itemNeed("WEAPON", 50, "stone_sword", "no sword for defense and hunting", 1, "stone"));
-  } else if (pickaxeTier >= 2 && (inventory.get("iron_sword") ?? 0) === 0 && (inventory.get("diamond_sword") ?? 0) === 0) {
+  } else if (pickaxeTier >= 2 && (inventory.get("iron_sword")?.count ?? 0) === 0 && (inventory.get("diamond_sword")?.count ?? 0) === 0) {
     needs.push(itemNeed("WEAPON", 44, "iron_sword", "iron age reached but sword is below tier", 1, "iron_ore"));
   }
 
   // ---- 有甲未穿：armorPoints 只反映穿戴，合好的甲放在背包里等于没有。
   // 穿戴是零成本幂等技能（inventory.equip-armor），永远先于"再合一件"。
   const armorPoints = status?.armorPoints ?? 0;
-  const ownedArmorPieces = ARMOR_PIECE_NAMES.filter((name) => (inventory.get(name) ?? 0) > 0);
+  const ownedArmorPieces = ARMOR_PIECE_NAMES.filter((name) => (inventory.get(name)?.count ?? 0) > 0);
   if (armorPoints === 0 && ownedArmorPieces.length > 0) {
     needs.push({
       key: "EQUIP_ARMOR",
@@ -205,13 +245,13 @@ export function assessSurvivalNeeds(
   }
 
   // ---- 铁储备：铁器时代的持续本钱（工具链自己会要铁，这里补余量）。
-  const ironUnits = (inventory.get("raw_iron") ?? 0) + (inventory.get("iron_ingot") ?? 0);
+  const ironUnits = (inventory.get("raw_iron")?.count ?? 0) + (inventory.get("iron_ingot")?.count ?? 0);
   if (pickaxeTier >= 1 && ironUnits < IRON_MINIMUM) {
     needs.push(itemNeed("IRON_RESERVE", 35, "raw_iron", `iron reserve ${ironUnits} < minimum ${IRON_MINIMUM}`, deficitCount(IRON_MINIMUM, ironUnits), "iron_ore"));
   }
 
   // ---- 盾牌：铁器时代后的保命件。
-  if (pickaxeTier >= 2 && (inventory.get("shield") ?? 0) === 0) {
+  if (pickaxeTier >= 2 && (inventory.get("shield")?.count ?? 0) === 0) {
     needs.push(itemNeed("SHIELD", 33, "shield", "iron age reached without a shield", 1, "iron_ore"));
   }
 
@@ -236,7 +276,7 @@ export function assessSurvivalNeeds(
   }
 
   // ---- 钻石推进：铁镐之后的下一个台阶，先攒镐+剑的本钱再谈甲。
-  const diamonds = inventory.get("diamond") ?? 0;
+  const diamonds = inventory.get("diamond")?.count ?? 0;
   if (pickaxeTier === 2) {
     needs.push(itemNeed("DIAMOND_PROGRESSION", 48, "diamond", `diamond reserve ${diamonds} < ${DIAMOND_PICKAXE_RESERVE} for a diamond pickaxe`, deficitCount(DIAMOND_PICKAXE_RESERVE, diamonds), "diamond_ore"));
   }
@@ -253,16 +293,16 @@ export function assessSurvivalNeeds(
   }
 
   // ---- 煤/火把：照明与燃料的低权持续维护。
-  const coalUnits = (inventory.get("coal") ?? 0) + (inventory.get("charcoal") ?? 0);
+  const coalUnits = (inventory.get("coal")?.count ?? 0) + (inventory.get("charcoal")?.count ?? 0);
   if (pickaxeTier >= 1 && coalUnits < COAL_MINIMUM) {
     needs.push(itemNeed("COAL_RESERVE", 25, "coal", `coal reserve ${coalUnits} < minimum ${COAL_MINIMUM}`, deficitCount(COAL_MINIMUM, coalUnits), "coal_ore"));
   }
-  if (pickaxeTier >= 1 && coalUnits >= 1 && (inventory.get("torch") ?? 0) < TORCH_MINIMUM) {
-    needs.push(itemNeed("TORCH", 20, "torch", `torches ${inventory.get("torch") ?? 0} < minimum ${TORCH_MINIMUM}`, deficitCount(TORCH_MINIMUM, inventory.get("torch") ?? 0), "coal_ore"));
+  if (pickaxeTier >= 1 && coalUnits >= 1 && (inventory.get("torch")?.count ?? 0) < TORCH_MINIMUM) {
+    needs.push(itemNeed("TORCH", 20, "torch", `torches ${inventory.get("torch")?.count ?? 0} < minimum ${TORCH_MINIMUM}`, deficitCount(TORCH_MINIMUM, inventory.get("torch")?.count ?? 0), "coal_ore"));
   }
 
   // ---- 箱子：铁器时代后的储存基建（放箱子本身后续接入，先有物件）。
-  if (pickaxeTier >= 2 && (inventory.get("chest") ?? 0) === 0) {
+  if (pickaxeTier >= 2 && (inventory.get("chest")?.count ?? 0) === 0) {
     needs.push(itemNeed("CHEST", 18, "chest", "iron age reached without storage", 1, "oak_log"));
   }
 
@@ -320,30 +360,56 @@ function deficitCount(minimum: number, current: number): number {
   return Math.max(1, Math.min(32, minimum - current));
 }
 
-function countSafeFood(inventory: ReadonlyMap<string, number>): number {
+function countSafeFood(inventory: ReadonlyMap<string, InventoryEntry>): number {
   let total = 0;
-  for (const [name, count] of inventory) {
-    if (SAFE_FOOD_ITEM_NAMES.has(name)) total += count;
+  for (const [name, entry] of inventory) {
+    if (SAFE_FOOD_ITEM_NAMES.has(name)) total += entry.count;
   }
   return total;
 }
 
 function firstMissing(
   items: readonly string[],
-  inventory: ReadonlyMap<string, number>,
+  inventory: ReadonlyMap<string, InventoryEntry>,
 ): string | null {
   for (const item of items) {
-    if ((inventory.get(item) ?? 0) === 0) return item;
+    if ((inventory.get(item)?.count ?? 0) === 0) return item;
   }
   return null;
 }
 
+type InventoryEntry = Readonly<{
+  count: number;
+  durability: number | null;
+  maxDurability: number | null;
+}>;
+
 function inventoryMap(
-  inventory: readonly Readonly<{ itemName: string; count: number }>[] | undefined,
-): ReadonlyMap<string, number> {
-  const map = new Map<string, number>();
+  inventory:
+    | readonly Readonly<{
+        itemName: string;
+        count: number;
+        durability?: number | undefined;
+        maxDurability?: number | undefined;
+      }>[]
+    | undefined,
+): ReadonlyMap<string, InventoryEntry> {
+  const map = new Map<string, InventoryEntry>();
   for (const item of inventory ?? []) {
-    map.set(item.itemName, (map.get(item.itemName) ?? 0) + item.count);
+    const existing = map.get(item.itemName);
+    map.set(item.itemName, {
+      count: (existing?.count ?? 0) + item.count,
+      durability: item.durability ?? existing?.durability ?? null,
+      maxDurability: item.maxDurability ?? existing?.maxDurability ?? null,
+    });
   }
   return map;
+}
+
+/** 耐久余量（0–1）；无耐久数据的物品按满耐久处理。 */
+function durabilityFraction(entry: InventoryEntry | undefined): number {
+  if (!entry || !entry.maxDurability || entry.maxDurability <= 0) return 1;
+  const remaining = entry.durability ?? entry.maxDurability;
+  // 钳制作用在比值上：把耐久值钳到 1 再除会把 8/132 算成 1%。
+  return Math.max(0, Math.min(1, remaining / entry.maxDurability));
 }

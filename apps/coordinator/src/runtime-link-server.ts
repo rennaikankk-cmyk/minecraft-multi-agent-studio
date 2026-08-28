@@ -763,6 +763,13 @@ export class RuntimeLinkServer implements StopCommandTransport {
     session.botId = peer.botId;
     session.runtimeInstanceId = message.payload.runtimeInstanceId;
     session.authenticated = true;
+    // 会话仲裁提前到认证时刻：同一 botId 的旧会话（进程重启后残留的死
+    // socket，或被顶替的旧进程）在这里被立即关闭，而不是等新会话的第一
+    // 条遥测。实测两活进程竞争时，迟到仲裁让双方在短时间内互相关闭对方
+    // 的会话（telemetry_ack_mismatch 风暴），技能派发也可能打到即将被
+    // 关闭的会话上。现在：最新认证者立即获胜，败者收到 runtime_replaced
+    // 并按终态处理。
+    this.activateSession(session);
     this.sendFrame(session.socket, accepted, (error) => {
       if (error) session.socket.close(1011, "authentication_response_failed");
     });

@@ -254,9 +254,9 @@ export class RuntimeLinkClient {
         code: "RUNTIME_LINK_TRANSPORT_ERROR",
       });
     });
-    socket.once("close", () => {
+    socket.once("close", (code: number, reason: Buffer) => {
       if (!this.isCurrent(generation, socket)) return;
-      this.handleSocketClosed(socket);
+      this.handleSocketClosed(socket, code, reason);
     });
   }
 
@@ -739,7 +739,7 @@ export class RuntimeLinkClient {
     }
   }
 
-  private handleSocketClosed(socket: WebSocket): void {
+  private handleSocketClosed(socket: WebSocket, code: number, reason: Buffer): void {
     if (this.socket === socket) this.socket = null;
     this.clearTimer("handshake");
     this.clearTimer("telemetryAck");
@@ -747,6 +747,22 @@ export class RuntimeLinkClient {
     this.handshake = null;
     this.coordinatorInstanceId = null;
     this.markFirstQueuedMessageUnsent();
+    const reasonText = reason?.toString("utf8") ?? "";
+    // 被更新的 Runtime 进程顶替是终态：重连只会把胜者的会话再关掉，
+    // 形成两个进程互相逐退的乒乓。如实失败关闭，让启动器决定是否重启。
+    if (reasonText.includes("runtime_replaced")) {
+      this.log("warn", "runtime_link_disconnected", {
+        code: "RUNTIME_LINK_REPLACED",
+        closeCode: code,
+      });
+      void this.triggerFailClosed(
+        new RuntimeLinkClientError(
+          "RUNTIME_LINK_IDENTITY_MISMATCH",
+          "A newer Runtime process took over this Bot's Link session.",
+        ),
+      );
+      return;
+    }
     this.log("warn", "runtime_link_disconnected", {
       code: "RUNTIME_LINK_DISCONNECTED",
     });
