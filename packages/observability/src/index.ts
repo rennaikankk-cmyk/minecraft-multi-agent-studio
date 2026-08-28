@@ -51,6 +51,7 @@ export const lifecycleMetricNames = [
   "bot_watchdog_loops_total",
   "bot_duplicate_crafting_prevented_total",
   "bot_stale_responses_total",
+  "bot_deaths_total",
   "bot_cancelled_requests_total",
   "bot_llm_requests_total",
   "bot_llm_useful_responses_total",
@@ -60,6 +61,9 @@ export const lifecycleMetricNames = [
   "bot_llm_execution_time_ms_total",
   "bot_llm_total_latency_ms_total",
   "bot_task_completion_time_ms_total",
+  "planner_deterministic_decisions_total",
+  "bot_autonomous_goals_total",
+  "bot_autonomous_recoveries_total",
 ] as const;
 
 export type LifecycleMetricName = (typeof lifecycleMetricNames)[number];

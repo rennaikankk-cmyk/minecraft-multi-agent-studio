@@ -140,7 +140,6 @@ export {
   LocalPlannerError,
   LOCAL_PLANNER_REASON_CODES,
   buildLocalPlannerGenerationSchema,
-  buildLocalPlannerPlanItemsRetrySchema,
   plannedAcquisitionGoalItem,
   localPlannerDecisionSchema,
   type CoordinatorLocalPlannerOptions,
@@ -159,7 +158,6 @@ export {
 } from "./autonomous-config.js";
 
 export {
-  AUTONOMOUS_GOAL_SEQUENCE,
   AutonomousDirector,
   type AutonomousDirectorOptions,
   type AutonomousTaskListener,

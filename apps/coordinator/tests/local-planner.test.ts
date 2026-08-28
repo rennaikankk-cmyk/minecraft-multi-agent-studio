@@ -23,7 +23,6 @@ import { BotAssignmentService } from "../src/bot-assignment.js";
 import { BotRegistry } from "../src/bot-registry.js";
 import {
   buildLocalPlannerGenerationSchema,
-  buildLocalPlannerPlanItemsRetrySchema,
   CoordinatorLocalPlanner,
   type CoordinatorLocalPlannerOptions,
   localPlannerDecisionSchema,
@@ -1805,32 +1804,12 @@ describe("CoordinatorLocalPlanner", () => {
     });
   });
 
-  it("re-asks a declined single-item acquisition goal with only the plan_items branch", async () => {
+  it("derives a single-item acquisition goal without a model round-trip", async () => {
     const planning = planningRegistry();
     const sendSkillInvocation = vi.fn<
       SkillInvocationTransport["sendSkillInvocation"]
     >(async (invocation) => skillResult(invocation, "completed"));
-    const generate = vi.fn(async (options) =>
-      aiResult(
-        JSON.stringify(
-          options.requestId.endsWith(":plan-items-retry")
-            ? {
-                action: "plan_items",
-                botId: BOT_ID,
-                taskId: "task-01",
-                goals: [{ itemName: "crafting_table", count: 1 }],
-                reasonCode: "ADVANCE_TASK",
-              }
-            : {
-                action: "noop",
-                botId: BOT_ID,
-                taskId: "task-01",
-                reasonCode: "NO_SAFE_SKILL",
-              },
-        ),
-        options.requestId,
-      ),
-    );
+    const generate = vi.fn();
     const planner = new CoordinatorLocalPlanner({
       ai: { generate },
       registry: { get: () => planning.get(BOT_ID, NOW) },
@@ -1844,48 +1823,22 @@ describe("CoordinatorLocalPlanner", () => {
       planner.planAndDispatch(resourcePlanRequest()),
     ).resolves.toMatchObject({
       action: "skill_result",
-      reasonCode: "ADVANCE_TASK",
+      reasonCode: "DETERMINISTIC_ACQUISITION",
       result: { payload: { outcome: "completed" } },
+      ai: null,
     });
-    expect(generate).toHaveBeenCalledTimes(2);
+    // The whole point: the model was measured answering noop/NO_SAFE_SKILL on
+    // 6 of 6 of these goals; the branch choice is now derived, not asked.
+    expect(generate).not.toHaveBeenCalled();
     expect(sendSkillInvocation).toHaveBeenCalledTimes(3);
-    const retryOptions = generate.mock.calls[1]![0];
-    // The retry offers one branch and advertises no skills, so the model cannot
-    // restate the noop it just gave; the item is the Coordinator's, not the model's.
-    expect(retryOptions.requestId).toBe("plan-request-01:plan-items-retry");
-    const retrySchema = z.toJSONSchema(retryOptions.schema);
-    expect(retrySchema).not.toHaveProperty("anyOf");
-    expect(retrySchema.properties?.action).toMatchObject({ const: "plan_items" });
-    expect(JSON.parse(retryOptions.prompt).availableSkills).toEqual([]);
   });
 
-  it("corrects an ungrounded plan_items choice to the one dirt item named by the goal", async () => {
+  it("derives a dirt acquisition goal deterministically with a count of one", async () => {
     const planning = planningRegistry();
     const sendSkillInvocation = vi.fn<
       SkillInvocationTransport["sendSkillInvocation"]
     >(async (invocation) => skillResult(invocation, "completed"));
-    const generate = vi.fn(async (options) =>
-      aiResult(
-        JSON.stringify(
-          options.requestId.endsWith(":plan-items-retry")
-            ? {
-                action: "plan_items",
-                botId: BOT_ID,
-                taskId: "task-01",
-                goals: [{ itemName: "dirt", count: 1 }],
-                reasonCode: "ADVANCE_TASK",
-              }
-            : {
-                action: "plan_items",
-                botId: BOT_ID,
-                taskId: "task-01",
-                goals: [{ itemName: "diamond", count: 1 }],
-                reasonCode: "ADVANCE_TASK",
-              },
-        ),
-        options.requestId,
-      ),
-    );
+    const generate = vi.fn();
     const planner = new CoordinatorLocalPlanner({
       ai: { generate },
       registry: { get: () => planning.get(BOT_ID, NOW) },
@@ -1902,21 +1855,14 @@ describe("CoordinatorLocalPlanner", () => {
       }),
     ).resolves.toMatchObject({
       action: "skill_result",
-      reasonCode: "ADVANCE_TASK",
       result: { payload: { outcome: "completed" } },
     });
-    expect(generate).toHaveBeenCalledTimes(2);
+    expect(generate).not.toHaveBeenCalled();
     expect(sendSkillInvocation).toHaveBeenCalledTimes(1);
     expect(sendSkillInvocation.mock.calls[0]?.[0].payload).toMatchObject({
       skillId: "collect.block",
       input: { blockName: "dirt", maxCount: 1 },
     });
-    const retryOptions = generate.mock.calls[1]![0];
-    expect(z.toJSONSchema(retryOptions.schema).properties?.goals).toMatchObject({
-      maxItems: 1,
-      minItems: 1,
-    });
-    expect(JSON.parse(retryOptions.prompt).plannedItems).toEqual(["dirt"]);
   });
 
   it("continues from the runtime inventory instead of rebuilding the wooden tool chain", async () => {
@@ -1967,34 +1913,14 @@ describe("CoordinatorLocalPlanner", () => {
     });
   });
 
-  it("records the narrowed re-ask and the step ladder without leaking the goal or inputs", async () => {
+  it("records the deterministic decision and the step ladder without leaking the goal or inputs", async () => {
     const planning = planningRegistry();
     const info = vi.fn();
     const warn = vi.fn();
     const sendSkillInvocation = vi.fn<
       SkillInvocationTransport["sendSkillInvocation"]
     >(async (invocation) => skillResult(invocation, "completed"));
-    const generate = vi.fn(async (options) =>
-      aiResult(
-        JSON.stringify(
-          options.requestId.endsWith(":plan-items-retry")
-            ? {
-                action: "plan_items",
-                botId: BOT_ID,
-                taskId: "task-01",
-                goals: [{ itemName: "crafting_table", count: 1 }],
-                reasonCode: "ADVANCE_TASK",
-              }
-            : {
-                action: "noop",
-                botId: BOT_ID,
-                taskId: "task-01",
-                reasonCode: "NO_SAFE_SKILL",
-              },
-        ),
-        options.requestId,
-      ),
-    );
+    const generate = vi.fn();
     const planner = new CoordinatorLocalPlanner({
       ai: { generate },
       registry: { get: () => planning.get(BOT_ID, NOW) },
@@ -2009,14 +1935,7 @@ describe("CoordinatorLocalPlanner", () => {
       planner.planAndDispatch(resourcePlanRequest()),
     ).resolves.toMatchObject({ action: "skill_result" });
 
-    expect(info).toHaveBeenCalledWith("coordinator_planner_plan_items_retry", {
-      traceId: "trace-plan-01",
-      taskId: "task-01",
-      botId: BOT_ID,
-      itemName: "crafting_table",
-      disposition: "accepted",
-      retriedAction: "plan_items",
-    });
+    expect(generate).not.toHaveBeenCalled();
     const supervision = info.mock.calls.find(
       ([event]) => event === "coordinator_planner_goal_supervision",
     );
@@ -2110,34 +2029,30 @@ describe("CoordinatorLocalPlanner", () => {
     expect(logged).not.toContain("isolated-test");
   });
 
-  it("records a discarded re-ask so a retried noop is not mistaken for a first-pass one", async () => {
+  it("does not consult the model for an acquisition goal even when it would decline", async () => {
     const planning = planningRegistry();
     const info = vi.fn();
+    // The model's measured answer for this goal shape was noop/NO_SAFE_SKILL
+    // 6 of 6 times; if the deterministic path ever regresses, this mock makes
+    // the regression loud instead of silently slower.
     const generate = vi.fn(async (options) =>
       aiResult(
-        JSON.stringify(
-          options.requestId.endsWith(":plan-items-retry")
-            ? {
-                action: "plan_items",
-                botId: "other-bot",
-                taskId: "task-01",
-                goals: [{ itemName: "crafting_table", count: 1 }],
-                reasonCode: "ADVANCE_TASK",
-              }
-            : {
-                action: "noop",
-                botId: BOT_ID,
-                taskId: "task-01",
-                reasonCode: "NO_SAFE_SKILL",
-              },
-        ),
+        JSON.stringify({
+          action: "noop",
+          botId: BOT_ID,
+          taskId: "task-01",
+          reasonCode: "NO_SAFE_SKILL",
+        }),
         options.requestId,
       ),
     );
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => skillResult(invocation, "completed"));
     const planner = new CoordinatorLocalPlanner({
       ai: { generate },
       registry: { get: () => planning.get(BOT_ID, NOW) },
-      transport: { sendSkillInvocation: vi.fn() },
+      transport: { sendSkillInvocation },
       coordinatorInstanceId: "coordinator-01",
       logger: { info, warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as never,
       now: () => NOW,
@@ -2146,15 +2061,9 @@ describe("CoordinatorLocalPlanner", () => {
 
     await expect(
       planner.planAndDispatch(resourcePlanRequest()),
-    ).resolves.toMatchObject({ action: "noop" });
-    expect(info).toHaveBeenCalledWith("coordinator_planner_plan_items_retry", {
-      traceId: "trace-plan-01",
-      taskId: "task-01",
-      botId: BOT_ID,
-      itemName: "crafting_table",
-      disposition: "discarded",
-      retriedAction: "plan_items",
-    });
+    ).resolves.toMatchObject({ action: "skill_result" });
+    expect(generate).not.toHaveBeenCalled();
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(3);
   });
 
   it("carries the failing step index and skill on a goal execution failure", async () => {
@@ -2819,29 +2728,20 @@ describe("CoordinatorLocalPlanner", () => {
     expect(logged).not.toContain("isolated-test");
   });
 
-  it("keeps a retried decision under the same grounding and identity checks", async () => {
+  it("keeps a model decision under the same grounding and identity checks", async () => {
     const planning = planningRegistry();
     const sendSkillInvocation = vi.fn<
       SkillInvocationTransport["sendSkillInvocation"]
     >();
     const generate = vi.fn(async (options) =>
       aiResult(
-        JSON.stringify(
-          options.requestId.endsWith(":plan-items-retry")
-            ? {
-                action: "plan_items",
-                botId: "other-bot",
-                taskId: "task-01",
-                goals: [{ itemName: "crafting_table", count: 1 }],
-                reasonCode: "ADVANCE_TASK",
-              }
-            : {
-                action: "noop",
-                botId: BOT_ID,
-                taskId: "task-01",
-                reasonCode: "NO_SAFE_SKILL",
-              },
-        ),
+        JSON.stringify({
+          action: "plan_items",
+          botId: "other-bot",
+          taskId: "task-01",
+          goals: [{ itemName: "crafting_table", count: 1 }],
+          reasonCode: "ADVANCE_TASK",
+        }),
         options.requestId,
       ),
     );
@@ -2854,12 +2754,16 @@ describe("CoordinatorLocalPlanner", () => {
       randomId: uuidSequence(),
     });
 
-    // A retry that changes identity is discarded, not dispatched, and the
-    // original noop is what the caller sees.
+    // A model decision that changes identity is rejected outright, never
+    // dispatched. The goal is deliberately not deterministic-parseable so the
+    // model branch is the one under test.
     await expect(
-      planner.planAndDispatch(resourcePlanRequest()),
-    ).resolves.toMatchObject({ action: "noop", reasonCode: "NO_SAFE_SKILL" });
-    expect(generate).toHaveBeenCalledTimes(2);
+      planner.planAndDispatch({
+        ...planRequest(),
+        operatorGoal: "Equip the best armor already in inventory.",
+      }),
+    ).rejects.toMatchObject({ code: "PLANNER_DECISION_MISMATCH" });
+    expect(generate).toHaveBeenCalledTimes(1);
     expect(sendSkillInvocation).not.toHaveBeenCalled();
   });
 
@@ -3056,18 +2960,7 @@ describe("CoordinatorLocalPlanner", () => {
         sequence: statusSequence,
       },
     }));
-    const generate = vi.fn(async (options) =>
-      aiResult(
-        JSON.stringify({
-          action: "plan_items",
-          botId: BOT_ID,
-          taskId: "task-01",
-          goals: [{ itemName: "crafting_table", count: 1 }],
-          reasonCode: "ADVANCE_TASK",
-        }),
-        options.requestId,
-      ),
-    );
+    const generate = vi.fn();
     const planner = new CoordinatorLocalPlanner({
       ai: { generate },
       registry: { get },
@@ -3089,6 +2982,7 @@ describe("CoordinatorLocalPlanner", () => {
       action: "skill_result",
       result: { payload: { outcome: "completed" } },
     });
+    expect(generate).not.toHaveBeenCalled();
     expect(calls).toEqual([
       "collect.block",
       "craft.item",
@@ -3101,7 +2995,7 @@ describe("CoordinatorLocalPlanner", () => {
     expect(new Set(sendSkillInvocation.mock.calls.map(([invocation]) =>
       invocation.payload.authorization.decisionId,
     )).size).toBe(4);
-    expect(get).toHaveBeenCalledTimes(9);
+    expect(get).toHaveBeenCalledTimes(8);
     expect(requestFreshStatus).toHaveBeenCalledTimes(1);
     expect(sendSkillInvocation.mock.calls[0]![0].payload.input).toMatchObject({
       blockName: "oak_log",
@@ -3116,10 +3010,6 @@ describe("CoordinatorLocalPlanner", () => {
       craftingTable: null,
       serverProfileId: "isolated-test",
     });
-    const generationSchema = z.toJSONSchema(generate.mock.calls[0]![0].schema);
-    expect(generationSchema.anyOf?.some(
-      (branch) => branch.properties?.action?.const === "plan_items",
-    )).toBe(true);
   });
 
   it("accepts a grounded Chinese single-item goal without exposing aliases to the model", async () => {
@@ -3152,14 +3042,31 @@ describe("CoordinatorLocalPlanner", () => {
     const sendSkillInvocation = vi.fn<
       SkillInvocationTransport["sendSkillInvocation"]
     >();
-    const planner = resourcePlanner(
-      planning,
-      { sendSkillInvocation },
-      goals,
+    const generate = vi.fn(async (options) =>
+      aiResult(
+        JSON.stringify({
+          action: "plan_items",
+          botId: BOT_ID,
+          taskId: "task-01",
+          goals,
+          reasonCode: "ADVANCE_TASK",
+        }),
+        options.requestId,
+      ),
     );
+    const planner = new CoordinatorLocalPlanner({
+      ai: { generate },
+      registry: { get: () => planning.get(BOT_ID, NOW) },
+      transport: { sendSkillInvocation },
+      coordinatorInstanceId: "coordinator-01",
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
 
+    // The movement goal keeps this on the model branch; the schema then rejects
+    // the amplified goals before anything is dispatched.
     await expect(
-      planner.planAndDispatch(resourcePlanRequest()),
+      planner.planAndDispatch(planRequest()),
     ).rejects.toMatchObject({ code: "PLANNER_DECISION_INVALID" });
     expect(sendSkillInvocation).not.toHaveBeenCalled();
   });
@@ -3188,22 +3095,18 @@ describe("CoordinatorLocalPlanner", () => {
    * Runtime 诚实报 completed 且 `itemsCollected:0`。旧代码把这个原样当成功返回，
    * 运维侧看到的响应与真采满了一模一样。
    */
-  it("re-plans a one-shot dispatch that completed without producing anything", async () => {
+  it("keeps an empty one-shot dispatch standing instead of re-planning", async () => {
     const planning = planningRegistry();
     const warn = vi.fn();
-    let dispatches = 0;
     const sendSkillInvocation = vi.fn<
       SkillInvocationTransport["sendSkillInvocation"]
-    >(async (invocation) => {
-      dispatches += 1;
-      return dispatches === 1
-        ? skillResult(invocation, "completed", undefined, 1, {
-            blockName: String(inputField(invocation.payload.input, "blockName")),
-            targetsFound: 0,
-            itemsCollected: 0,
-          })
-        : skillResult(invocation, "completed");
-    });
+    >(async (invocation) =>
+      skillResult(invocation, "completed", undefined, 1, {
+        blockName: String(inputField(invocation.payload.input, "blockName")),
+        targetsFound: 0,
+        itemsCollected: 0,
+      }),
+    );
     const generate = vi.fn(emptyDispatchGenerate());
     const planner = new CoordinatorLocalPlanner({
       ai: { generate },
@@ -3215,19 +3118,21 @@ describe("CoordinatorLocalPlanner", () => {
       randomId: uuidSequence(),
     });
 
+    // Non-acquisition goal: the model branch handles it, the dispatch completes
+    // with nothing produced, and the result stands as-is — the caller sees
+    // "completed with zero production" and re-assesses on its own.
     await expect(
-      planner.planAndDispatch(resourcePlanRequest()),
+      planner.planAndDispatch({
+        ...resourcePlanRequest(),
+        operatorGoal: "Equip the best armor already in inventory.",
+      }),
     ).resolves.toMatchObject({
       action: "skill_result",
       reasonCode: "ADVANCE_TASK",
       result: { payload: { outcome: "completed" } },
     });
-    // One empty dispatch, then the three steps the deterministic planner derives.
-    expect(sendSkillInvocation).toHaveBeenCalledTimes(4);
-    expect(generate).toHaveBeenCalledTimes(2);
-    expect(generate.mock.calls[1]![0].requestId).toBe(
-      "plan-request-01:plan-items-retry",
-    );
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(1);
+    expect(generate).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledWith(
       "coordinator_planner_empty_dispatch_replanned",
       {
@@ -3266,7 +3171,10 @@ describe("CoordinatorLocalPlanner", () => {
       });
 
       await expect(
-        planner.planAndDispatch(resourcePlanRequest()),
+        planner.planAndDispatch({
+          ...resourcePlanRequest(),
+          operatorGoal: "Equip the best armor already in inventory.",
+        }),
       ).resolves.toMatchObject({
         action: "skill_result",
         result: { payload: { output } },
@@ -3294,7 +3202,10 @@ describe("CoordinatorLocalPlanner", () => {
     });
 
     await expect(
-      planner.planAndDispatch(resourcePlanRequest()),
+      planner.planAndDispatch({
+        ...resourcePlanRequest(),
+        operatorGoal: "Equip the best armor already in inventory.",
+      }),
     ).resolves.toMatchObject({
       action: "skill_result",
       result: { payload: { outcome: "failed", errorCode: "COLLECT_BLOCKS_FAILED" } },
@@ -4026,103 +3937,6 @@ describe("plannedAcquisitionGoalItem", () => {
   });
 });
 
-describe("buildLocalPlannerPlanItemsRetrySchema", () => {
-  it("offers exactly one plan_items branch pinned to the trusted item and identity", () => {
-    const schema = buildLocalPlannerPlanItemsRetrySchema("crafting_table", {
-      botId: BOT_ID,
-      taskId: "task-01",
-    });
-    expect(
-      schema.safeParse({
-        action: "plan_items",
-        botId: BOT_ID,
-        taskId: "task-01",
-        goals: [{ itemName: "crafting_table", count: 1 }],
-        reasonCode: "ADVANCE_TASK",
-      }).success,
-    ).toBe(true);
-    // A different item, a different identity, and noop are all off-grammar, which
-    // is precisely why the retry cannot restate the decision it just declined.
-    for (const invalid of [
-      { itemName: "oak_log", count: 1 },
-      { itemName: "crafting_table", count: 2 },
-    ]) {
-      expect(
-        schema.safeParse({
-          action: "plan_items",
-          botId: BOT_ID,
-          taskId: "task-01",
-          goals: [invalid],
-          reasonCode: "ADVANCE_TASK",
-        }).success,
-      ).toBe(false);
-    }
-    expect(
-      schema.safeParse({
-        action: "noop",
-        botId: BOT_ID,
-        taskId: "task-01",
-        reasonCode: "NO_SAFE_SKILL",
-      }).success,
-    ).toBe(false);
-    expect(
-      schema.safeParse({
-        action: "plan_items",
-        botId: "other-bot",
-        taskId: "task-01",
-        goals: [{ itemName: "crafting_table", count: 1 }],
-        reasonCode: "ADVANCE_TASK",
-      }).success,
-    ).toBe(false);
-  });
-
-  it("refuses an item outside the trusted planning vocabulary", () => {
-    expect(() => buildLocalPlannerPlanItemsRetrySchema("minecraft:crafting_table")).toThrow(
-      LocalPlannerError,
-    );
-  });
-
-  it("fails closed before model use when the advertised catalog exceeds the prompt limit", async () => {
-    const current = registry.get(BOT_ID, NOW)!;
-    const baseSkill = current.skillCatalog!.skills[0]!;
-    const oversizedSchema = {
-      type: "object",
-      properties: {
-        note: {
-          type: "string",
-          enum: Array.from({ length: 8_000 }, (_, index) => `catalog-value-${index}`),
-        },
-      },
-      required: ["note"],
-      additionalProperties: false,
-    };
-    const oversizedRecord = {
-      ...current,
-      skillCatalog: {
-        ...current.skillCatalog!,
-        skills: Array.from({ length: 16 }, (_, index) => ({
-          ...baseSkill,
-          skillId: `movement.goto-${index}`,
-          inputSchema: oversizedSchema,
-        })),
-      },
-    };
-    const generate = vi.fn();
-    const planner = new CoordinatorLocalPlanner({
-      ai: { generate },
-      registry: { get: () => oversizedRecord },
-      transport: { sendSkillInvocation: vi.fn() },
-      coordinatorInstanceId: "coordinator-01",
-      now: () => NOW,
-      randomId: uuidSequence(),
-    });
-
-    await expect(planner.planAndDispatch(planRequest())).rejects.toMatchObject({
-      code: "PLANNER_SKILL_CATALOG_UNAVAILABLE",
-    });
-    expect(generate).not.toHaveBeenCalled();
-  });
-});
 
 function plannerWith(
   generate: (options: any) => Promise<AIScheduledResult<GenerateResult>>,

@@ -146,8 +146,10 @@ describe("goal execution across the production control path", () => {
       "craft.item:crafting_table",
     ]);
     // Durable execution freshness checks read the authoritative Bot record
-    // before planning and before each bound dispatch.
-    expect(stack.plannerRegistryGet).toHaveBeenCalledTimes(9);
+    // before planning and before each bound dispatch. The deterministic
+    // acquisition path skips the post-model freshness re-read (there is no
+    // model round-trip to stale-check), hence 8 instead of 9.
+    expect(stack.plannerRegistryGet).toHaveBeenCalledTimes(8);
     expect(stack.requestFreshStatus).toHaveBeenCalledTimes(1);
     expect(stack.client.snapshotCalls).toBeGreaterThan(1);
     assertInvocationChain(stack, 4, 3);

@@ -49,7 +49,7 @@ const goalTextSchema = z
 
 const goalAiTimingSchema = z
   .object({
-    attempts: z.number().int().min(1).max(5),
+    attempts: z.number().int().min(0).max(5),
     queueTimeMs: z.number().int().nonnegative().max(10 * 60_000),
     executionTimeMs: z.number().int().nonnegative().max(10 * 60_000),
     totalTimeMs: z.number().int().nonnegative().max(10 * 60_000),

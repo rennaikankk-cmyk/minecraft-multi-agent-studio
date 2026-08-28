@@ -16,12 +16,16 @@ export function projectGoalDispatchResult(
   identity: Readonly<{ taskId: string; botId: string }>,
   result: LocalPlanResult,
 ): GoalDispatchResultV1 {
-  const ai = {
-    attempts: result.ai.attempts,
-    queueTimeMs: Math.round(result.ai.queueTimeMs),
-    executionTimeMs: Math.round(result.ai.executionTimeMs),
-    totalTimeMs: Math.round(result.ai.totalTimeMs),
-  };
+  // Deterministic decisions carry no AI usage record; the projection reports
+  // zeroed counters instead of pretending a model round-trip happened.
+  const ai = result.ai === null
+    ? { attempts: 0, queueTimeMs: 0, executionTimeMs: 0, totalTimeMs: 0 }
+    : {
+        attempts: result.ai.attempts,
+        queueTimeMs: Math.round(result.ai.queueTimeMs),
+        executionTimeMs: Math.round(result.ai.executionTimeMs),
+        totalTimeMs: Math.round(result.ai.totalTimeMs),
+      };
   if (result.action === "noop") {
     return {
       action: "noop",

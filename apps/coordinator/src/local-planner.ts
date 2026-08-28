@@ -47,6 +47,12 @@ import {
   type BotAssignmentService,
 } from "./bot-assignment.js";
 import {
+  parseDeterministicGoal,
+  type DeterministicGoal,
+  type DeterministicPlanItemsDecision,
+  type DeterministicSkillDecision,
+} from "./deterministic-goals.js";
+import {
   buildLocalPlannerPrompt,
   LOCAL_PLANNER_PROMPT_VERSION,
   LOCAL_PLANNER_SYSTEM_PROMPT,
@@ -278,36 +284,6 @@ export function buildLocalPlannerGenerationSchema(
 }
 
 /**
- * Offers exactly one plan_items branch for a single trusted item, with no noop
- * and no invoke branch.
- *
- * Reserved for the retry below. With all branches offered, the model answers a
- * gather-then-craft goal with noop/NO_SAFE_SKILL every time: it reads "no one
- * advertised skill completes this" as grounds to decline, and no amount of
- * prompt wording moved it (v7 through v11 all measured 0). Removing the branch
- * it wrongly prefers is the only lever left that does not weaken a check.
- *
- * Narrowing is safe precisely because it constrains generation only: the
- * response is still re-parsed with the protocol-backed
- * localPlannerDecisionSchema, still grounded against the operator goal, and
- * every expanded step is still authorized by the deterministic GoalPlanner.
- */
-export function buildLocalPlannerPlanItemsRetrySchema(
-  itemName: string,
-  trustedIdentity?: LocalPlannerTrustedIdentity,
-) {
-  if (!planGoalItemNameSchema.safeParse(itemName).success) {
-    throw new LocalPlannerError(
-      "PLANNER_GOAL_UNSUPPORTED",
-      "The retry item name is outside the trusted planning vocabulary.",
-    );
-  }
-  return localPlannerPlanItemsDecisionSchema(z.literal(itemName)).extend(
-    trustedIdentityFields(trustedIdentity),
-  );
-}
-
-/**
  * 取得类动词。中文一侧此前只认书面的"获取/制作/采集/收集/合成"，
  * 而"做一个熔炉""挖点铁矿"这类最常见的口语说法一个都不匹配——目标里明明写了
  * 可达物品，却因为动词没登记而降级成 noop。英文一侧早已同时收 make 与 build，
@@ -448,14 +424,16 @@ export type LocalPlanResult =
   | Readonly<{
       action: "noop";
       reasonCode: string;
-      ai: AIScheduledResult<GenerateResult>;
+      /** Null when the decision was derived deterministically without a model. */
+      ai: AIScheduledResult<GenerateResult> | null;
     }>
   | Readonly<{
       action: "skill_result";
       reasonCode: string;
       invocation: SkillInvocationV1;
       result: SkillExecutionResultV1;
-      ai: AIScheduledResult<GenerateResult>;
+      /** Null when the decision was derived deterministically without a model. */
+      ai: AIScheduledResult<GenerateResult> | null;
     }>;
 
 export type LocalPlannerPlanItemsDecision = Extract<
@@ -782,6 +760,45 @@ const PLANNED_ITEM_GOAL_ALIASES: Readonly<Record<string, readonly string[]>> =
       "钻石靴子",
       "钻石鞋",
     ]),
+    charcoal: Object.freeze(["charcoal", "木炭"]),
+    torch: Object.freeze(["torch", "torches", "火把"]),
+    chest: Object.freeze(["chest", "chests", "箱子", "储物箱"]),
+    wooden_sword: Object.freeze([
+      "wooden sword",
+      "wooden_sword",
+      "木剑",
+      "木制剑",
+    ]),
+    stone_sword: Object.freeze([
+      "stone sword",
+      "stone_sword",
+      "石剑",
+      "石制剑",
+    ]),
+    iron_sword: Object.freeze([
+      "iron sword",
+      "iron_sword",
+      "铁剑",
+      "铁制剑",
+    ]),
+    shield: Object.freeze(["shield", "盾牌", "盾"]),
+    iron_helmet: Object.freeze([
+      "iron helmet",
+      "iron_helmet",
+      "铁头盔",
+      "铁头盔",
+    ]),
+    iron_chestplate: Object.freeze([
+      "iron chestplate",
+      "iron_chestplate",
+      "铁胸甲",
+    ]),
+    iron_leggings: Object.freeze([
+      "iron leggings",
+      "iron_leggings",
+      "铁护腿",
+    ]),
+    iron_boots: Object.freeze(["iron boots", "iron_boots", "铁靴子", "铁鞋"]),
   });
 
 /**
@@ -890,6 +907,55 @@ export class CoordinatorLocalPlanner {
     const bindability = this.coordinatorGoalBindability(availableSkills);
     this.logGoalBindability(request, bindability);
     const plannedItemNames = bindability.bindable;
+
+    // §确定性快速路径：目标本身是协调器模板或唯一物品采集时，决策可以
+    // 被推导出来，不需要一次模型往返。解析器只认固定模板与"动词+唯一
+    // 可达物品"，任何含糊形态返回 null 照旧走模型分支；派发路径与模型
+    // 分支完全同一条（grounding、安全等待、任务迁移一个不少）。
+    const deterministic = this.deterministicDecisionFor(
+      operatorGoal,
+      plannedItemNames,
+      request,
+      record,
+      availableSkills,
+    );
+    if (deterministic !== null) {
+      if (deterministic.planItems !== null) {
+        this.options.metrics?.increment(
+          "planner_deterministic_decisions_total",
+          { bot_id: request.botId, kind: "plan_items" },
+        );
+        return this.planItemsAndDispatch(
+          request,
+          deterministic.planItems,
+          record,
+          availableSkills,
+          null,
+          deadlineMs,
+        );
+      }
+      this.options.metrics?.increment(
+        "planner_deterministic_decisions_total",
+        { bot_id: request.botId, kind: "invoke_skill" },
+      );
+      if (deterministic.skill === null) {
+        throw new LocalPlannerError(
+          "PLANNER_DECISION_INVALID",
+          "Deterministic skill decision was expected but missing.",
+        );
+      }
+      return this.dispatchDirectSkillDecision({
+        request,
+        decision: deterministic.skill,
+        operatorGoal,
+        record,
+        availableSkills,
+        execution,
+        deadlineMs,
+        ai: null,
+      });
+    }
+
     const generationSchema = buildLocalPlannerGenerationSchema(
       availableSkills,
       plannedItemNames,
@@ -953,15 +1019,6 @@ export class CoordinatorLocalPlanner {
       );
     }
     if (decision.action === "noop") {
-      const retried = await this.retryDeclinedAcquisitionGoal({
-        request,
-        operatorGoal,
-        plannedItemNames,
-        record,
-        availableSkills,
-        deadlineMs,
-      });
-      if (retried) return retried;
       this.logUnbindableGoalNames(request, operatorGoal, bindability);
       await this.abortTaskExecution(
         request.taskId,
@@ -972,17 +1029,6 @@ export class CoordinatorLocalPlanner {
       return { action: "noop", reasonCode: decision.reasonCode, ai };
     }
     if (decision.action === "plan_items") {
-      if (!planGoalsAreGrounded(decision.goals, operatorGoal)) {
-        const retried = await this.retryDeclinedAcquisitionGoal({
-          request,
-          operatorGoal,
-          plannedItemNames,
-          record,
-          availableSkills,
-          deadlineMs,
-        });
-        if (retried) return retried;
-      }
       return this.planItemsAndDispatch(
         request,
         decision,
@@ -992,6 +1038,50 @@ export class CoordinatorLocalPlanner {
         deadlineMs,
       );
     }
+    return this.dispatchDirectSkillDecision({
+      request,
+      decision,
+      operatorGoal,
+      record,
+      availableSkills,
+      plannedItemNames,
+      execution,
+      deadlineMs,
+      ai,
+    });
+    });
+  }
+
+  /**
+   * Direct single-skill dispatch shared by the model's invoke_skill branch and
+   * the deterministic fast path. Everything that makes a dispatch safe —
+   * catalog matching, advertised-input validation, grounding, safety wait,
+   * task execution transitions, recovery — lives here once, so the two entry
+   * points can never drift apart.
+   */
+  private async dispatchDirectSkillDecision({
+    request,
+    decision,
+    operatorGoal,
+    record,
+    availableSkills,
+    plannedItemNames = [],
+    execution,
+    deadlineMs,
+    ai,
+  }: {
+    request: LocalPlanRequest;
+    decision:
+      | Extract<LocalPlannerDecision, { action: "invoke_skill" }>
+      | DeterministicSkillDecision;
+    operatorGoal: string;
+    record: BotRegistryRecord;
+    availableSkills: readonly BotSkillCatalogEntryV1[];
+    plannedItemNames?: readonly string[];
+    execution: PlannerExecutionContext;
+    deadlineMs: number;
+    ai: AIScheduledResult<GenerateResult> | null;
+  }): Promise<LocalPlanResult> {
     const advertisedSkill = availableSkills.find(
       ({ skillId, skillVersion, availability }) =>
         skillId === decision.skillId && skillVersion === decision.skillVersion,
@@ -1058,30 +1148,21 @@ export class CoordinatorLocalPlanner {
     });
     if (skillResult.payload.outcome === "completed") {
       if (dispatchChangedNothing(skillResult)) {
-        const replanned = await this.retryDeclinedAcquisitionGoal({
-          request,
-          operatorGoal,
-          plannedItemNames,
-          record,
-          availableSkills,
-          deadlineMs,
-          execution: completedExecution,
-          claim: execution.claim,
-          emptyResult: skillResult,
-        });
-        if (replanned) {
-          this.logEmptyDispatchReplanned(request, decision.skillId);
-          return replanned;
-        }
+        // 空 dispatch（技能成功但什么都没产出）不再触发采集重问阶梯：可解析
+        // 的采集目标在进入模型前已被确定性路径接管，能走到这里的空 dispatch
+        // 都是非采集形态。如实记录，让调用方基于"目标仍缺"自行重估。
+        this.logEmptyDispatchReplanned(request, decision.skillId);
       }
       await this.finishSuccessfulTaskExecution(
         request,
         skillResult,
         completedExecution,
       );
-      this.options.metrics?.increment("bot_llm_useful_responses_total", {
-        bot_id: request.botId,
-      });
+      if (ai !== null) {
+        this.options.metrics?.increment("bot_llm_useful_responses_total", {
+          bot_id: request.botId,
+        });
+      }
     }
     return {
       action: "skill_result",
@@ -1090,7 +1171,52 @@ export class CoordinatorLocalPlanner {
       result: skillResult,
       ai,
     };
-    });
+  }
+
+  /**
+   * Derives a decision for the coordinator's own goal templates without a
+   * model round-trip. Returns null for every goal shape that is not one of
+   * the fixed templates or a single unambiguous acquisition — those must keep
+   * going through the model branch.
+   *
+   * The synthesized decisions carry the same trusted-identity fields a model
+   * decision would, because downstream code asserts them; the identity here
+   * comes from the request object itself, not from anything parsed.
+   */
+  private deterministicDecisionFor(
+    operatorGoal: string,
+    plannedItemNames: readonly string[],
+    request: LocalPlanRequest,
+    record: BotRegistryRecord,
+    availableSkills: readonly BotSkillCatalogEntryV1[],
+  ): Readonly<{
+    planItems: DeterministicPlanItemsDecision | null;
+    skill: DeterministicSkillDecision | null;
+  }> | null {
+    const parsed = parseDeterministicGoal(operatorGoal, plannedItemNames);
+    if (parsed === null) return null;
+    if (parsed.kind === "acquire-item") {
+      return {
+        planItems: {
+          action: "plan_items",
+          botId: request.botId,
+          taskId: request.taskId,
+          goals: [{ itemName: parsed.itemName, count: parsed.count }],
+          reasonCode: "DETERMINISTIC_ACQUISITION",
+        },
+        skill: null,
+      };
+    }
+    const dimension =
+      record.currentStatus?.position.dimension ?? "minecraft:overworld";
+    const decision = deterministicSkillDecision(
+      parsed,
+      request,
+      dimension,
+      availableSkills,
+    );
+    if (decision === null) return null;
+    return { planItems: null, skill: decision };
   }
 
   private async withAssignment<T>(
@@ -1236,173 +1362,12 @@ export class CoordinatorLocalPlanner {
     }
   }
 
-  /**
-   * Re-asks a declined single-item acquisition goal with only the plan_items
-   * branch on offer, and returns null whenever the goal is not one.
-   *
-   * Measured behaviour, not a guess: offered every branch, the model answers
-   * "craft one crafting_table from nearby resources" with noop/NO_SAFE_SKILL on
-   * 6 of 6 requests while a forced single-branch probe produced the correct
-   * decision 4 of 4 times. The capability is there; the branch choice is what
-   * fails, so this removes the choice for the one goal shape that is provably
-   * reachable and asks again.
-   *
-   * A null return leaves the model's original noop standing untouched, which is
-   * why an honest decline can never be overturned here: the guard requires an
-   * acquisition verb and exactly one named item from the trusted reachable set,
-   * and no such goal is one the deterministic planner cannot serve.
-   */
-  private async retryDeclinedAcquisitionGoal({
-    request,
-    operatorGoal,
-    plannedItemNames,
-    record,
-    availableSkills,
-    deadlineMs,
-    execution,
-    claim,
-    emptyResult,
-  }: {
-    request: LocalPlanRequest;
-    operatorGoal: string;
-    plannedItemNames: readonly string[];
-    record: BotRegistryRecord;
-    availableSkills: readonly BotSkillCatalogEntryV1[];
-    deadlineMs: number;
-    execution?: TaskExecutionRecord;
-    claim?: PlannerExecutionClaim;
-    emptyResult?: SkillExecutionResultV1;
-  }): Promise<LocalPlanResult | null> {
-    const itemName = plannedAcquisitionGoalItem(operatorGoal, plannedItemNames);
-    if (itemName === null) return null;
-    if ((execution === undefined) !== (claim === undefined)) {
-      throw new TypeError("A deterministic retry needs both task execution and claim.");
-    }
-    if (execution !== undefined && emptyResult === undefined) {
-      throw new TypeError("A direct empty dispatch must include its result.");
-    }
-    if (execution !== undefined) {
-      await this.assertExecutionAttemptFresh(request, execution, claim!);
-    }
-    this.assertWithinDeadline(deadlineMs, request.signal);
-
-    const retryAi = await this.options.ai.generate({
-      requestId: `${request.requestId}:plan-items-retry`,
-      botId: request.botId,
-      priority: aiRequestPriorities.planning,
-      supersedeKey: `plan-items-retry:${request.taskId}`,
-      prompt: buildLocalPlannerPrompt({
-        promptVersion: LOCAL_PLANNER_PROMPT_VERSION,
-        operatorGoal,
-        bot: safeBotContext(record, request.taskId),
-        plannedItems: [itemName],
-        availableSkills: [],
-      }),
-      systemPrompt: LOCAL_PLANNER_SYSTEM_PROMPT,
-      schema: buildLocalPlannerPlanItemsRetrySchema(itemName, {
-        botId: request.botId,
-        taskId: request.taskId,
-      }),
-      maxTokens: 512,
-      temperature: 0,
-      timeoutMs: request.timeoutMs,
-      traceId: request.traceId,
-      ...(request.signal ? { signal: request.signal } : {}),
-    });
-    this.recordAIUsage(request, retryAi);
-    this.assertWithinDeadline(deadlineMs, request.signal);
-
-    // The narrowed grammar constrains generation only. The response still has
-    // to satisfy the protocol-backed schema and carry the trusted identity,
-    // exactly as a first-pass decision does.
-    const retryDecision = parseDecision(retryAi.value.content);
-    if (
-      retryDecision.action !== "plan_items" ||
-      retryDecision.botId !== request.botId ||
-      retryDecision.taskId !== request.taskId
-    ) {
-      this.logRetry(request, itemName, "discarded", retryDecision.action);
-      return null;
-    }
-    this.logRetry(request, itemName, "accepted", retryDecision.action);
-    let planExecution = execution;
-    if (planExecution !== undefined) {
-      planExecution = await this.assertExecutionAttemptFresh(
-        request,
-        planExecution,
-        claim!,
-      );
-      const replanned = await this.transitionTaskExecution(
-        request.taskId,
-        "REPLAN",
-        {
-          expectedRevision: planExecution.revision,
-          currentStep: "empty-dispatch-replan",
-          actualResult: skillResultSummary(emptyResult!),
-          failureReason: null,
-          worldStateVersion: planExecution.worldStateVersion,
-        },
-      );
-      planExecution = await this.transitionTaskExecution(
-        request.taskId,
-        "PLAN",
-        {
-          expectedRevision: replanned.revision,
-          currentStep: "slow-cognitive-loop",
-          expectedResult: { outcome: "completed" },
-          actualResult: null,
-          movementLease: null,
-          failureReason: null,
-          worldStateVersion: replanned.worldStateVersion,
-        },
-      );
-    }
-    const result = await this.planItemsAndDispatch(
-      request,
-      retryDecision,
-      record,
-      availableSkills,
-      retryAi,
-      deadlineMs,
-    );
-    if (
-      planExecution !== undefined &&
-      result.action === "skill_result" &&
-      result.result.payload.outcome === "completed"
-    ) {
-      const executing = await this.transitionTaskExecution(
-        request.taskId,
-        "EXECUTE",
-        {
-          expectedRevision: planExecution.revision,
-          currentStep: result.invocation.payload.skillId,
-          expectedResult: {
-            outcome: "completed",
-            skillId: result.invocation.payload.skillId,
-            skillVersion: result.invocation.payload.skillVersion,
-          },
-          actualResult: null,
-          worldStateVersion: planExecution.worldStateVersion,
-        },
-      );
-      await this.finishSuccessfulTaskExecution(
-        request,
-        result.result,
-        executing,
-      );
-      this.options.metrics?.increment("bot_llm_useful_responses_total", {
-        bot_id: request.botId,
-      });
-    }
-    return result;
-  }
-
   private async planItemsAndDispatch(
     request: LocalPlanRequest,
-    decision: LocalPlannerPlanItemsDecision,
+    decision: LocalPlannerPlanItemsDecision | DeterministicPlanItemsDecision,
     initialRecord: BotRegistryRecord,
     availableSkills: readonly BotSkillCatalogEntryV1[],
-    ai: AIScheduledResult<GenerateResult>,
+    ai: AIScheduledResult<GenerateResult> | null,
     deadlineMs: number,
   ): Promise<LocalPlanResult> {
     const goals: GoalRequest[] = decision.goals.map(({ itemName, count }) => ({
@@ -1942,7 +1907,9 @@ export class CoordinatorLocalPlanner {
 
   private async dispatchSkillWithRecovery(input: Readonly<{
     request: LocalPlanRequest;
-    decision: Extract<LocalPlannerDecision, { action: "invoke_skill" }>;
+    decision:
+      | Extract<LocalPlannerDecision, { action: "invoke_skill" }>
+      | DeterministicSkillDecision;
     trustedInput: SkillJsonValue;
     initialRecord: BotRegistryRecord;
     initialSkill: BotSkillCatalogEntryV1;
@@ -3135,33 +3102,6 @@ export class CoordinatorLocalPlanner {
   }
 
   /**
-   * Records whether the narrowed re-ask overturned a declined acquisition
-   * goal.  The retry is otherwise invisible: a discarded one looks exactly
-   * like a first-pass noop from outside the planner.
-   */
-  private logRetry(
-    request: LocalPlanRequest,
-    itemName: string,
-    disposition: "accepted" | "discarded",
-    retriedAction: string,
-  ): void {
-    const logger = this.options.logger;
-    if (!logger) return;
-    try {
-      logger.info("coordinator_planner_plan_items_retry", {
-        traceId: request.traceId,
-        taskId: request.taskId,
-        botId: request.botId,
-        itemName,
-        disposition,
-        retriedAction,
-      });
-    } catch {
-      // Diagnostics must never change what the planner reports.
-    }
-  }
-
-  /**
    * Emits the step ladder for one goal.  Only planner-derived values are
    * recorded — step kinds, trusted item names, and outcome codes.  The
    * operator goal, Skill inputs, and world coordinates stay out, so turning
@@ -3523,6 +3463,121 @@ function assertPlanGoalsGrounded(
       );
     }
   }
+}
+
+/**
+ * Maps a parsed coordinator goal template onto an invoke_skill decision for a
+ * skill the Runtime actually advertises. Returns null when the required skill
+ * is not in the catalog — the goal then falls back to the model branch rather
+ * than dispatching something unverified.
+ *
+ * Inputs embed the trusted ServerProfile placeholder exactly like a model
+ * decision would; injectTrustedServerProfile swaps in the real value and
+ * rejects any attempt to spell a different one.
+ */
+function deterministicSkillDecision(
+  parsed: Exclude<DeterministicGoal, { kind: "acquire-item" }>,
+  request: LocalPlanRequest,
+  dimension: string,
+  availableSkills: readonly BotSkillCatalogEntryV1[],
+): DeterministicSkillDecision | null {
+  const advertisedVersion = (skillId: string): string | null => {
+    const entry = availableSkills.find(
+      (candidate) =>
+        candidate.skillId === skillId && candidate.availability === "available",
+    );
+    return entry?.skillVersion ?? null;
+  };
+  if (parsed.kind === "move-to") {
+    const skillVersion = advertisedVersion("movement.goto");
+    if (skillVersion === null) return null;
+    return {
+      action: "invoke_skill",
+      botId: request.botId,
+      taskId: request.taskId,
+      skillId: "movement.goto",
+      skillVersion,
+      input: {
+        target: {
+          x: parsed.x,
+          y: parsed.y,
+          z: parsed.z,
+          dimension,
+          serverProfileId: TRUSTED_SERVER_PROFILE_PLACEHOLDER,
+        },
+        radius: 2,
+      },
+      reasonCode: "DETERMINISTIC_MOVE",
+    };
+  }
+  if (parsed.kind === "scan-block") {
+    const skillVersion = advertisedVersion("world.scan");
+    if (skillVersion === null) return null;
+    return {
+      action: "invoke_skill",
+      botId: request.botId,
+      taskId: request.taskId,
+      skillId: "world.scan",
+      skillVersion,
+      input: {
+        blockName: parsed.blockName,
+        maxCount: 16,
+        maxDistance: 64,
+        dimension,
+        serverProfileId: TRUSTED_SERVER_PROFILE_PLACEHOLDER,
+      },
+      reasonCode: "DETERMINISTIC_SCAN",
+    };
+  }
+  if (parsed.kind === "secure-food") {
+    const skillVersion = advertisedVersion("food.secure");
+    if (skillVersion === null) return null;
+    return {
+      action: "invoke_skill",
+      botId: request.botId,
+      taskId: request.taskId,
+      skillId: "food.secure",
+      skillVersion,
+      input: {
+        targetCount: parsed.targetCount,
+        dimension,
+        serverProfileId: TRUSTED_SERVER_PROFILE_PLACEHOLDER,
+      },
+      reasonCode: "DETERMINISTIC_FOOD",
+    };
+  }
+  if (parsed.kind === "equip-armor") {
+    const equipVersion = advertisedVersion("inventory.equip-armor");
+    if (equipVersion === null) return null;
+    return {
+      action: "invoke_skill",
+      botId: request.botId,
+      taskId: request.taskId,
+      skillId: "inventory.equip-armor",
+      skillVersion: equipVersion,
+      input: {
+        serverProfileId: TRUSTED_SERVER_PROFILE_PLACEHOLDER,
+      },
+      reasonCode: "DETERMINISTIC_EQUIP",
+    };
+  }
+  const skillVersion = advertisedVersion("shelter.dig");
+  if (skillVersion === null) return null;
+  return {
+    action: "invoke_skill",
+    botId: request.botId,
+    taskId: request.taskId,
+    skillId: "shelter.dig",
+    skillVersion,
+    input: {
+      direction: parsed.direction,
+      depth: parsed.depth,
+      sealItemName: parsed.sealItemName,
+      dimension,
+      serverProfileId: TRUSTED_SERVER_PROFILE_PLACEHOLDER,
+    },
+    reasonCode: "DETERMINISTIC_SHELTER",
+  };
 }
 
 function planGoalsAreGrounded(
