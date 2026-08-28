@@ -166,6 +166,26 @@ export const vanillaResourceRecipes: readonly ResourceRecipe[] = Object.freeze([
     station: "furnace",
     fuelCandidates: ["coal", "charcoal", "oak_planks"],
   }),
+  // 木炭：无煤时用木板当燃料把原木烧成木炭，燃料链从"必须有煤"变成自举。
+  recipe({
+    itemName: "charcoal",
+    kind: "smelt",
+    inputs: [need("oak_log", 1)],
+    station: "furnace",
+    fuelCandidates: ["coal", "charcoal", "oak_planks"],
+  }),
+  recipe({
+    itemName: "torch",
+    kind: "craft",
+    yield: 4,
+    inputs: [need("coal", 1), need("stick", 1)],
+  }),
+  recipe({
+    itemName: "chest",
+    kind: "craft",
+    inputs: [need("oak_planks", 8)],
+    station: "crafting_table",
+  }),
 
   // ---- 工具阶梯 ----
   recipe({
@@ -192,10 +212,62 @@ export const vanillaResourceRecipes: readonly ResourceRecipe[] = Object.freeze([
     inputs: [need("diamond", 3), need("stick", 2)],
     station: "crafting_table",
   }),
+
+  // ---- 武器阶梯（钻石前每档都要一把，杀动物取食与自卫共用） ----
+  recipe({
+    itemName: "wooden_sword",
+    kind: "craft",
+    inputs: [need("oak_planks", 2), need("stick", 1)],
+    station: "crafting_table",
+  }),
+  recipe({
+    itemName: "stone_sword",
+    kind: "craft",
+    inputs: [need("cobblestone", 2), need("stick", 1)],
+    station: "crafting_table",
+  }),
+  recipe({
+    itemName: "iron_sword",
+    kind: "craft",
+    inputs: [need("iron_ingot", 2), need("stick", 1)],
+    station: "crafting_table",
+  }),
   recipe({
     itemName: "diamond_sword",
     kind: "craft",
     inputs: [need("diamond", 2), need("stick", 1)],
+    station: "crafting_table",
+  }),
+  recipe({
+    itemName: "shield",
+    kind: "craft",
+    inputs: [need("iron_ingot", 1), need("oak_planks", 6)],
+    station: "crafting_table",
+  }),
+
+  // ---- 铁护甲（铁甲四件，比裸装 survivability 高一档） ----
+  recipe({
+    itemName: "iron_helmet",
+    kind: "craft",
+    inputs: [need("iron_ingot", 5)],
+    station: "crafting_table",
+  }),
+  recipe({
+    itemName: "iron_chestplate",
+    kind: "craft",
+    inputs: [need("iron_ingot", 8)],
+    station: "crafting_table",
+  }),
+  recipe({
+    itemName: "iron_leggings",
+    kind: "craft",
+    inputs: [need("iron_ingot", 7)],
+    station: "crafting_table",
+  }),
+  recipe({
+    itemName: "iron_boots",
+    kind: "craft",
+    inputs: [need("iron_ingot", 4)],
     station: "crafting_table",
   }),
 
