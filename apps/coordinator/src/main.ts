@@ -225,6 +225,9 @@ async function main(): Promise<void> {
       failureCooldownMs: autonomousConfig.failureCooldownMs,
       terminalRetentionMs: autonomousConfig.terminalRetentionMs,
       logger,
+      // 配置了 Local AI 时把调度路由交给重规划神谕；确定性模式不注入，
+      // 神谕路径完全不激活。12 路并发预算见 LOCAL_AI_MAX_CONCURRENCY。
+      ...(aiScheduler ? { replanAI: new ScheduledAIRouter(aiRouter!, aiScheduler) } : {}),
     });
   }
   if (goalPersistenceConfig) {

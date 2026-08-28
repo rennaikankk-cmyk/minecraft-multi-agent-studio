@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import type { ScheduledAIRouter } from "@minecraft-studio/ai-router";
 import type { AppLogger } from "@minecraft-studio/observability";
 import {
   identifierSchema,
@@ -16,7 +17,14 @@ import {
   LocalPlannerError,
 } from "./local-planner.js";
 import {
+  askReplanOracle,
+  buildReplanPrompt,
+  sanitizeReplanDecision,
+  substitutionAllowlist,
+} from "./replan-oracle.js";
+import {
   assessSurvivalNeeds,
+  SAFE_FOOD_ITEM_NAMES,
   type SurvivalNeed,
   type SurvivalNeedKey,
 } from "./survival-needs.js";
@@ -53,6 +61,11 @@ export type AutonomousDirectorOptions = Readonly<{
   logger?: AppLogger;
   now?: () => Date;
   randomId?: () => string;
+  /**
+   * 重规划神谕（可选）：需求连续失败被抑制时咨询一次。未注入时自主生存
+   * 完全确定性运转。模型只能从白名单菜单选择，见 replan-oracle.ts。
+   */
+  replanAI?: { generate: ScheduledAIRouter["generate"] };
 }>;
 
 type InternalTask = PublicTask & {
@@ -113,6 +126,13 @@ const AUTONOMOUS_SHELTER_MATERIALS = Object.freeze([
 ] as const);
 /** 同一需求连续失败这么多次后，冷却窗口内不再选中它（livelock 防护）。 */
 const AUTONOMOUS_NEED_FAILURE_LIMIT = 3;
+/** 神谕提示词里的镐档描述顺序（仅用于摘要，不参与决策）。 */
+const PICKAXE_TIERS_FOR_PROMPT = [
+  "wooden_pickaxe",
+  "stone_pickaxe",
+  "iron_pickaxe",
+  "diamond_pickaxe",
+] as const;
 const AUTONOMOUS_NEED_SUPPRESSION_MS = 120_000;
 
 type ScannedResourcePosition = Readonly<{
@@ -144,6 +164,11 @@ export class AutonomousDirector implements AutonomousTaskSource {
   private readonly explorationRadiusStep = new Map<string, number>();
   private readonly nextExplorationAt = new Map<string, number>();
   private readonly shelterDirectionCursor = new Map<string, number>();
+  /** 神谕给出的一次性替代资源（needKey → item），用一次即消费。 */
+  private readonly pendingSubstitutes = new Map<
+    string,
+    Readonly<{ needKey: SurvivalNeedKey; itemName: string }>
+  >();
   private timer: ReturnType<typeof setInterval> | null = null;
   private unsubscribeRegistry: (() => void) | null = null;
   private started = false;
@@ -303,7 +328,19 @@ export class AutonomousDirector implements AutonomousTaskSource {
     );
     const chosen = eligible[0];
     if (chosen === undefined) return null;
-    return this.bindGoal(record, chosen, nowMs);
+    const bound = this.bindGoal(record, chosen, nowMs);
+    if (bound === null) return null;
+    const substitute = this.pendingSubstitutes.get(record.botId);
+    if (substitute && substitute.needKey === chosen.key) {
+      this.pendingSubstitutes.delete(record.botId);
+      return {
+        ...bound,
+        title: `获取 ${substitute.itemName}`,
+        operatorGoal: `获取 ${substitute.itemName}`,
+        reason: `replan substitute for ${chosen.key}`,
+      };
+    }
+    return bound;
   }
 
   /** 把需求意图绑定成可下发的具体目标（方向/封口料/探索坐标）。 */
@@ -679,6 +716,93 @@ export class AutonomousDirector implements AutonomousTaskSource {
     });
   }
 
+  /**
+   * 抑制触发时咨询重规划神谕并应用其决策。全部 best-effort：任何失败都
+   * 保持既定的确定性策略。应用面收窄到三件事——探索半径档位、抑制窗口
+   * 延长、一次性替代资源覆盖。
+   */
+  private async consultReplanOracle(
+    botId: string,
+    goal: AutonomousGoal,
+    failures: number,
+  ): Promise<void> {
+    if (!this.started) return;
+    const ai = this.options.replanAI;
+    if (!ai) return;
+    const record = this.options.registry.get(botId, validDate(this.now()));
+    const inventory = new Map(
+      (record?.currentStatus?.inventory ?? []).map(({ itemName, count }) => [
+        itemName,
+        count,
+      ] as const),
+    );
+    let safeFoodCount = 0;
+    for (const [name, count] of inventory) {
+      if (SAFE_FOOD_ITEM_NAMES.has(name)) safeFoodCount += count;
+    }
+    const pickaxeTier =
+      PICKAXE_TIERS_FOR_PROMPT.find((name) => (inventory.get(name) ?? 0) > 0) ??
+      "none";
+    const substitutes = substitutionAllowlist(goal.needKey);
+    const requestId = identifierSchema.parse(this.randomId());
+    const decision = await askReplanOracle({
+      ai,
+      requestId,
+      botId,
+      traceId: requestId,
+      prompt: buildReplanPrompt({
+        needKey: goal.needKey,
+        reason: goal.reason,
+        failures,
+        safeFoodCount,
+        pickaxeTier,
+        substitutes,
+      }),
+    });
+    if (!this.started || decision === null) return;
+    const sanitized = sanitizeReplanDecision(decision, goal.needKey);
+    const nowMs = validDate(this.now()).getTime();
+    const failureKey = `${botId}:${goal.needKey}`;
+    switch (sanitized.strategy) {
+      case "widen-exploration": {
+        const bump = sanitized.magnitude === "large" ? 2 : sanitized.magnitude === "medium" ? 1 : 0;
+        const step = Math.min(
+          (this.explorationRadiusStep.get(botId) ?? 0) + bump,
+          AUTONOMOUS_EXPLORATION_RADII.length - 1,
+        );
+        this.explorationRadiusStep.set(botId, step);
+        break;
+      }
+      case "defer-longer": {
+        const factor = sanitized.magnitude === "large" ? 8 : sanitized.magnitude === "medium" ? 4 : 2;
+        this.needSuppressedUntil.set(
+          failureKey,
+          nowMs + AUTONOMOUS_NEED_SUPPRESSION_MS * factor,
+        );
+        break;
+      }
+      case "substitute-resource": {
+        if (sanitized.substituteItem) {
+          this.pendingSubstitutes.set(botId, {
+            needKey: goal.needKey,
+            itemName: sanitized.substituteItem,
+          });
+        }
+        break;
+      }
+      case "rotate-sector":
+      default:
+        break;
+    }
+    this.log("info", "coordinator_autonomous_replan_applied", {
+      botId,
+      needKey: goal.needKey,
+      strategy: sanitized.strategy,
+      substituteItem: sanitized.substituteItem,
+      magnitude: sanitized.magnitude,
+    });
+  }
+
   private setRecoveryTask(botId: string, taskId: string, title: string): void {
     const current = this.tasks.get(botId);
     if (!current || current.taskId !== taskId || current.status !== "running") return;
@@ -726,6 +850,12 @@ export class AutonomousDirector implements AutonomousTaskSource {
           failures,
           suppressedUntilMs: nowMs + AUTONOMOUS_NEED_SUPPRESSION_MS,
         });
+        // 确定性恢复梯已走完：这是模型（若配置）唯一介入自主生存的时机，
+        // 且只能从 replan-oracle 的白名单菜单里挑一个替代策略。无模型/
+        // 超时/输出不合法时保持默认扇区轮转，自主性不受影响。
+        if (this.options.replanAI) {
+          void this.consultReplanOracle(botId, goal, failures);
+        }
       }
     }
     this.nextGoalAt.set(

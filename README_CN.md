@@ -128,9 +128,43 @@ Coordinator 内置一个确定性自主生存层，对每个空闲且 L0 无风�
   `coordinator_autonomous_need_selected` 等结构化日志记录每次选择与结果，
   `planner_deterministic_decisions_total` 度量确定性派发占比。
 
-已知边界：重连路径上两个 Runtime 进程争抢同一 botId 时会出现遥测序号竞态
-（`telemetry_ack_mismatch`，进程重启后恢复）；L0 断线保号后立即重连进怪堆会再次触发
-反射，需要启动器侧重连退避；工具耐久的提前补齐尚未接入（协调器看不到耐久）。
+已知边界：采集接近路径刻意不允许沿途挖掘（反作弊立场 + Codex 实测的安全移动
+常量）；深矿/复杂地形的采集吞吐依赖扇区探索与楼梯回退。
+
+## 本地模型（Spark / Local AI Hub）的分工与并发预算
+
+基础生存链 0 次模型调用（见上文确定性派发）。模型只做三类高价值工作：
+
+1. **自由目标规划**（始终可用）：Dashboard 输入的自然语言目标走模型分支，
+   输出仍受 schema + 确定性规划器双重约束。
+2. **重规划神谕**（`replan-oracle.ts`）：同一需求连续 3 次失败被抑制时，
+   咨询一次模型，从 4 个白名单策略（轮转扇区/拉远探索/延长搁置/替代资源）
+   中选一个，参数受按需求白名单约束——模型劫持也无法产生菜单外的动作。
+   模型不可用时静默回退确定性策略，自主生存不依赖它。
+3. **多 Bot 战略**（规划中）：N Bot 场景下的分工/分区建议，同样走约束菜单。
+
+连接 vLLM/OpenAI 兼容端点（DGX Spark）：
+
+```dotenv
+LOCAL_AI_ENABLED=1
+LOCAL_AI_PROVIDER=vllm
+LOCAL_AI_HUB_URL=http://<spark-host>:8000/v1
+LOCAL_AI_MODEL=<model-name>
+LOCAL_AI_API_KEY=<可选>
+```
+
+**并发预算**（16 路本地模型，qqbot 已占 4 路）：
+
+```dotenv
+AI_MAX_CONCURRENCY=12      # 留 4 路给 qqbot；默认值即 12
+AI_PER_BOT_CONCURRENCY=1   # 每 Bot 同时至多 1 个在途请求（默认）
+```
+
+自主生存下模型请求天然稀疏（每 Bot 数分钟一次神谕 + 偶发自由目标），
+12 路预算足以支撑 10+ Bot 同时运转；`perBotConcurrency=1` 保证单个 Bot
+不会霸占队列。观察 `coordinator_ai_request` 日志的 `state` 字段可核对
+实际占用，`planner_deterministic_decisions_total` 与
+`bot_llm_requests_total` 之比即确定性占比。
 
 ## 启动隔离测试 Bot
 

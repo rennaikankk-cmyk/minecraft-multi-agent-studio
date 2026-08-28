@@ -568,6 +568,85 @@ describe("AutonomousDirector", () => {
     await director.stop();
   });
 
+  it("consults the replan oracle on suppression and applies its substitute", async () => {
+    const record = readyRecord("studio-bot-01");
+    record.currentStatus!.inventory = [
+      { itemName: "stone_pickaxe", count: 1 },
+      { itemName: "oak_log", count: 16 },
+      { itemName: "cooked_beef", count: 12 },
+      { itemName: "stone_sword", count: 1 },
+    ];
+    let nowMs = NOW.getTime();
+    const registryListeners = new Set<(record: BotRegistryRecord) => void>();
+    const registry = {
+      list: vi.fn(() => [record]),
+      get: vi.fn(() => record),
+      subscribe: vi.fn((listener: (record: BotRegistryRecord) => void) => {
+        registryListeners.add(listener);
+        return () => registryListeners.delete(listener);
+      }),
+    };
+    // 需求 3 连败后：COAL 目标一直不可达；神谕建议改采木炭。
+    const generate = vi.fn(async () => ({
+      requestId: "replan-1",
+      botId: "studio-bot-01",
+      priority: 5,
+      value: {
+        content: JSON.stringify({
+          strategy: "substitute-resource",
+          substituteItem: "charcoal",
+          magnitude: null,
+        }),
+        usage: { promptTokens: 10, completionTokens: 10 },
+      },
+      attempts: 1,
+      enqueuedAt: "",
+      startedAt: "",
+      completedAt: "",
+      queueTimeMs: 0,
+      executionTimeMs: 1,
+      totalTimeMs: 1,
+    }));
+    const planAndDispatch = vi.fn(async (request: { operatorGoal: string }) => {
+      if (request.operatorGoal.startsWith("获取 coal")) {
+        return failedPlanResult("COLLECT_TARGET_UNREACHABLE");
+      }
+      return noopPlanResult();
+    });
+    const director = new AutonomousDirector({
+      registry,
+      planner: { planAndDispatch },
+      replanAI: { generate },
+      intervalMs: 60_000,
+      goalTimeoutMs: 60_000,
+      failureCooldownMs: 1_000,
+      terminalRetentionMs: 10_000,
+      now: () => new Date(nowMs),
+      randomId: uuidSequence(),
+    });
+
+    director.start();
+    await flushDirector();
+    // 三次失败触发抑制：1 次起始 + 2 次重试。
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      nowMs += 11_000;
+      registryListeners.forEach((listener) => listener(record));
+      await flushDirector();
+    }
+    // 神谕已被咨询（抑制触发时恰好一次），且提示词只包含安全的需要摘要。
+    expect(generate).toHaveBeenCalledTimes(1);
+    const prompt = JSON.parse(generate.mock.calls[0]![0].prompt);
+    expect(prompt.need).toBe("TOOL_PROGRESSION");
+    expect(prompt.needReason).toBe("pickaxe tier stone_pickaxe < next iron_pickaxe");
+    // 抑制不影响自主性：窗口过后继续派发确定性目标。
+    nowMs += 130_000;
+    registryListeners.forEach((listener) => listener(record));
+    await flushDirector();
+    const after = planAndDispatch.mock.calls.length;
+    expect(after).toBeGreaterThan(3);
+    await director.stop();
+  });
+
   it("explores new sectors once every survival need is satisfied", async () => {
     const record = readyRecord("studio-bot-01");
     record.currentStatus!.armorPoints = 20;
