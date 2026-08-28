@@ -240,7 +240,7 @@ export function GoalConsole() {
     <section className="goalConsole" aria-busy={submitting} data-testid="goal-console">
       <form className="goalForm" onSubmit={submitGoal}>
         <label>
-          <span>目标 Bot</span>
+          <span>执行 Bot</span>
           <select
             value={botId}
             onChange={(event) => setBotId(event.target.value)}

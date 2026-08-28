@@ -2,10 +2,19 @@ import type {
   AIScheduledResult,
   GenerateResult,
 } from "@minecraft-studio/ai-router";
+import {
+  InMemoryMetricRegistry,
+  type MetricRecorder,
+} from "@minecraft-studio/observability";
 import type {
   SkillExecutionResultV1,
   SkillJsonValue,
 } from "@minecraft-studio/protocol";
+import {
+  PersistentTaskStateMachine,
+  type TaskExecutionRecord,
+  type TaskExecutionStore,
+} from "@minecraft-studio/task-system";
 import { vanillaResourceRecipes } from "@minecraft-studio/skills";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -135,6 +144,801 @@ describe("CoordinatorLocalPlanner", () => {
       RUNTIME_ID,
       expect.any(AbortSignal),
     );
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "SUCCESS",
+      currentStep: null,
+      expectedResult: {
+        outcome: "completed",
+        skillId: "movement.goto",
+        skillVersion: "1.0.0",
+      },
+      actualResult: {
+        outcome: "completed",
+        skillId: "movement.goto",
+        skillVersion: "1.0.0",
+        attempts: 1,
+        output: { reached: true },
+      },
+      recoveryCount: 0,
+      revision: 4,
+    });
+  });
+
+  it("records returned AI usage and counts useful responses only after task success", async () => {
+    let currentTime = NOW;
+    const metrics = new InMemoryMetricRegistry();
+    const taskStateMachine = new PersistentTaskStateMachine({
+      now: () => currentTime,
+    });
+    const planner = plannerWith(
+      async (options) => {
+        currentTime = new Date(NOW.getTime() + 350);
+        const result = movementDecision(options.requestId);
+        return {
+          ...result,
+          value: {
+            ...result.value,
+            usage: { promptTokens: 23, completionTokens: 7 },
+          },
+          queueTimeMs: 1.6,
+          executionTimeMs: 10.6,
+          totalTimeMs: 12.2,
+        };
+      },
+      {
+        sendSkillInvocation: async (invocation) =>
+          completedSkillResult(invocation),
+      },
+      taskStateMachine,
+      registry,
+      metrics,
+    );
+
+    await expect(planner.planAndDispatch(planRequest())).resolves.toMatchObject({
+      action: "skill_result",
+      result: { payload: { outcome: "completed" } },
+    });
+
+    const recordedNames = new Set([
+      "bot_llm_prompt_tokens_total",
+      "bot_llm_completion_tokens_total",
+      "bot_llm_queue_time_ms_total",
+      "bot_llm_execution_time_ms_total",
+      "bot_llm_total_latency_ms_total",
+      "bot_llm_useful_responses_total",
+      "bot_task_completion_time_ms_total",
+    ]);
+    expect(
+      metrics.snapshot().filter(({ name }) => recordedNames.has(name)),
+    ).toEqual([
+      {
+        name: "bot_llm_completion_tokens_total",
+        value: 7,
+        labels: { bot_id: BOT_ID },
+      },
+      {
+        name: "bot_llm_execution_time_ms_total",
+        value: 11,
+        labels: { bot_id: BOT_ID },
+      },
+      {
+        name: "bot_llm_prompt_tokens_total",
+        value: 23,
+        labels: { bot_id: BOT_ID },
+      },
+      {
+        name: "bot_llm_queue_time_ms_total",
+        value: 2,
+        labels: { bot_id: BOT_ID },
+      },
+      {
+        name: "bot_llm_total_latency_ms_total",
+        value: 12,
+        labels: { bot_id: BOT_ID },
+      },
+      {
+        name: "bot_llm_useful_responses_total",
+        value: 1,
+        labels: { bot_id: BOT_ID },
+      },
+      {
+        name: "bot_task_completion_time_ms_total",
+        value: 350,
+        labels: { bot_id: BOT_ID, outcome: "success" },
+      },
+    ]);
+  });
+
+  it.each(["failed", "cancelled"] as const)(
+    "does not count a terminal %s Skill result as a useful LLM response",
+    async (outcome) => {
+      const metrics = new InMemoryMetricRegistry();
+      const planner = plannerWith(
+        async (options) => movementDecision(options.requestId),
+        {
+          sendSkillInvocation: async (invocation) =>
+            unsuccessfulSkillResult(
+              invocation,
+              outcome,
+              outcome === "failed" ? "SKILL_FAILED" : "SKILL_CANCELLED_BY_RUNTIME",
+            ),
+        },
+        undefined,
+        registry,
+        metrics,
+      );
+
+      await expect(planner.planAndDispatch(planRequest())).resolves.toMatchObject({
+        action: "skill_result",
+        result: { payload: { outcome } },
+      });
+      expect(
+        metrics.snapshot().filter(
+          ({ name }) => name === "bot_llm_useful_responses_total",
+        ),
+      ).toEqual([]);
+    },
+  );
+
+  it("does not count noop or stale model responses as useful", async () => {
+    const noopMetrics = new InMemoryMetricRegistry();
+    const noopPlanner = plannerWith(
+      async (options) =>
+        aiResult(
+          JSON.stringify({
+            action: "noop",
+            botId: BOT_ID,
+            taskId: "task-01",
+            reasonCode: "NO_SAFE_SKILL",
+          }),
+          options.requestId,
+        ),
+      undefined,
+      undefined,
+      registry,
+      noopMetrics,
+    );
+    await expect(noopPlanner.planAndDispatch(planRequest())).resolves.toMatchObject({
+      action: "noop",
+    });
+    expect(
+      noopMetrics.snapshot().some(
+        ({ name }) => name === "bot_llm_useful_responses_total",
+      ),
+    ).toBe(false);
+
+    const staleMetrics = new InMemoryMetricRegistry();
+    const stalePlanner = plannerWith(
+      async (options) => ({
+        ...movementDecision(options.requestId),
+        requestId: "stale-request",
+      }),
+      undefined,
+      undefined,
+      registry,
+      staleMetrics,
+    );
+    await expect(stalePlanner.planAndDispatch(planRequest())).rejects.toMatchObject({
+      code: "PLANNER_STALE_RESPONSE",
+    });
+    expect(
+      staleMetrics.snapshot().some(
+        ({ name }) => name === "bot_llm_useful_responses_total",
+      ),
+    ).toBe(false);
+    expect(staleMetrics.snapshot()).toContainEqual({
+      name: "bot_llm_prompt_tokens_total",
+      value: 10,
+      labels: { bot_id: BOT_ID },
+    });
+  });
+
+  it("records one abort duration for a terminal Skill failure", async () => {
+    let currentTime = NOW;
+    const metrics = new InMemoryMetricRegistry();
+    const taskStateMachine = new PersistentTaskStateMachine({
+      now: () => currentTime,
+    });
+    const planner = plannerWith(
+      async (options) => movementDecision(options.requestId),
+      {
+        sendSkillInvocation: async (invocation) => {
+          currentTime = new Date(NOW.getTime() + 125);
+          return unsuccessfulSkillResult(invocation, "failed", "SKILL_FAILED");
+        },
+      },
+      taskStateMachine,
+      registry,
+      metrics,
+    );
+
+    await expect(planner.planAndDispatch(planRequest())).resolves.toMatchObject({
+      action: "skill_result",
+      result: { payload: { outcome: "failed" } },
+    });
+    expect(
+      metrics.snapshot().filter(
+        ({ name }) => name === "bot_task_completion_time_ms_total",
+      ),
+    ).toEqual([
+      {
+        name: "bot_task_completion_time_ms_total",
+        value: 125,
+        labels: { bot_id: BOT_ID, outcome: "abort" },
+      },
+    ]);
+  });
+
+  it.each(["PLAN", "RECOVER", "REPLAN"] as const)(
+    "recovers a persisted %s task through a fresh PLAN after Coordinator restart",
+    async (persistedState) => {
+      const taskStateMachine = new PersistentTaskStateMachine({ now: () => NOW });
+      const persisted = await seedPersistedTask(taskStateMachine, persistedState);
+      const metrics = new InMemoryMetricRegistry();
+      const generate = vi.fn(async (options) => movementDecision(options.requestId));
+      const sendSkillInvocation = vi.fn<
+        SkillInvocationTransport["sendSkillInvocation"]
+      >(async (invocation) => {
+        expect(generate).toHaveBeenCalledTimes(1);
+        return completedSkillResult(invocation);
+      });
+      const planner = plannerWith(
+        generate,
+        { sendSkillInvocation },
+        taskStateMachine,
+        registry,
+        metrics,
+      );
+
+      await expect(planner.planAndDispatch(planRequest())).resolves.toMatchObject({
+        action: "skill_result",
+        result: { payload: { outcome: "completed" } },
+      });
+
+      expect(generate).toHaveBeenCalledTimes(1);
+      expect(sendSkillInvocation).toHaveBeenCalledTimes(1);
+      await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+        state: "SUCCESS",
+        planVersion:
+          persisted.planVersion + (persistedState === "REPLAN" ? 0 : 1),
+        recoveryCount: persisted.recoveryCount,
+      });
+      if (persistedState !== "REPLAN") {
+        expect(metrics.snapshot()).toContainEqual({
+          name: "bot_task_state_transitions_total",
+          value: 1,
+          labels: {
+            bot_id: BOT_ID,
+            from: persistedState,
+            to: "REPLAN",
+          },
+        });
+      }
+      expect(metrics.snapshot()).toContainEqual({
+        name: "bot_task_state_transitions_total",
+        value: 1,
+        labels: { bot_id: BOT_ID, from: "REPLAN", to: "PLAN" },
+      });
+      expect(metrics.snapshot()).toContainEqual({
+        name: "bot_task_success_total",
+        value: 1,
+        labels: { bot_id: BOT_ID },
+      });
+    },
+  );
+
+  it("uses recovery budget before replanning an interrupted idempotent execution", async () => {
+    const taskStateMachine = new PersistentTaskStateMachine({ now: () => NOW });
+    await seedPersistedTask(taskStateMachine, "EXECUTE");
+    const metrics = new InMemoryMetricRegistry();
+    const generate = vi.fn(async (options) => movementDecision(options.requestId));
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => {
+      expect(generate).toHaveBeenCalledTimes(1);
+      return completedSkillResult(invocation);
+    });
+    const planner = plannerWith(
+      generate,
+      { sendSkillInvocation },
+      taskStateMachine,
+      registry,
+      metrics,
+    );
+
+    await expect(planner.planAndDispatch(planRequest())).resolves.toMatchObject({
+      action: "skill_result",
+      result: { payload: { outcome: "completed" } },
+    });
+
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(1);
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "SUCCESS",
+      recoveryCount: 1,
+      planVersion: 1,
+      retryCount: 0,
+    });
+    for (const [from, to] of [
+      ["EXECUTE", "RECOVER"],
+      ["RECOVER", "REPLAN"],
+      ["REPLAN", "PLAN"],
+    ] as const) {
+      expect(metrics.snapshot()).toContainEqual({
+        name: "bot_task_state_transitions_total",
+        value: 1,
+        labels: { bot_id: BOT_ID, from, to },
+      });
+    }
+  });
+
+  it.each([
+    [
+      "non-idempotent",
+      "movement.goto",
+      "movement.goto",
+      "1.0.0",
+      false,
+      "COORDINATOR_RESTART_EXECUTION_NON_IDEMPOTENT",
+    ],
+    [
+      "unknown",
+      "movement.unknown",
+      "movement.unknown",
+      "1.0.0",
+      true,
+      "COORDINATOR_RESTART_EXECUTION_SKILL_UNKNOWN",
+    ],
+  ] as const)(
+    "aborts an interrupted %s Skill without model use or replay",
+    async (
+      _caseName,
+      currentStep,
+      expectedSkillId,
+      expectedSkillVersion,
+      catalogSkillIdempotent,
+      failureReason,
+    ) => {
+      const taskStateMachine = new PersistentTaskStateMachine({ now: () => NOW });
+      await seedPersistedTask(taskStateMachine, "EXECUTE", {
+        currentStep,
+        expectedSkillId,
+        expectedSkillVersion,
+      });
+      const metrics = new InMemoryMetricRegistry();
+      const generate = vi.fn();
+      const sendSkillInvocation = vi.fn();
+      const planner = plannerWith(
+        generate,
+        { sendSkillInvocation },
+        taskStateMachine,
+        catalogSkillIdempotent
+          ? registry
+          : registryWithSkillIdempotence(false),
+        metrics,
+      );
+
+      await expect(planner.planAndDispatch(planRequest())).rejects.toMatchObject({
+        code: "PLANNER_RESTART_RECOVERY_UNSAFE",
+      });
+
+      expect(generate).not.toHaveBeenCalled();
+      expect(sendSkillInvocation).not.toHaveBeenCalled();
+      await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+        state: "ABORT",
+        currentStep: "restart-recovery-aborted",
+        failureReason,
+        recoveryCount: 0,
+      });
+      expect(
+        metrics.snapshot().filter(
+          ({ name }) => name === "bot_task_abort_total",
+        ),
+      ).toEqual([
+        {
+          name: "bot_task_abort_total",
+          value: 1,
+          labels: { bot_id: BOT_ID, reason: failureReason },
+        },
+      ]);
+    },
+  );
+
+  it("aborts interrupted execution when restart recovery budget is exhausted", async () => {
+    const taskStateMachine = new PersistentTaskStateMachine({
+      now: () => NOW,
+      defaultMaxRecoveryCount: 0,
+    });
+    await seedPersistedTask(taskStateMachine, "EXECUTE");
+    const metrics = new InMemoryMetricRegistry();
+    const generate = vi.fn();
+    const sendSkillInvocation = vi.fn();
+    const planner = plannerWith(
+      generate,
+      { sendSkillInvocation },
+      taskStateMachine,
+      registry,
+      metrics,
+    );
+
+    await expect(planner.planAndDispatch(planRequest())).rejects.toMatchObject({
+      code: "PLANNER_RESTART_RECOVERY_EXHAUSTED",
+    });
+
+    expect(generate).not.toHaveBeenCalled();
+    expect(sendSkillInvocation).not.toHaveBeenCalled();
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "ABORT",
+      failureReason: "RECOVERY_BUDGET_EXHAUSTED",
+      recoveryCount: 0,
+    });
+    expect(
+      metrics.snapshot().filter(
+        ({ name }) => name === "bot_task_abort_total",
+      ),
+    ).toEqual([
+      {
+        name: "bot_task_abort_total",
+        value: 1,
+        labels: {
+          bot_id: BOT_ID,
+          reason: "RECOVERY_BUDGET_EXHAUSTED",
+        },
+      },
+    ]);
+  });
+
+  it("preserves a newer task revision that wins restart recovery CAS", async () => {
+    let stored: TaskExecutionRecord | null = null;
+    let recoveryReads = 0;
+    let recoveryArmed = false;
+    const store: TaskExecutionStore = {
+      get: () => {
+        if (recoveryArmed) {
+          recoveryReads += 1;
+          if (recoveryReads === 3 && stored !== null) {
+            stored = {
+              ...structuredClone(stored),
+              currentStep: "newer-plan-winner",
+              revision: stored.revision + 1,
+            };
+          }
+        }
+        return stored === null ? null : structuredClone(stored);
+      },
+      save: (record) => {
+        stored = structuredClone(record);
+      },
+    };
+    const taskStateMachine = new PersistentTaskStateMachine({
+      store,
+      now: () => NOW,
+    });
+    const persisted = await seedPersistedTask(taskStateMachine, "PLAN");
+    recoveryArmed = true;
+    const generate = vi.fn();
+    const sendSkillInvocation = vi.fn();
+    const planner = plannerWith(
+      generate,
+      { sendSkillInvocation },
+      taskStateMachine,
+    );
+
+    await expect(planner.planAndDispatch(planRequest())).rejects.toMatchObject({
+      code: "PLANNER_RESTART_RECOVERY_STALE",
+    });
+
+    expect(generate).not.toHaveBeenCalled();
+    expect(sendSkillInvocation).not.toHaveBeenCalled();
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "PLAN",
+      currentStep: "newer-plan-winner",
+      revision: persisted.revision + 2,
+      failureReason: null,
+    });
+  });
+
+  it.each([
+    ["different", "coordinator-other"],
+    ["same", "coordinator-01"],
+  ] as const)(
+    "rejects an active %s-owner execution lease without mutating the task",
+    async (_ownerKind, owner) => {
+      const taskStateMachine = new PersistentTaskStateMachine({ now: () => NOW });
+      const persisted = await seedPersistedTask(taskStateMachine, "PLAN");
+      const claimed = await taskStateMachine.claimExecution(persisted.taskId, {
+        owner,
+        leaseExpiresAt: new Date(NOW.getTime() + 60_000).toISOString(),
+        expectedRevision: persisted.revision,
+      });
+      const generate = vi.fn();
+      const sendSkillInvocation = vi.fn();
+      const planner = plannerWith(
+        generate,
+        { sendSkillInvocation },
+        taskStateMachine,
+      );
+
+      await expect(planner.planAndDispatch(planRequest())).rejects.toMatchObject({
+        code: "PLANNER_EXECUTION_OWNED",
+      });
+
+      expect(generate).not.toHaveBeenCalled();
+      expect(sendSkillInvocation).not.toHaveBeenCalled();
+      await expect(planner.getTaskExecution("task-01")).resolves.toEqual(claimed);
+    },
+  );
+
+  it("claims an expired execution lease before restart recovery", async () => {
+    const taskStateMachine = new PersistentTaskStateMachine({ now: () => NOW });
+    let persisted = await taskStateMachine.create({
+      taskId: "task-01",
+      botId: BOT_ID,
+      goal: planRequest().operatorGoal,
+      executionOwner: "coordinator-old",
+      executionLeaseExpiresAt: new Date(NOW.getTime() - 1).toISOString(),
+      expectedResult: { outcome: "completed" },
+    });
+    persisted = await taskStateMachine.transition(persisted.taskId, "PLAN", {
+      expectedRevision: persisted.revision,
+      currentStep: "interrupted-plan",
+    });
+    const generate = vi.fn(async (options) => movementDecision(options.requestId));
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => completedSkillResult(invocation));
+    const planner = plannerWith(
+      generate,
+      { sendSkillInvocation },
+      taskStateMachine,
+    );
+
+    await expect(planner.planAndDispatch(planRequest())).resolves.toMatchObject({
+      action: "skill_result",
+      result: { payload: { outcome: "completed" } },
+    });
+
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(1);
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "SUCCESS",
+      executionOwner: null,
+      executionLeaseExpiresAt: null,
+      planVersion: 1,
+    });
+  });
+
+  it("preserves the durable winner when execution-claim CAS loses", async () => {
+    let stored: TaskExecutionRecord | null = null;
+    let claimArmed = false;
+    const winnerLease = new Date(NOW.getTime() + 60_000).toISOString();
+    const store: TaskExecutionStore = {
+      get: () => stored === null ? null : structuredClone(stored),
+      save: (record) => {
+        if (
+          claimArmed &&
+          stored !== null &&
+          stored.executionOwner === null &&
+          record.executionOwner === "coordinator-01"
+        ) {
+          stored = {
+            ...structuredClone(stored),
+            executionOwner: "coordinator-winner",
+            executionLeaseExpiresAt: winnerLease,
+            updatedAt: NOW.toISOString(),
+            revision: stored.revision + 1,
+          };
+          throw new Error("Task execution revision conflicts with another snapshot.");
+        }
+        stored = structuredClone(record);
+      },
+    };
+    const taskStateMachine = new PersistentTaskStateMachine({
+      store,
+      now: () => NOW,
+    });
+    await seedPersistedTask(taskStateMachine, "PLAN");
+    claimArmed = true;
+    const generate = vi.fn();
+    const sendSkillInvocation = vi.fn();
+    const planner = plannerWith(
+      generate,
+      { sendSkillInvocation },
+      taskStateMachine,
+    );
+
+    await expect(planner.planAndDispatch(planRequest())).rejects.toMatchObject({
+      code: "PLANNER_RESTART_RECOVERY_STALE",
+    });
+
+    expect(generate).not.toHaveBeenCalled();
+    expect(sendSkillInvocation).not.toHaveBeenCalled();
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "PLAN",
+      executionOwner: "coordinator-winner",
+      executionLeaseExpiresAt: winnerLease,
+      failureReason: null,
+    });
+  });
+
+  it("preserves the durable winner when initial task creation races", async () => {
+    let stored: TaskExecutionRecord | null = null;
+    const winnerLease = new Date(NOW.getTime() + 60_000).toISOString();
+    const store: TaskExecutionStore = {
+      get: () => stored === null ? null : structuredClone(stored),
+      save: (record) => {
+        if (stored === null) {
+          stored = {
+            ...structuredClone(record),
+            executionOwner: "coordinator-winner",
+            executionLeaseExpiresAt: winnerLease,
+          };
+          throw new Error("Task execution revision conflicts with another snapshot.");
+        }
+        stored = structuredClone(record);
+      },
+    };
+    const taskStateMachine = new PersistentTaskStateMachine({
+      store,
+      now: () => NOW,
+    });
+    const generate = vi.fn();
+    const sendSkillInvocation = vi.fn();
+    const planner = plannerWith(
+      generate,
+      { sendSkillInvocation },
+      taskStateMachine,
+    );
+
+    await expect(planner.planAndDispatch(planRequest())).rejects.toMatchObject({
+      code: "PLANNER_RESTART_RECOVERY_STALE",
+    });
+
+    expect(generate).not.toHaveBeenCalled();
+    expect(sendSkillInvocation).not.toHaveBeenCalled();
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "PRECHECK",
+      executionOwner: "coordinator-winner",
+      executionLeaseExpiresAt: winnerLease,
+      failureReason: null,
+      revision: 0,
+    });
+  });
+
+  it("does not abort a task whose execution owner changes during failure handling", async () => {
+    let stored: TaskExecutionRecord | null = null;
+    const winnerLease = new Date(NOW.getTime() + 60_000).toISOString();
+    const store: TaskExecutionStore = {
+      get: () => stored === null ? null : structuredClone(stored),
+      save: (record) => {
+        stored = structuredClone(record);
+      },
+    };
+    const taskStateMachine = new PersistentTaskStateMachine({
+      store,
+      now: () => NOW,
+    });
+    const planner = plannerWith(
+      async () => {
+        if (stored === null) throw new Error("Missing claimed task.");
+        stored = {
+          ...structuredClone(stored),
+          executionOwner: "coordinator-winner",
+          executionLeaseExpiresAt: winnerLease,
+          currentStep: "winner-plan",
+          revision: stored.revision + 1,
+        };
+        throw new Error("AI planning failed");
+      },
+      { sendSkillInvocation: vi.fn() },
+      taskStateMachine,
+    );
+
+    await expect(planner.planAndDispatch(planRequest())).rejects.toThrow(
+      "AI planning failed",
+    );
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "PLAN",
+      currentStep: "winner-plan",
+      executionOwner: "coordinator-winner",
+      executionLeaseExpiresAt: winnerLease,
+      failureReason: null,
+    });
+  });
+
+  it("rejects a stale restart request before changing the persisted task", async () => {
+    const taskStateMachine = new PersistentTaskStateMachine({ now: () => NOW });
+    const persisted = await seedPersistedTask(taskStateMachine, "PLAN");
+    const generate = vi.fn();
+    const sendSkillInvocation = vi.fn();
+    const planner = plannerWith(
+      generate,
+      { sendSkillInvocation },
+      taskStateMachine,
+    );
+
+    await expect(
+      planner.planAndDispatch({
+        ...planRequest(),
+        planVersion: persisted.planVersion + 1,
+      }),
+    ).rejects.toMatchObject({ code: "PLANNER_STALE_RESPONSE" });
+
+    expect(generate).not.toHaveBeenCalled();
+    expect(sendSkillInvocation).not.toHaveBeenCalled();
+    await expect(planner.getTaskExecution("task-01")).resolves.toEqual(persisted);
+  });
+
+  it("carries a fresh requested world version through restart replanning", async () => {
+    const taskStateMachine = new PersistentTaskStateMachine({ now: () => NOW });
+    const persisted = await seedPersistedTask(taskStateMachine, "PLAN");
+    const planner = plannerWith(
+      async (options) => movementDecision(options.requestId),
+      {
+        sendSkillInvocation: async (invocation) =>
+          completedSkillResult(invocation),
+      },
+      taskStateMachine,
+    );
+
+    await expect(
+      planner.planAndDispatch({
+        ...planRequest(),
+        planVersion: persisted.planVersion,
+        worldStateVersion: 7,
+      }),
+    ).resolves.toMatchObject({ action: "skill_result" });
+
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "SUCCESS",
+      planVersion: persisted.planVersion + 1,
+      worldStateVersion: 7,
+    });
+  });
+
+  it("does not mutate a persisted task when restart recovery is already cancelled", async () => {
+    const taskStateMachine = new PersistentTaskStateMachine({ now: () => NOW });
+    const persisted = await seedPersistedTask(taskStateMachine, "PLAN");
+    const controller = new AbortController();
+    controller.abort("operator-cancelled");
+    const generate = vi.fn();
+    const sendSkillInvocation = vi.fn();
+    const planner = plannerWith(
+      generate,
+      { sendSkillInvocation },
+      taskStateMachine,
+    );
+
+    await expect(
+      planner.planAndDispatch({ ...planRequest(), signal: controller.signal }),
+    ).rejects.toMatchObject({ code: "PLANNER_CANCELLED" });
+
+    expect(generate).not.toHaveBeenCalled();
+    expect(sendSkillInvocation).not.toHaveBeenCalled();
+    await expect(planner.getTaskExecution("task-01")).resolves.toEqual(persisted);
+  });
+
+  it("aborts an interrupted VERIFY state instead of replaying its Skill", async () => {
+    const taskStateMachine = new PersistentTaskStateMachine({ now: () => NOW });
+    await seedPersistedTask(taskStateMachine, "VERIFY");
+    const generate = vi.fn();
+    const sendSkillInvocation = vi.fn();
+    const planner = plannerWith(
+      generate,
+      { sendSkillInvocation },
+      taskStateMachine,
+    );
+
+    await expect(planner.planAndDispatch(planRequest())).rejects.toMatchObject({
+      code: "PLANNER_RESTART_RECOVERY_UNSAFE",
+    });
+
+    expect(generate).not.toHaveBeenCalled();
+    expect(sendSkillInvocation).not.toHaveBeenCalled();
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "ABORT",
+      failureReason: "COORDINATOR_RESTART_STATE_UNRECOVERABLE:VERIFY",
+    });
   });
 
   it("rejects prose, identity changes, and skills absent from the Runtime catalog", async () => {
@@ -170,6 +974,75 @@ describe("CoordinatorLocalPlanner", () => {
         code: expectedCodes[index],
       });
     }
+  });
+
+  it("drops a stale response when the captured world version changes", async () => {
+    let worldStateVersion = 7;
+    const planner = plannerWith(async (options) => {
+      worldStateVersion = 8;
+      return aiResult(
+        JSON.stringify({
+          action: "noop",
+          botId: BOT_ID,
+          taskId: "task-01",
+          reasonCode: "NO_SAFE_SKILL",
+        }),
+        options.requestId,
+      );
+    });
+
+    await expect(
+      planner.planAndDispatch({
+        ...planRequest(),
+        planVersion: 0,
+        worldStateVersion: 7,
+        currentVersions: () => ({
+          planVersion: 0,
+          worldStateVersion,
+        }),
+      }),
+    ).rejects.toMatchObject({ code: "PLANNER_STALE_RESPONSE" });
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "ABORT",
+      worldStateVersion: 7,
+      failureReason: "PLANNER_STALE_RESPONSE",
+    });
+  });
+
+  it("drops a stale response when the persistent task is replanned concurrently", async () => {
+    const taskStateMachine = new PersistentTaskStateMachine({ now: () => NOW });
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >();
+    const planner = plannerWith(
+      async (options) => {
+        await taskStateMachine.transition("task-01", "REPLAN", {
+          currentStep: "newer-plan",
+        });
+        return aiResult(
+          JSON.stringify({
+            action: "noop",
+            botId: BOT_ID,
+            taskId: "task-01",
+            reasonCode: "NO_SAFE_SKILL",
+          }),
+          options.requestId,
+        );
+      },
+      { sendSkillInvocation },
+      taskStateMachine,
+    );
+
+    await expect(planner.planAndDispatch(planRequest())).rejects.toMatchObject({
+      code: "PLANNER_STALE_RESPONSE",
+    });
+    expect(sendSkillInvocation).not.toHaveBeenCalled();
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "REPLAN",
+      planVersion: 1,
+      failureReason: null,
+      revision: 2,
+    });
   });
 
   it("rejects a model-supplied ServerProfile identity", async () => {
@@ -306,6 +1179,607 @@ describe("CoordinatorLocalPlanner", () => {
       reasonCode: "NO_SAFE_SKILL",
     });
     expect(sendSkillInvocation).not.toHaveBeenCalled();
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "ABORT",
+      failureReason: "PLANNER_NOOP:NO_SAFE_SKILL",
+      cancellationToken: { cancelled: false },
+      revision: 2,
+    });
+  });
+
+  it("persists a terminal Skill result as ABORT without retrying", async () => {
+    const outcome = "failed" as const;
+    const errorCode = "SKILL_INPUT_INVALID";
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => unsuccessfulSkillResult(invocation, outcome, errorCode));
+    const planner = plannerWith(
+      async (options) =>
+        aiResult(
+          JSON.stringify({
+            action: "invoke_skill",
+            botId: BOT_ID,
+            taskId: "task-01",
+            skillId: "movement.goto",
+            skillVersion: "1.0.0",
+            input: {
+              target: {
+                x: 10,
+                y: 64,
+                z: 10,
+                dimension: "minecraft:overworld",
+                serverProfileId: "$CURRENT_SERVER_PROFILE",
+              },
+              radius: 2,
+            },
+            reasonCode: "ADVANCE_TASK",
+          }),
+          options.requestId,
+        ),
+      { sendSkillInvocation },
+    );
+
+    await expect(planner.planAndDispatch(planRequest())).resolves.toMatchObject({
+      action: "skill_result",
+      result: { payload: { outcome, errorCode } },
+    });
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "ABORT",
+      currentStep: "terminal-skill-failure",
+      recoveryCount: 0,
+      failureReason: errorCode,
+      cancellationToken: { cancelled: false },
+      actualResult: {
+        outcome,
+        errorCode,
+        skillId: "movement.goto",
+        skillVersion: "1.0.0",
+        attempts: 1,
+      },
+      revision: 3,
+    });
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["failed", "NORMAL_ACTIONS_PAUSED"],
+    ["failed", "SKILL_EXECUTION_INTERRUPTED"],
+    ["cancelled", "SKILL_CANCELLED"],
+  ] as const)(
+    "recovers a recoverable L0 %s result (%s) without another model call",
+    async (outcome, errorCode) => {
+      const generate = vi.fn(async (options) => movementDecision(options.requestId));
+      let attempt = 0;
+      const sendSkillInvocation = vi.fn<
+        SkillInvocationTransport["sendSkillInvocation"]
+      >(async (invocation) => {
+        attempt += 1;
+        return attempt === 1
+          ? unsuccessfulSkillResult(invocation, outcome, errorCode)
+          : completedSkillResult(invocation, 92);
+      });
+      const planner = plannerWith(generate, { sendSkillInvocation });
+
+      await expect(planner.planAndDispatch(planRequest())).resolves.toMatchObject({
+        action: "skill_result",
+        result: { payload: { outcome: "completed" } },
+      });
+
+      expect(generate).toHaveBeenCalledTimes(1);
+      expect(sendSkillInvocation).toHaveBeenCalledTimes(2);
+      const firstInvocation = sendSkillInvocation.mock.calls[0]![0];
+      const secondInvocation = sendSkillInvocation.mock.calls[1]![0];
+      expect(secondInvocation.payload.invocationId).not.toBe(
+        firstInvocation.payload.invocationId,
+      );
+      await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+        state: "SUCCESS",
+        currentStep: null,
+        recoveryCount: 1,
+        retryCount: 1,
+        planVersion: 1,
+        failureReason: errorCode,
+        cancellationToken: { cancelled: false },
+        actualResult: {
+          outcome: "completed",
+          output: { reached: true },
+        },
+        revision: 7,
+      });
+    },
+  );
+
+  it("does not replay a non-idempotent Skill after a partial L0 interruption", async () => {
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) =>
+      unsuccessfulSkillResult(
+        invocation,
+        "failed",
+        "SKILL_EXECUTION_INTERRUPTED",
+      ),
+    );
+    const planner = plannerWith(
+      async (options) => movementDecision(options.requestId),
+      { sendSkillInvocation },
+      undefined,
+      registryWithSkillIdempotence(false),
+    );
+
+    await expect(planner.planAndDispatch(planRequest())).resolves.toMatchObject({
+      action: "skill_result",
+      result: {
+        payload: {
+          outcome: "failed",
+          errorCode: "SKILL_EXECUTION_INTERRUPTED",
+        },
+      },
+    });
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(1);
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "ABORT",
+      currentStep: "non-idempotent-recovery-requires-replan",
+      recoveryCount: 0,
+      failureReason:
+        "NON_IDEMPOTENT_L0_RETRY_UNSAFE:SKILL_EXECUTION_INTERRUPTED",
+      revision: 3,
+    });
+  });
+
+  it("can retry a non-idempotent Skill paused before its first mutation", async () => {
+    let attempt = 0;
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => {
+      attempt += 1;
+      return attempt === 1
+        ? unsuccessfulSkillResult(
+            invocation,
+            "failed",
+            "NORMAL_ACTIONS_PAUSED",
+          )
+        : completedSkillResult(invocation, 94);
+    });
+    const planner = plannerWith(
+      async (options) => movementDecision(options.requestId),
+      { sendSkillInvocation },
+      undefined,
+      registryWithSkillIdempotence(false),
+    );
+
+    await expect(planner.planAndDispatch(planRequest())).resolves.toMatchObject({
+      action: "skill_result",
+      result: { payload: { outcome: "completed" } },
+    });
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(2);
+  });
+
+  it("waits for L0 safety to clear before retrying the Skill", async () => {
+    const baseRecord = registry.get(BOT_ID, NOW)!;
+    let safetyPaused = false;
+    const recoveryRegistry = {
+      get: (botId: string) => {
+        if (botId !== BOT_ID) return null;
+        return {
+          ...baseRecord,
+          currentStatus: {
+            ...baseRecord.currentStatus!,
+            safety: {
+              ...baseRecord.currentStatus!.safety,
+              mode: safetyPaused ? "paused" as const : "monitoring" as const,
+              normalTasksPaused: safetyPaused,
+            },
+          },
+        };
+      },
+    };
+    let attempt = 0;
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => {
+      attempt += 1;
+      if (attempt === 1) {
+        safetyPaused = true;
+        setTimeout(() => {
+          safetyPaused = false;
+        }, 2);
+        return unsuccessfulSkillResult(
+          invocation,
+          "failed",
+          "NORMAL_ACTIONS_PAUSED",
+        );
+      }
+      expect(safetyPaused).toBe(false);
+      return completedSkillResult(invocation, 93);
+    });
+    const planner = new CoordinatorLocalPlanner({
+      ai: { generate: async (options) => movementDecision(options.requestId) },
+      registry: recoveryRegistry,
+      transport: { sendSkillInvocation },
+      coordinatorInstanceId: "coordinator-01",
+      now: () => NOW,
+      randomId: uuidSequence(),
+      safetyRecoveryPollIntervalMs: 1,
+      maxSafetyRecoveryWaitMs: 50,
+    });
+
+    await expect(planner.planAndDispatch(planRequest())).resolves.toMatchObject({
+      action: "skill_result",
+      result: { payload: { outcome: "completed" } },
+    });
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(2);
+  });
+
+  it("waits when L0 pauses after planning but before the first dispatch", async () => {
+    const baseRecord = registry.get(BOT_ID, NOW)!;
+    let safetyPaused = false;
+    const recoveryRegistry = {
+      get: (botId: string) => {
+        if (botId !== BOT_ID) return null;
+        return {
+          ...baseRecord,
+          currentStatus: {
+            ...baseRecord.currentStatus!,
+            safety: {
+              ...baseRecord.currentStatus!.safety,
+              mode: safetyPaused ? "paused" as const : "monitoring" as const,
+              normalTasksPaused: safetyPaused,
+            },
+          },
+        };
+      },
+    };
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => {
+      expect(safetyPaused).toBe(false);
+      return completedSkillResult(invocation, 97);
+    });
+    const planner = new CoordinatorLocalPlanner({
+      ai: {
+        generate: async (options) => {
+          safetyPaused = true;
+          setTimeout(() => {
+            safetyPaused = false;
+          }, 2);
+          return movementDecision(options.requestId);
+        },
+      },
+      registry: recoveryRegistry,
+      transport: { sendSkillInvocation },
+      coordinatorInstanceId: "coordinator-01",
+      now: () => NOW,
+      randomId: uuidSequence(),
+      safetyRecoveryPollIntervalMs: 1,
+      maxSafetyRecoveryWaitMs: 50,
+    });
+
+    await expect(planner.planAndDispatch(planRequest())).resolves.toMatchObject({
+      action: "skill_result",
+      result: { payload: { outcome: "completed" } },
+    });
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(1);
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "SUCCESS",
+      recoveryCount: 0,
+      retryCount: 0,
+      planVersion: 0,
+    });
+  });
+
+  it("aborts when L0 safety remains paused past the bounded wait", async () => {
+    const baseRecord = registry.get(BOT_ID, NOW)!;
+    let safetyPaused = false;
+    const recoveryRegistry = {
+      get: (botId: string) => {
+        if (botId !== BOT_ID) return null;
+        return {
+          ...baseRecord,
+          currentStatus: {
+            ...baseRecord.currentStatus!,
+            safety: {
+              ...baseRecord.currentStatus!.safety,
+              mode: safetyPaused ? "paused" as const : "monitoring" as const,
+              normalTasksPaused: safetyPaused,
+            },
+          },
+        };
+      },
+    };
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => {
+      safetyPaused = true;
+      return unsuccessfulSkillResult(
+        invocation,
+        "failed",
+        "NORMAL_ACTIONS_PAUSED",
+      );
+    });
+    const planner = new CoordinatorLocalPlanner({
+      ai: { generate: async (options) => movementDecision(options.requestId) },
+      registry: recoveryRegistry,
+      transport: { sendSkillInvocation },
+      coordinatorInstanceId: "coordinator-01",
+      now: () => NOW,
+      randomId: uuidSequence(),
+      safetyRecoveryPollIntervalMs: 1,
+      maxSafetyRecoveryWaitMs: 2,
+    });
+
+    await expect(planner.planAndDispatch(planRequest())).rejects.toMatchObject({
+      code: "PLANNER_SAFETY_PAUSED",
+    });
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(1);
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "ABORT",
+      currentStep: "wait-for-safety-clear",
+      recoveryCount: 1,
+      retryCount: 0,
+      failureReason: "PLANNER_SAFETY_PAUSED",
+      revision: 4,
+    });
+  });
+
+  it("aborts after the persistent L0 recovery budget is exhausted", async () => {
+    const taskStateMachine = new PersistentTaskStateMachine({
+      now: () => NOW,
+      defaultMaxRecoveryCount: 1,
+    });
+    const generate = vi.fn(async (options) => movementDecision(options.requestId));
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) =>
+      unsuccessfulSkillResult(invocation, "cancelled", "SKILL_CANCELLED"),
+    );
+    const planner = plannerWith(
+      generate,
+      { sendSkillInvocation },
+      taskStateMachine,
+    );
+
+    await expect(planner.planAndDispatch(planRequest())).resolves.toMatchObject({
+      action: "skill_result",
+      result: {
+        payload: { outcome: "cancelled", errorCode: "SKILL_CANCELLED" },
+      },
+    });
+
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(2);
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "ABORT",
+      currentStep: "recovery-budget-exhausted",
+      recoveryCount: 1,
+      retryCount: 1,
+      planVersion: 1,
+      failureReason: "RECOVERY_BUDGET_EXHAUSTED",
+      cancellationToken: { cancelled: false },
+      revision: 6,
+    });
+  });
+
+  it("does not retry when the persistent recovery budget is zero", async () => {
+    const taskStateMachine = new PersistentTaskStateMachine({
+      now: () => NOW,
+      defaultMaxRecoveryCount: 0,
+    });
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) =>
+      unsuccessfulSkillResult(invocation, "cancelled", "SKILL_CANCELLED"),
+    );
+    const planner = plannerWith(
+      async (options) => movementDecision(options.requestId),
+      { sendSkillInvocation },
+      taskStateMachine,
+    );
+
+    await expect(planner.planAndDispatch(planRequest())).resolves.toMatchObject({
+      action: "skill_result",
+      result: { payload: { outcome: "cancelled" } },
+    });
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(1);
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "ABORT",
+      recoveryCount: 0,
+      retryCount: 0,
+      failureReason: "RECOVERY_BUDGET_EXHAUSTED",
+      revision: 3,
+    });
+  });
+
+  it("does not recover a Skill cancellation after the user aborts the task", async () => {
+    const controller = new AbortController();
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => {
+      controller.abort("operator-cancelled");
+      return unsuccessfulSkillResult(invocation, "cancelled", "SKILL_CANCELLED");
+    });
+    const planner = plannerWith(
+      async (options) => movementDecision(options.requestId),
+      { sendSkillInvocation },
+    );
+
+    await expect(
+      planner.planAndDispatch({ ...planRequest(), signal: controller.signal }),
+    ).rejects.toMatchObject({ code: "PLANNER_CANCELLED" });
+
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(1);
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "ABORT",
+      recoveryCount: 0,
+      failureReason: "PLANNER_CANCELLED",
+      cancellationToken: {
+        cancelled: true,
+        reason: "PLANNER_CANCELLED",
+      },
+      revision: 3,
+    });
+  });
+
+  it("does not recover after the persistent cancellation token is set", async () => {
+    const taskStateMachine = new PersistentTaskStateMachine({ now: () => NOW });
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => {
+      await taskStateMachine.cancel("task-01", "USER_CANCELLED");
+      return unsuccessfulSkillResult(invocation, "cancelled", "SKILL_CANCELLED");
+    });
+    const planner = plannerWith(
+      async (options) => movementDecision(options.requestId),
+      { sendSkillInvocation },
+      taskStateMachine,
+    );
+
+    await expect(planner.planAndDispatch(planRequest())).rejects.toMatchObject({
+      code: "PLANNER_CANCELLED",
+    });
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(1);
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "ABORT",
+      recoveryCount: 0,
+      failureReason: "USER_CANCELLED",
+      cancellationToken: { cancelled: true, reason: "USER_CANCELLED" },
+      revision: 3,
+    });
+  });
+
+  it("drops an old Skill result when a newer replan wins the task revision", async () => {
+    const taskStateMachine = new PersistentTaskStateMachine({ now: () => NOW });
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => {
+      await taskStateMachine.transition("task-01", "REPLAN", {
+        currentStep: "newer-replan",
+      });
+      return unsuccessfulSkillResult(invocation, "cancelled", "SKILL_CANCELLED");
+    });
+    const planner = plannerWith(
+      async (options) => movementDecision(options.requestId),
+      { sendSkillInvocation },
+      taskStateMachine,
+    );
+
+    await expect(planner.planAndDispatch(planRequest())).rejects.toMatchObject({
+      code: "PLANNER_STALE_RESPONSE",
+    });
+
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(1);
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "REPLAN",
+      currentStep: "newer-replan",
+      planVersion: 1,
+      recoveryCount: 0,
+      failureReason: null,
+      revision: 3,
+    });
+  });
+
+  it("preserves a durable replan that wins during the result commit", async () => {
+    let stored: TaskExecutionRecord | null = null;
+    const store: TaskExecutionStore = {
+      get: () => stored === null ? null : structuredClone(stored),
+      save: (record) => {
+        if (record.state === "VERIFY" && stored?.state === "EXECUTE") {
+          stored = {
+            ...structuredClone(stored),
+            state: "REPLAN",
+            currentStep: "durable-winner",
+            planVersion: stored.planVersion + 1,
+            revision: stored.revision + 1,
+          };
+          throw new Error("Task execution revision conflicts with another snapshot.");
+        }
+        stored = structuredClone(record);
+      },
+    };
+    const taskStateMachine = new PersistentTaskStateMachine({
+      store,
+      now: () => NOW,
+    });
+    const planner = plannerWith(
+      async (options) => movementDecision(options.requestId),
+      {
+        sendSkillInvocation: async (invocation) =>
+          completedSkillResult(invocation, 96),
+      },
+      taskStateMachine,
+    );
+
+    await expect(planner.planAndDispatch(planRequest())).rejects.toMatchObject({
+      code: "PLANNER_STALE_RESPONSE",
+    });
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "REPLAN",
+      currentStep: "durable-winner",
+      planVersion: 1,
+      failureReason: null,
+      revision: 3,
+    });
+  });
+
+  it("rejects a transport result that does not match the active invocation", async () => {
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => {
+      const result = completedSkillResult(invocation, 95);
+      return {
+        ...result,
+        payload: {
+          ...result.payload,
+          invocationId: uuid(999),
+        },
+      };
+    });
+    const planner = plannerWith(
+      async (options) => movementDecision(options.requestId),
+      { sendSkillInvocation },
+    );
+
+    await expect(planner.planAndDispatch(planRequest())).rejects.toMatchObject({
+      code: "PLANNER_SKILL_RESULT_INVALID",
+    });
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(1);
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "ABORT",
+      failureReason: "PLANNER_SKILL_RESULT_INVALID",
+      revision: 3,
+    });
+  });
+
+  it("cancels the persistent task when the external AbortSignal fires", async () => {
+    const controller = new AbortController();
+    const taskStateMachine = new PersistentTaskStateMachine({ now: () => NOW });
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >();
+    const planner = plannerWith(
+      async (options) => {
+        expect(options.signal).toBe(controller.signal);
+        controller.abort("operator-cancelled");
+        throw new Error("AI request cancelled");
+      },
+      { sendSkillInvocation },
+      taskStateMachine,
+    );
+
+    await expect(
+      planner.planAndDispatch({ ...planRequest(), signal: controller.signal }),
+    ).rejects.toThrow("AI request cancelled");
+    expect(sendSkillInvocation).not.toHaveBeenCalled();
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "ABORT",
+      failureReason: "PLANNER_CANCELLED",
+      cancellationToken: {
+        cancelled: true,
+        reason: "PLANNER_CANCELLED",
+        cancelledAt: NOW.toISOString(),
+      },
+      movementLease: null,
+      revision: 2,
+    });
   });
 
   it("recovers a decision the model wrapped in a markdown fence", async () => {
@@ -1627,7 +3101,7 @@ describe("CoordinatorLocalPlanner", () => {
     expect(new Set(sendSkillInvocation.mock.calls.map(([invocation]) =>
       invocation.payload.authorization.decisionId,
     )).size).toBe(4);
-    expect(get).toHaveBeenCalledTimes(7);
+    expect(get).toHaveBeenCalledTimes(9);
     expect(requestFreshStatus).toHaveBeenCalledTimes(1);
     expect(sendSkillInvocation.mock.calls[0]![0].payload.input).toMatchObject({
       blockName: "oak_log",
@@ -2607,23 +4081,244 @@ describe("buildLocalPlannerPlanItemsRetrySchema", () => {
       LocalPlannerError,
     );
   });
+
+  it("fails closed before model use when the advertised catalog exceeds the prompt limit", async () => {
+    const current = registry.get(BOT_ID, NOW)!;
+    const baseSkill = current.skillCatalog!.skills[0]!;
+    const oversizedSchema = {
+      type: "object",
+      properties: {
+        note: {
+          type: "string",
+          enum: Array.from({ length: 8_000 }, (_, index) => `catalog-value-${index}`),
+        },
+      },
+      required: ["note"],
+      additionalProperties: false,
+    };
+    const oversizedRecord = {
+      ...current,
+      skillCatalog: {
+        ...current.skillCatalog!,
+        skills: Array.from({ length: 16 }, (_, index) => ({
+          ...baseSkill,
+          skillId: `movement.goto-${index}`,
+          inputSchema: oversizedSchema,
+        })),
+      },
+    };
+    const generate = vi.fn();
+    const planner = new CoordinatorLocalPlanner({
+      ai: { generate },
+      registry: { get: () => oversizedRecord },
+      transport: { sendSkillInvocation: vi.fn() },
+      coordinatorInstanceId: "coordinator-01",
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    await expect(planner.planAndDispatch(planRequest())).rejects.toMatchObject({
+      code: "PLANNER_SKILL_CATALOG_UNAVAILABLE",
+    });
+    expect(generate).not.toHaveBeenCalled();
+  });
 });
 
 function plannerWith(
   generate: (options: any) => Promise<AIScheduledResult<GenerateResult>>,
   transport: SkillInvocationTransport = { sendSkillInvocation: vi.fn() },
-  assignment?: Pick<BotAssignmentService, "acquire" | "release">,
-  verifyAssignmentLease?: CoordinatorLocalPlannerOptions["verifyAssignmentLease"],
+  taskStateMachineOrAssignment?:
+    | PersistentTaskStateMachine
+    | Pick<BotAssignmentService, "acquire" | "release">,
+  plannerRegistryOrVerifier:
+    | Pick<BotRegistry, "get">
+    | CoordinatorLocalPlannerOptions["verifyAssignmentLease"] = registry,
+  metrics?: MetricRecorder,
 ): CoordinatorLocalPlanner {
+  const usesLegacyArguments =
+    (taskStateMachineOrAssignment !== undefined &&
+      !(taskStateMachineOrAssignment instanceof PersistentTaskStateMachine)) ||
+    typeof plannerRegistryOrVerifier === "function";
+  const taskStateMachine = !usesLegacyArguments &&
+      taskStateMachineOrAssignment instanceof PersistentTaskStateMachine
+    ? taskStateMachineOrAssignment
+    : undefined;
+  const assignment = usesLegacyArguments &&
+      taskStateMachineOrAssignment !== undefined
+    ? taskStateMachineOrAssignment
+    : undefined;
+  const plannerRegistry = !usesLegacyArguments &&
+      typeof plannerRegistryOrVerifier !== "function"
+    ? plannerRegistryOrVerifier
+    : registry;
+  const verifyAssignmentLease = usesLegacyArguments &&
+      typeof plannerRegistryOrVerifier === "function"
+    ? plannerRegistryOrVerifier
+    : undefined;
   return new CoordinatorLocalPlanner({
     ai: { generate },
-    registry,
+    registry: plannerRegistry,
     ...(assignment ? { assignment } : {}),
     ...(verifyAssignmentLease ? { verifyAssignmentLease } : {}),
     transport,
     coordinatorInstanceId: "coordinator-01",
     now: () => NOW,
     randomId: uuidSequence(),
+    ...(taskStateMachine ? { taskStateMachine } : {}),
+    ...(metrics ? { metrics } : {}),
+  });
+}
+
+function registryWithSkillIdempotence(
+  idempotent: boolean,
+): Pick<BotRegistry, "get"> {
+  const current = registry.get(BOT_ID, NOW)!;
+  return {
+    get: (botId: string) =>
+      botId === BOT_ID
+        ? {
+            ...current,
+            skillCatalog: {
+              ...current.skillCatalog!,
+              skills: current.skillCatalog!.skills.map((skill) => ({
+                ...skill,
+                idempotent,
+              })),
+            },
+          }
+        : null,
+  };
+}
+
+function movementDecision(
+  requestId: string,
+): AIScheduledResult<GenerateResult> {
+  return aiResult(
+    JSON.stringify({
+      action: "invoke_skill",
+      botId: BOT_ID,
+      taskId: "task-01",
+      skillId: "movement.goto",
+      skillVersion: "1.0.0",
+      input: {
+        target: {
+          x: 10,
+          y: 64,
+          z: 10,
+          dimension: "minecraft:overworld",
+          serverProfileId: "$CURRENT_SERVER_PROFILE",
+        },
+        radius: 2,
+      },
+      reasonCode: "ADVANCE_TASK",
+    }),
+    requestId,
+  );
+}
+
+function completedSkillResult(
+  invocation: Parameters<SkillInvocationTransport["sendSkillInvocation"]>[0],
+  sequence = 90,
+): SkillExecutionResultV1 {
+  return {
+    schemaVersion: "1.0",
+    messageId: uuid(sequence),
+    traceId: invocation.traceId,
+    timestamp: NOW.toISOString(),
+    source: { service: "bot-runtime", instanceId: RUNTIME_ID },
+    botId: invocation.botId,
+    taskId: invocation.taskId,
+    type: "skill.result.v1",
+    payload: {
+      invocationId: invocation.payload.invocationId,
+      skillId: invocation.payload.skillId,
+      skillVersion: invocation.payload.skillVersion,
+      completedAt: NOW.toISOString(),
+      outcome: "completed",
+      attempts: 1,
+      output: { reached: true },
+    },
+  };
+}
+
+function unsuccessfulSkillResult(
+  invocation: Parameters<SkillInvocationTransport["sendSkillInvocation"]>[0],
+  outcome: "failed" | "cancelled",
+  errorCode: string,
+): SkillExecutionResultV1 {
+  const result = {
+    schemaVersion: "1.0" as const,
+    messageId: uuid(91),
+    traceId: invocation.traceId,
+    timestamp: NOW.toISOString(),
+    source: { service: "bot-runtime" as const, instanceId: RUNTIME_ID },
+    botId: invocation.botId,
+    taskId: invocation.taskId,
+    type: "skill.result.v1" as const,
+    payload: {
+      invocationId: invocation.payload.invocationId,
+      skillId: invocation.payload.skillId,
+      skillVersion: invocation.payload.skillVersion,
+      completedAt: NOW.toISOString(),
+      attempts: 1,
+      errorCode,
+    },
+  };
+  return outcome === "failed"
+    ? { ...result, payload: { ...result.payload, outcome: "failed" } }
+    : { ...result, payload: { ...result.payload, outcome: "cancelled" } };
+}
+
+async function seedPersistedTask(
+  taskStateMachine: PersistentTaskStateMachine,
+  state: "PLAN" | "EXECUTE" | "RECOVER" | "REPLAN" | "VERIFY",
+  options: Readonly<{
+    currentStep?: string;
+    expectedSkillId?: string;
+    expectedSkillVersion?: string;
+  }> = {},
+): Promise<TaskExecutionRecord> {
+  const request = planRequest();
+  let task = await taskStateMachine.create({
+    taskId: request.taskId,
+    botId: request.botId,
+    goal: request.operatorGoal,
+    worldStateVersion: 0,
+    expectedResult: { outcome: "completed" },
+  });
+  task = await taskStateMachine.transition(task.taskId, "PLAN", {
+    expectedRevision: task.revision,
+    currentStep: "slow-cognitive-loop",
+  });
+  if (state === "PLAN") return task;
+  if (state === "REPLAN") {
+    return taskStateMachine.transition(task.taskId, "REPLAN", {
+      expectedRevision: task.revision,
+      currentStep: "persisted-replan",
+    });
+  }
+  const currentStep = options.currentStep ?? "movement.goto";
+  task = await taskStateMachine.transition(task.taskId, "EXECUTE", {
+    expectedRevision: task.revision,
+    currentStep,
+    expectedResult: {
+      outcome: "completed",
+      skillId: options.expectedSkillId ?? currentStep,
+      skillVersion: options.expectedSkillVersion ?? "1.0.0",
+    },
+  });
+  if (state === "EXECUTE") return task;
+  if (state === "VERIFY") {
+    return taskStateMachine.transition(task.taskId, "VERIFY", {
+      expectedRevision: task.revision,
+      currentStep: "persisted-verify",
+      actualResult: { outcome: "completed" },
+    });
+  }
+  return taskStateMachine.transition(task.taskId, "RECOVER", {
+    expectedRevision: task.revision,
+    currentStep: "persisted-recover",
+    failureReason: "PERSISTED_INTERRUPTION",
   });
 }
 
@@ -2782,7 +4477,7 @@ function readyRegistry(): BotRegistry {
           additionalProperties: false,
         },
         timeoutMs: 20_000,
-        idempotent: false,
+        idempotent: true,
         selectedVariantId: "portable",
         unavailableReasons: [],
       }],

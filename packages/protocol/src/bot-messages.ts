@@ -575,7 +575,7 @@ export const botSkillCatalogEntryV1Schema = z
     availability: skillCompatibilityAvailabilitySchema,
     verification: skillCompatibilityVerificationSchema,
     inputSchema: skillInputSchemaSchema,
-    timeoutMs: z.number().int().min(10).max(60_000),
+    timeoutMs: z.number().int().min(10).max(10 * 60_000),
     idempotent: z.boolean(),
     selectedVariantId: skillVariantIdentifierSchema.nullable(),
     unavailableReasons: z.array(skillCompatibilityReasonSchema).max(128),
@@ -627,6 +627,119 @@ export const botPositionSchema = z
       .min(3)
       .max(128)
       .regex(/^[a-z0-9_.-]+:[a-z0-9_./-]+$/u),
+  })
+  .strict();
+
+export const BOT_WORLD_STATE_MAX_INVENTORY_ITEMS = 128;
+export const BOT_WORLD_STATE_MAX_UTILITY_BLOCKS = 128;
+
+const worldStateResourceNameSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^(?:[a-z0-9_.-]+:)?[a-z0-9_./-]+$/u);
+
+const worldStateCoordinateSchema = z
+  .object({
+    x: z.number().finite(),
+    y: z.number().finite(),
+    z: z.number().finite(),
+  })
+  .strict();
+
+const worldStateDimensionSchema = z
+  .string()
+  .min(3)
+  .max(128)
+  .regex(/^[a-z0-9_.-]+:[a-z0-9_./-]+$/u);
+
+export const botWorldStateInventoryItemV1Schema = z
+  .object({
+    name: worldStateResourceNameSchema,
+    count: z.number().int().positive().max(2_147_483_647),
+    durability: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(2_147_483_647)
+      .nullable(),
+  })
+  .strict();
+
+export const botWorldStateUtilityBlockNameV1Schema = z.enum([
+  "crafting_table",
+  "furnace",
+  "blast_furnace",
+  "smoker",
+  "campfire",
+  "soul_campfire",
+  "brewing_stand",
+  "enchanting_table",
+  "anvil",
+  "chipped_anvil",
+  "damaged_anvil",
+  "stonecutter",
+  "grindstone",
+  "smithing_table",
+  "loom",
+  "cartography_table",
+  "fletching_table",
+  "chest",
+  "trapped_chest",
+  "ender_chest",
+  "barrel",
+  "shulker_box",
+  "bed",
+  "portal",
+  "nether_portal",
+  "end_portal",
+  "water",
+  "lava",
+  "oak_log",
+  "birch_log",
+  "spruce_log",
+  "jungle_log",
+  "acacia_log",
+  "dark_oak_log",
+  "mangrove_log",
+  "cherry_log",
+  "coal_ore",
+  "iron_ore",
+  "diamond_ore",
+  "wheat",
+  "carrots",
+  "potatoes",
+]);
+
+export const botWorldStateUtilityBlockV1Schema = z
+  .object({
+    name: botWorldStateUtilityBlockNameV1Schema,
+    dimension: worldStateDimensionSchema,
+    position: worldStateCoordinateSchema,
+    reachable: z.boolean().nullable(),
+    source: z.enum(["observation", "memory", "placed", "unknown"]),
+    confidence: z.number().finite().min(0).max(1),
+  })
+  .strict();
+
+export const botWorldStateNavigationV1Schema = z
+  .object({
+    owner: z
+      .string()
+      .min(1)
+      .max(256)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u)
+      .nullable(),
+    target: z
+      .object({
+        x: z.number().finite(),
+        y: z.number().finite(),
+        z: z.number().finite(),
+        dimension: worldStateDimensionSchema,
+      })
+      .strict()
+      .nullable(),
+    version: sequenceSchema,
   })
   .strict();
 
@@ -924,6 +1037,46 @@ export const botSkillCatalogV1Schema = z
   })
   .strict();
 
+export const botWorldStateV1Schema = z
+  .object({
+    ...botMessageEnvelopeShape,
+    type: z.literal("bot.world-state.v1"),
+    payload: z
+      .object({
+        serverProfileId: identifierSchema,
+        runtimeInstanceId: identifierSchema,
+        sequence: sequenceSchema,
+        observedAt: timestampSchema,
+        worldStateVersion: sequenceSchema,
+        inventory: z
+          .array(botWorldStateInventoryItemV1Schema)
+          .max(BOT_WORLD_STATE_MAX_INVENTORY_ITEMS)
+          .refine(
+            (items) => new Set(items.map(({ name }) => name)).size === items.length,
+            { message: "World-state inventory entries must be unique by name." },
+          ),
+        nearbyUtilityBlocks: z
+          .array(botWorldStateUtilityBlockV1Schema)
+          .max(BOT_WORLD_STATE_MAX_UTILITY_BLOCKS)
+          .refine(
+            (blocks) =>
+              new Set(
+                blocks.map(
+                  ({ name, dimension, position }) =>
+                    `${name}|${dimension}|${position.x}|${position.y}|${position.z}`,
+                ),
+              ).size === blocks.length,
+            {
+              message:
+                "Nearby utility blocks must be unique by name, dimension, and position.",
+            },
+          ),
+        navigation: botWorldStateNavigationV1Schema,
+      })
+      .strict(),
+  })
+  .strict();
+
 export const controlPermissionSchema = z.enum([
   "bot.stop",
   "bot.emergency-stop",
@@ -1059,6 +1212,7 @@ export const botTelemetryMessageV1Schema = z.discriminatedUnion("type", [
   botDisconnectedV1Schema,
   botVersionV1Schema,
   botSkillCatalogV1Schema,
+  botWorldStateV1Schema,
 ]);
 
 export const botProtocolMessageV1Schema = z.union([
@@ -1067,6 +1221,7 @@ export const botProtocolMessageV1Schema = z.union([
   botDisconnectedV1Schema,
   botVersionV1Schema,
   botSkillCatalogV1Schema,
+  botWorldStateV1Schema,
   stopBotCommandV1Schema,
   botStopResultV1Schema,
 ]);
@@ -1085,6 +1240,19 @@ export type BotSkillCatalogEntryV1 = z.infer<
   typeof botSkillCatalogEntryV1Schema
 >;
 export type BotSkillCatalogV1 = z.infer<typeof botSkillCatalogV1Schema>;
+export type BotWorldStateInventoryItemV1 = z.infer<
+  typeof botWorldStateInventoryItemV1Schema
+>;
+export type BotWorldStateUtilityBlockNameV1 = z.infer<
+  typeof botWorldStateUtilityBlockNameV1Schema
+>;
+export type BotWorldStateUtilityBlockV1 = z.infer<
+  typeof botWorldStateUtilityBlockV1Schema
+>;
+export type BotWorldStateNavigationV1 = z.infer<
+  typeof botWorldStateNavigationV1Schema
+>;
+export type BotWorldStateV1 = z.infer<typeof botWorldStateV1Schema>;
 export type SkillCompatibilityAvailability = z.infer<
   typeof skillCompatibilityAvailabilitySchema
 >;

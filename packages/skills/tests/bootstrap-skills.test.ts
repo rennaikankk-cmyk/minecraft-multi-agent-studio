@@ -567,6 +567,35 @@ describe("smelt.item@1.0.0", () => {
     }));
   });
 
+  it("accepts a nullable furnace for deterministic runtime resolution", async () => {
+    const adapter = vi.fn(async () => ({
+      inputItemName: "raw_iron",
+      fuelItemName: "coal",
+      outputItemName: "iron_ingot",
+      requestedCount: 5,
+      insertedFuelCount: 1,
+      smeltedCount: 5,
+    }));
+    const run = makeExecutor(adapter);
+    const invocation = makeInvocation("smelt.item", {
+      ...input,
+      furnace: null,
+    });
+
+    const result = await run.executor.execute(
+      invocation,
+      makeAuthorization(invocation, ["craft.execute"]),
+      state,
+    );
+
+    expect(result.payload).toMatchObject({ outcome: "completed" });
+    expect(adapter).toHaveBeenCalledWith(
+      expect.objectContaining({
+        input: expect.objectContaining({ furnace: null }),
+      }),
+    );
+  });
+
   it("rejects an out-of-reach furnace before capability execution", async () => {
     const run = makeExecutor();
     const invocation = makeInvocation("smelt.item", {

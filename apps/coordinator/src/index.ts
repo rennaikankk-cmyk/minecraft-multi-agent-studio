@@ -4,6 +4,7 @@ export {
   type BotRegistryOptions,
   type BotRegistryListener,
   type BotRegistryRecord,
+  type BotRegistryWorldState,
   type CoordinatorTelemetryErrorCode,
   type RegistryConnectionState,
   type TelemetryIgnoreReason,

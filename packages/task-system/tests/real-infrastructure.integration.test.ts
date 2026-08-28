@@ -26,6 +26,7 @@ import {
   type IsolatedTaskInfrastructureConfig,
 } from "../src/infrastructure-config.js";
 import { PgTaskPoolAdapter } from "../src/pg-pool-adapter.js";
+import { PostgresTaskExecutionStore } from "../src/postgres-task-execution-store.js";
 import { TaskOutboxReconciler } from "../src/outbox-reconciler.js";
 import {
   MAX_TASK_OUTBOX_ATTEMPTS,
@@ -36,6 +37,7 @@ import {
   taskRecordSchema,
   type TaskRecord,
 } from "../src/model.js";
+import { PersistentTaskStateMachine } from "../src/task-fsm.js";
 
 const runRealInfrastructure =
   process.env.RUN_REAL_TASK_INFRA_TEST === "1";
@@ -692,6 +694,7 @@ describeReal.sequential(
       expect(tables.rows.map(({ table_name }) => table_name)).toEqual([
         "studio_task_cancellation_requests",
         "studio_task_dependencies",
+        "studio_task_executions",
         "studio_task_history",
         "studio_task_outbox",
         "studio_tasks",
@@ -747,6 +750,34 @@ describeReal.sequential(
           [created.task.taskId],
         ),
       ).rejects.toThrow();
+    }, REAL_TEST_TIMEOUT_MS);
+
+    it("restores persistent execution FSM progress after a runtime restart", async () => {
+      const task = (
+        await repository.createTask(
+          taskCreateCommand("test.persistent-execution-fsm"),
+        )
+      ).task;
+      const store = new PostgresTaskExecutionStore(poolAdapter);
+      const firstRuntime = new PersistentTaskStateMachine({ store });
+      await firstRuntime.create({
+        taskId: task.taskId,
+        botId: "isolated-test-bot",
+        goal: "Acquire a wooden pickaxe",
+      });
+      await firstRuntime.transition(task.taskId, "PLAN", {
+        currentStep: "expand recipe dependencies",
+        worldStateVersion: 2,
+      });
+
+      const restartedRuntime = new PersistentTaskStateMachine({ store });
+      expect(await restartedRuntime.restore(task.taskId)).toMatchObject({
+        taskId: task.taskId,
+        state: "PLAN",
+        currentStep: "expand recipe dependencies",
+        worldStateVersion: 2,
+        revision: 1,
+      });
     }, REAL_TEST_TIMEOUT_MS);
 
     it("rolls back task and history when the transactional outbox insert fails", async () => {

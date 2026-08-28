@@ -11,6 +11,8 @@ import { createStructuredLogger } from "@minecraft-studio/observability";
 import {
   BullMqTaskQueue,
   PgTaskPoolAdapter,
+  PersistentTaskStateMachine,
+  PostgresTaskExecutionStore,
   PostgresTaskRepository,
   TaskOutboxReconciler,
 } from "@minecraft-studio/task-system";
@@ -158,6 +160,9 @@ async function main(): Promise<void> {
         });
       },
     });
+    const taskPersistence = await createTaskStateMachine();
+    taskPool = taskPersistence.pool;
+    const taskStateMachine = taskPersistence.stateMachine;
     localPlanner = new CoordinatorLocalPlanner({
       ai: new ScheduledAIRouter(aiRouter, aiScheduler),
       registry,
@@ -410,6 +415,59 @@ async function main(): Promise<void> {
   };
   process.once("SIGINT", () => void stop("SIGINT"));
   process.once("SIGTERM", () => void stop("SIGTERM"));
+}
+
+async function createTaskStateMachine(): Promise<Readonly<{
+  stateMachine: PersistentTaskStateMachine;
+  pool: PgTaskPoolAdapter | null;
+}>> {
+  const connectionString = process.env.COORDINATOR_TASK_POSTGRES_URL?.trim();
+  if (!connectionString) {
+    logger.warn("coordinator_task_persistence_unavailable", {
+      durability: "process-local",
+      code: "TASK_POSTGRES_NOT_CONFIGURED",
+    });
+    return {
+      stateMachine: new PersistentTaskStateMachine(),
+      pool: null,
+    };
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(connectionString);
+  } catch {
+    throw new Error("COORDINATOR_TASK_POSTGRES_URL is invalid.");
+  }
+  if (
+    !["postgres:", "postgresql:"].includes(parsed.protocol) ||
+    parsed.hash.length > 0
+  ) {
+    throw new Error("COORDINATOR_TASK_POSTGRES_URL is invalid.");
+  }
+  const schemaName = process.env.COORDINATOR_TASK_POSTGRES_SCHEMA?.trim() || "public";
+  if (!/^[a-z_][a-z0-9_]{0,62}$/u.test(schemaName)) {
+    throw new Error("COORDINATOR_TASK_POSTGRES_SCHEMA is invalid.");
+  }
+  const pool = new PgTaskPoolAdapter({
+    connectionString,
+    options: `-c search_path=${schemaName}`,
+  });
+  await pool.verifyConnection();
+  const client = await pool.connect();
+  try {
+    await client.query("SELECT 1 FROM studio_task_executions LIMIT 0");
+  } finally {
+    client.release();
+  }
+  logger.info("coordinator_task_persistence_ready", {
+    durability: "postgresql",
+  });
+  return {
+    stateMachine: new PersistentTaskStateMachine({
+      store: new PostgresTaskExecutionStore(pool),
+    }),
+    pool,
+  };
 }
 
 void main().catch((cause: unknown) => {

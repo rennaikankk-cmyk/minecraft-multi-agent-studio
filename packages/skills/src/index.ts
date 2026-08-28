@@ -104,6 +104,7 @@ export {
   type ObservedInventory,
 } from "./builtin/inventory-space.js";
 export {
+  CRAFT_CAPABILITY_MAX_COUNT,
   CRAFT_ITEM_TIMEOUT_MS,
   CRAFT_MAX_COUNT,
   craftItemCapabilityInputSchema,
@@ -142,6 +143,19 @@ export {
   smeltItemSkill,
   smeltItemStateSchema,
 } from "./builtin/smelt-item.js";
+export {
+  closedLoopSkillStatuses,
+  closedLoopSkillStatusSchema,
+  ENSURE_ITEM_TIMEOUT_MS,
+  ensureItemInputSchema,
+  ensureItemOutputSchema,
+  ensureItemSkill,
+  ensureItemSmeltCapabilityInputSchema,
+  ensureItemStateSchema,
+  INVENTORY_SNAPSHOT_MAX_ITEM_TYPES,
+  inventorySnapshotCapabilityInputSchema,
+  inventorySnapshotCapabilityOutputSchema,
+} from "./builtin/ensure-item.js";
 export {
   antiCheatCompatibilityProfiles,
   antiCheatCompatibilityProfileSchema,
@@ -309,6 +323,36 @@ export {
   type SkillRetryPolicy,
   type SkillVariantCompatibility,
 } from "./types.js";
+export {
+  MOVEMENT_PRIORITIES,
+  MovementArbiter,
+  MovementController,
+  MovementLeaseUnavailableError,
+  StaleMovementLeaseError,
+  movementPriorities,
+  type MovementArbiterOptions,
+  type MovementControllerOptions,
+  type MovementLease,
+  type MovementLeaseEndReason,
+  type MovementLeaseEvent,
+  type MovementLeasePreemptHandler,
+  type MovementLeaseReleaseHandler,
+  type MovementLeaseRequest,
+  type MovementLeaseSnapshot,
+  type MovementLeaseState,
+  type MovementOperation,
+  type MovementPriority,
+  type MovementPriorityInput,
+  type MovementPriorityName,
+} from "./movement-arbiter.js";
+export {
+  actionLockKinds,
+  ActionLockError,
+  ActionLockManager,
+  type ActionLockAcquireOptions,
+  type ActionLockKind,
+  type ActionLockSnapshot,
+} from "./runtime/action-lock.js";
 export {
   tradeVillagerSkill, tradeVillagerInputSchema, tradeVillagerOutputSchema, tradeVillagerStateSchema, tradeVillagerCapabilityInputSchema, tradeVillagerCapabilityOutputSchema,
 } from "./builtin/trade-villager.js";

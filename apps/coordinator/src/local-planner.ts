@@ -7,9 +7,15 @@ import {
   type GenerateResult,
   type ScheduledAIRouter,
 } from "@minecraft-studio/ai-router";
+import type {
+  AppLogger,
+  LifecycleMetricName,
+  MetricRecorder,
+} from "@minecraft-studio/observability";
 import {
   goalResultSummaryFromOutput,
   identifierSchema,
+  parseSkillExecutionResult,
   type BotSkillCatalogEntryV1,
   skillIdentifierSchema,
   skillInvocationV1Schema,
@@ -28,7 +34,11 @@ import {
   type StepOutcome,
   type SupervisionResult,
 } from "@minecraft-studio/skills";
-import type { AppLogger } from "@minecraft-studio/observability";
+import {
+  PersistentTaskStateMachine,
+  TaskExecutionError,
+  type TaskExecutionRecord,
+} from "@minecraft-studio/task-system";
 import { z } from "zod";
 
 import type { BotRegistry, BotRegistryRecord } from "./bot-registry.js";
@@ -54,6 +64,15 @@ export const LOCAL_PLANNER_REASON_CODES = Object.freeze([
 ] as const);
 const reasonCodeSchema = z.enum(LOCAL_PLANNER_REASON_CODES);
 const TRUSTED_SERVER_PROFILE_PLACEHOLDER = "$CURRENT_SERVER_PROFILE";
+// Operator cancellation is trusted only from AbortSignal/task state. Runtime
+// SKILL_CANCELLED is also emitted when L0 preempts an active normal Skill.
+const RECOVERABLE_L0_ERROR_CODES = new Set([
+  "NORMAL_ACTIONS_PAUSED",
+  "SKILL_CANCELLED",
+  "SKILL_EXECUTION_INTERRUPTED",
+]);
+const DEFAULT_SAFETY_RECOVERY_POLL_INTERVAL_MS = 100;
+const DEFAULT_MAX_SAFETY_RECOVERY_WAIT_MS = 30_000;
 
 const localPlannerNoopDecisionSchema = z
   .object({
@@ -413,6 +432,16 @@ export type LocalPlanRequest = Readonly<{
    */
   assignmentLeaseOwner?: string;
   signal?: AbortSignal;
+  /** Versions captured when the slow request was created. */
+  planVersion?: number;
+  worldStateVersion?: number;
+  /** Re-read immediately before dispatch to reject a stale model response. */
+  currentVersions?: () => Readonly<{
+    planVersion: number;
+    worldStateVersion: number;
+    taskCancelled?: boolean;
+    taskCompleted?: boolean;
+  }>;
 }>;
 
 export type LocalPlanResult =
@@ -466,7 +495,14 @@ export type LocalPlannerErrorCode =
   | "PLANNER_GOAL_EXECUTION_FAILED"
   | "PLAN_STEP_DISPATCH_UNAVAILABLE"
   | "STEP_TARGET_NOT_FOUND"
-  | "SKILL_INVOCATION_INVALID";
+  | "SKILL_INVOCATION_INVALID"
+  | "PLANNER_STALE_RESPONSE"
+  | "PLANNER_EXECUTION_OWNED"
+  | "PLANNER_RESTART_RECOVERY_STALE"
+  | "PLANNER_RESTART_RECOVERY_UNSAFE"
+  | "PLANNER_RESTART_RECOVERY_EXHAUSTED"
+  | "PLANNER_CANCELLED"
+  | "PLANNER_SKILL_RESULT_INVALID";
 
 export class LocalPlannerError extends Error {
   /** Plan step the failure came from, when the failure had one. Log-only. */
@@ -517,8 +553,23 @@ export type CoordinatorLocalPlannerOptions = Readonly<{
    * process, and the wrong place to start a triage.
    */
   logger?: AppLogger;
+  taskStateMachine?: PersistentTaskStateMachine;
+  metrics?: MetricRecorder;
   now?: () => Date;
   randomId?: () => string;
+  safetyRecoveryPollIntervalMs?: number;
+  maxSafetyRecoveryWaitMs?: number;
+}>;
+
+type PlannerExecutionContext = Readonly<{
+  task: TaskExecutionRecord;
+  worldStateVersion: number;
+  claim: PlannerExecutionClaim;
+}>;
+
+type PlannerExecutionClaim = Readonly<{
+  owner: string;
+  leaseExpiresAt: string;
 }>;
 
 /**
@@ -748,12 +799,30 @@ export class CoordinatorLocalPlanner {
   private readonly actorId: string;
   private readonly goalPlanner: GoalPlanner;
   private readonly planSupervisor: PlanSupervisor;
+  private readonly taskStateMachine: PersistentTaskStateMachine;
+  private readonly safetyRecoveryPollIntervalMs: number;
+  private readonly maxSafetyRecoveryWaitMs: number;
 
   constructor(private readonly options: CoordinatorLocalPlannerOptions) {
     this.coordinatorInstanceId = identifierSchema.parse(
       options.coordinatorInstanceId,
     );
     this.actorId = identifierSchema.parse(options.actorId ?? "local-planner");
+    this.taskStateMachine =
+      options.taskStateMachine ?? new PersistentTaskStateMachine();
+    this.safetyRecoveryPollIntervalMs = boundedInteger(
+      options.safetyRecoveryPollIntervalMs ??
+        DEFAULT_SAFETY_RECOVERY_POLL_INTERVAL_MS,
+      1,
+      5_000,
+      "safetyRecoveryPollIntervalMs",
+    );
+    this.maxSafetyRecoveryWaitMs = boundedInteger(
+      options.maxSafetyRecoveryWaitMs ?? DEFAULT_MAX_SAFETY_RECOVERY_WAIT_MS,
+      1,
+      60_000,
+      "maxSafetyRecoveryWaitMs",
+    );
     this.now = options.now ?? (() => new Date());
     this.randomId = options.randomId ?? randomUUID;
     this.goalPlanner = new GoalPlanner();
@@ -764,6 +833,47 @@ export class CoordinatorLocalPlanner {
     this.validateRequest(request);
     const startedAt = this.validNow();
     const deadlineMs = startedAt.getTime() + request.timeoutMs;
+    this.assertWithinDeadline(deadlineMs, request.signal);
+    const initialRecord = this.requireAvailableBot(request.botId);
+    let claim: PlannerExecutionClaim | null = null;
+    try {
+      const execution = await this.beginTaskExecution(
+        request,
+        initialRecord,
+        deadlineMs,
+        (acquired) => {
+          claim = acquired;
+        },
+      );
+      return await this.planAndDispatchOnce(request, execution, deadlineMs);
+    } catch (cause) {
+      await this.failTaskExecution(request, cause, claim);
+      if (
+        cause instanceof LocalPlannerError &&
+        cause.code === "PLANNER_STALE_RESPONSE"
+      ) {
+        this.options.metrics?.increment("bot_stale_responses_total", {
+          bot_id: request.botId,
+        });
+      }
+      if (request.signal?.aborted) {
+        this.options.metrics?.increment("bot_cancelled_requests_total", {
+          bot_id: request.botId,
+        });
+      }
+      throw cause;
+    }
+  }
+
+  async getTaskExecution(taskId: string): Promise<TaskExecutionRecord | null> {
+    return this.taskStateMachine.get(taskId);
+  }
+
+  private async planAndDispatchOnce(
+    request: LocalPlanRequest,
+    execution: PlannerExecutionContext,
+    deadlineMs: number,
+  ): Promise<LocalPlanResult> {
     this.assertWithinDeadline(deadlineMs, request.signal);
     const record = this.requireAvailableBot(request.botId);
     return this.withAssignment(request, record, deadlineMs, async () => {
@@ -831,7 +941,10 @@ export class CoordinatorLocalPlanner {
       traceId: request.traceId,
       ...(request.signal ? { signal: request.signal } : {}),
     });
+    this.recordAIUsage(request, ai);
     this.assertWithinDeadline(deadlineMs, request.signal);
+    this.assertFreshResponse(request, ai, execution);
+    await this.assertTaskExecutionFresh(request, execution);
     const decision = parseDecision(ai.value.content);
     if (decision.botId !== request.botId || decision.taskId !== request.taskId) {
       throw new LocalPlannerError(
@@ -850,6 +963,12 @@ export class CoordinatorLocalPlanner {
       });
       if (retried) return retried;
       this.logUnbindableGoalNames(request, operatorGoal, bindability);
+      await this.abortTaskExecution(
+        request.taskId,
+        `PLANNER_NOOP:${decision.reasonCode}`,
+        execution.claim,
+        { expectedRevision: execution.task.revision },
+      );
       return { action: "noop", reasonCode: decision.reasonCode, ai };
     }
     if (decision.action === "plan_items") {
@@ -890,11 +1009,14 @@ export class CoordinatorLocalPlanner {
     );
     assertGroundedSensitiveInput(modelInput, operatorGoal, record);
 
-    const currentRecord = this.requireUnchangedDispatchContext(
-      request.botId,
-      record,
-      advertisedSkill,
-    );
+    const currentRecord = await this.waitForSafetyClear({
+      request,
+      expectedTask: execution.task,
+      initialRecord: record,
+      initialSkill: advertisedSkill,
+      deadlineMs,
+      claim: execution.claim,
+    });
     const currentSkill = currentRecord.skillCatalog!.skills.find(
       ({ skillId, skillVersion, availability }) =>
         skillId === decision.skillId && skillVersion === decision.skillVersion,
@@ -906,55 +1028,66 @@ export class CoordinatorLocalPlanner {
     validateAdvertisedInput(currentSkill.inputSchema, trustedInput);
 
     this.assertWithinDeadline(deadlineMs, request.signal);
-    const dispatchStartedAt = this.validNow();
-    const invocationDeadlineMs = Math.min(
-      deadlineMs,
-      dispatchStartedAt.getTime() + currentSkill.timeoutMs,
+    const activeExecution = await this.transitionTaskExecution(
+      request.taskId,
+      "EXECUTE",
+      {
+        expectedRevision: execution.task.revision,
+        currentStep: decision.skillId,
+        expectedResult: {
+          outcome: "completed",
+          skillId: decision.skillId,
+          skillVersion: decision.skillVersion,
+        },
+        worldStateVersion: execution.worldStateVersion,
+      },
     );
-    const skillTimeoutMs = Math.max(
-      1,
-      Math.floor(invocationDeadlineMs - dispatchStartedAt.getTime()),
-    );
-    const invocation = this.invocation(
-      request,
-      decision.skillId,
-      decision.skillVersion,
-      trustedInput,
-      dispatchStartedAt,
-      invocationDeadlineMs,
-    );
-    const dispatchSignal = boundedAbortSignal(request.signal, skillTimeoutMs);
-    const result = await this.options.transport.sendSkillInvocation(
+    const {
       invocation,
-      currentRecord.runtimeInstanceId,
-      dispatchSignal,
-    );
-    this.assertWithinDeadline(deadlineMs, request.signal);
-    // A one-shot Skill that completed without producing anything is the shape
-    // the deterministic planner exists to serve: the model picked a single
-    // Skill for a goal that needs a chain. Re-ask through the planner rather
-    // than reporting an empty success — the guard below still requires an
-    // acquisition verb and exactly one reachable item, so a goal that is not
-    // provably plannable keeps the result it already has.
-    if (dispatchChangedNothing(result)) {
-      const replanned = await this.retryDeclinedAcquisitionGoal({
-        request,
-        operatorGoal,
-        plannedItemNames,
-        record,
-        availableSkills,
-        deadlineMs,
-      });
-      if (replanned) {
-        this.logEmptyDispatchReplanned(request, decision.skillId);
-        return replanned;
+      result: skillResult,
+      execution: completedExecution,
+    } = await this.dispatchSkillWithRecovery({
+      request,
+      decision,
+      trustedInput,
+      initialRecord: currentRecord,
+      initialSkill: currentSkill,
+      deadlineMs,
+      execution: activeExecution,
+      claim: execution.claim,
+    });
+    if (skillResult.payload.outcome === "completed") {
+      if (dispatchChangedNothing(skillResult)) {
+        const replanned = await this.retryDeclinedAcquisitionGoal({
+          request,
+          operatorGoal,
+          plannedItemNames,
+          record,
+          availableSkills,
+          deadlineMs,
+          execution: completedExecution,
+          claim: execution.claim,
+          emptyResult: skillResult,
+        });
+        if (replanned) {
+          this.logEmptyDispatchReplanned(request, decision.skillId);
+          return replanned;
+        }
       }
+      await this.finishSuccessfulTaskExecution(
+        request,
+        skillResult,
+        completedExecution,
+      );
+      this.options.metrics?.increment("bot_llm_useful_responses_total", {
+        bot_id: request.botId,
+      });
     }
     return {
       action: "skill_result",
       reasonCode: decision.reasonCode,
       invocation,
-      result,
+      result: skillResult,
       ai,
     };
     });
@@ -1126,6 +1259,9 @@ export class CoordinatorLocalPlanner {
     record,
     availableSkills,
     deadlineMs,
+    execution,
+    claim,
+    emptyResult,
   }: {
     request: LocalPlanRequest;
     operatorGoal: string;
@@ -1133,9 +1269,21 @@ export class CoordinatorLocalPlanner {
     record: BotRegistryRecord;
     availableSkills: readonly BotSkillCatalogEntryV1[];
     deadlineMs: number;
+    execution?: TaskExecutionRecord;
+    claim?: PlannerExecutionClaim;
+    emptyResult?: SkillExecutionResultV1;
   }): Promise<LocalPlanResult | null> {
     const itemName = plannedAcquisitionGoalItem(operatorGoal, plannedItemNames);
     if (itemName === null) return null;
+    if ((execution === undefined) !== (claim === undefined)) {
+      throw new TypeError("A deterministic retry needs both task execution and claim.");
+    }
+    if (execution !== undefined && emptyResult === undefined) {
+      throw new TypeError("A direct empty dispatch must include its result.");
+    }
+    if (execution !== undefined) {
+      await this.assertExecutionAttemptFresh(request, execution, claim!);
+    }
     this.assertWithinDeadline(deadlineMs, request.signal);
 
     const retryAi = await this.options.ai.generate({
@@ -1161,6 +1309,7 @@ export class CoordinatorLocalPlanner {
       traceId: request.traceId,
       ...(request.signal ? { signal: request.signal } : {}),
     });
+    this.recordAIUsage(request, retryAi);
     this.assertWithinDeadline(deadlineMs, request.signal);
 
     // The narrowed grammar constrains generation only. The response still has
@@ -1176,7 +1325,39 @@ export class CoordinatorLocalPlanner {
       return null;
     }
     this.logRetry(request, itemName, "accepted", retryDecision.action);
-    return this.planItemsAndDispatch(
+    let planExecution = execution;
+    if (planExecution !== undefined) {
+      planExecution = await this.assertExecutionAttemptFresh(
+        request,
+        planExecution,
+        claim!,
+      );
+      const replanned = await this.transitionTaskExecution(
+        request.taskId,
+        "REPLAN",
+        {
+          expectedRevision: planExecution.revision,
+          currentStep: "empty-dispatch-replan",
+          actualResult: skillResultSummary(emptyResult!),
+          failureReason: null,
+          worldStateVersion: planExecution.worldStateVersion,
+        },
+      );
+      planExecution = await this.transitionTaskExecution(
+        request.taskId,
+        "PLAN",
+        {
+          expectedRevision: replanned.revision,
+          currentStep: "slow-cognitive-loop",
+          expectedResult: { outcome: "completed" },
+          actualResult: null,
+          movementLease: null,
+          failureReason: null,
+          worldStateVersion: replanned.worldStateVersion,
+        },
+      );
+    }
+    const result = await this.planItemsAndDispatch(
       request,
       retryDecision,
       record,
@@ -1184,6 +1365,36 @@ export class CoordinatorLocalPlanner {
       retryAi,
       deadlineMs,
     );
+    if (
+      planExecution !== undefined &&
+      result.action === "skill_result" &&
+      result.result.payload.outcome === "completed"
+    ) {
+      const executing = await this.transitionTaskExecution(
+        request.taskId,
+        "EXECUTE",
+        {
+          expectedRevision: planExecution.revision,
+          currentStep: result.invocation.payload.skillId,
+          expectedResult: {
+            outcome: "completed",
+            skillId: result.invocation.payload.skillId,
+            skillVersion: result.invocation.payload.skillVersion,
+          },
+          actualResult: null,
+          worldStateVersion: planExecution.worldStateVersion,
+        },
+      );
+      await this.finishSuccessfulTaskExecution(
+        request,
+        result.result,
+        executing,
+      );
+      this.options.metrics?.increment("bot_llm_useful_responses_total", {
+        bot_id: request.botId,
+      });
+    }
+    return result;
   }
 
   private async planItemsAndDispatch(
@@ -1729,6 +1940,966 @@ export class CoordinatorLocalPlanner {
     return result.payload.outcome === "completed" ? result.payload.output : null;
   }
 
+  private async dispatchSkillWithRecovery(input: Readonly<{
+    request: LocalPlanRequest;
+    decision: Extract<LocalPlannerDecision, { action: "invoke_skill" }>;
+    trustedInput: SkillJsonValue;
+    initialRecord: BotRegistryRecord;
+    initialSkill: BotSkillCatalogEntryV1;
+    deadlineMs: number;
+    execution: TaskExecutionRecord;
+    claim: PlannerExecutionClaim;
+  }>): Promise<Readonly<{
+    invocation: SkillInvocationV1;
+    result: SkillExecutionResultV1;
+    execution: TaskExecutionRecord;
+  }>> {
+    let execution = input.execution;
+    for (;;) {
+      await this.assertExecutionAttemptFresh(input.request, execution, input.claim);
+      this.assertWithinDeadline(input.deadlineMs, input.request.signal);
+      const currentRecord = await this.waitForSafetyClear({
+        request: input.request,
+        expectedTask: execution,
+        initialRecord: input.initialRecord,
+        initialSkill: input.initialSkill,
+        deadlineMs: input.deadlineMs,
+        claim: input.claim,
+      });
+      const dispatchStartedAt = this.validNow();
+      const invocationDeadlineMs = Math.min(
+        input.deadlineMs,
+        dispatchStartedAt.getTime() + input.initialSkill.timeoutMs,
+      );
+      const skillTimeoutMs = Math.max(
+        1,
+        Math.floor(invocationDeadlineMs - dispatchStartedAt.getTime()),
+      );
+      const invocation = this.invocation(
+        input.request,
+        input.decision.skillId,
+        input.decision.skillVersion,
+        input.trustedInput,
+        dispatchStartedAt,
+        invocationDeadlineMs,
+      );
+      const dispatchSignal = boundedAbortSignal(
+        input.request.signal,
+        skillTimeoutMs,
+      );
+      const result = this.validatedSkillResult(
+        await this.options.transport.sendSkillInvocation(
+          invocation,
+          currentRecord.runtimeInstanceId,
+          dispatchSignal,
+        ),
+        invocation,
+        currentRecord.runtimeInstanceId,
+      );
+      this.assertWithinDeadline(input.deadlineMs, input.request.signal);
+      await this.assertExecutionAttemptFresh(input.request, execution, input.claim);
+      if (result.payload.outcome === "completed") {
+        return { invocation, result, execution };
+      }
+      const retryExecution = await this.prepareL0RecoveryRetry({
+        request: input.request,
+        result,
+        execution,
+        initialRecord: input.initialRecord,
+        initialSkill: input.initialSkill,
+        deadlineMs: input.deadlineMs,
+        claim: input.claim,
+      });
+      if (retryExecution === null) return { invocation, result, execution };
+      execution = retryExecution;
+    }
+  }
+
+  private async prepareL0RecoveryRetry(input: Readonly<{
+    request: LocalPlanRequest;
+    result: SkillExecutionResultV1;
+    execution: TaskExecutionRecord;
+    initialRecord: BotRegistryRecord;
+    initialSkill: BotSkillCatalogEntryV1;
+    deadlineMs: number;
+    claim: PlannerExecutionClaim;
+  }>): Promise<TaskExecutionRecord | null> {
+    if (input.result.payload.outcome === "completed") {
+      throw new TypeError("Completed Skill results cannot enter recovery.");
+    }
+    const actualResult = skillResultSummary(input.result);
+    const errorCode = input.result.payload.errorCode;
+    const recoverableL0 = isRecoverableL0SkillResult(input.result);
+    if (!recoverableL0) {
+      await this.abortTaskExecution(
+        input.request.taskId,
+        errorCode,
+        input.claim,
+        {
+          expectedRevision: input.execution.revision,
+          currentStep: "terminal-skill-failure",
+          actualResult,
+        },
+      );
+      return null;
+    }
+    if (!isSafeL0Replay(input.result, input.initialSkill)) {
+      await this.abortTaskExecution(
+        input.request.taskId,
+        `NON_IDEMPOTENT_L0_RETRY_UNSAFE:${errorCode}`,
+        input.claim,
+        {
+          expectedRevision: input.execution.revision,
+          currentStep: "non-idempotent-recovery-requires-replan",
+          actualResult,
+        },
+      );
+      return null;
+    }
+
+    const recoveryBudgetExhausted =
+      input.execution.recoveryCount >= input.execution.maxRecoveryCount;
+    const recovered = await this.transitionTaskExecution(
+      input.request.taskId,
+      "RECOVER",
+      {
+        expectedRevision: input.execution.revision,
+        currentStep: recoveryBudgetExhausted
+          ? "recovery-budget-exhausted"
+          : "wait-for-safety-clear",
+        actualResult,
+        failureReason: errorCode,
+      },
+    );
+    if (recovered.state === "ABORT") {
+      this.options.metrics?.increment("bot_task_abort_total", {
+        bot_id: input.request.botId,
+        reason: recovered.failureReason ?? "RECOVERY_BUDGET_EXHAUSTED",
+      });
+      return null;
+    }
+
+    const readyRecord = await this.waitForSafetyClear({
+      request: input.request,
+      expectedTask: recovered,
+      initialRecord: input.initialRecord,
+      initialSkill: input.initialSkill,
+      deadlineMs: input.deadlineMs,
+      claim: input.claim,
+    });
+    const replanned = await this.transitionTaskExecution(
+      input.request.taskId,
+      "REPLAN",
+      {
+        expectedRevision: recovered.revision,
+        currentStep: "revalidate-after-l0-interruption",
+        worldStateVersion: worldStateVersion(readyRecord),
+      },
+    );
+    this.assertWithinDeadline(input.deadlineMs, input.request.signal);
+    return this.transitionTaskExecution(input.request.taskId, "EXECUTE", {
+      expectedRevision: replanned.revision,
+      currentStep: input.initialSkill.skillId,
+      expectedResult: {
+        outcome: "completed",
+        skillId: input.initialSkill.skillId,
+        skillVersion: input.initialSkill.skillVersion,
+      },
+      actualResult: null,
+      worldStateVersion: worldStateVersion(readyRecord),
+    });
+  }
+
+  private async beginTaskExecution(
+    request: LocalPlanRequest,
+    record: BotRegistryRecord,
+    deadlineMs: number,
+    onClaim: (claim: PlannerExecutionClaim) => void,
+  ): Promise<PlannerExecutionContext> {
+    const reportedWorldVersion = worldStateVersion(record);
+    const requestedWorldVersion = request.worldStateVersion;
+    const capturedWorldVersion = requestedWorldVersion ?? reportedWorldVersion;
+    const claim: PlannerExecutionClaim = {
+      owner: this.coordinatorInstanceId,
+      leaseExpiresAt: new Date(deadlineMs).toISOString(),
+    };
+    let task = await this.taskStateMachine.get(request.taskId);
+    this.assertTaskStartFresh(request, task);
+    if (task === null) {
+      try {
+        task = await this.taskStateMachine.create({
+          taskId: request.taskId,
+          botId: request.botId,
+          goal: request.operatorGoal,
+          worldStateVersion: capturedWorldVersion,
+          expectedResult: { outcome: "completed" },
+          executionOwner: claim.owner,
+          executionLeaseExpiresAt: claim.leaseExpiresAt,
+        });
+      } catch (cause) {
+        if (cause instanceof TaskExecutionError) {
+          const durable = cause.code === "TASK_EXECUTION_PERSISTENCE_FAILED"
+            ? await this.readTaskAfterPersistenceRace(request.taskId)
+            : null;
+          if (cause.code === "TASK_EXECUTION_EXISTS" || durable !== null) {
+            throw new LocalPlannerError(
+              "PLANNER_RESTART_RECOVERY_STALE",
+              "Another Coordinator created the task execution first.",
+            );
+          }
+        }
+        throw cause;
+      }
+      onClaim(claim);
+      this.recordTaskTransition(request, null, task);
+    } else {
+      if (task.botId !== request.botId || task.goal !== request.operatorGoal) {
+        throw new LocalPlannerError(
+          "PLANNER_STALE_RESPONSE",
+          "Goal task identity does not match the persisted execution.",
+        );
+      }
+      if (
+        task.state === "SUCCESS" ||
+        task.state === "ABORT" ||
+        task.cancellationToken.cancelled
+      ) {
+        throw new LocalPlannerError(
+          "PLANNER_STALE_RESPONSE",
+          "Goal task execution is terminal or cancelled.",
+        );
+      }
+      const unclaimed = task;
+      try {
+        task = await this.taskStateMachine.claimExecution(task.taskId, {
+          ...claim,
+          expectedRevision: task.revision,
+        });
+      } catch (cause) {
+        if (cause instanceof TaskExecutionError) {
+          if (cause.code === "TASK_EXECUTION_OWNED") {
+            throw new LocalPlannerError(
+              "PLANNER_EXECUTION_OWNED",
+              "Task execution already has an unexpired Coordinator lease.",
+            );
+          }
+          if (cause.code === "TASK_EXECUTION_CANCELLED") {
+            throw new LocalPlannerError(
+              "PLANNER_CANCELLED",
+              "Task execution was cancelled before its lease could be claimed.",
+            );
+          }
+          if (
+            cause.code === "TASK_EXECUTION_REVISION_CONFLICT" ||
+            cause.code === "TASK_EXECUTION_TERMINAL"
+          ) {
+            throw new LocalPlannerError(
+              "PLANNER_RESTART_RECOVERY_STALE",
+              "Task execution changed before its Coordinator lease was claimed.",
+            );
+          }
+          if (cause.code === "TASK_EXECUTION_PERSISTENCE_FAILED") {
+            const durable = await this.readTaskAfterPersistenceRace(request.taskId);
+            if (
+              durable !== null &&
+              (durable.revision !== unclaimed.revision ||
+                durable.executionOwner !== unclaimed.executionOwner ||
+                durable.executionLeaseExpiresAt !==
+                  unclaimed.executionLeaseExpiresAt)
+            ) {
+              throw new LocalPlannerError(
+                "PLANNER_RESTART_RECOVERY_STALE",
+                "Another Coordinator won the durable execution claim.",
+              );
+            }
+          }
+        }
+        throw cause;
+      }
+      onClaim(claim);
+      if (task.state !== "PRECHECK") {
+        task = await this.recoverTaskAfterRestart(
+          request,
+          record,
+          task,
+          capturedWorldVersion,
+          deadlineMs,
+        );
+      }
+    }
+    if (task.state === "PRECHECK") {
+      task = await this.transitionRestartTask(request, task, "PLAN", deadlineMs, {
+        currentStep: "slow-cognitive-loop",
+        worldStateVersion: capturedWorldVersion,
+      });
+    }
+    return { task, worldStateVersion: task.worldStateVersion, claim };
+  }
+
+  private async readTaskAfterPersistenceRace(
+    taskId: string,
+  ): Promise<TaskExecutionRecord | null> {
+    try {
+      return await this.taskStateMachine.get(taskId);
+    } catch {
+      return null;
+    }
+  }
+
+  private async recoverTaskAfterRestart(
+    request: LocalPlanRequest,
+    record: BotRegistryRecord,
+    task: TaskExecutionRecord,
+    worldStateVersion: number,
+    deadlineMs: number,
+  ): Promise<TaskExecutionRecord> {
+    if (task.state === "PLAN") {
+      const replanned = await this.transitionRestartTask(request, task, "REPLAN", deadlineMs, {
+        currentStep: "restart-replan-interrupted-plan",
+        worldStateVersion,
+      });
+      return this.transitionRestartTask(request, replanned, "PLAN", deadlineMs, {
+        currentStep: "slow-cognitive-loop",
+        expectedResult: { outcome: "completed" },
+        actualResult: null,
+        movementLease: null,
+        worldStateVersion,
+      });
+    }
+    if (task.state === "RECOVER") {
+      const replanned = await this.transitionRestartTask(request, task, "REPLAN", deadlineMs, {
+        currentStep: "restart-replan-interrupted-recovery",
+        worldStateVersion,
+      });
+      return this.transitionRestartTask(request, replanned, "PLAN", deadlineMs, {
+        currentStep: "slow-cognitive-loop",
+        expectedResult: { outcome: "completed" },
+        actualResult: null,
+        movementLease: null,
+        worldStateVersion,
+      });
+    }
+    if (task.state === "REPLAN") {
+      return this.transitionRestartTask(request, task, "PLAN", deadlineMs, {
+        currentStep: "slow-cognitive-loop",
+        expectedResult: { outcome: "completed" },
+        actualResult: null,
+        movementLease: null,
+        worldStateVersion,
+      });
+    }
+    if (task.state === "EXECUTE") {
+      const interruptedSkill = restartExecutionSkill(task, record);
+      if (interruptedSkill === null || !interruptedSkill.idempotent) {
+        const reason = interruptedSkill === null
+          ? "COORDINATOR_RESTART_EXECUTION_SKILL_UNKNOWN"
+          : "COORDINATOR_RESTART_EXECUTION_NON_IDEMPOTENT";
+        await this.abortRestartTask(request, task, reason, deadlineMs);
+        throw new LocalPlannerError(
+          "PLANNER_RESTART_RECOVERY_UNSAFE",
+          "Interrupted execution cannot be conservatively replanned after restart.",
+        );
+      }
+      const recovered = await this.transitionRestartTask(request, task, "RECOVER", deadlineMs, {
+        currentStep: "restart-recover-interrupted-execution",
+        failureReason: "COORDINATOR_RESTART_DURING_EXECUTE",
+        movementLease: null,
+        worldStateVersion,
+      });
+      if (recovered.state === "ABORT") {
+        this.recordTaskAbortMetric(
+          recovered,
+          recovered.failureReason ?? "RECOVERY_BUDGET_EXHAUSTED",
+        );
+        throw new LocalPlannerError(
+          "PLANNER_RESTART_RECOVERY_EXHAUSTED",
+          "Interrupted execution exhausted its persistent recovery budget.",
+        );
+      }
+      const replanned = await this.transitionRestartTask(request, recovered, "REPLAN", deadlineMs, {
+        currentStep: "restart-replan-interrupted-execution",
+        worldStateVersion,
+      });
+      return this.transitionRestartTask(request, replanned, "PLAN", deadlineMs, {
+        currentStep: "slow-cognitive-loop",
+        expectedResult: { outcome: "completed" },
+        actualResult: null,
+        movementLease: null,
+        worldStateVersion,
+      });
+    }
+    await this.abortRestartTask(
+      request,
+      task,
+      `COORDINATOR_RESTART_STATE_UNRECOVERABLE:${task.state}`,
+      deadlineMs,
+    );
+    throw new LocalPlannerError(
+      "PLANNER_RESTART_RECOVERY_UNSAFE",
+      "Persisted execution state cannot be conservatively resumed after restart.",
+    );
+  }
+
+  private async transitionRestartTask(
+    request: LocalPlanRequest,
+    task: TaskExecutionRecord,
+    to: Parameters<PersistentTaskStateMachine["transition"]>[1],
+    deadlineMs: number,
+    patch: Parameters<PersistentTaskStateMachine["transition"]>[2] = {},
+  ): Promise<TaskExecutionRecord> {
+    this.assertRestartRecoveryActive(request, deadlineMs);
+    try {
+      const transitioned = await this.transitionTaskExecution(task.taskId, to, {
+        ...patch,
+        expectedRevision: task.revision,
+      });
+      this.assertRestartRecoveryActive(request, deadlineMs);
+      return transitioned;
+    } catch (cause) {
+      if (
+        cause instanceof LocalPlannerError &&
+        cause.code === "PLANNER_STALE_RESPONSE"
+      ) {
+        throw new LocalPlannerError(
+          "PLANNER_RESTART_RECOVERY_STALE",
+          "Persisted task changed while restart recovery was committing.",
+        );
+      }
+      throw cause;
+    }
+  }
+
+  private async abortRestartTask(
+    request: LocalPlanRequest,
+    task: TaskExecutionRecord,
+    reason: string,
+    deadlineMs: number,
+  ): Promise<void> {
+    const aborted = await this.transitionRestartTask(request, task, "ABORT", deadlineMs, {
+      currentStep: "restart-recovery-aborted",
+      failureReason: reason,
+      movementLease: null,
+    });
+    this.recordTaskAbortMetric(aborted, reason);
+  }
+
+  private assertRestartRecoveryActive(
+    request: LocalPlanRequest,
+    deadlineMs: number,
+  ): void {
+    this.assertWithinDeadline(deadlineMs, request.signal);
+    const external = request.currentVersions?.();
+    if (external?.taskCancelled === true) {
+      throw new LocalPlannerError(
+        "PLANNER_CANCELLED",
+        "Task execution was cancelled during restart recovery.",
+      );
+    }
+    if (external?.taskCompleted === true) {
+      throw new LocalPlannerError(
+        "PLANNER_RESTART_RECOVERY_STALE",
+        "Task execution completed while restart recovery was active.",
+      );
+    }
+  }
+
+  private assertTaskStartFresh(
+    request: LocalPlanRequest,
+    task: TaskExecutionRecord | null,
+  ): void {
+    if (request.signal?.aborted) {
+      throw new LocalPlannerError(
+        "PLANNER_CANCELLED",
+        "Task execution was cancelled before planning started.",
+      );
+    }
+    const external = request.currentVersions?.();
+    if (external?.taskCancelled === true) {
+      throw new LocalPlannerError(
+        "PLANNER_CANCELLED",
+        "Task execution was cancelled before planning started.",
+      );
+    }
+    if (external?.taskCompleted === true) {
+      throw new LocalPlannerError(
+        "PLANNER_STALE_RESPONSE",
+        "Task execution completed before planning started.",
+      );
+    }
+    const expectedPlanVersion = task?.planVersion ?? 0;
+    if (
+      (request.planVersion !== undefined &&
+        request.planVersion !== expectedPlanVersion) ||
+      (task !== null &&
+        external !== undefined &&
+        external.planVersion !== task.planVersion) ||
+      (task !== null &&
+        request.worldStateVersion !== undefined &&
+        request.worldStateVersion < task.worldStateVersion) ||
+      (request.worldStateVersion !== undefined &&
+        external !== undefined &&
+        external.worldStateVersion !== request.worldStateVersion)
+    ) {
+      throw new LocalPlannerError(
+        "PLANNER_STALE_RESPONSE",
+        "Task or world version changed before planning started.",
+      );
+    }
+  }
+
+  private async assertTaskExecutionFresh(
+    request: LocalPlanRequest,
+    captured: PlannerExecutionContext,
+  ): Promise<void> {
+    const current = await this.taskStateMachine.get(request.taskId);
+    const currentBot = this.options.registry.get(request.botId);
+    if (
+      current === null ||
+      current.state !== "PLAN" ||
+      current.cancellationToken.cancelled ||
+      !this.hasActiveExecutionClaim(current, captured.claim) ||
+      current.planVersion !== captured.task.planVersion ||
+      current.worldStateVersion !== captured.worldStateVersion ||
+      (currentBot !== null &&
+        worldStateVersion(currentBot) !== 0 &&
+        worldStateVersion(currentBot) !== captured.worldStateVersion)
+    ) {
+      throw new LocalPlannerError(
+        "PLANNER_STALE_RESPONSE",
+        "Local planner response no longer matches the persistent task or world state.",
+      );
+    }
+  }
+
+  private async finishSuccessfulTaskExecution(
+    request: LocalPlanRequest,
+    result: SkillExecutionResultV1,
+    execution: TaskExecutionRecord,
+  ): Promise<void> {
+    const actualResult = skillResultSummary(result);
+    const verified = await this.transitionTaskExecution(
+      request.taskId,
+      "VERIFY",
+      {
+        expectedRevision: execution.revision,
+        currentStep: "postcondition-verify",
+        actualResult,
+      },
+    );
+    await this.transitionTaskExecution(request.taskId, "SUCCESS", {
+      expectedRevision: verified.revision,
+      currentStep: null,
+      actualResult,
+    });
+    this.options.metrics?.increment("bot_task_success_total", {
+      bot_id: request.botId,
+    });
+  }
+
+  private validatedSkillResult(
+    input: unknown,
+    invocation: SkillInvocationV1,
+    expectedRuntimeInstanceId: string,
+  ): SkillExecutionResultV1 {
+    let result: SkillExecutionResultV1;
+    try {
+      result = parseSkillExecutionResult(input);
+    } catch {
+      throw new LocalPlannerError(
+        "PLANNER_SKILL_RESULT_INVALID",
+        "Skill transport returned an invalid result envelope.",
+      );
+    }
+    if (
+      result.source.instanceId !== expectedRuntimeInstanceId ||
+      result.botId !== invocation.botId ||
+      result.taskId !== invocation.taskId ||
+      result.traceId !== invocation.traceId ||
+      result.payload.invocationId !== invocation.payload.invocationId ||
+      result.payload.skillId !== invocation.payload.skillId ||
+      result.payload.skillVersion !== invocation.payload.skillVersion
+    ) {
+      throw new LocalPlannerError(
+        "PLANNER_SKILL_RESULT_INVALID",
+        "Skill result identity does not match the active invocation.",
+      );
+    }
+    return result;
+  }
+
+  private async assertExecutionAttemptFresh(
+    request: LocalPlanRequest,
+    expected: TaskExecutionRecord,
+    claim: PlannerExecutionClaim,
+  ): Promise<TaskExecutionRecord> {
+    const current = await this.taskStateMachine.get(request.taskId);
+    const external = request.currentVersions?.();
+    if (
+      current?.cancellationToken.cancelled === true ||
+      external?.taskCancelled === true
+    ) {
+      throw new LocalPlannerError(
+        "PLANNER_CANCELLED",
+        "Task execution was cancelled while a Skill attempt was active.",
+      );
+    }
+    if (
+      current === null ||
+      external?.taskCompleted === true ||
+      !this.hasActiveExecutionClaim(current, claim) ||
+      current.state !== expected.state ||
+      current.revision !== expected.revision ||
+      current.planVersion !== expected.planVersion ||
+      current.worldStateVersion !== expected.worldStateVersion ||
+      (external !== undefined &&
+        (external.planVersion !== expected.planVersion ||
+          external.worldStateVersion !== expected.worldStateVersion))
+    ) {
+      throw new LocalPlannerError(
+        "PLANNER_STALE_RESPONSE",
+        "Skill result no longer matches the active task execution revision.",
+      );
+    }
+    return current;
+  }
+
+  private async waitForSafetyClear(input: Readonly<{
+    request: LocalPlanRequest;
+    expectedTask: TaskExecutionRecord;
+    initialRecord: BotRegistryRecord;
+    initialSkill: BotSkillCatalogEntryV1;
+    deadlineMs: number;
+    claim: PlannerExecutionClaim;
+  }>): Promise<BotRegistryRecord> {
+    let remainingWaitMs = Math.min(
+      this.maxSafetyRecoveryWaitMs,
+      Math.max(0, input.deadlineMs - this.validNow().getTime()),
+    );
+    for (;;) {
+      this.assertWithinDeadline(input.deadlineMs, input.request.signal);
+      await this.assertExecutionAttemptFresh(
+        input.request,
+        input.expectedTask,
+        input.claim,
+      );
+      const record = this.options.registry.get(input.request.botId);
+      if (
+        !record ||
+        record.connectionState !== "online" ||
+        !record.currentStatus ||
+        !record.currentStatus.safety ||
+        !dispatchContextMatches(
+          record,
+          input.initialRecord,
+          input.initialSkill,
+        )
+      ) {
+        throw new LocalPlannerError(
+          "PLANNER_BOT_UNAVAILABLE",
+          "Bot Runtime changed or disconnected during L0 recovery.",
+        );
+      }
+      if (!record.currentStatus.safety.normalTasksPaused) return record;
+      if (remainingWaitMs <= 0) {
+        throw new LocalPlannerError(
+          "PLANNER_SAFETY_PAUSED",
+          "L0 safety did not clear within the bounded recovery wait.",
+        );
+      }
+      const delayMs = Math.min(
+        this.safetyRecoveryPollIntervalMs,
+        remainingWaitMs,
+      );
+      await abortableDelay(delayMs, input.request.signal);
+      remainingWaitMs -= delayMs;
+      this.assertWithinDeadline(input.deadlineMs, input.request.signal);
+    }
+  }
+
+  private async failTaskExecution(
+    request: LocalPlanRequest,
+    cause: unknown,
+    claim: PlannerExecutionClaim | null,
+  ): Promise<void> {
+    if (claim === null) return;
+    const current = await this.readTaskAfterPersistenceRace(request.taskId);
+    if (
+      current === null ||
+      current.state === "SUCCESS" ||
+      current.state === "ABORT" ||
+      !this.hasActiveExecutionClaim(current, claim)
+    ) {
+      return;
+    }
+    if (
+      cause instanceof LocalPlannerError &&
+      cause.code === "PLANNER_RESTART_RECOVERY_STALE"
+    ) {
+      return;
+    }
+    const cancellationRequested =
+      request.signal?.aborted === true ||
+      (cause instanceof LocalPlannerError && cause.code === "PLANNER_CANCELLED");
+    const reason = cancellationRequested
+      ? "PLANNER_CANCELLED"
+      : cause instanceof LocalPlannerError
+        ? cause.code
+        : "PLANNER_EXECUTION_FAILED";
+    if (cancellationRequested) {
+      let cancelled: TaskExecutionRecord;
+      try {
+        cancelled = await this.taskStateMachine.cancel(
+          request.taskId,
+          reason,
+          current.revision,
+        );
+      } catch (cancelCause) {
+        if (
+          cancelCause instanceof TaskExecutionError &&
+          (cancelCause.code === "TASK_EXECUTION_REVISION_CONFLICT" ||
+            cancelCause.code === "TASK_EXECUTION_TERMINAL" ||
+            cancelCause.code === "TASK_EXECUTION_PERSISTENCE_FAILED")
+        ) {
+          return;
+        }
+        throw cancelCause;
+      }
+      if (
+        cancelled.state === "ABORT" &&
+        cancelled.cancellationToken.cancelled
+      ) {
+        this.recordTaskTransition(request, current, cancelled);
+        this.options.metrics?.increment("bot_task_abort_total", {
+          bot_id: request.botId,
+          reason,
+        });
+      }
+      return;
+    }
+    if (
+      cause instanceof LocalPlannerError &&
+      cause.code === "PLANNER_STALE_RESPONSE" &&
+      current.state !== "PLAN"
+    ) {
+      return;
+    }
+    await this.abortTaskExecution(request.taskId, reason, claim, {
+      expectedRevision: current.revision,
+    });
+  }
+
+  private async abortTaskExecution(
+    taskId: string,
+    reason: string,
+    claim: PlannerExecutionClaim,
+    patch: Parameters<PersistentTaskStateMachine["transition"]>[2] = {},
+  ): Promise<void> {
+    const current = await this.taskStateMachine.get(taskId);
+    if (
+      current === null ||
+      current.state === "SUCCESS" ||
+      current.state === "ABORT" ||
+      !this.hasActiveExecutionClaim(current, claim) ||
+      (patch.expectedRevision !== undefined &&
+        patch.expectedRevision !== current.revision)
+    ) {
+      return;
+    }
+    let aborted: TaskExecutionRecord;
+    try {
+      aborted = await this.transitionTaskExecution(taskId, "ABORT", {
+        ...patch,
+        expectedRevision: patch.expectedRevision ?? current.revision,
+        failureReason: reason,
+      });
+    } catch (abortCause) {
+      if (
+        abortCause instanceof LocalPlannerError &&
+        (abortCause.code === "PLANNER_STALE_RESPONSE" ||
+          abortCause.code === "PLANNER_CANCELLED")
+      ) {
+        return;
+      }
+      throw abortCause;
+    }
+    if (aborted.state === "ABORT") {
+      this.options.metrics?.increment("bot_task_abort_total", {
+        bot_id: current.botId,
+        reason,
+      });
+    }
+  }
+
+  private hasActiveExecutionClaim(
+    task: TaskExecutionRecord,
+    claim: PlannerExecutionClaim,
+  ): boolean {
+    return (
+      task.executionOwner === claim.owner &&
+      task.executionLeaseExpiresAt === claim.leaseExpiresAt &&
+      Date.parse(claim.leaseExpiresAt) > this.validNow().getTime()
+    );
+  }
+
+  private recordTaskAbortMetric(task: TaskExecutionRecord, reason: string): void {
+    this.options.metrics?.increment("bot_task_abort_total", {
+      bot_id: task.botId,
+      reason,
+    });
+  }
+
+  private async transitionTaskExecution(
+    taskId: string,
+    to: Parameters<PersistentTaskStateMachine["transition"]>[1],
+    patch: Parameters<PersistentTaskStateMachine["transition"]>[2] = {},
+  ): Promise<TaskExecutionRecord> {
+    const before = await this.taskStateMachine.get(taskId);
+    let after: TaskExecutionRecord;
+    try {
+      after = await this.taskStateMachine.transition(taskId, to, patch);
+    } catch (cause) {
+      if (cause instanceof TaskExecutionError) {
+        if (cause.code === "TASK_EXECUTION_CANCELLED") {
+          throw new LocalPlannerError(
+            "PLANNER_CANCELLED",
+            "Task execution was cancelled during a Coordinator transition.",
+          );
+        }
+        if (
+          cause.code === "TASK_EXECUTION_REVISION_CONFLICT" ||
+          cause.code === "TASK_EXECUTION_TERMINAL"
+        ) {
+          throw new LocalPlannerError(
+            "PLANNER_STALE_RESPONSE",
+            "Task execution changed before the Coordinator transition committed.",
+          );
+        }
+        if (
+          cause.code === "TASK_EXECUTION_PERSISTENCE_FAILED" &&
+          patch.expectedRevision !== undefined
+        ) {
+          let durable: TaskExecutionRecord | null = null;
+          try {
+            durable = await this.taskStateMachine.get(taskId);
+          } catch {
+            // Preserve the persistence failure when the durable winner is unknown.
+          }
+          if (durable?.cancellationToken.cancelled) {
+            throw new LocalPlannerError(
+              "PLANNER_CANCELLED",
+              "Task execution was cancelled while a transition was persisted.",
+            );
+          }
+          if (
+            durable !== null &&
+            durable.revision !== patch.expectedRevision
+          ) {
+            throw new LocalPlannerError(
+              "PLANNER_STALE_RESPONSE",
+              "A newer durable task revision won the transition race.",
+            );
+          }
+        }
+      }
+      throw cause;
+    }
+    this.recordTaskTransition(
+      { taskId, botId: after.botId, traceId: taskId },
+      before,
+      after,
+    );
+    return after;
+  }
+
+  private recordTaskTransition(
+    request: Pick<LocalPlanRequest, "taskId" | "botId" | "traceId">,
+    before: TaskExecutionRecord | null,
+    after: TaskExecutionRecord,
+  ): void {
+    if (before?.state === after.state) return;
+    this.options.metrics?.increment("bot_task_state_transitions_total", {
+      bot_id: request.botId,
+      from: before?.state ?? "CREATED",
+      to: after.state,
+    });
+    if (after.state === "SUCCESS" || after.state === "ABORT") {
+      this.recordPositiveMetric(
+        "bot_task_completion_time_ms_total",
+        {
+          bot_id: request.botId,
+          outcome: after.state === "SUCCESS" ? "success" : "abort",
+        },
+        Date.parse(after.updatedAt) - Date.parse(after.startTime),
+      );
+    }
+    const fields = {
+      traceId: request.traceId,
+      taskId: request.taskId,
+      botId: request.botId,
+      skillId: null,
+      modelName: null,
+      fromState: before?.state ?? null,
+      toState: after.state,
+      currentStep: after.currentStep,
+      planVersion: after.planVersion,
+      worldStateVersion: after.worldStateVersion,
+      retryCount: after.retryCount,
+      recoveryCount: after.recoveryCount,
+      expected: after.expectedResult,
+      actual: after.actualResult,
+      failureReason: after.failureReason,
+    };
+    try {
+      const write = after.state === "ABORT"
+        ? this.options.logger?.warn.bind(this.options.logger)
+        : this.options.logger?.info.bind(this.options.logger);
+      write?.("coordinator_task_transition", fields);
+    } catch {
+      // Observability cannot alter deterministic task execution.
+    }
+  }
+
+  private recordAIUsage(
+    request: Pick<LocalPlanRequest, "botId">,
+    ai: AIScheduledResult<GenerateResult>,
+  ): void {
+    const labels = { bot_id: request.botId };
+    this.recordPositiveMetric(
+      "bot_llm_prompt_tokens_total",
+      labels,
+      ai.value.usage.promptTokens,
+    );
+    this.recordPositiveMetric(
+      "bot_llm_completion_tokens_total",
+      labels,
+      ai.value.usage.completionTokens,
+    );
+    this.recordPositiveMetric(
+      "bot_llm_queue_time_ms_total",
+      labels,
+      ai.queueTimeMs,
+    );
+    this.recordPositiveMetric(
+      "bot_llm_execution_time_ms_total",
+      labels,
+      ai.executionTimeMs,
+    );
+    this.recordPositiveMetric(
+      "bot_llm_total_latency_ms_total",
+      labels,
+      ai.totalTimeMs,
+    );
+  }
+
+  private recordPositiveMetric(
+    name: LifecycleMetricName,
+    labels: Readonly<Record<string, string>>,
+    rawAmount: number,
+  ): void {
+    const amount = roundedPositiveSafeInteger(rawAmount);
+    if (amount !== null) this.options.metrics?.increment(name, labels, amount);
+  }
+
   private validateRequest(request: LocalPlanRequest): void {
     const valid =
       identifierSchema.safeParse(request.requestId).success &&
@@ -1745,11 +2916,47 @@ export class CoordinatorLocalPlanner {
         identifierSchema.safeParse(request.assignmentLeaseOwner).success) &&
       Number.isSafeInteger(request.timeoutMs) &&
       request.timeoutMs >= 10 &&
-      request.timeoutMs <= 10 * 60_000;
+      request.timeoutMs <= 10 * 60_000 &&
+      (request.planVersion === undefined || Number.isSafeInteger(request.planVersion)) &&
+      (request.worldStateVersion === undefined || Number.isSafeInteger(request.worldStateVersion));
     if (!valid) {
       throw new LocalPlannerError(
         "PLANNER_REQUEST_INVALID",
         "Local planner request failed bounded validation.",
+      );
+    }
+  }
+
+  private assertFreshResponse(
+    request: LocalPlanRequest,
+    ai: AIScheduledResult<GenerateResult>,
+    expected: PlannerExecutionContext,
+  ): void {
+    const createdAtMs = Date.parse(ai.enqueuedAt);
+    const completedAtMs = Date.parse(ai.completedAt);
+    if (
+      ai.requestId !== request.requestId ||
+      ai.botId !== request.botId ||
+      !Number.isFinite(createdAtMs) ||
+      !Number.isFinite(completedAtMs) ||
+      completedAtMs < createdAtMs
+    ) {
+      throw new LocalPlannerError(
+        "PLANNER_STALE_RESPONSE",
+        "Local planner response identity or lifetime is stale.",
+      );
+    }
+    if (!request.currentVersions) return;
+    const current = request.currentVersions();
+    if (
+      current.taskCancelled === true ||
+      current.taskCompleted === true ||
+      current.planVersion !== expected.task.planVersion ||
+      current.worldStateVersion !== expected.worldStateVersion
+    ) {
+      throw new LocalPlannerError(
+        "PLANNER_STALE_RESPONSE",
+        "Local planner response no longer matches the active task or world version.",
       );
     }
   }
@@ -1860,10 +3067,16 @@ export class CoordinatorLocalPlanner {
     deadlineMs: number,
     signal?: AbortSignal,
   ): void {
-    if (signal?.aborted || this.validNow().getTime() >= deadlineMs) {
+    if (signal?.aborted) {
+      throw new LocalPlannerError(
+        "PLANNER_CANCELLED",
+        "Local planner request was cancelled.",
+      );
+    }
+    if (this.validNow().getTime() >= deadlineMs) {
       throw new LocalPlannerError(
         "PLANNER_TIMEOUT",
-        "Local planner exceeded or cancelled its total request deadline.",
+        "Local planner exceeded its total request deadline.",
       );
     }
   }
@@ -2084,6 +3297,135 @@ function parseDecision(content: string): LocalPlannerDecision {
       { cause: error },
     );
   }
+}
+
+function worldStateVersion(record: BotRegistryRecord): number {
+  const candidate = record.worldState?.version;
+  return typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 0
+    ? candidate
+    : 0;
+}
+
+function skillResultSummary(result: SkillExecutionResultV1): SkillJsonValue {
+  return skillJsonValueSchema.parse({
+    outcome: result.payload.outcome,
+    skillId: result.payload.skillId,
+    skillVersion: result.payload.skillVersion,
+    attempts: result.payload.attempts,
+    ...(result.payload.outcome === "completed"
+      ? { output: result.payload.output }
+      : { errorCode: result.payload.errorCode }),
+  });
+}
+
+function isRecoverableL0SkillResult(result: SkillExecutionResultV1): boolean {
+  return (
+    result.payload.outcome !== "completed" &&
+    RECOVERABLE_L0_ERROR_CODES.has(result.payload.errorCode)
+  );
+}
+
+function isSafeL0Replay(
+  result: SkillExecutionResultV1,
+  skill: BotSkillCatalogEntryV1,
+): boolean {
+  if (result.payload.outcome === "completed") return false;
+  // A precondition pause happens before a Skill can mutate the world. Other
+  // interruptions may have committed a partial side effect.
+  return skill.idempotent || result.payload.errorCode === "NORMAL_ACTIONS_PAUSED";
+}
+
+function dispatchContextMatches(
+  currentRecord: BotRegistryRecord,
+  initialRecord: BotRegistryRecord,
+  initialSkill: BotSkillCatalogEntryV1,
+): boolean {
+  const currentSkill = currentRecord.skillCatalog?.skills.find(
+    ({ skillId, skillVersion, availability }) =>
+      skillId === initialSkill.skillId &&
+      skillVersion === initialSkill.skillVersion &&
+      availability === "available",
+  );
+  return (
+    currentRecord.runtimeInstanceId === initialRecord.runtimeInstanceId &&
+    currentRecord.serverProfileId === initialRecord.serverProfileId &&
+    currentRecord.skillCatalog?.sequence === initialRecord.skillCatalog?.sequence &&
+    currentSkill !== undefined &&
+    JSON.stringify(currentSkill) === JSON.stringify(initialSkill)
+  );
+}
+
+function restartExecutionSkill(
+  task: TaskExecutionRecord,
+  record: BotRegistryRecord,
+): BotSkillCatalogEntryV1 | null {
+  if (
+    task.currentStep === null ||
+    task.expectedResult === null ||
+    Array.isArray(task.expectedResult) ||
+    typeof task.expectedResult !== "object"
+  ) {
+    return null;
+  }
+  const expected = task.expectedResult as Record<string, unknown>;
+  if (expected.outcome !== "completed") return null;
+  const skillId = expected.skillId;
+  const skillVersion = expected.skillVersion;
+  if (
+    typeof skillId !== "string" ||
+    typeof skillVersion !== "string" ||
+    task.currentStep !== skillId
+  ) {
+    return null;
+  }
+  return (
+    record.skillCatalog?.skills.find(
+      (skill) =>
+        skill.skillId === skillId && skill.skillVersion === skillVersion,
+    ) ?? null
+  );
+}
+
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(
+      new LocalPlannerError("PLANNER_CANCELLED", "Recovery wait was cancelled."),
+    );
+  }
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const onAbort = () => finish(
+      new LocalPlannerError("PLANNER_CANCELLED", "Recovery wait was cancelled."),
+    );
+    const finish = (error?: LocalPlannerError) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      if (error) reject(error);
+      else resolve();
+    };
+    const timer = setTimeout(() => finish(), ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function boundedInteger(
+  value: number,
+  minimum: number,
+  maximum: number,
+  field: string,
+): number {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new RangeError(`${field} must be between ${minimum} and ${maximum}.`);
+  }
+  return value;
+}
+
+function roundedPositiveSafeInteger(value: number): number | null {
+  if (!Number.isFinite(value) || value <= 0) return null;
+  const rounded = Math.round(value);
+  return Number.isSafeInteger(rounded) && rounded > 0 ? rounded : null;
 }
 
 function stepOutcomeFromResult(

@@ -180,4 +180,69 @@ describe("structured observability", () => {
       metrics.increment("bot_heartbeats_total", { access_token: "secret" }),
     ).toThrowError(/sensitive/u);
   });
+
+  it("accumulates LLM usage and task completion totals", () => {
+    const metrics = new InMemoryMetricRegistry();
+    const botLabels = { bot_id: "worker-01" };
+
+    metrics.increment("bot_llm_prompt_tokens_total", botLabels, 120);
+    metrics.increment("bot_llm_prompt_tokens_total", botLabels, 30);
+    metrics.increment("bot_llm_completion_tokens_total", botLabels, 45);
+    metrics.increment("bot_llm_queue_time_ms_total", botLabels, 7);
+    metrics.increment("bot_llm_execution_time_ms_total", botLabels, 93);
+    metrics.increment("bot_llm_total_latency_ms_total", botLabels, 100);
+    metrics.increment(
+      "bot_task_completion_time_ms_total",
+      { ...botLabels, outcome: "success" },
+      350,
+    );
+    metrics.increment(
+      "bot_task_completion_time_ms_total",
+      { ...botLabels, outcome: "abort" },
+      125,
+    );
+
+    const beforeRejectedZero = metrics.snapshot();
+    expect(() =>
+      metrics.increment("bot_llm_queue_time_ms_total", botLabels, 0),
+    ).toThrowError(/positive safe integer/u);
+    expect(metrics.snapshot()).toEqual(beforeRejectedZero);
+    expect(metrics.snapshot()).toEqual([
+      {
+        name: "bot_llm_completion_tokens_total",
+        value: 45,
+        labels: botLabels,
+      },
+      {
+        name: "bot_llm_execution_time_ms_total",
+        value: 93,
+        labels: botLabels,
+      },
+      {
+        name: "bot_llm_prompt_tokens_total",
+        value: 150,
+        labels: botLabels,
+      },
+      {
+        name: "bot_llm_queue_time_ms_total",
+        value: 7,
+        labels: botLabels,
+      },
+      {
+        name: "bot_llm_total_latency_ms_total",
+        value: 100,
+        labels: botLabels,
+      },
+      {
+        name: "bot_task_completion_time_ms_total",
+        value: 125,
+        labels: { bot_id: "worker-01", outcome: "abort" },
+      },
+      {
+        name: "bot_task_completion_time_ms_total",
+        value: 350,
+        labels: { bot_id: "worker-01", outcome: "success" },
+      },
+    ]);
+  });
 });

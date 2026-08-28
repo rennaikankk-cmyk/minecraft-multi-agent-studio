@@ -20,13 +20,21 @@ import {
   containerTransferCapabilityOutputSchema,
   craftItemCapabilityInputSchema,
   craftItemCapabilityOutputSchema,
+  inventorySnapshotCapabilityInputSchema,
+  inventorySnapshotCapabilityOutputSchema,
   placeBlockCapabilityInputSchema,
   placeBlockCapabilityOutputSchema,
   smeltItemCapabilityInputSchema,
   smeltItemCapabilityOutputSchema,
+  MOVEMENT_PRIORITIES,
+  MovementController,
+  type MovementLease,
   SAFE_PATH_MAX_DISTANCE,
   SkillFault,
   SkillRefusal,
+  ActionLockError,
+  ActionLockManager,
+  type ActionLockKind,
   resolveMovementProfile,
   type ServerPolicyLimits,
   safeMovementGotoCapabilityInputSchema,
@@ -47,7 +55,8 @@ import {
   buildBlueprintCapabilityInputSchema,
   buildBlueprintCapabilityOutputSchema,
   storeSortCapabilityInputSchema,
-  storeSortCapabilityOutputSchema,  type SkillCapabilityRequest,
+  storeSortCapabilityOutputSchema,
+  type SkillCapabilityRequest,
   type SkillCompatibilityEnvironment,
   type SkillResourceKind,
 } from "@minecraft-studio/skills";
@@ -64,8 +73,19 @@ import type {
   BotClientHandlers,
   BotClientSnapshot,
   BotDisconnectInfo,
+  BotRecoveryAction,
+  BotRecoveryActionResult,
 } from "./client.js";
 import type { ServerProfile } from "./server-profile.js";
+import {
+  importantBlockNames,
+  WorldStateStore,
+  type EntityState,
+  type InventoryItemState,
+  type NearbyBlockState,
+  type WorldPosition,
+  type WorldStateSnapshot,
+} from "./world-state.js";
 import {
   isMineflayerUnsupportedVersionError,
   mineflayerVersionOption,
@@ -73,6 +93,9 @@ import {
 } from "./version-compatibility.js";
 
 const { goals } = pathfinderModule;
+
+const ACTION_LOCK_TTL_MS = 5 * 60_000;
+const MAX_UTILITY_STATION_PATH_ATTEMPTS = 4;
 
 const ARMOR_POINTS: Readonly<Record<string, number>> = {
   leather_helmet: 1,
@@ -186,6 +209,37 @@ const SAFE_FOOD_NAMES = new Set([
   "salmon",
   "sweet_berries",
 ]);
+
+type MineflayerBlock = NonNullable<
+  Awaited<ReturnType<Bot["blockAt"]>>
+>;
+
+type UtilityStationPolicy = Readonly<{
+  itemName: "crafting_table" | "furnace";
+  blockNames: readonly string[];
+  scanRadius: number;
+  scanCount: number;
+  maxOwnedPerArea: number;
+}>;
+
+const CRAFTING_TABLE_POLICY: UtilityStationPolicy = Object.freeze({
+  itemName: "crafting_table",
+  blockNames: Object.freeze(["crafting_table"]),
+  scanRadius: 32,
+  scanCount: 64,
+  maxOwnedPerArea: 1,
+});
+
+const FURNACE_POLICY: UtilityStationPolicy = Object.freeze({
+  itemName: "furnace",
+  // Automatic resolution uses the general-purpose furnace. Blast furnaces
+  // and smokers remain valid when the caller supplies an exact coordinate;
+  // selecting either generically would require recipe-type compatibility.
+  blockNames: Object.freeze(["furnace"]),
+  scanRadius: 32,
+  scanCount: 64,
+  maxOwnedPerArea: 1,
+});
 
 const SAFE_FORAGE_ENTITY_NAMES = new Set([
   "cow",
@@ -945,21 +999,58 @@ export class MineflayerBotClient implements BotClient {
   private errorDetail: string | undefined;
   private versionUnsupportedReported = false;
   private inventoryListenerBound = false;
+  /** Single owner for Pathfinder, collectblock, combat and recovery motion. */
+  readonly movementController: MovementController;
+  private readonly worldState: WorldStateStore;
+  private readonly actionLocks = new ActionLockManager();
+  private lastCraftingTableCreatedAt = 0;
+  private lastCraftingTablePlacedAt = 0;
+  private lastCraftingTablePosition: Vec3 | null = null;
+  private lastFurnacePlacedAt = 0;
+  private lastFurnacePosition: Vec3 | null = null;
+  private lastNearbyBlockScanAt = Number.NEGATIVE_INFINITY;
+  private lastNearbyBlockScanContext: string | null = null;
+  private nearbyBlockScanCache: readonly NearbyBlockState[] = Object.freeze([]);
+  private pathResetCount = 0;
+  private currentPathLength: number | null = null;
   private activePathInvocationId: string | null = null;
   private safeForageExplorationCursor = 0;
   private readonly combatAdapter: MineflayerCombatAdapter;
+
+  /** Facilities are intentionally conservative: a nearby reachable table is
+   * always reused, and creation is rate-limited even across separate tasks. */
+  readonly craftingTableCreationCooldownMs = 60_000;
+  readonly craftingTablePlacementCooldownMs = 20_000;
+  readonly maxOwnedCraftingTablesPerArea = CRAFTING_TABLE_POLICY.maxOwnedPerArea;
+  readonly craftingTableScanRadius = CRAFTING_TABLE_POLICY.scanRadius;
+  readonly furnacePlacementCooldownMs = 20_000;
+  readonly maxOwnedFurnacesPerArea = FURNACE_POLICY.maxOwnedPerArea;
+  readonly furnaceScanRadius = FURNACE_POLICY.scanRadius;
+  /** Expensive findBlocks passes are shared by all state-change events. */
+  readonly worldStateBlockScanIntervalMs = 1_000;
 
   constructor(
     private readonly bot: Bot,
     private readonly configuredVersion: ServerProfile["minecraftVersion"],
     private readonly serverProfileId: string | null = null,
-    combatEnabled = false,
+    combatEnabledOrWorldState: boolean | WorldStateStore = false,
+    worldState = new WorldStateStore(),
   ) {
+    const combatEnabled = typeof combatEnabledOrWorldState === "boolean"
+      ? combatEnabledOrWorldState
+      : false;
+    this.worldState = typeof combatEnabledOrWorldState === "boolean"
+      ? worldState
+      : combatEnabledOrWorldState;
     this.combatAdapter = new MineflayerCombatAdapter(
       bot,
       serverProfileId ?? "",
       combatEnabled,
     );
+    this.movementController = new MovementController({
+      onPreempt: () => this.stopMovementPrimitives(),
+      onRelease: () => this.stopMovementPrimitives(),
+    });
     bot.on("spawn", () => {
       this.lastObservedHealth = finiteNumber(bot.health)
         ? Number(bot.health)
@@ -988,6 +1079,25 @@ export class MineflayerBotClient implements BotClient {
     bot.on("breath", () => this.handlers?.onStateChanged());
     bot.on("move", () => this.handlers?.onStateChanged());
     bot.on("physicsTick", () => this.handlers?.onStateChanged());
+    bot.on("path_reset", () => {
+      this.pathResetCount += 1;
+      this.currentPathLength = null;
+      this.handlers?.onStateChanged();
+    });
+    bot.on("path_update", (path) => {
+      this.currentPathLength = Number.isSafeInteger(path.path.length)
+        ? path.path.length
+        : null;
+      this.handlers?.onStateChanged();
+    });
+    bot.on("goal_reached", () => {
+      this.currentPathLength = 0;
+      this.handlers?.onStateChanged();
+    });
+    bot.on("path_stop", () => {
+      this.currentPathLength = null;
+      this.handlers?.onStateChanged();
+    });
     bot.on("entityEquip", (entity) => {
       if (entity === bot.entity) this.handlers?.onStateChanged();
     });
@@ -1096,11 +1206,162 @@ export class MineflayerBotClient implements BotClient {
     };
   }
 
+  /**
+   * Build a bounded, event-friendly world snapshot from Mineflayer facts. The
+   * runtime keeps the returned data in its own cache, so callers never need to
+   * ask an LLM for inventory or nearby workstation state.
+   */
+  worldStateSnapshot(): WorldStateSnapshot {
+    const current = this.snapshot();
+    const serverProfileId = this.serverProfileId ?? "unknown-server";
+    const nowMs = Date.now();
+    const now = new Date(nowMs).toISOString();
+    const inventory: InventoryItemState[] = this.bot.inventory.items().map((item) => {
+      const candidate = item as typeof item & {
+        durabilityUsed?: number;
+        maxDurability?: number;
+      };
+      const maxDurability = Number.isFinite(candidate.maxDurability)
+        ? candidate.maxDurability!
+        : null;
+      const durability = maxDurability !== null && Number.isFinite(candidate.durabilityUsed)
+        ? Math.max(0, maxDurability - candidate.durabilityUsed!)
+        : null;
+      return { name: item.name, count: item.count, durability, maxDurability };
+    });
+    const origin = {
+      x: current.position.x,
+      y: current.position.y,
+      z: current.position.z,
+      dimension: current.position.dimension,
+      serverProfileId,
+    } as const;
+    const scanContext = `${serverProfileId}|${current.position.dimension}`;
+    if (
+      scanContext !== this.lastNearbyBlockScanContext ||
+      nowMs < this.lastNearbyBlockScanAt ||
+      nowMs - this.lastNearbyBlockScanAt >= this.worldStateBlockScanIntervalMs
+    ) {
+      const nearbyBlocks: NearbyBlockState[] = [];
+      const registry = this.bot.registry as unknown as {
+        blocksByName?: Record<string, { id: number } | undefined>;
+      };
+      for (const name of importantBlockNames) {
+        const id = registry.blocksByName?.[name]?.id;
+        if (!Number.isSafeInteger(id)) continue;
+        let positions: Vec3[] = [];
+        try {
+          positions = this.bot.findBlocks({
+            matching: id!,
+            maxDistance: 32,
+            count: 8,
+          });
+        } catch {
+          continue;
+        }
+        for (const position of positions) {
+          const block = this.bot.blockAt(position);
+          if (!block || block.name !== name) continue;
+          const distance = Math.hypot(
+            position.x - origin.x,
+            position.y - origin.y,
+            position.z - origin.z,
+          );
+          nearbyBlocks.push({
+            name,
+            position: {
+              ...origin,
+              x: position.x,
+              y: position.y,
+              z: position.z,
+            },
+            lastSeen: now,
+            reachable: distance <= 4.5,
+            source: "observation",
+            confidence: 1,
+          });
+        }
+      }
+      this.nearbyBlockScanCache = Object.freeze(nearbyBlocks);
+      this.lastNearbyBlockScanAt = nowMs;
+      this.lastNearbyBlockScanContext = scanContext;
+    }
+    const entities: EntityState[] = [];
+    const hostileNames = new Set(["zombie", "skeleton", "creeper", "spider", "enderman", "witch", "pillager", "vindicator", "phantom", "blaze", "ghast", "magma_cube", "slime", "warden"]);
+    for (const entity of Object.values(this.bot.entities ?? {})) {
+      const id = String(entity.id ?? "");
+      const position = entity.position;
+      if (!id || !position || !Number.isFinite(position.x) || !Number.isFinite(position.y) || !Number.isFinite(position.z)) continue;
+      const name = String(entity.name ?? entity.displayName ?? "unknown");
+      entities.push({
+        entityId: id,
+        name,
+        position: { ...origin, x: position.x, y: position.y, z: position.z },
+        hostile: hostileNames.has(name),
+        lastSeen: now,
+        confidence: 1,
+      });
+    }
+    const movementLease = this.movementController.currentLease();
+    const navigationTarget = this.movementGoalPosition(movementLease?.goal);
+    this.worldState.observe({
+      observedAt: new Date(now),
+      position: origin,
+      inventory,
+      nearbyBlocks: this.nearbyBlockScanCache,
+      replaceNearbyBlocks: true,
+      entities,
+      navigation: {
+        target: navigationTarget,
+        movementOwner: movementLease?.owner ?? null,
+        pathLength: this.currentPathLength,
+        pathResetCount: this.pathResetCount,
+      },
+    });
+    return this.worldState.snapshot();
+  }
+
+  private movementGoalPosition(goal: unknown): WorldPosition | null {
+    if (typeof goal !== "object" || goal === null || Array.isArray(goal)) {
+      return null;
+    }
+    const candidate = goal as Partial<WorldPosition>;
+    if (
+      ![candidate.x, candidate.y, candidate.z].every(
+        (value) => typeof value === "number" && Number.isFinite(value),
+      ) ||
+      typeof candidate.dimension !== "string" ||
+      candidate.dimension.length === 0 ||
+      typeof candidate.serverProfileId !== "string" ||
+      candidate.serverProfileId !== this.serverProfileId
+    ) {
+      return null;
+    }
+    return {
+      x: candidate.x!,
+      y: candidate.y!,
+      z: candidate.z!,
+      dimension: candidate.dimension,
+      serverProfileId: candidate.serverProfileId,
+    };
+  }
+
   async executeSafetyAction(
     action: L0SafetyAction,
   ): Promise<L0SafetyActionResult> {
     if (this.requestedStop) {
       return { outcome: "skipped", errorCode: "RUNTIME_STOPPING" };
+    }
+    const movementPriority =
+      action.kind === "RETREAT_STEP" || action.kind === "ESCAPE_LAVA"
+        ? MOVEMENT_PRIORITIES.ESCAPE
+        : MOVEMENT_PRIORITIES.EMERGENCY;
+    const movementLease = this.movementController.acquire({
+      owner: `safety:${action.kind}`,
+      priority: movementPriority,
+    });
+    if (movementLease === null) {
+      return { outcome: "skipped", errorCode: "MOVEMENT_BUSY" };
     }
     try {
       this.interruptNormalActions();
@@ -1115,34 +1376,115 @@ export class MineflayerBotClient implements BotClient {
         const food = this.safeFoodItems()[0];
         if (!food) return { outcome: "skipped", errorCode: "NO_SAFE_FOOD" };
         this.bot.clearControlStates();
-        await this.bot.equip(food.item, "hand");
-        await this.bot.consume();
+        await this.actionLocks.withLock(
+          "inventory",
+          {
+            owner: `safety:${action.kind}`,
+            ttlMs: ACTION_LOCK_TTL_MS,
+          },
+          async () => {
+            await this.bot.equip(food.item, "hand");
+            await this.bot.consume();
+          },
+        );
         return { outcome: "executed", errorCode: null };
       }
       if (action.kind === "FORAGE_SAFE_FOOD") {
         return await this.forageSafeFood();
       }
       if (action.kind === "RETREAT_STEP") {
-        await this.applyBoundedControls(action.durationMs, ["back", "sprint"]);
+        await this.applyBoundedControls(
+          action.durationMs,
+          ["back", "sprint"],
+          movementLease,
+        );
+        movementLease.assertCurrent();
         return { outcome: "executed", errorCode: null };
       }
       if (action.kind === "ASCEND") {
-        await this.applyBoundedControls(action.durationMs, ["jump"]);
+        await this.applyBoundedControls(
+          action.durationMs,
+          ["jump"],
+          movementLease,
+        );
+        movementLease.assertCurrent();
         return { outcome: "executed", errorCode: null };
       }
       if (action.kind === "ESCAPE_LAVA") {
-        await this.applyBoundedControls(action.durationMs, ["jump", "forward"]);
+        await this.applyBoundedControls(
+          action.durationMs,
+          ["jump", "forward"],
+          movementLease,
+        );
+        movementLease.assertCurrent();
         return { outcome: "executed", errorCode: null };
       }
       if (action.kind === "UNSTICK") {
-        await this.applyBoundedControls(action.durationMs, ["jump", "back"]);
+        await this.applyBoundedControls(
+          action.durationMs,
+          ["jump", "back"],
+          movementLease,
+        );
+        movementLease.assertCurrent();
         return { outcome: "executed", errorCode: null };
       }
       return { outcome: "skipped", errorCode: "RUNTIME_ACTION_REQUIRED" };
     } catch {
-      this.bot.clearControlStates();
+      if (movementLease.isCurrent()) this.bot.clearControlStates();
       return { outcome: "failed", errorCode: "SAFETY_ACTION_FAILED" };
+    } finally {
+      movementLease.release(
+        movementLease.signal.aborted ? "cancelled" : "completed",
+      );
     }
+  }
+
+  async executeRecoveryAction(
+    action: BotRecoveryAction,
+  ): Promise<BotRecoveryActionResult> {
+    if (this.requestedStop) {
+      return { outcome: "skipped", errorCode: "RUNTIME_STOPPING" };
+    }
+    if (
+      !Number.isSafeInteger(action.durationMs) ||
+      action.durationMs < 100 ||
+      action.durationMs > 2_000
+    ) {
+      return { outcome: "failed", errorCode: "RECOVERY_ACTION_INVALID" };
+    }
+    const previous = this.movementController.currentLease();
+    if (previous === null) {
+      return { outcome: "skipped", errorCode: "NO_ACTIVE_MOVEMENT" };
+    }
+    if (previous.taskId !== undefined && previous.taskId !== action.taskId) {
+      return { outcome: "skipped", errorCode: "RECOVERY_TASK_MISMATCH" };
+    }
+    const lease = this.movementController.acquire({
+      owner: `recovery:watchdog:${action.kind}`,
+      priority: MOVEMENT_PRIORITIES.RECOVERY,
+      taskId: action.taskId,
+      goal: previous.goal,
+      metadata: { trigger: action.trigger },
+    });
+    if (lease === null) {
+      return { outcome: "skipped", errorCode: "MOVEMENT_BUSY" };
+    }
+    try {
+      lease.assertCurrent();
+      this.stopMovementPrimitives();
+      const controls = action.kind === "local-unstick"
+        ? (["jump", "back"] as const)
+        : (["back", "left"] as const);
+      await this.applyBoundedControls(action.durationMs, controls, lease);
+      lease.assertCurrent();
+      return { outcome: "executed", errorCode: null };
+    } catch {
+      if (lease.isCurrent()) this.bot.clearControlStates();
+      return { outcome: "failed", errorCode: "WATCHDOG_RECOVERY_FAILED" };
+    } finally {
+      lease.release(lease.signal.aborted ? "cancelled" : "completed");
+    }
+
   }
 
   async invokeSkillCapability(
@@ -1180,34 +1522,58 @@ export class MineflayerBotClient implements BotClient {
       return this.invokeArmorSnapshot(request);
     }
     if (
+      request.capability === "inventory.read" &&
+      request.operation === "inventory.snapshot"
+    ) {
+      return this.invokeInventorySnapshot(request);
+    }
+    if (
       request.capability === "inventory.write" &&
       request.operation === "armor.equip"
     ) {
-      return this.invokeArmorEquip(request);
+      return this.withActionLocks(request, ["inventory"], () =>
+        this.invokeArmorEquip(request),
+      );
     }
     if (
       request.capability === "world.interact" &&
       request.operation === "collect.blocks-safe"
     ) {
-      return this.invokeCollectBlocks(request);
+      return this.withActionLocks(
+        request,
+        ["blockInteraction", "inventory"],
+        () => this.invokeCollectBlocks(request),
+      );
     }
     if (
       request.capability === "craft.execute" &&
       request.operation === "craft.item-safe"
     ) {
-      return this.invokeCraftItem(request);
+      return this.withActionLocks(request, ["crafting", "inventory"], () =>
+        this.invokeCraftItem(request),
+      );
     }
     if (
       request.capability === "craft.execute" &&
       request.operation === "smelt.item-safe"
     ) {
-      return this.invokeSmeltItem(request);
+      return this.withActionLocks(
+        request,
+        ["crafting", "container", "inventory"],
+        () => this.invokeSmeltItem(request),
+      );
     }
     if (
       request.capability === "world.interact" &&
       request.operation === "block.place-safe"
     ) {
       const blueprintInput = buildBlueprintCapabilityInputSchema.safeParse(request.input);
+      const invokePlacement = (placementRequest: SkillCapabilityRequest) =>
+        this.withActionLocks(
+          placementRequest,
+          ["blockInteraction", "inventory"],
+          () => this.invokePlaceBlock(placementRequest),
+        );
       if (blueprintInput.success) {
         const { target, blueprintIndex: _blueprintIndex, ...placement } = blueprintInput.data;
         const expectedTarget = {
@@ -1222,16 +1588,19 @@ export class MineflayerBotClient implements BotClient {
         ) {
           throw new SkillFault("BLUEPRINT_STEP_BLOCKED");
         }
-        return this.invokePlaceBlock({ ...request, input: placement });
+        return invokePlacement({ ...request, input: placement });
       }
-      return this.invokePlaceBlock(request);
+      return invokePlacement(request);
     }
     if (
       request.capability === "container.write" &&
       request.operation === "container.transfer-safe"
     ) {
-      return this.invokeContainerTransfer(request);
-    }    if (
+      return this.withActionLocks(request, ["container", "inventory"], () =>
+        this.invokeContainerTransfer(request),
+      );
+    }
+    if (
       request.capability === "world.interact" &&
       request.operation === "trade.villager-safe"
     ) {
@@ -1262,6 +1631,50 @@ export class MineflayerBotClient implements BotClient {
       return this.invokeMinePlan(request);
     }
     throw new SkillFault("SKILL_CAPABILITY_UNSUPPORTED");
+  }
+
+  /**
+   * Acquire a capability's resources in declaration order and release them in
+   * reverse order. Station helpers may request a lock already held by the same
+   * invocation; that is a re-entrant no-op rather than a self-deadlock.
+   */
+  private async withActionLocks<T>(
+    request: SkillCapabilityRequest,
+    kinds: readonly ActionLockKind[],
+    work: () => Promise<T>,
+  ): Promise<T> {
+    const owner = `${request.taskId}:${request.invocationId}`;
+    const acquire = async (index: number): Promise<T> => {
+      const kind = kinds[index];
+      if (kind === undefined) return work();
+      if (this.actionLocks.ownerOf(kind) === owner) {
+        return acquire(index + 1);
+      }
+      return this.actionLocks.withLock(
+        kind,
+        { owner, ttlMs: ACTION_LOCK_TTL_MS, signal: request.signal },
+        () => acquire(index + 1),
+      );
+    };
+
+    try {
+      return await acquire(0);
+    } catch (error) {
+      if (!(error instanceof ActionLockError)) throw error;
+      if (error.code === "LOCK_CANCELLED") {
+        throw new SkillFault("SKILL_CANCELLED", "Skill action was cancelled.");
+      }
+      if (error.code === "LOCK_BUSY") {
+        throw new SkillFault(
+          "ACTION_LOCK_BUSY",
+          "Another bot action owns a required resource.",
+        );
+      }
+      throw new SkillFault(
+        "ACTION_LOCK_FAILED",
+        "The bot action resource lock failed.",
+      );
+    }
   }
 
   private async invokeSiteObservation(request: SkillCapabilityRequest): Promise<unknown> {
@@ -1629,9 +2042,6 @@ export class MineflayerBotClient implements BotClient {
     if (!this.bot.pathfinder) {
       throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE");
     }
-    if (this.activePathInvocationId !== null) {
-      throw new SkillFault("BOT_MOVEMENT_BUSY");
-    }
 
     const input = safeMovementGotoCapabilityInputSchema.safeParse(
       request.input,
@@ -1660,6 +2070,17 @@ export class MineflayerBotClient implements BotClient {
       throw new SkillFault("TARGET_OUT_OF_SAFE_RANGE");
     }
 
+    const lease = this.movementController.acquire({
+      owner: `skill:${request.skillId}:${request.invocationId}`,
+      priority: MOVEMENT_PRIORITIES.TASK_NAVIGATION,
+      taskId: request.taskId,
+      goal: input.data.target,
+      signal: request.signal,
+    });
+    if (lease === null) {
+      throw new SkillFault("BOT_MOVEMENT_BUSY");
+    }
+
     const movements = configureSafePathfinderMovements(
       new Movements(this.bot),
     );
@@ -1676,8 +2097,7 @@ export class MineflayerBotClient implements BotClient {
     const stopOnAbort = () => this.stopPathfinder();
     request.signal.addEventListener("abort", stopOnAbort, { once: true });
     try {
-      if (request.signal.aborted) {
-        stopOnAbort();
+      if (request.signal.aborted || lease.signal.aborted) {
         throw new SkillFault("SKILL_CANCELLED");
       }
       await this.bot.pathfinder.goto(
@@ -1688,8 +2108,38 @@ export class MineflayerBotClient implements BotClient {
           pathfinderRadius,
         ),
       );
+      if (!lease.isCurrent()) {
+        throw new SkillFault("SKILL_CANCELLED");
+      }
+      const finalPosition = this.bot.entity.position;
+      const distanceToTarget = Math.hypot(
+        input.data.target.x - finalPosition.x,
+        input.data.target.y - finalPosition.y,
+        input.data.target.z - finalPosition.z,
+      );
+      if (
+        !Number.isFinite(distanceToTarget) ||
+        distanceToTarget > input.data.radius + 0.5
+      ) {
+        throw new SkillFault("PATH_TARGET_NOT_REACHED");
+      }
+      return safeMovementGotoCapabilityOutputSchema.parse({
+        reached: true,
+        finalPosition: {
+          x: finalPosition.x,
+          y: finalPosition.y,
+          z: finalPosition.z,
+          dimension: currentDimension,
+          serverProfileId: this.serverProfileId,
+        },
+        distanceToTarget,
+      });
     } catch (error) {
+      if (error instanceof SkillFault) throw error;
       if (request.signal.aborted) {
+        throw new SkillFault("SKILL_CANCELLED");
+      }
+      if (lease.signal.aborted || !lease.isCurrent()) {
         throw new SkillFault("SKILL_CANCELLED");
       }
       this.stopPathfinder();
@@ -1704,42 +2154,46 @@ export class MineflayerBotClient implements BotClient {
           : "pathfinder rejected without a message.",
       );
     } finally {
-      request.signal.removeEventListener("abort", stopOnAbort);
-      if (this.activePathInvocationId === request.invocationId) {
-        this.activePathInvocationId = null;
-      }
+      lease.release(lease.signal.aborted ? "cancelled" : "completed");
     }
-
-    const finalPosition = this.bot.entity.position;
-    const distanceToTarget = Math.hypot(
-      input.data.target.x - finalPosition.x,
-      input.data.target.y - finalPosition.y,
-      input.data.target.z - finalPosition.z,
-    );
-    if (
-      !Number.isFinite(distanceToTarget) ||
-      distanceToTarget > input.data.radius + 0.5
-    ) {
-      throw new SkillFault("PATH_TARGET_NOT_REACHED");
-    }
-
-    return safeMovementGotoCapabilityOutputSchema.parse({
-      reached: true,
-      finalPosition: {
-        x: finalPosition.x,
-        y: finalPosition.y,
-        z: finalPosition.z,
-        dimension: currentDimension,
-        serverProfileId: this.serverProfileId,
-      },
-      distanceToTarget,
-    });
   }
 
   private assertServerProfileMatch(requestedProfileId: string): void {
     if (requestedProfileId !== this.serverProfileId) {
       throw new SkillFault("TARGET_SERVER_PROFILE_MISMATCH");
     }
+  }
+
+  /** Bounded real inventory readback used by deterministic closed-loop goals. */
+  private async invokeInventorySnapshot(
+    request: SkillCapabilityRequest,
+  ): Promise<unknown> {
+    const input = inventorySnapshotCapabilityInputSchema.safeParse(request.input);
+    if (!input.success) {
+      throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    }
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    this.assertDimensionMatch(input.data.dimension);
+    if (request.signal.aborted) {
+      throw new SkillFault("SKILL_CANCELLED");
+    }
+
+    const counts = new Map<string, number>();
+    for (const item of this.bot.inventory.items()) {
+      if (typeof item.name !== "string" || item.name.length === 0) continue;
+      counts.set(item.name, (counts.get(item.name) ?? 0) + item.count);
+    }
+    const items = [...counts]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .slice(0, input.data.maxItemTypes)
+      .map(([itemName, count]) => ({ itemName, count }));
+    const world = this.worldStateSnapshot();
+    return inventorySnapshotCapabilityOutputSchema.parse({
+      dimension: input.data.dimension,
+      serverProfileId: input.data.serverProfileId,
+      worldStateVersion: world.version,
+      items,
+    });
   }
 
   /**
@@ -1818,6 +2272,9 @@ export class MineflayerBotClient implements BotClient {
     }
     try {
       await this.bot.equip(item, destination);
+      if (request.signal.aborted) {
+        throw new SkillFault("SKILL_CANCELLED");
+      }
     } catch {
       if (request.signal.aborted) {
         throw new SkillFault("SKILL_CANCELLED");
@@ -2845,9 +3302,6 @@ export class MineflayerBotClient implements BotClient {
     if (!this.bot.collectBlock) {
       throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE");
     }
-    if (this.activePathInvocationId !== null) {
-      throw new SkillFault("BOT_MOVEMENT_BUSY");
-    }
 
     const registry = this.bot.registry as unknown as {
       blocksByName?: Record<string, { id: number } | undefined>;
@@ -2913,6 +3367,23 @@ export class MineflayerBotClient implements BotClient {
         "COLLECT_TARGET_UNREACHABLE",
         `No exposed ${input.data.blockName} target was found within ${input.data.maxDistance} blocks.`,
       );
+    }
+
+    const lease = this.movementController.acquire({
+      owner: `skill:${request.skillId}:${request.invocationId}`,
+      priority: MOVEMENT_PRIORITIES.TASK_NAVIGATION,
+      taskId: request.taskId,
+      goal: {
+        x: targets[0]!.position.x,
+        y: targets[0]!.position.y,
+        z: targets[0]!.position.z,
+        dimension: input.data.dimension,
+        serverProfileId: input.data.serverProfileId,
+      },
+      signal: request.signal,
+    });
+    if (lease === null) {
+      throw new SkillFault("BOT_MOVEMENT_BUSY");
     }
 
     // 采集途中不允许插件把物品倒进任何箱子——入库是 container.transfer
@@ -3032,8 +3503,7 @@ export class MineflayerBotClient implements BotClient {
     };
     request.signal.addEventListener("abort", stopOnAbort, { once: true });
     try {
-      if (request.signal.aborted) {
-        stopOnAbort();
+      if (request.signal.aborted || lease.signal.aborted) {
         throw new SkillFault("SKILL_CANCELLED");
       }
       // 给 collect() 套一个静默挂死的界。见 COLLECT_SETTLE_BUDGET_MS：
@@ -3130,7 +3600,7 @@ export class MineflayerBotClient implements BotClient {
       collectionSucceeded = true;
     } catch (error) {
       if (error instanceof SkillFault) throw error;
-      if (request.signal.aborted) {
+      if (request.signal.aborted || lease.signal.aborted || !lease.isCurrent()) {
         throw new SkillFault("SKILL_CANCELLED");
       }
       // 扫描已经证明目标在射程内，走到这里说明是"够不到/挖不动"，而不是"没有树"。
@@ -3211,6 +3681,17 @@ export class MineflayerBotClient implements BotClient {
       throw new SkillFault("ITEM_NAME_UNKNOWN");
     }
 
+    const inventoryBefore = this.countInventoryItem(input.data.itemName);
+    if (inventoryBefore >= input.data.count) {
+      return craftItemCapabilityOutputSchema.parse({
+        itemName: input.data.itemName,
+        requestedCount: input.data.count,
+        craftedCount: 0,
+        usedCraftingTable: false,
+      });
+    }
+    const shortfall = input.data.count - inventoryBefore;
+
     let craftingTable = null;
     if (input.data.craftingTable) {
       const { x, y, z } = input.data.craftingTable;
@@ -3218,12 +3699,28 @@ export class MineflayerBotClient implements BotClient {
       if (!craftingTable || craftingTable.name !== "crafting_table") {
         throw new SkillFault("CRAFTING_TABLE_NOT_FOUND");
       }
+      this.lastCraftingTablePosition = new Vec3(input.data.craftingTable.x, input.data.craftingTable.y, input.data.craftingTable.z);
     }
 
+    // recipesFor also returns [] when materials are missing. recipesAll is the
+    // inventory-independent check that tells us whether the recipe itself
+    // requires a 3x3 station. Confusing those cases was the main source of
+    // workbench creation while a task was merely short on ingredients.
+    const portableRecipes = this.bot.recipesAll(itemType.id, null, false);
+    const stationRecipes = this.bot.recipesAll(itemType.id, null, true);
+    if (portableRecipes.length === 0 && stationRecipes.length === 0) {
+      throw new SkillFault("RECIPE_UNAVAILABLE");
+    }
+    const requiresCraftingTable =
+      portableRecipes.length === 0 &&
+      stationRecipes.some((candidate) => candidate.requiresTable);
+    if (!craftingTable && requiresCraftingTable) {
+      craftingTable = await this.ensureCraftingTableAccess(request);
+    }
     const recipes = this.bot.recipesFor(
       itemType.id,
       null,
-      1,
+      shortfall,
       craftingTable ?? false,
     );
     const recipe = recipes[0];
@@ -3232,24 +3729,29 @@ export class MineflayerBotClient implements BotClient {
       throw new SkillFault("RECIPE_UNAVAILABLE");
     }
 
-    const before = this.countInventoryItem(input.data.itemName);
     if (request.signal.aborted) {
       throw new SkillFault("SKILL_CANCELLED");
     }
+    const resultPerCraft = Math.max(1, recipe.result.count);
+    const craftRuns = Math.ceil(shortfall / resultPerCraft);
     try {
       await this.bot.craft(
         recipe,
-        input.data.count,
+        craftRuns,
         craftingTable ?? undefined,
       );
-    } catch {
+      if (request.signal.aborted) {
+        throw new SkillFault("SKILL_CANCELLED");
+      }
+    } catch (error) {
+      if (error instanceof SkillFault) throw error;
       if (request.signal.aborted) {
         throw new SkillFault("SKILL_CANCELLED");
       }
       // craft 抛错时也读回增量——部分成功要如实上报而不是丢弃。
       const partial = Math.max(
         0,
-        this.countInventoryItem(input.data.itemName) - before,
+        this.countInventoryItem(input.data.itemName) - inventoryBefore,
       );
       if (partial > 0) {
         return craftItemCapabilityOutputSchema.parse({
@@ -3264,7 +3766,7 @@ export class MineflayerBotClient implements BotClient {
 
     const craftedCount = Math.max(
       0,
-      this.countInventoryItem(input.data.itemName) - before,
+      this.countInventoryItem(input.data.itemName) - inventoryBefore,
     );
     return craftItemCapabilityOutputSchema.parse({
       itemName: input.data.itemName,
@@ -3272,6 +3774,429 @@ export class MineflayerBotClient implements BotClient {
       craftedCount,
       usedCraftingTable: craftingTable !== null,
     });
+  }
+
+  /**
+   * Single workstation access path used by all table-dependent crafting.
+   * The final scan happens immediately before placement/creation, closing the
+   * race where another task placed a table after the initial observation.
+   */
+  private async ensureCraftingTableAccess(
+    request: SkillCapabilityRequest,
+  ): Promise<MineflayerBlock> {
+    return this.withActionLocks(
+      request,
+      ["crafting"],
+      async () => {
+        const now = Date.now();
+        const table = this.findReusableUtilityStation(CRAFTING_TABLE_POLICY);
+        if (table) {
+          this.lastCraftingTablePosition = table.position.clone();
+          return table;
+        }
+
+        const observedTables = this.findUtilityStations(
+          CRAFTING_TABLE_POLICY,
+        );
+        if (observedTables.length > 0) {
+          for (const observedTable of observedTables.slice(
+            0,
+            MAX_UTILITY_STATION_PATH_ATTEMPTS,
+          )) {
+            const reached = await this.moveToUtilityStation(
+              request,
+              CRAFTING_TABLE_POLICY,
+              observedTable,
+            );
+            if (reached) {
+              this.lastCraftingTablePosition = reached.position.clone();
+              return reached;
+            }
+          }
+          throw new SkillFault("CRAFTING_TABLE_UNAVAILABLE");
+        }
+
+        // Re-scan after deciding to create/place. A different skill may have
+        // changed the world while this invocation was queued for the lock.
+        const rescanned = this.findReusableUtilityStation(
+          CRAFTING_TABLE_POLICY,
+        );
+        if (rescanned) {
+          this.lastCraftingTablePosition = rescanned.position.clone();
+          return rescanned;
+        }
+
+        const ownedNearby = this.countUtilityStations(CRAFTING_TABLE_POLICY);
+        if (ownedNearby >= this.maxOwnedCraftingTablesPerArea) {
+          throw new SkillFault("CRAFTING_TABLE_UNAVAILABLE");
+        }
+
+        const tableItem = this.bot.inventory
+          .items()
+          .find((item) => item.name === "crafting_table");
+        if (tableItem) {
+          if (
+            now - this.lastCraftingTablePlacedAt <
+            this.craftingTablePlacementCooldownMs
+          ) {
+            throw new SkillFault("CRAFTING_TABLE_PLACEMENT_COOLDOWN");
+          }
+          const placed = await this.placeInventoryUtilityStation({
+            request,
+            policy: CRAFTING_TABLE_POLICY,
+            item: tableItem,
+            faults: {
+              unavailable: "CRAFTING_TABLE_UNAVAILABLE",
+              placementUnavailable: "CRAFTING_TABLE_PLACEMENT_UNAVAILABLE",
+              placementFailed: "CRAFTING_TABLE_PLACEMENT_FAILED",
+              placementUnconfirmed: "CRAFTING_TABLE_PLACEMENT_UNCONFIRMED",
+            },
+            onPlacementAttempt: () => {
+              this.lastCraftingTablePlacedAt = now;
+            },
+          });
+          this.lastCraftingTablePosition = placed.position.clone();
+          return placed;
+        }
+
+        if (
+          now - this.lastCraftingTableCreatedAt <
+          this.craftingTableCreationCooldownMs
+        ) {
+          throw new SkillFault("CRAFTING_TABLE_CREATION_COOLDOWN");
+        }
+        // Crafting a table is the only allowed creation path, and uses the
+        // portable 2x2 recipe. The caller's original recipe is not retried.
+        const registry = this.bot.registry as unknown as {
+          itemsByName?: Record<string, { id: number } | undefined>;
+        };
+        const tableType = registry.itemsByName?.crafting_table;
+        if (!tableType) throw new SkillFault("ITEM_NAME_UNKNOWN");
+        const tableRecipes = this.bot.recipesFor(tableType.id, null, 1, false);
+        const tableRecipe = tableRecipes[0];
+        if (!tableRecipe) throw new SkillFault("RECIPE_UNAVAILABLE");
+        const before = this.countInventoryItem("crafting_table");
+        await this.bot.craft(tableRecipe, 1);
+        if (request.signal.aborted) {
+          throw new SkillFault("SKILL_CANCELLED");
+        }
+        if (this.countInventoryItem("crafting_table") <= before) {
+          throw new SkillFault("CRAFTING_TABLE_CREATION_UNCONFIRMED");
+        }
+        this.lastCraftingTableCreatedAt = now;
+        const craftedTableItem = this.bot.inventory
+          .items()
+          .find((item) => item.name === "crafting_table");
+        if (!craftedTableItem) {
+          throw new SkillFault("CRAFTING_TABLE_NOT_IN_INVENTORY");
+        }
+        // Placement uses the same final scan as an inventory-resident table.
+        // The normal placement cooldown is deliberately bypassed immediately
+        // after a newly confirmed local craft.
+        const placed = await this.placeInventoryUtilityStation({
+          request,
+          policy: CRAFTING_TABLE_POLICY,
+          item: craftedTableItem,
+          faults: {
+            unavailable: "CRAFTING_TABLE_UNAVAILABLE",
+            placementUnavailable: "CRAFTING_TABLE_PLACEMENT_UNAVAILABLE",
+            placementFailed: "CRAFTING_TABLE_PLACEMENT_FAILED",
+            placementUnconfirmed: "CRAFTING_TABLE_PLACEMENT_UNCONFIRMED",
+          },
+          onPlacementAttempt: () => {
+            this.lastCraftingTablePlacedAt = now;
+          },
+        });
+        this.lastCraftingTablePosition = placed.position.clone();
+        return placed;
+      },
+    );
+  }
+
+  /** Resolve all observed instances of one bounded utility-station policy. */
+  private findUtilityStations(
+    policy: UtilityStationPolicy,
+  ): readonly MineflayerBlock[] {
+    const registry = this.bot.registry as unknown as {
+      blocksByName?: Record<string, { id: number } | undefined>;
+    };
+    const ids = policy.blockNames
+      .map((name) => registry.blocksByName?.[name]?.id)
+      .filter((id): id is number => Number.isSafeInteger(id));
+    if (ids.length === 0) return [];
+    let positions: Vec3[] = [];
+    try {
+      positions = this.bot.findBlocks({
+        matching: ids.length === 1 ? ids[0]! : ids,
+        maxDistance: policy.scanRadius,
+        count: policy.scanCount,
+      });
+    } catch {
+      return [];
+    }
+    const names = new Set(policy.blockNames);
+    const origin = this.bot.entity.position;
+    return positions
+      .map((position) => this.bot.blockAt(position))
+      .filter(
+        (block): block is MineflayerBlock =>
+          block !== null && names.has(block.name),
+      )
+      .sort(
+        (left, right) =>
+          Math.hypot(
+            left.position.x - origin.x,
+            left.position.y - origin.y,
+            left.position.z - origin.z,
+          ) -
+          Math.hypot(
+            right.position.x - origin.x,
+            right.position.y - origin.y,
+            right.position.z - origin.z,
+          ),
+      );
+  }
+
+  private findReusableUtilityStation(
+    policy: UtilityStationPolicy,
+  ): MineflayerBlock | null {
+    // A farther station may still be the only one inside interaction reach;
+    // filter after sorting rather than rejecting the nearest out-of-reach
+    // candidate outright.
+    return (
+      this.findUtilityStations(policy).find((station) =>
+        this.withinInteractionReach(station.position),
+      ) ?? null
+    );
+  }
+
+  private countUtilityStations(policy: UtilityStationPolicy): number {
+    return this.findUtilityStations(policy).length;
+  }
+
+  private withinInteractionReach(position: Vec3): boolean {
+    const origin = this.bot.entity.position;
+    return Math.hypot(position.x + 0.5 - origin.x, position.y + 0.5 - origin.y, position.z + 0.5 - origin.z) <= 4.5;
+  }
+
+  private async moveToUtilityStation(
+    request: SkillCapabilityRequest,
+    policy: UtilityStationPolicy,
+    station: MineflayerBlock,
+  ): Promise<MineflayerBlock | null> {
+    if (!this.bot.pathfinder) {
+      throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE");
+    }
+    const lease = this.movementController.acquire({
+      owner: `skill:${request.skillId}:${request.invocationId}:station`,
+      priority: MOVEMENT_PRIORITIES.TASK_NAVIGATION,
+      taskId: request.taskId,
+      goal: {
+        x: station.position.x,
+        y: station.position.y,
+        z: station.position.z,
+        dimension: normalizeDimension(String(this.bot.game.dimension)),
+        serverProfileId: this.serverProfileId!,
+      },
+      signal: request.signal,
+    });
+    if (lease === null) throw new SkillFault("BOT_MOVEMENT_BUSY");
+
+    const movements = configureSafePathfinderMovements(new Movements(this.bot));
+    this.bot.pathfinder.setMovements(movements);
+    this.bot.pathfinder.thinkTimeout = 5_000;
+    this.bot.pathfinder.tickTimeout = 20;
+    try {
+      lease.assertCurrent();
+      await this.bot.pathfinder.goto(
+        new goals.GoalNear(
+          station.position.x,
+          station.position.y,
+          station.position.z,
+          3,
+        ),
+      );
+      lease.assertCurrent();
+    } catch (error) {
+      if (request.signal.aborted || lease.signal.aborted || !lease.isCurrent()) {
+        throw new SkillFault("SKILL_CANCELLED");
+      }
+      return null;
+    } finally {
+      lease.release(lease.signal.aborted ? "cancelled" : "completed");
+    }
+
+    const observed = this.bot.blockAt(station.position);
+    return observed !== null &&
+      policy.blockNames.includes(observed.name) &&
+      this.withinInteractionReach(observed.position)
+      ? observed
+      : null;
+  }
+
+  private findUtilityStationPlacementReference(): {
+    reference: MineflayerBlock;
+    target: Vec3;
+    face: Vec3;
+  } | null {
+    const origin = this.bot.entity.position.floored();
+    const candidates = [
+      new Vec3(1, 0, 0),
+      new Vec3(-1, 0, 0),
+      new Vec3(0, 0, 1),
+      new Vec3(0, 0, -1),
+    ];
+    for (const offset of candidates) {
+      // Place on the top face of a floor block beside the bot. Targeting the
+      // bot's own occupied cell is rejected by vanilla servers and previously
+      // made the table guard appear to work only in permissive test doubles.
+      const target = origin.offset(offset.x, offset.y, offset.z);
+      const reference = this.bot.blockAt(target.offset(0, -1, 0));
+      if (!reference || reference.boundingBox === "empty") continue;
+      const face = new Vec3(0, 1, 0);
+      const occupant = this.bot.blockAt(target);
+      if (occupant && occupant.boundingBox !== "empty") continue;
+      if (!this.withinInteractionReach(reference.position)) continue;
+      return { reference, target, face };
+    }
+    return null;
+  }
+
+  /**
+   * Shared last-mile placement guard for crafting tables and furnaces. It
+   * re-scans after equip and marks an attempt before the non-idempotent write,
+   * so a failed confirmation cannot immediately produce a duplicate block.
+   */
+  private async placeInventoryUtilityStation(options: Readonly<{
+    request: SkillCapabilityRequest;
+    policy: UtilityStationPolicy;
+    item: Parameters<Bot["equip"]>[0];
+    faults: Readonly<{
+      unavailable: string;
+      placementUnavailable: string;
+      placementFailed: string;
+      placementUnconfirmed: string;
+    }>;
+    onPlacementAttempt: () => void;
+  }>): Promise<MineflayerBlock> {
+    const placement = this.findUtilityStationPlacementReference();
+    if (!placement) {
+      throw new SkillFault(options.faults.placementUnavailable);
+    }
+    try {
+      await this.bot.equip(options.item, "hand");
+      if (options.request.signal.aborted) {
+        throw new SkillFault("SKILL_CANCELLED");
+      }
+
+      const reusable = this.findReusableUtilityStation(options.policy);
+      if (reusable) return reusable;
+      if (
+        this.countUtilityStations(options.policy) >=
+        options.policy.maxOwnedPerArea
+      ) {
+        throw new SkillFault(options.faults.unavailable);
+      }
+
+      options.onPlacementAttempt();
+      await this.bot.placeBlock(placement.reference, placement.face);
+      if (options.request.signal.aborted) {
+        throw new SkillFault("SKILL_CANCELLED");
+      }
+    } catch (error) {
+      if (error instanceof SkillFault) throw error;
+      if (options.request.signal.aborted) {
+        throw new SkillFault("SKILL_CANCELLED");
+      }
+      throw new SkillFault(options.faults.placementFailed);
+    }
+    const placed = this.bot.blockAt(placement.target);
+    if (!placed || placed.name !== options.policy.itemName) {
+      throw new SkillFault(options.faults.placementUnconfirmed);
+    }
+    return placed;
+  }
+
+  /** Deterministic furnace access for nullable smelt.item station inputs. */
+  private async ensureFurnaceAccess(
+    request: SkillCapabilityRequest,
+  ): Promise<MineflayerBlock> {
+    return this.withActionLocks(
+      request,
+      ["crafting"],
+      async () => {
+        const furnace = this.findReusableUtilityStation(FURNACE_POLICY);
+        if (furnace) {
+          this.lastFurnacePosition = furnace.position.clone();
+          return furnace;
+        }
+
+        const observedFurnaces = this.findUtilityStations(FURNACE_POLICY);
+        if (observedFurnaces.length > 0) {
+          for (const observedFurnace of observedFurnaces.slice(
+            0,
+            MAX_UTILITY_STATION_PATH_ATTEMPTS,
+          )) {
+            const reached = await this.moveToUtilityStation(
+              request,
+              FURNACE_POLICY,
+              observedFurnace,
+            );
+            if (reached) {
+              this.lastFurnacePosition = reached.position.clone();
+              return reached;
+            }
+          }
+          throw new SkillFault("FURNACE_UNAVAILABLE");
+        }
+
+        const rescanned = this.findReusableUtilityStation(FURNACE_POLICY);
+        if (rescanned) {
+          this.lastFurnacePosition = rescanned.position.clone();
+          return rescanned;
+        }
+        if (
+          this.countUtilityStations(FURNACE_POLICY) >=
+          this.maxOwnedFurnacesPerArea
+        ) {
+          throw new SkillFault("FURNACE_UNAVAILABLE");
+        }
+
+        const furnaceItem = this.bot.inventory
+          .items()
+          .find((item) => item.name === "furnace");
+        if (!furnaceItem) {
+          // Furnace crafting needs a 3x3 station and a larger dependency loop.
+          // Until that loop is supervised here, fail closed instead of
+          // fabricating a craft result or attempting repeated placement.
+          throw new SkillFault("FURNACE_NOT_IN_INVENTORY");
+        }
+        const now = Date.now();
+        if (
+          now - this.lastFurnacePlacedAt <
+          this.furnacePlacementCooldownMs
+        ) {
+          throw new SkillFault("FURNACE_PLACEMENT_COOLDOWN");
+        }
+
+        const placed = await this.placeInventoryUtilityStation({
+          request,
+          policy: FURNACE_POLICY,
+          item: furnaceItem,
+          faults: {
+            unavailable: "FURNACE_UNAVAILABLE",
+            placementUnavailable: "FURNACE_PLACEMENT_UNAVAILABLE",
+            placementFailed: "FURNACE_PLACEMENT_FAILED",
+            placementUnconfirmed: "FURNACE_PLACEMENT_UNCONFIRMED",
+          },
+          onPlacementAttempt: () => {
+            this.lastFurnacePlacedAt = now;
+          },
+        });
+        this.lastFurnacePosition = placed.position.clone();
+        return placed;
+      },
+    );
   }
 
   /** 熔炼：只使用空熔炉，显式装入原料和燃料，逐次取出并读回真实产物。 */
@@ -3296,10 +4221,21 @@ export class MineflayerBotClient implements BotClient {
       throw new SkillFault("SMELT_FUEL_INSUFFICIENT");
     }
 
-    const { x, y, z } = input.data.furnace;
-    const block = this.bot.blockAt(new Vec3(x, y, z));
-    if (!block || !["furnace", "blast_furnace", "smoker"].includes(block.name)) {
-      throw new SkillFault("FURNACE_NOT_FOUND");
+    let block: MineflayerBlock;
+    if (input.data.furnace === null) {
+      block = await this.ensureFurnaceAccess(request);
+    } else {
+      const { x, y, z } = input.data.furnace;
+      const requestedBlock = this.bot.blockAt(new Vec3(x, y, z));
+      if (
+        !requestedBlock ||
+        !["furnace", "blast_furnace", "smoker"].includes(
+          requestedBlock.name,
+        )
+      ) {
+        throw new SkillFault("FURNACE_NOT_FOUND");
+      }
+      block = requestedBlock;
     }
 
     let furnace: Awaited<ReturnType<Bot["openFurnace"]>> | null = null;
@@ -3312,7 +4248,9 @@ export class MineflayerBotClient implements BotClient {
       }
       if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
       await furnace.putInput(inputType.id, null, input.data.count);
+      if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
       await furnace.putFuel(fuelType.id, null, input.data.fuelCount);
+      if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
 
       while (smeltedCount < input.data.count) {
         if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
@@ -3321,6 +4259,7 @@ export class MineflayerBotClient implements BotClient {
           outputItemName ??= output.name;
           if (output.name !== outputItemName) throw new SkillFault("FURNACE_OUTPUT_MISMATCH");
           const taken = await furnace.takeOutput();
+          if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
           smeltedCount += taken.count;
           continue;
         }
@@ -3407,8 +4346,15 @@ export class MineflayerBotClient implements BotClient {
     }
     try {
       await this.bot.equip(item, "hand");
+      if (request.signal.aborted) {
+        throw new SkillFault("SKILL_CANCELLED");
+      }
       await this.bot.placeBlock(reference, new Vec3(face.x, face.y, face.z));
-    } catch {
+      if (request.signal.aborted) {
+        throw new SkillFault("SKILL_CANCELLED");
+      }
+    } catch (error) {
+      if (error instanceof SkillFault) throw error;
       if (request.signal.aborted) {
         throw new SkillFault("SKILL_CANCELLED");
       }
@@ -3479,6 +4425,9 @@ export class MineflayerBotClient implements BotClient {
         await window.deposit(itemType.id, null, input.data.count);
       } else {
         await window.withdraw(itemType.id, null, input.data.count);
+      }
+      if (request.signal.aborted) {
+        throw new SkillFault("SKILL_CANCELLED");
       }
     } catch (error) {
       if (error instanceof SkillFault) throw error;
@@ -4153,7 +5102,15 @@ export class MineflayerBotClient implements BotClient {
 
   private async applyBoundedControls(
     durationMs: number | undefined,
-    controls: readonly ("forward" | "back" | "jump" | "sprint")[],
+    controls: readonly (
+      | "forward"
+      | "back"
+      | "left"
+      | "right"
+      | "jump"
+      | "sprint"
+    )[],
+    lease: MovementLease,
   ): Promise<void> {
     if (
       !Number.isSafeInteger(durationMs) ||
@@ -4161,12 +5118,19 @@ export class MineflayerBotClient implements BotClient {
       durationMs < 100 ||
       durationMs > 2_000
     ) {
-      throw new TypeError("Safety action duration is invalid.");
+      throw new TypeError("Bounded movement duration is invalid.");
     }
+    lease.assertCurrent();
     this.bot.clearControlStates();
     for (const control of controls) this.bot.setControlState(control, true);
-    await new Promise<void>((resolve) => setTimeout(resolve, durationMs));
-    this.bot.clearControlStates();
+    try {
+      await waitForDurationOrAbort(durationMs, lease.signal);
+      lease.assertCurrent();
+    } finally {
+      // Preemption cleanup already stopped the old controls synchronously.
+      // A late callback must not clear controls installed by the new owner.
+      if (lease.isCurrent()) this.bot.clearControlStates();
+    }
   }
 
   private stopPathfinder(): void {
@@ -4176,9 +5140,48 @@ export class MineflayerBotClient implements BotClient {
       // Stopping movement is best-effort; callers still clear Mineflayer controls.
     }
   }
+
+  private stopMovementPrimitives(): void {
+    try {
+      const cancelTask = this.bot.collectBlock?.cancelTask;
+      if (typeof cancelTask === "function") {
+        void cancelTask.call(this.bot.collectBlock).catch(() => {});
+      }
+    } catch {
+      // collectblock may be absent or already settled during disconnect.
+    }
+    this.stopPathfinder();
+    try {
+      this.bot.clearControlStates();
+    } catch {
+      // Disconnect cleanup is best effort.
+    }
+  }
 }
 
-export function createMineflayerClient(profile: ServerProfile): BotClient {
+function waitForDurationOrAbort(
+  durationMs: number,
+  signal: AbortSignal,
+): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timeout = setTimeout(finish, durationMs);
+    signal.addEventListener("abort", finish, { once: true });
+  });
+}
+
+export function createMineflayerClient(
+  profile: ServerProfile,
+  worldState = new WorldStateStore(),
+): BotClient {
   const bot = createBot(createMineflayerOptions(profile));
   bot.loadPlugin(pathfinder);
   // collectblock 会自动加载它依赖的 mineflayer-tool（两者均 MIT，供应链已锁定）。
@@ -4188,6 +5191,7 @@ export function createMineflayerClient(profile: ServerProfile): BotClient {
     profile.minecraftVersion,
     profile.id,
     profile.combat?.enabled === true,
+    worldState,
   );
 }
 

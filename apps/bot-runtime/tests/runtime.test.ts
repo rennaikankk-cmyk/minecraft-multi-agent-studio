@@ -10,6 +10,7 @@ import type {
   SkillCapabilityRequest,
   SkillExecutionAuthorization,
 } from "@minecraft-studio/skills";
+import { ensureItemOutputSchema } from "@minecraft-studio/skills";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -17,6 +18,8 @@ import type {
   BotClientHandlers,
   BotClientSnapshot,
   BotDisconnectInfo,
+  BotRecoveryAction,
+  BotRecoveryActionResult,
 } from "../src/client.js";
 import type {
   CombatDriverObservation,
@@ -25,6 +28,10 @@ import type {
 import { SingleBotRuntime } from "../src/runtime.js";
 import type { ServerProfile } from "../src/server-profile.js";
 import type { RuntimeLogger } from "../src/runtime-types.js";
+import {
+  WorldStateStore,
+  type WorldStateSnapshot,
+} from "../src/world-state.js";
 
 const FIXED_UUID = "11111111-1111-4111-8111-111111111111";
 
@@ -255,6 +262,82 @@ class FakeBotClient implements BotClient {
   }
 }
 
+class WorldStateBotClient extends FakeBotClient {
+  constructor(private readonly currentWorldState: WorldStateSnapshot) {
+    super();
+  }
+
+  worldStateSnapshot(): WorldStateSnapshot {
+    return structuredClone(this.currentWorldState);
+  }
+}
+
+class WatchdogBotClient extends WorldStateBotClient {
+  readonly recoveryActions: BotRecoveryAction[] = [];
+
+  async executeRecoveryAction(
+    action: BotRecoveryAction,
+  ): Promise<BotRecoveryActionResult> {
+    this.recoveryActions.push(action);
+    return { outcome: "executed", errorCode: null };
+  }
+}
+
+class SharedWorldStateBotClient extends FakeBotClient {
+  constructor(private readonly worldState: WorldStateStore) {
+    super();
+  }
+
+  worldStateSnapshot(): WorldStateSnapshot {
+    this.worldState.observe({
+      observedAt: new Date(Date.now()),
+      position: {
+        ...snapshot.position,
+        serverProfileId: profile.id,
+      },
+      inventory: [
+        {
+          name: "oak_log",
+          count: 1,
+          durability: null,
+          maxDurability: null,
+        },
+      ],
+      nearbyBlocks: [],
+      entities: [],
+      navigation: {
+        target: null,
+        movementOwner: null,
+        pathLength: null,
+        pathResetCount: 0,
+        stuckSince: null,
+        lastFailureTarget: null,
+        blacklist: [],
+      },
+    });
+    return this.worldState.snapshot();
+  }
+
+  async invokeSkillCapability(
+    request: SkillCapabilityRequest,
+  ): Promise<unknown> {
+    this.capabilityCalls.push(request);
+    if (
+      request.capability !== "inventory.read" ||
+      request.operation !== "inventory.snapshot"
+    ) {
+      throw new Error(`Unexpected capability operation: ${request.operation}`);
+    }
+    const worldState = this.worldStateSnapshot();
+    return {
+      dimension: snapshot.position.dimension,
+      serverProfileId: profile.id,
+      worldStateVersion: worldState.version,
+      items: [{ itemName: "oak_log", count: 1 }],
+    };
+  }
+}
+
 const logger: RuntimeLogger = {
   info: vi.fn(),
   warn: vi.fn(),
@@ -296,6 +379,37 @@ function movementInvocation(): SkillInvocationV1 {
   };
 }
 
+function ensureItemInvocation(): SkillInvocationV1 {
+  return {
+    schemaVersion: "1.0",
+    messageId: "55555555-5555-4555-8555-555555555555",
+    traceId: "trace-ensure-item-runtime",
+    timestamp: "2026-07-19T10:00:00.000Z",
+    source: { service: "coordinator", instanceId: "coordinator-01" },
+    botId: profile.botId,
+    taskId: "task-ensure-item-runtime",
+    type: "skill.invoke.v1",
+    payload: {
+      invocationId: "66666666-6666-4666-8666-666666666666",
+      skillId: "goal.ensure-item",
+      skillVersion: "1.0.0",
+      expiresAt: "2026-07-19T10:01:00.000Z",
+      input: {
+        itemName: "oak_log",
+        count: 1,
+        dimension: snapshot.position.dimension,
+        serverProfileId: profile.id,
+      },
+      authorization: {
+        decisionId: "77777777-7777-4777-8777-777777777777",
+        actorId: "coordinator-agent",
+        issuedAt: "2026-07-19T09:59:59.000Z",
+        expiresAt: "2026-07-19T10:01:00.000Z",
+      },
+    },
+  };
+}
+
 function skillAuthorization(
   invocation: SkillInvocationV1,
 ): SkillExecutionAuthorization {
@@ -312,6 +426,29 @@ function skillAuthorization(
     issuedAt: invocation.payload.authorization.issuedAt,
     expiresAt: invocation.payload.authorization.expiresAt,
     allowedCapabilities: new Set(["bot.move"]),
+  };
+}
+
+function ensureItemAuthorization(
+  invocation: SkillInvocationV1,
+): SkillExecutionAuthorization {
+  return {
+    decisionId: invocation.payload.authorization.decisionId,
+    actorId: invocation.payload.authorization.actorId,
+    sourceInstanceId: invocation.source.instanceId,
+    traceId: invocation.traceId,
+    taskId: invocation.taskId,
+    botId: invocation.botId,
+    invocationId: invocation.payload.invocationId,
+    skillId: invocation.payload.skillId,
+    skillVersion: invocation.payload.skillVersion,
+    issuedAt: invocation.payload.authorization.issuedAt,
+    expiresAt: invocation.payload.authorization.expiresAt,
+    allowedCapabilities: new Set([
+      "inventory.read",
+      "world.interact",
+      "craft.execute",
+    ]),
   };
 }
 
@@ -397,6 +534,7 @@ describe("SingleBotRuntime", () => {
       "bot.version.v1",
       "bot.skill-catalog.v1",
       "bot.status.v1",
+      "bot.world-state.v1",
       "bot.heartbeat.v1",
     ]);
     expect(messages.at(-1)?.timestamp).toBe("2026-07-19T10:00:00.010Z");
@@ -1155,14 +1293,23 @@ describe("SingleBotRuntime", () => {
 
   it("cancels an active Pathfinder skill when L0 takes control", async () => {
     const client = new FakeBotClient();
+    let activeSignal: AbortSignal | null = null;
+    let release!: () => void;
     vi.spyOn(client, "invokeSkillCapability").mockImplementation(
       async (request) =>
-        new Promise((_resolve, reject) => {
-          request.signal.addEventListener(
-            "abort",
-            () => reject(new Error("cancelled by L0")),
-            { once: true },
-          );
+        new Promise((resolve) => {
+          activeSignal = request.signal;
+          release = () => resolve({
+            reached: true,
+            finalPosition: {
+              x: 1,
+              y: 64,
+              z: 1,
+              dimension: "minecraft:overworld",
+              serverProfileId: profile.id,
+            },
+            distanceToTarget: 0,
+          });
         }),
     );
     const runtime = new SingleBotRuntime(profile, {
@@ -1189,12 +1336,82 @@ describe("SingleBotRuntime", () => {
     client.stateChanged();
     await vi.advanceTimersByTimeAsync(0);
 
+    expect(activeSignal?.aborted).toBe(false);
+    client.setSnapshot(snapshot);
+    client.stateChanged();
+    await vi.advanceTimersByTimeAsync(0);
+    release();
     await expect(pending).resolves.toMatchObject({
       payload: {
-        outcome: "cancelled",
-        errorCode: "SKILL_CANCELLED",
+        outcome: "completed",
       },
     });
+    await runtime.stop("test_cleanup");
+  });
+
+  it("reports the active task while a skill is running and clears it afterward", async () => {
+    const client = new FakeBotClient();
+    const messages: unknown[] = [];
+    let release!: () => void;
+    vi.spyOn(client, "invokeSkillCapability").mockImplementation(
+      async () => new Promise((resolve) => {
+        release = () => resolve({
+          reached: true,
+          finalPosition: {
+            x: 1,
+            y: 64,
+            z: 1,
+            dimension: "minecraft:overworld",
+            serverProfileId: profile.id,
+          },
+          distanceToTarget: 0,
+        });
+      }),
+    );
+    const runtime = new SingleBotRuntime(profile, {
+      createClient: () => client,
+      messageSink: (message) => messages.push(message),
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+    runtime.start();
+    client.spawn();
+    const invocation = movementInvocation();
+    const pending = runtime.handleSkillInvocation(
+      invocation,
+      skillAuthorization(invocation),
+    );
+    await vi.advanceTimersByTimeAsync(profile.statusIntervalMs);
+
+    expect(messages).toContainEqual(expect.objectContaining({
+      type: "bot.status.v1",
+      payload: expect.objectContaining({
+        currentTask: expect.objectContaining({
+          taskId: invocation.taskId,
+          title: "movement.goto",
+          status: "running",
+        }),
+      }),
+    }));
+
+    release();
+    await pending;
+    await vi.advanceTimersByTimeAsync(profile.statusIntervalMs);
+    const statuses = messages.filter(
+      (message): message is Extract<
+        BotTelemetryMessageV1,
+        { type: "bot.status.v1" }
+      > =>
+        typeof message === "object" &&
+        message !== null &&
+        "type" in message &&
+        message.type === "bot.status.v1",
+    );
+    expect(statuses.at(-1)).toEqual(expect.objectContaining({
+      type: "bot.status.v1",
+      payload: expect.objectContaining({ currentTask: null }),
+    }));
     await runtime.stop("test_cleanup");
   });
 
