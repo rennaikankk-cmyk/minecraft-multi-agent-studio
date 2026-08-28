@@ -57,6 +57,7 @@ Get-Content .\configs\servers\isolated-test.local.json
 - `spawn-animals=false`
 - `spawn-monsters=false`
 - `spawn-npcs=false`
+- `max-players=2`（内存受限环境只启动两个真实 Bot 并发验收）
 
 ## 执行与判定
 
@@ -66,7 +67,7 @@ Get-Content .\configs\servers\isolated-test.local.json
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-isolated-minecraft-test.ps1
 ```
 
-成功标准：3 个真实集成测试全部通过，最后出现 `REAL_MINECRAFT_INTEGRATION=PASS` 和 `MINECRAFT_SKILL_ACCEPTANCE=PASS`。脚本验证真实连接、七个内建技能各一个成功场景、优雅停止、服务端断开和有限重连，并只清理本次启动的子进程；不会停止未知的占端口进程。测试代码存在不等于真实运行通过，技能仍保持 `verification=unverified`，直到相应证据门实际完成并登记。
+成功标准：3 个真实集成测试全部通过，最后出现 `REAL_MINECRAFT_INTEGRATION=PASS` 和 `MINECRAFT_SKILL_ACCEPTANCE=PASS`。脚本验证两个真实 Bot 同时在线、移动、探索、采集、制作、建造、仓储、装备、熔炼、挖矿、庇护所、战斗和自然语言生存闭环，并验证优雅停止、服务端断开和有限重连；只清理本次启动的子进程，不会停止未知的占端口进程。测试代码存在不等于真实运行通过，技能仍保持 `verification=unverified`，直到相应证据门实际完成并登记。
 
 验收输出位于 `runtime-data/isolated-test/acceptance/`，服务端日志位于 `runtime-data/isolated-test/server/logs/`。这些目录均不得提交。
 

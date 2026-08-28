@@ -1,0 +1,108 @@
+name: ${SPARK_COMPOSE_PROJECT_NAME:-minecraft-studio-ornith-heretic}
+
+# This file is deliberately parameter-only.  Use one of the checked-in
+# profile env templates (and a separate 0600 API-key env file) when starting
+# it.  The image and model revision are required so a floating deployment
+# cannot be started by accident.
+services:
+  ornith-heretic:
+    image: ${SPARK_VLLM_IMAGE:?SPARK_VLLM_IMAGE must be an immutable image digest or image ID}
+    container_name: ${SPARK_CONTAINER_NAME:-minecraft-studio-ornith-heretic}
+    restart: ${SPARK_RESTART_POLICY:-unless-stopped}
+    ports:
+      - "${SPARK_BIND_ADDRESS:-127.0.0.1}:${SPARK_HOST_PORT:-8001}:8000/tcp"
+    env_file:
+      - ${SPARK_API_KEY_ENV_FILE:?SPARK_API_KEY_ENV_FILE must point to a 0600 env file}
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      SPARK_DEPLOYMENT_PROFILE: ${SPARK_DEPLOYMENT_PROFILE:?SPARK_DEPLOYMENT_PROFILE must be canary or production}
+      SPARK_MODEL_REVISION: ${SPARK_MODEL_REVISION:?SPARK_MODEL_REVISION must be the immutable model commit SHA}
+      SPARK_SERVED_MODEL_NAME: ${SPARK_SERVED_MODEL_NAME:-ornith15-heretic}
+      SPARK_MAX_MODEL_LEN: ${SPARK_MAX_MODEL_LEN:-262144}
+      SPARK_MAX_NUM_SEQS: ${SPARK_MAX_NUM_SEQS:-16}
+      SPARK_MAX_NUM_BATCHED_TOKENS: ${SPARK_MAX_NUM_BATCHED_TOKENS:-32768}
+      SPARK_GPU_MEMORY_UTILIZATION: ${SPARK_GPU_MEMORY_UTILIZATION:-0.85}
+      SPARK_KV_CACHE_DTYPE: ${SPARK_KV_CACHE_DTYPE:-fp8}
+      SPARK_REASONING_PARSER: ${SPARK_REASONING_PARSER:-qwen3}
+      SPARK_TOOL_CALL_PARSER: ${SPARK_TOOL_CALL_PARSER:-qwen3_xml}
+      SPARK_SAFETENSORS_LOAD_STRATEGY: ${SPARK_SAFETENSORS_LOAD_STRATEGY:-prefetch}
+      SPARK_SPECULATIVE_CONFIG: '${SPARK_SPECULATIVE_CONFIG:-}'
+      SPARK_LIMIT_MM_PER_PROMPT: '${SPARK_LIMIT_MM_PER_PROMPT:-{"image":1,"video":0}}'
+      VLLM_LOGGING_LEVEL: ${VLLM_LOGGING_LEVEL:-INFO}
+      VLLM_NO_USAGE_STATS: "1"
+      VLLM_DO_NOT_TRACK: "1"
+      XDG_CACHE_HOME: /root/.cache
+      XDG_CONFIG_HOME: /root/.cache/config
+      HF_HOME: /root/.cache/huggingface
+      TRITON_CACHE_DIR: /root/.cache/triton
+      TORCHINDUCTOR_CACHE_DIR: /root/.cache/torchinductor
+      CUDA_CACHE_PATH: /root/.cache/cuda
+    volumes:
+      - "${SPARK_MODEL_PATH:?SPARK_MODEL_PATH must point to the fixed revision directory}:/model:ro"
+      - "${SPARK_CACHE_PATH:?SPARK_CACHE_PATH must point to a dedicated writable vLLM cache}:/root/.cache:rw"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=2g
+    shm_size: ${SPARK_SHM_SIZE:-16gb}
+    stop_grace_period: ${SPARK_STOP_GRACE_PERIOD:-90s}
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    labels:
+      com.minecraft-studio.service: ornith-heretic
+      com.minecraft-studio.deployment-profile: ${SPARK_DEPLOYMENT_PROFILE:?}
+      com.minecraft-studio.model-revision: ${SPARK_MODEL_REVISION:?}
+      com.minecraft-studio.vllm-image: ${SPARK_VLLM_IMAGE:?}
+      com.minecraft-studio.mtp: "${SPARK_MTP_EXPECTED:-false}"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        : "$${VLLM_API_KEY:?VLLM_API_KEY must be supplied by SPARK_API_KEY_ENV_FILE}"
+        set -- vllm serve /model \
+          --served-model-name "$${SPARK_SERVED_MODEL_NAME}" \
+          --host 0.0.0.0 \
+          --port 8000 \
+          --dtype auto \
+          --max-model-len "$${SPARK_MAX_MODEL_LEN}" \
+          --max-num-seqs "$${SPARK_MAX_NUM_SEQS}" \
+          --max-num-batched-tokens "$${SPARK_MAX_NUM_BATCHED_TOKENS}" \
+          --gpu-memory-utilization "$${SPARK_GPU_MEMORY_UTILIZATION}" \
+          --kv-cache-dtype "$${SPARK_KV_CACHE_DTYPE}" \
+          --enable-prefix-caching \
+          --enable-chunked-prefill \
+          --reasoning-parser "$${SPARK_REASONING_PARSER}" \
+          --tool-call-parser "$${SPARK_TOOL_CALL_PARSER}" \
+          --enable-auto-tool-choice \
+          --safetensors-load-strategy "$${SPARK_SAFETENSORS_LOAD_STRATEGY}" \
+          --limit-mm-per-prompt "$${SPARK_LIMIT_MM_PER_PROMPT}"
+        if [ -n "$${SPARK_SPECULATIVE_CONFIG:-}" ]; then
+          set -- "$$@" --speculative-config "$${SPARK_SPECULATIVE_CONFIG}"
+        fi
+        exec "$$@"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          /usr/bin/python3 -c 'import json,os,urllib.request;
+          h={"Authorization":"Bearer "+os.environ["VLLM_API_KEY"]};
+          urllib.request.urlopen("http://127.0.0.1:8000/health",timeout=5);
+          r=urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8000/v1/models",headers=h),timeout=5);
+          d=json.load(r);
+          raise SystemExit(0 if any(x.get("id")==os.environ["SPARK_SERVED_MODEL_NAME"] for x in d.get("data",[])) else 1)'
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 600s
+    logging:
+      driver: json-file
+      options:
+        max-size: ${SPARK_LOG_MAX_SIZE:-50m}
+        max-file: ${SPARK_LOG_MAX_FILES:-5}

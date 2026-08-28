@@ -12,7 +12,7 @@ const model = environment.LOCAL_AI_MODEL ?? 'qwen-fast:latest';
 const provider = environment.LOCAL_AI_PROVIDER?.trim().toLowerCase() ?? 'vllm';
 const adapter: AIAdapter = provider === 'ollama'
   ? new OllamaAdapter(baseUrl, model)
-  : new VLLMAdapter(baseUrl, model);
+  : new VLLMAdapter(baseUrl, model, environment.LOCAL_AI_API_KEY);
 const router = new AIRouter();
 router.register(adapter);
 

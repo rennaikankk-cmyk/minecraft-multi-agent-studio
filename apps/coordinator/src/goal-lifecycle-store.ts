@@ -98,6 +98,20 @@ export interface GoalLifecycleStore {
   ): Promise<GoalLifecycleSnapshot>;
 }
 
+export interface QueuedGoalLifecycleStore {
+  submitQueued(
+    request: ControlLinkGoalRequestV1,
+  ): Promise<GoalLifecycleSnapshot>;
+  waitForQueuedTerminal(
+    taskId: string,
+    signal: AbortSignal,
+  ): Promise<GoalLifecycleSnapshot>;
+  requestQueuedCancellation(
+    taskId: string,
+    reasonCode: "AI_TIMEOUT" | "CONTROL_LINK_STOPPED",
+  ): Promise<void>;
+}
+
 export class GoalLifecycleStoreError extends Error {
   constructor(
     readonly code: ControlLinkGoalErrorCode,
@@ -201,6 +215,98 @@ export class PostgresGoalLifecycleStore implements GoalLifecycleStore {
       const persisted = validateGoalTask(created.task, input);
       return await this.resume(persisted.task, persisted.input);
     } catch (error) {
+      throw lifecycleError(error);
+    }
+  }
+
+  async submitQueued(
+    request: ControlLinkGoalRequestV1,
+  ): Promise<GoalLifecycleSnapshot> {
+    const input = inputFromRequest(request);
+    try {
+      const submitted = await this.options.repository.submitTask({
+        schemaVersion: "1.0",
+        operationId: input.operationId,
+        taskId: input.taskId,
+        idempotencyScope: GOAL_IDEMPOTENCY_SCOPE,
+        idempotencyKey: input.operationId,
+        taskType: GOAL_TASK_TYPE,
+        handlerVersion: GOAL_HANDLER_VERSION,
+        executionIdempotent: false,
+        title: "Submitted goal",
+        description: "Authenticated operator goal.",
+        input,
+        priority: 50,
+        requiredSkills: [],
+        requiredItems: [],
+        target: null,
+        dependencyIds: [],
+        parentTaskId: null,
+        deadline: null,
+        timeoutMs: input.timeoutMs,
+        maxRetries: 0,
+        riskLevel: "R1",
+        traceId: input.operationId,
+        actorId: input.actorId,
+        dispatchBotId: input.botId,
+      });
+      const persisted = validateGoalTask(submitted.task, input);
+      if (persisted.task.dispatchBotId !== input.botId) {
+        throw new GoalLifecycleStoreError(
+          "GOAL_ID_CONFLICT",
+          "Persisted goal dispatch target conflicts with the request.",
+        );
+      }
+      return snapshot(persisted.task, persisted.input);
+    } catch (error) {
+      throw lifecycleError(error);
+    }
+  }
+
+  async waitForQueuedTerminal(
+    taskId: string,
+    signal: AbortSignal,
+  ): Promise<GoalLifecycleSnapshot> {
+    while (!signal.aborted) {
+      try {
+        const task = await this.options.repository.getTask(taskId);
+        if (!task) {
+          throw new GoalLifecycleStoreError(
+            "CONTROL_LINK_INTERNAL_ERROR",
+            "Queued goal disappeared from durable storage.",
+          );
+        }
+        const persisted = validateGoalTask(task);
+        const state = snapshot(persisted.task, persisted.input);
+        if (isGoalTerminal(persisted.task)) return state;
+      } catch (error) {
+        throw lifecycleError(error);
+      }
+      await waitForPoll(signal);
+    }
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : new Error("goal_wait_aborted");
+  }
+
+  async requestQueuedCancellation(
+    taskId: string,
+    reasonCode: "AI_TIMEOUT" | "CONTROL_LINK_STOPPED",
+  ): Promise<void> {
+    try {
+      await this.options.repository.requestTaskCancellation({
+        operationId: this.randomId(),
+        taskId,
+        actorId: this.options.coordinatorInstanceId,
+        reasonCode,
+      });
+    } catch (error) {
+      if (
+        error instanceof TaskSystemError &&
+        error.code === "TASK_TERMINAL"
+      ) {
+        return;
+      }
       throw lifecycleError(error);
     }
   }
@@ -360,7 +466,7 @@ export class PostgresGoalLifecycleStore implements GoalLifecycleStore {
       task.leaseExpiresAt !== null &&
       Date.parse(task.leaseExpiresAt) <= now.getTime()
     ) {
-      const recovered = await this.options.repository.expireLease({
+      const recovered = await this.options.repository.recoverExpiredLease({
         schemaVersion: "1.0",
         operationId: this.randomId(),
         taskId: task.taskId,
@@ -368,7 +474,7 @@ export class PostgresGoalLifecycleStore implements GoalLifecycleStore {
         actorId: this.options.coordinatorInstanceId,
         reasonCode: "TASK_LEASE_EXPIRED",
       });
-      return validateGoalTask(recovered, persisted.input);
+      return validateGoalTask(recovered.task, persisted.input);
     }
     if (
       task.status === "queued" &&
@@ -400,8 +506,22 @@ export function durableGoalFingerprint(
     "payload" in request
       ? inputFromRequest(request)
       : persistedGoalInputSchema.parse(request);
+  // `task_input` is stored as PostgreSQL JSONB, whose object key order is not
+  // the order used by the incoming request. Hash the fixed semantic fields as
+  // a tuple so a replay after a Coordinator restart has the same identity.
+  const canonical = [
+    input.schemaVersion,
+    input.kind,
+    input.operationId,
+    input.taskId,
+    input.clientId,
+    input.actorId,
+    input.botId,
+    input.operatorGoal,
+    input.timeoutMs,
+  ] as const;
   return createHash("sha256")
-    .update(JSON.stringify(input), "utf8")
+    .update(JSON.stringify(canonical), "utf8")
     .digest("hex");
 }
 
@@ -561,4 +681,20 @@ function assertTerminalTtl(value: number): void {
   if (!Number.isSafeInteger(value) || value < 1_000 || value > 24 * 60 * 60_000) {
     throw new TypeError("Goal lifecycle terminal TTL is invalid.");
   }
+}
+
+async function waitForPoll(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return;
+  await new Promise<void>((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, 100);
+    timer.unref?.();
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }

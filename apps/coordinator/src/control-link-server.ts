@@ -8,7 +8,6 @@ import type { AddressInfo } from "node:net";
 import type { Duplex } from "node:stream";
 
 import type { AppLogger } from "@minecraft-studio/observability";
-import { AISchedulerError } from "@minecraft-studio/ai-router";
 import {
   CONTROL_LINK_MAX_BOTS,
   CONTROL_LINK_MAX_PAYLOAD_BYTES,
@@ -44,6 +43,10 @@ import {
 import { WebSocket, WebSocketServer } from "ws";
 
 import { BotRegistry, type BotRegistryRecord } from "./bot-registry.js";
+import {
+  BotAssignmentError,
+  type BotAssignmentService,
+} from "./bot-assignment.js";
 import type { ControlLinkClientConfig } from "./control-link-config.js";
 import {
   durableGoalFingerprint,
@@ -51,12 +54,16 @@ import {
   type GoalExecutionLease,
   type GoalLifecycleSnapshot,
   type GoalLifecycleStore,
+  type QueuedGoalLifecycleStore,
 } from "./goal-lifecycle-store.js";
 import {
   LocalPlannerError,
   type CoordinatorLocalPlanner,
-  type LocalPlanResult,
 } from "./local-planner.js";
+import {
+  mapGoalExecutionError,
+  projectGoalDispatchResult,
+} from "./goal-execution-result.js";
 import {
   CoordinatorStopError,
   type StopController,
@@ -65,6 +72,7 @@ import {
   TaskHistoryReaderError,
   type TaskHistoryReader,
 } from "./task-history-reader.js";
+import type { AutonomousTaskSource } from "./autonomous-director.js";
 
 const HANDSHAKE_TIMEOUT_MS = 5_000;
 const MAX_CLOCK_SKEW_MS = 30_000;
@@ -92,8 +100,11 @@ export type ControlLinkServerOptions = Readonly<{
   clients: readonly ControlLinkClientConfig[];
   registry: BotRegistry;
   stopController: Pick<StopController, "requestStop">;
+  assignment?: Pick<BotAssignmentService, "acquire" | "release">;
   goalPlanner?: Pick<CoordinatorLocalPlanner, "planAndDispatch">;
   goalStore?: GoalLifecycleStore;
+  queuedGoalStore?: QueuedGoalLifecycleStore;
+  autonomousTaskSource?: AutonomousTaskSource;
   taskHistoryReader?: TaskHistoryReader;
   logger: AppLogger;
   now?: () => Date;
@@ -188,6 +199,7 @@ export class ControlLinkServer {
   private readonly maxPendingTaskReads: number;
   private readonly maxBufferedSnapshotEvents: number;
   private readonly pingIntervalMs: number;
+  private readonly unsubscribeAutonomous: () => void;
   private streamSequence = 0;
   private trackedGoalOrder = 0;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -213,6 +225,14 @@ export class ControlLinkServer {
     if (options.goalPlanner !== undefined && options.goalStore === undefined) {
       throw new TypeError(
         "Control Link goal execution requires durable storage.",
+      );
+    }
+    if (
+      options.queuedGoalStore !== undefined &&
+      (options.goalPlanner === undefined || options.goalStore === undefined)
+    ) {
+      throw new TypeError(
+        "Queued goal execution requires the durable store and local planner.",
       );
     }
     if (options.clients.length === 0 || options.clients.length > 64) {
@@ -323,6 +343,14 @@ export class ControlLinkServer {
     this.unsubscribeRegistry = options.registry.subscribe((record) => {
       this.publishRecord(record);
     });
+    this.unsubscribeAutonomous = options.autonomousTaskSource?.subscribe((botId) => {
+      try {
+        const record = this.options.registry.get(botId, validNow(this.now()));
+        if (record) this.publishRecord(record);
+      } catch {
+        // A status presentation update must not break the task source.
+      }
+    }) ?? (() => undefined);
   }
 
   async start(): Promise<ControlLinkAddress> {
@@ -366,6 +394,7 @@ export class ControlLinkServer {
     if (this.stopped) return;
     this.stopped = true;
     this.unsubscribeRegistry();
+    this.unsubscribeAutonomous();
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.pingTimer = null;
     if (this.goalRecoveryTimer) clearInterval(this.goalRecoveryTimer);
@@ -1217,9 +1246,14 @@ export class ControlLinkServer {
   }
 
   private async executeGoal(pending: PendingGoal): Promise<void> {
+    if (this.options.queuedGoalStore) {
+      await this.executeQueuedGoal(pending);
+      return;
+    }
     const request = pending.request;
     const controller = pending.controller;
     let lease: GoalExecutionLease | null = null;
+    let assignmentLeaseId: string | null = null;
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
@@ -1268,6 +1302,7 @@ export class ControlLinkServer {
         return;
       }
       lease = begin.lease;
+      assignmentLeaseId = await this.acquireExecutionAssignment(request);
       if (timedOut || controller.signal.aborted) {
         throw new Error(timedOut ? "goal_timeout" : "goal_aborted");
       }
@@ -1284,7 +1319,7 @@ export class ControlLinkServer {
       if (timedOut || controller.signal.aborted) {
         throw new Error("goal_timeout");
       }
-      const result = publicGoalResult(request, planResult);
+      const result = projectGoalDispatchResult(request.payload, planResult);
       const terminal = await this.options.goalStore!.recordResult(lease, result);
       this.applyGoalSnapshots([terminal], validNow(this.now()));
       this.rememberCompletedGoal(request.payload.operationId, {
@@ -1305,7 +1340,11 @@ export class ControlLinkServer {
         action: result.action,
       });
     } catch (cause) {
-      let errorCode = goalErrorCode(cause, timedOut, controller.signal.aborted);
+      let errorCode = mapGoalExecutionError(
+        cause,
+        timedOut,
+        controller.signal.aborted,
+      );
       let terminalPersisted = false;
       if (lease) {
         const status = errorCode === "AI_TIMEOUT"
@@ -1363,12 +1402,182 @@ export class ControlLinkServer {
         botId: request.payload.botId,
         clientId: request.payload.clientId,
         code: errorCode,
+        // `code` is the coarse code the client is entitled to see; several
+        // distinct planner outcomes collapse into PLANNER_REJECTED. The
+        // originating code stays log-only so triage does not start by
+        // guessing which one it was.
+        ...plannerDiagnostics(cause),
       });
     } finally {
+      this.releaseExecutionAssignment(assignmentLeaseId);
       clearTimeout(timer);
       if (this.pendingGoals.get(request.payload.operationId) === pending) {
         this.pendingGoals.delete(request.payload.operationId);
       }
+    }
+  }
+
+  private async executeQueuedGoal(pending: PendingGoal): Promise<void> {
+    const request = pending.request;
+    const controller = pending.controller;
+    let submitted = false;
+    let assignmentLeaseId: string | null = null;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new Error("goal_timeout"));
+    }, request.payload.timeoutMs);
+    try {
+      assignmentLeaseId = await this.acquireExecutionAssignment(request);
+      const queued = await this.options.queuedGoalStore!.submitQueued(request);
+      submitted = true;
+      this.applyGoalSnapshots([queued], validNow(this.now()));
+      const terminal = await this.options.queuedGoalStore!.waitForQueuedTerminal(
+        request.payload.taskId,
+        controller.signal,
+      );
+      this.applyGoalSnapshots([terminal], validNow(this.now()));
+      if (terminal.result !== null) {
+        this.rememberCompletedGoal(request.payload.operationId, {
+          fingerprint: terminal.fingerprint,
+          result: terminal.result,
+          expiresAtMs: validNow(this.now()).getTime() + COMPLETED_GOAL_TTL_MS,
+        });
+        if (!this.stopped) {
+          for (const responder of pending.responders.values()) {
+            this.sendGoalSuccess(responder, request, terminal.result);
+          }
+        }
+        return;
+      }
+
+      const errorCode =
+        terminal.errorCode ?? "CONTROL_LINK_INTERNAL_ERROR";
+      this.rememberCompletedGoal(request.payload.operationId, {
+        fingerprint: terminal.fingerprint,
+        result: null,
+        errorCode,
+        expiresAtMs: validNow(this.now()).getTime() + COMPLETED_GOAL_TTL_MS,
+      });
+      if (!this.stopped) {
+        for (const responder of pending.responders.values()) {
+          this.sendGoalFailure(
+            responder.session,
+            request,
+            errorCode,
+            responder.requestMessageId,
+          );
+        }
+      }
+    } catch (cause) {
+      const errorCode = mapGoalExecutionError(
+        cause,
+        timedOut,
+        controller.signal.aborted,
+      );
+      if (submitted) {
+        await this.options.queuedGoalStore!
+          .requestQueuedCancellation(
+            request.payload.taskId,
+            timedOut ? "AI_TIMEOUT" : "CONTROL_LINK_STOPPED",
+          )
+          .catch((cancellationCause: unknown) => {
+            safeLog(
+              this.options.logger,
+              "error",
+              "coordinator_queued_goal_cancellation_failed",
+              {
+                traceId: request.payload.operationId,
+                taskId: request.payload.taskId,
+                code:
+                  cancellationCause instanceof GoalLifecycleStoreError
+                    ? cancellationCause.code
+                    : "CONTROL_LINK_INTERNAL_ERROR",
+              },
+            );
+          });
+      }
+      if (!this.stopped) {
+        for (const responder of pending.responders.values()) {
+          this.sendGoalFailure(
+            responder.session,
+            request,
+            errorCode,
+            responder.requestMessageId,
+          );
+        }
+      }
+      safeLog(this.options.logger, "warn", "coordinator_queued_goal_failed", {
+        traceId: request.payload.operationId,
+        taskId: request.payload.taskId,
+        botId: request.payload.botId,
+        code: errorCode,
+      });
+    } finally {
+      this.releaseExecutionAssignment(assignmentLeaseId);
+      clearTimeout(timer);
+      if (this.pendingGoals.get(request.payload.operationId) === pending) {
+        this.pendingGoals.delete(request.payload.operationId);
+      }
+    }
+  }
+
+  private async acquireExecutionAssignment(
+    request: ControlLinkGoalRequestV1,
+  ): Promise<string | null> {
+    const assignment = this.options.assignment;
+    if (!assignment) return null;
+    await this.options.autonomousTaskSource?.requestManualControl?.(
+      request.payload.botId,
+    );
+    const record = this.options.registry.get(
+      request.payload.botId,
+      validNow(this.now()),
+    );
+    if (
+      !record ||
+      record.connectionState !== "online" ||
+      record.currentStatus === null
+    ) {
+      throw new LocalPlannerError(
+        "PLANNER_BOT_UNAVAILABLE",
+        "Target Bot is not currently available for a normal task.",
+      );
+    }
+    try {
+      return assignment.acquire({
+        taskId: request.payload.taskId,
+        serverProfileId: record.serverProfileId,
+        dimension: record.currentStatus.position.dimension,
+        requiredSkills: [],
+        preferredBotId: request.payload.botId,
+        leaseTtlMs: request.payload.timeoutMs,
+      }).leaseId;
+    } catch (cause) {
+      if (cause instanceof BotAssignmentError) {
+        throw new LocalPlannerError(
+          cause.code === "ASSIGNMENT_PREFERRED_BOT_BUSY"
+            ? "PLANNER_BOT_BUSY"
+            : "PLANNER_BOT_UNAVAILABLE",
+          "Target Bot could not obtain an exclusive task assignment.",
+          { cause },
+        );
+      }
+      throw cause;
+    }
+  }
+
+  private releaseExecutionAssignment(leaseId: string | null): void {
+    if (!leaseId || !this.options.assignment) return;
+    try {
+      this.options.assignment.release(leaseId);
+    } catch {
+      safeLog(
+        this.options.logger,
+        "warn",
+        "coordinator_assignment_release_failed",
+        { leaseId, code: "ASSIGNMENT_RELEASE_FAILED" },
+      );
     }
   }
 
@@ -1505,7 +1714,7 @@ export class ControlLinkServer {
       runtimeTask.taskId !== tracked.taskId &&
       (tracked.baselineRuntimeTask?.taskId !== runtimeTask.taskId ||
         tracked.baselineRuntimeTask?.startedAt !== runtimeTask.startedAt);
-    const currentTask = tracked &&
+    const trackedTask = tracked &&
       !(!goalTaskActive(tracked.status) && runtimeTaskReplacedBaseline)
       ? {
           taskId: tracked.taskId,
@@ -1516,7 +1725,22 @@ export class ControlLinkServer {
           status: tracked.status,
           startedAt: tracked.startedAt,
         }
-      : runtimeTask;
+      : null;
+    let autonomousTask: PublicCurrentTask | null = null;
+    try {
+      autonomousTask =
+        this.options.autonomousTaskSource?.getCurrentTask(
+          record.botId,
+          validNow(this.now()),
+        ) ?? null;
+    } catch {
+      autonomousTask = null;
+    }
+    const currentTask = selectCurrentTask(
+      trackedTask,
+      autonomousTask,
+      runtimeTask,
+    );
     return projectBotState(record, currentTask);
   }
 
@@ -1892,39 +2116,27 @@ function safeLog(
   }
 }
 
-function publicGoalResult(
-  request: ControlLinkGoalRequestV1,
-  result: LocalPlanResult,
-): GoalDispatchResultV1 {
-  const ai = {
-    attempts: result.ai.attempts,
-    queueTimeMs: Math.round(result.ai.queueTimeMs),
-    executionTimeMs: Math.round(result.ai.executionTimeMs),
-    totalTimeMs: Math.round(result.ai.totalTimeMs),
-  };
-  if (result.action === "noop") {
+/**
+ * Log-only detail about why a goal failed.  The planner's own code and the
+ * failing step index never reach the client, because the coarse code is the
+ * contract; they exist so triage starts from the real cause instead of from
+ * a mapped one.
+ */
+function plannerDiagnostics(
+  cause: unknown,
+): Readonly<Record<string, unknown>> {
+  if (cause instanceof LocalPlannerError) {
     return {
-      action: "noop",
-      botId: request.payload.botId,
-      taskId: request.payload.taskId,
-      reasonCode: result.reasonCode,
-      ai,
+      plannerCode: cause.code,
+      ...(cause.stepIndex === undefined
+        ? {}
+        : { plannerStepIndex: cause.stepIndex }),
+      ...(cause.stepSkillId === undefined
+        ? {}
+        : { plannerStepSkillId: cause.stepSkillId }),
     };
   }
-  const payload = result.result.payload;
-  const base = {
-    action: "skill_result",
-    botId: request.payload.botId,
-    taskId: request.payload.taskId,
-    reasonCode: result.reasonCode,
-    skillId: payload.skillId,
-    skillVersion: payload.skillVersion,
-    outcome: payload.outcome,
-    ai,
-  } as const;
-  return payload.outcome === "completed"
-    ? base
-    : { ...base, errorCode: payload.errorCode };
+  return { plannerCode: null };
 }
 
 function goalTaskStatus(
@@ -1935,34 +2147,6 @@ function goalTaskStatus(
   if (result.outcome === "cancelled") return "cancelled";
   if (result.outcome === "timed_out") return "expired";
   return "failed";
-}
-
-function goalErrorCode(
-  cause: unknown,
-  timedOut: boolean,
-  aborted = false,
-): ControlLinkGoalErrorCode {
-  if (timedOut) return "AI_TIMEOUT";
-  if (aborted) return "CONTROL_LINK_STOPPED";
-  if (cause instanceof GoalLifecycleStoreError) return cause.code;
-  if (cause instanceof AISchedulerError) {
-    if (cause.code === "AI_QUEUE_FULL") return "AI_QUEUE_FULL";
-    if (cause.code === "AI_REQUEST_TIMEOUT") return "AI_TIMEOUT";
-    return "AI_UNAVAILABLE";
-  }
-  if (cause instanceof LocalPlannerError) {
-    if (cause.code === "PLANNER_TIMEOUT") return "AI_TIMEOUT";
-    if (
-      cause.code === "PLANNER_BOT_UNAVAILABLE" ||
-      cause.code === "PLANNER_BOT_BUSY" ||
-      cause.code === "PLANNER_SAFETY_PAUSED" ||
-      cause.code === "PLANNER_SKILL_CATALOG_UNAVAILABLE"
-    ) {
-      return "BOT_UNAVAILABLE";
-    }
-    return "PLANNER_REJECTED";
-  }
-  return "SKILL_DISPATCH_FAILED";
 }
 
 function goalFingerprint(request: ControlLinkGoalRequestV1): string {
@@ -1977,6 +2161,18 @@ function goalTaskActive(status: PublicCurrentTask["status"]): boolean {
     status === "blocked" ||
     status === "waiting" ||
     status === "paused"
+  );
+}
+
+function selectCurrentTask(
+  ...candidates: readonly (PublicCurrentTask | null)[]
+): PublicCurrentTask | null {
+  return (
+    candidates.find(
+      (candidate) => candidate !== null && goalTaskActive(candidate.status),
+    ) ??
+    candidates.find((candidate) => candidate !== null) ??
+    null
   );
 }
 

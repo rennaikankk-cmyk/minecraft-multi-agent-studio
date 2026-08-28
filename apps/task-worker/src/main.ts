@@ -13,6 +13,7 @@ import {
   loadTaskWorkerConfig,
 } from "./config.js";
 import { createIsolatedAcceptanceRegistry } from "./isolated-acceptance-handler.js";
+import { createCoordinatorGoalRegistry } from "./coordinator-goal-handler.js";
 
 const instanceId = `task-worker-${randomUUID()}`;
 const logger = createStructuredLogger({
@@ -45,9 +46,16 @@ async function main(): Promise<void> {
   try {
     await pool.verifyConnection();
     const repository = new PostgresTaskRepository(pool);
+    const registry = config.purpose === "production"
+      ? createCoordinatorGoalRegistry({
+          baseUrl: config.coordinatorExecution.url,
+          secret: config.coordinatorExecution.secret,
+          workerInstanceId: instanceId,
+        })
+      : createIsolatedAcceptanceRegistry();
     worker = new BullMqTaskWorker(
       repository,
-      createIsolatedAcceptanceRegistry(),
+      registry,
       {
         redisUrl: config.infrastructure.redisUrl,
         queueName: config.infrastructure.queueName,

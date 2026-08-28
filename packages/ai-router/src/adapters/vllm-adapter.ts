@@ -1,6 +1,16 @@
 import type { AIAdapter, GenerateOptions, GenerateResult, HealthResult } from '../types/adapter.js';
 import { z } from 'zod';
 
+function sanitizeVllmJsonSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sanitizeVllmJsonSchema);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key !== 'propertyNames')
+      .map(([key, entry]) => [key, sanitizeVllmJsonSchema(entry)]),
+  );
+}
+
 const chatCompletionResponseSchema = z
   .object({
     choices: z
@@ -33,13 +43,25 @@ export class VLLMAdapter implements AIAdapter {
 
   constructor(
     private readonly baseUrl: string,
-    private readonly model: string
+    private readonly model: string,
+    private readonly apiKey?: string | null,
   ) {}
+
+  private requestHeaders(contentType?: string): Record<string, string> {
+    return {
+      Accept: 'application/json',
+      ...(contentType ? { 'Content-Type': contentType } : {}),
+      ...(this.apiKey?.trim()
+        ? { Authorization: `Bearer ${this.apiKey.trim()}` }
+        : {}),
+    };
+  }
 
   async health(): Promise<HealthResult> {
     const start = Date.now();
     try {
       const response = await fetch(`${this.baseUrl}/health`, {
+        headers: this.requestHeaders(),
         signal: AbortSignal.timeout(5000)
       });
       if (response.ok) {
@@ -56,6 +78,7 @@ export class VLLMAdapter implements AIAdapter {
         };
       }
       const modelsResponse = await fetch(`${this.baseUrl}/v1/models`, {
+        headers: this.requestHeaders(),
         signal: AbortSignal.timeout(5000),
       });
       if (!modelsResponse.ok) {
@@ -94,13 +117,17 @@ export class VLLMAdapter implements AIAdapter {
     try {
       const response = await fetch(`${this.baseUrl}/v1/chat/completions`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.requestHeaders('application/json'),
         body: JSON.stringify({
           model: this.model,
           messages: [
             ...(request.systemPrompt ? [{ role: 'system', content: request.systemPrompt }] : []),
             { role: 'user', content: request.prompt }
           ],
+          // Ornith is a Qwen reasoning model. Planner decisions belong in the
+          // structured content channel; leaving thinking enabled can consume
+          // the whole bounded response with reasoning and return content=null.
+          chat_template_kwargs: { enable_thinking: false },
           max_tokens: request.maxTokens,
           temperature: request.temperature,
           ...(request.schema
@@ -110,7 +137,7 @@ export class VLLMAdapter implements AIAdapter {
                   json_schema: {
                     name: 'structured_response',
                     strict: true,
-                    schema: z.toJSONSchema(request.schema),
+                    schema: sanitizeVllmJsonSchema(z.toJSONSchema(request.schema)),
                   },
                 },
               }

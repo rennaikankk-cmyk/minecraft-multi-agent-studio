@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 import { Queue } from "bullmq";
-import { Pool } from "pg";
+import { Pool, type PoolConfig } from "pg";
 import {
   afterAll,
   beforeAll,
@@ -26,6 +26,7 @@ import {
   type IsolatedTaskInfrastructureConfig,
 } from "../src/infrastructure-config.js";
 import { PgTaskPoolAdapter } from "../src/pg-pool-adapter.js";
+import { PostgresTaskExecutionStore } from "../src/postgres-task-execution-store.js";
 import { TaskOutboxReconciler } from "../src/outbox-reconciler.js";
 import {
   MAX_TASK_OUTBOX_ATTEMPTS,
@@ -36,6 +37,7 @@ import {
   taskRecordSchema,
   type TaskRecord,
 } from "../src/model.js";
+import { PersistentTaskStateMachine } from "../src/task-fsm.js";
 
 const runRealInfrastructure =
   process.env.RUN_REAL_TASK_INFRA_TEST === "1";
@@ -86,6 +88,13 @@ const migrationFiles = [
     ),
     sha256:
       "dd273906f80d672dde5f01ecf4b075fac5ebc385070e65be557b7bd46d99f472",
+  },
+  {
+    path: fileURLToPath(
+      new URL("../migrations/0006_task_execution_fsm.sql", import.meta.url),
+    ),
+    sha256:
+      "a31a75eacc054473e0d10c5a766eadc32064ae80b6145eb0217843ab9bc636ff",
   },
 ] as const;
 
@@ -168,7 +177,17 @@ function taskAssignmentCommand(
   };
 }
 
-function dispatchFor(task: TaskRecord) {
+function dispatchFor(
+  task: Pick<
+    TaskRecord,
+    | "taskId"
+    | "traceId"
+    | "revision"
+    | "taskType"
+    | "handlerVersion"
+    | "executionIdempotent"
+  >,
+) {
   return {
     schemaVersion: "1.0" as const,
     messageId: randomUUID(),
@@ -304,6 +323,19 @@ async function stopTaskWorkerProcess(
   }
 }
 
+async function expectTaskWorkerProcessStopped(
+  child: ChildProcess,
+): Promise<void> {
+  const exitCode = await stopTaskWorkerProcess(child);
+  if (process.platform === "win32") {
+    // Windows represents SIGTERM termination as a null exit code even when
+    // the worker handled the signal and completed its graceful cleanup.
+    expect([0, null]).toContain(exitCode);
+    return;
+  }
+  expect(exitCode).toBe(0);
+}
+
 async function forceStopTaskWorkerProcess(
   child: ChildProcess,
   timeoutMs = 2_000,
@@ -337,6 +369,7 @@ describeReal.sequential(
     let schemaName: string;
     let adminPool: Pool;
     let assertionPool: Pool;
+    let scopedPoolConfig: PoolConfig;
     let poolAdapter: PgTaskPoolAdapter;
     let repository: PostgresTaskRepository;
     const queues: BullMqTaskQueue[] = [];
@@ -355,7 +388,7 @@ describeReal.sequential(
       adminPool = new Pool({ connectionString: config.postgresUrl });
       await adminPool.query(`CREATE SCHEMA "${schemaName}"`);
 
-      const scopedPoolConfig = {
+      scopedPoolConfig = {
         connectionString: config.postgresUrl,
         options: `-c search_path=${schemaName}`,
       };
@@ -460,30 +493,68 @@ describeReal.sequential(
         options: `-c search_path=${upgradeSchema}`,
       };
       const upgradePool = new Pool(upgradePoolConfig);
-      const upgradeAdapter = new PgTaskPoolAdapter(upgradePoolConfig);
       try {
         for (const migrationFile of migrationFiles.slice(0, 3)) {
           const sql = await readFile(migrationFile.path, "utf8");
           await upgradePool.query(sql);
         }
-        const upgradeRepository = new PostgresTaskRepository(upgradeAdapter);
-        const blocked = (
-          await upgradeRepository.createTask(
-            taskCreateCommand("test.upgrade-invalid-blocked"),
-          )
-        ).task;
+        const blocked = {
+          ...taskCreateCommand("test.upgrade-invalid-blocked"),
+          revision: 0,
+        };
         const expiresLater = {
           ...taskCreateCommand("test.upgrade-invalid-expired"),
           deadline: new Date(Date.now() + 60_000).toISOString(),
+          revision: 0,
         };
-        const expired = (
-          await upgradeRepository.createTask(expiresLater)
-        ).task;
-        const numericRevision = (
-          await upgradeRepository.createTask(
-            taskCreateCommand("test.upgrade-numeric-revision"),
-          )
-        ).task;
+        const expired = expiresLater;
+        const numericRevision = {
+          ...taskCreateCommand("test.upgrade-numeric-revision"),
+          revision: 0,
+        };
+        for (const task of [blocked, expired, numericRevision]) {
+          const requestFingerprint = createHash("sha256")
+            .update(JSON.stringify(task), "utf8")
+            .digest("hex");
+          await upgradePool.query(
+            `INSERT INTO studio_tasks (
+               task_id, schema_version, idempotency_scope, idempotency_key,
+               request_fingerprint, task_type, handler_version,
+               execution_idempotent, title, description, priority, status,
+               dispatch_bot_id, assigned_bot_id, required_skills,
+               required_items, target, parent_task_id, deadline, timeout_ms,
+               retry_count, max_retries, lease_owner, lease_expires_at,
+               risk_level, failure_reason, result, evidence, trace_id,
+               revision, created_at, updated_at, started_at, finished_at
+             ) VALUES (
+               $1, '1.0', $2, $3, $4, $5, $6, $7, $8, $9, $10, 'queued',
+               NULL, NULL, $11::jsonb, $12::jsonb, $13::jsonb, $14, $15,
+               $16, 0, $17, NULL, NULL, $18, NULL, NULL, '[]'::jsonb,
+               $19, 0, clock_timestamp(), clock_timestamp(), NULL, NULL
+             )`,
+            [
+              task.taskId,
+              task.idempotencyScope,
+              task.idempotencyKey,
+              requestFingerprint,
+              task.taskType,
+              task.handlerVersion,
+              task.executionIdempotent,
+              task.title,
+              task.description,
+              task.priority,
+              JSON.stringify(task.requiredSkills),
+              JSON.stringify(task.requiredItems),
+              JSON.stringify(task.target),
+              task.parentTaskId,
+              task.deadline,
+              task.timeoutMs,
+              task.maxRetries,
+              task.riskLevel,
+              task.traceId,
+            ],
+          );
+        }
         await upgradePool.query(
           `UPDATE studio_tasks
            SET deadline = CASE WHEN task_id = $1
@@ -614,7 +685,6 @@ describeReal.sequential(
           expect(taskRecordSchema.safeParse(task_snapshot).success).toBe(true);
         }
       } finally {
-        await upgradeAdapter.close();
         await upgradePool.end();
         await adminPool.query(`DROP SCHEMA "${upgradeSchema}" CASCADE`);
       }
@@ -631,6 +701,7 @@ describeReal.sequential(
       expect(tables.rows.map(({ table_name }) => table_name)).toEqual([
         "studio_task_cancellation_requests",
         "studio_task_dependencies",
+        "studio_task_executions",
         "studio_task_history",
         "studio_task_outbox",
         "studio_tasks",
@@ -686,6 +757,34 @@ describeReal.sequential(
           [created.task.taskId],
         ),
       ).rejects.toThrow();
+    }, REAL_TEST_TIMEOUT_MS);
+
+    it("restores persistent execution FSM progress after a runtime restart", async () => {
+      const task = (
+        await repository.createTask(
+          taskCreateCommand("test.persistent-execution-fsm"),
+        )
+      ).task;
+      const store = new PostgresTaskExecutionStore(poolAdapter);
+      const firstRuntime = new PersistentTaskStateMachine({ store });
+      await firstRuntime.create({
+        taskId: task.taskId,
+        botId: "isolated-test-bot",
+        goal: "Acquire a wooden pickaxe",
+      });
+      await firstRuntime.transition(task.taskId, "PLAN", {
+        currentStep: "expand recipe dependencies",
+        worldStateVersion: 2,
+      });
+
+      const restartedRuntime = new PersistentTaskStateMachine({ store });
+      expect(await restartedRuntime.restore(task.taskId)).toMatchObject({
+        taskId: task.taskId,
+        state: "PLAN",
+        currentStep: "expand recipe dependencies",
+        worldStateVersion: 2,
+        revision: 1,
+      });
     }, REAL_TEST_TIMEOUT_MS);
 
     it("rolls back task and history when the transactional outbox insert fails", async () => {
@@ -1020,52 +1119,61 @@ describeReal.sequential(
         },
       });
       const worker = createWorker(registry, "integration-worker-outbox-e2e");
-      await worker.start();
-      const input = {
-        schemaVersion: "1.0" as const,
-        value: { operation: "digest", count: 2 },
-      };
-      const submitted = await repository.submitTask({
-        ...taskSubmitCommand("isolated.acceptance.digest"),
-        input,
-      });
-      const reconciler = new TaskOutboxReconciler({
-        repository,
-        queue,
-        instanceId: "integration-outbox-e2e-reconciler",
-      });
-      await expect(reconciler.reconcileOnce()).resolves.toEqual({
-        claimed: 1,
-        enqueued: 1,
-        skipped: 0,
-        failed: 0,
-      });
-      await expect(
-        repository.getTaskOutbox(
+      try {
+        await worker.start();
+        const input = {
+          schemaVersion: "1.0" as const,
+          value: { operation: "digest", count: 2 },
+        };
+        const submitted = await repository.submitTask({
+          ...taskSubmitCommand("isolated.acceptance.digest"),
+          input,
+        });
+        const reconciler = new TaskOutboxReconciler({
+          repository,
+          queue,
+          instanceId: "integration-outbox-e2e-reconciler",
+        });
+        await expect(reconciler.reconcileOnce()).resolves.toEqual({
+          claimed: 1,
+          enqueued: 1,
+          skipped: 0,
+          failed: 0,
+        });
+        await expect(
+          repository.getTaskOutbox(
+            submitted.task.taskId,
+            submitted.task.revision,
+          ),
+        ).resolves.toMatchObject({
+          status: "delivered",
+          messageId: submitted.outbox.messageId,
+        });
+        const completed = await waitForTask(
+          repository,
           submitted.task.taskId,
-          submitted.task.revision,
-        ),
-      ).resolves.toMatchObject({
-        status: "delivered",
-        messageId: submitted.outbox.messageId,
-      });
-      const completed = await waitForTask(
-        repository,
-        submitted.task.taskId,
-        (candidate) => candidate.status === "completed",
-      );
-      const serialized = JSON.stringify(input.value);
-      expect(completed.result).toEqual({
-        schemaVersion: "1.0",
-        kind: "isolated.acceptance.digest.v1",
-        sha256: createHash("sha256").update(serialized, "utf8").digest("hex"),
-        byteLength: Buffer.byteLength(serialized, "utf8"),
-      });
-      expect(completed.evidence).toEqual([
-        { kind: "trace", reference: completed.traceId },
-      ]);
-      await worker.close();
-      await queue.close();
+          (candidate) => candidate.status === "completed",
+        );
+        const persistedInput = completed.input as typeof input;
+        const serialized = JSON.stringify(persistedInput.value);
+        expect(completed.result).toEqual({
+          schemaVersion: "1.0",
+          kind: "isolated.acceptance.digest.v1",
+          sha256: createHash("sha256")
+            .update(serialized, "utf8")
+            .digest("hex"),
+          byteLength: Buffer.byteLength(serialized, "utf8"),
+        });
+        expect(completed.evidence).toEqual([
+          { kind: "trace", reference: completed.traceId },
+        ]);
+      } finally {
+        try {
+          await worker.close();
+        } finally {
+          await queue.close();
+        }
+      }
     }, REAL_TEST_TIMEOUT_MS);
 
     it("records a failed queue delivery and resets its consecutive budget after recovery", async () => {
@@ -2160,7 +2268,7 @@ describeReal.sequential(
         });
         expect(acknowledged?.acknowledgedAt).not.toBeNull();
 
-        await expect(stopTaskWorkerProcess(child)).resolves.toBe(0);
+        await expectTaskWorkerProcessStopped(child);
       } finally {
         if (child.exitCode === null && child.signalCode === null) {
           await stopTaskWorkerProcess(child).catch(async () => {
@@ -2214,7 +2322,11 @@ describeReal.sequential(
           submitted.task.taskId,
           (candidate) => candidate.status === "completed",
         );
-        const serialized = JSON.stringify(input.value);
+        // PostgreSQL JSONB may normalize object key order before the worker
+        // reads the task. Compare against the durable input that was executed,
+        // matching the in-process delivery test above.
+        const persistedInput = completed.input as typeof input;
+        const serialized = JSON.stringify(persistedInput.value);
         expect(completed.result).toEqual({
           schemaVersion: "1.0",
           kind: "isolated.acceptance.digest.v1",
@@ -2232,7 +2344,7 @@ describeReal.sequential(
             submitted.task.revision,
           ),
         ).resolves.toMatchObject({ status: "delivered" });
-        await expect(stopTaskWorkerProcess(child)).resolves.toBe(0);
+        await expectTaskWorkerProcessStopped(child);
       } finally {
         if (child.exitCode === null && child.signalCode === null) {
           await stopTaskWorkerProcess(child).catch(async () => {

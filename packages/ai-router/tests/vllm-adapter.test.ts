@@ -97,6 +97,7 @@ describe('VLLMAdapter', () => {
     expect(url).toBe('http://192.168.100.2:8000/v1/chat/completions');
     expect(JSON.parse(String(init?.body))).toMatchObject({
       model: 'test-model',
+      chat_template_kwargs: { enable_thinking: false },
       response_format: {
         type: 'json_schema',
         json_schema: {
@@ -106,6 +107,63 @@ describe('VLLMAdapter', () => {
         },
       },
     });
+  });
+
+  it('sends an optional bearer token to authenticated vLLM endpoints', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith('/health')) return new Response('ok', { status: 200 });
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: 'ready' } }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = new VLLMAdapter('http://127.0.0.1:8001', 'ornith15-heretic', 'test-api-key');
+
+    await expect(adapter.health()).resolves.toMatchObject({ available: true });
+    await adapter.generate({
+      prompt: 'ready',
+      maxTokens: 8,
+      temperature: 0,
+      timeoutMs: 5_000,
+      traceId: 'trace-vllm-auth',
+    });
+
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer test-api-key');
+    }
+  });
+
+  it('removes JSON Schema propertyNames unsupported by vLLM grammar compilation', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { content: '{"action":"noop","labels":{}}' } }],
+          usage: { prompt_tokens: 12, completion_tokens: 5 },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const adapter = new VLLMAdapter('http://127.0.0.1:18100', 'test-model');
+
+    await adapter.generate({
+      prompt: 'plan',
+      maxTokens: 64,
+      temperature: 0,
+      timeoutMs: 5_000,
+      traceId: 'trace-vllm-property-names',
+      schema: z.object({
+        action: z.literal('noop'),
+        labels: z.record(z.string(), z.string()),
+      }).strict(),
+    });
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(JSON.stringify(body.response_format.json_schema.schema)).not.toContain('propertyNames');
   });
 
   it('rejects malformed successful responses instead of returning invented defaults', async () => {

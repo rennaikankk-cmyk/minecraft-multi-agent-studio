@@ -202,7 +202,7 @@ export function BotDashboard() {
               <DrawerFact label="L0 安全" value={formatSafety(detailBot)} />
               <DrawerFact
                 label="当前任务"
-                value={detailBot.currentTask ? `${detailBot.currentTask.title} · ${detailBot.currentTask.status}` : "无任务"}
+                value={formatCurrentTask(detailBot)}
               />
               <DrawerFact
                 label="MC 版本"
@@ -297,7 +297,7 @@ function BotCard({
         <Fact label="生命" value={bot.health ? `${formatNumber(bot.health.current)} / ${bot.health.maximum === null ? "?" : formatNumber(bot.health.maximum)}` : "不可用"} />
         <Fact label="饥饿" value={bot.food ? `${bot.food.level} / 20` : "不可用"} />
         <Fact label="延迟" value={bot.latencyMs === null ? "不可用" : `${bot.latencyMs} ms`} />
-        <Fact label="任务" value={bot.currentTask ? `${bot.currentTask.title} · ${bot.currentTask.status}` : "无任务"} />
+        <Fact label="任务" value={formatCurrentTask(bot)} />
         <Fact label="L0安全" value={formatSafety(bot)} wide />
         <Fact label="位置" value={formatPosition(bot)} wide />
         <Fact label="版本" value={bot.minecraftVersion?.resolvedVersion ?? "未解析"} wide />
@@ -378,6 +378,16 @@ function formatSafety(bot: PublicBotDetailV1): string {
   };
   const risks = safety.activeRisks.map((risk) => labels[risk]).join("、");
   return risks || "正在干预";
+}
+
+function formatCurrentTask(bot: PublicBotDetailV1): string {
+  if (bot.currentTask) {
+    return `${bot.currentTask.title} · ${bot.currentTask.status}`;
+  }
+  if (bot.safety?.normalTasksPaused) {
+    return `安全暂停: ${formatSafety(bot)} · paused`;
+  }
+  return "无任务";
 }
 
 function formatNumber(value: number): string {

@@ -206,6 +206,21 @@ describe("ServerProfile", () => {
     ).toBe(false);
   });
 
+  it("accepts a Desktop Manager real-server profile without granting test probing", () => {
+    expect(
+      serverProfileSchema.parse({
+        ...validProfile,
+        purpose: "managed",
+        networkScope: "private-lan",
+        host: "192.168.10.20",
+      }),
+    ).toMatchObject({
+      purpose: "managed",
+      networkScope: "private-lan",
+      host: "192.168.10.20",
+    });
+  });
+
   it("rejects public hosts, production purpose, passwords, and invalid retries", () => {
     expect(
       serverProfileSchema.safeParse({ ...validProfile, host: "8.8.8.8" }).success,

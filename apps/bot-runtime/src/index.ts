@@ -72,6 +72,14 @@ export {
 } from "./combat-driver.js";
 export { MineflayerCombatAdapter } from "./combat-mineflayer-adapter.js";
 export {
+  ExplosionPacketAdapter,
+  ExplosionPacketAdapterError,
+  type CombatExplosionObservation,
+  type CombatExplosionVector,
+  type ExplosionPacketAdapterErrorCode,
+  type ExplosionPacketSchemaKind,
+} from "./explosion-packet-adapter.js";
+export {
   BotRuntimeHost,
   type BotRuntimeHostOptions,
 } from "./runtime-host.js";
@@ -98,10 +106,12 @@ export {
   ServerProfileError,
   loadServerProfile,
   serverProfileCombatConfigSchema,
+  serverProfilePurposeSchema,
   serverProfileSchema,
   type ServerProfile,
   type ServerProfileCombatConfig,
   type ServerProfileErrorCode,
+  type ServerProfilePurpose,
 } from "./server-profile.js";
 export {
   BotSupervisorConfigError,
@@ -131,8 +141,32 @@ export type {
   BotClientFactory,
   BotClientHandlers,
   BotClientSnapshot,
+  BotDamageInfo,
   BotDisconnectInfo,
+  BotRecoveryAction,
+  BotRecoveryActionResult,
 } from "./client.js";
+export {
+  DEFAULT_PROGRESS_WATCHDOG_CONFIG,
+  ProgressWatchdog,
+  type ProgressSample,
+  type ProgressWatchdogConfig,
+  type ProgressWatchdogEvent,
+  type ProgressWatchdogEventKind,
+  type ProgressWatchdogSnapshot,
+} from "./progress-watchdog.js";
+export {
+  importantBlockNames,
+  WorldStateStore,
+  type EntityState,
+  type ImportantBlockName,
+  type InventoryItemState,
+  type NavigationState,
+  type NearbyBlockState,
+  type WorldPosition,
+  type WorldStateObservation,
+  type WorldStateSnapshot,
+} from "./world-state.js";
 export {
   isMineflayerTestedVersion,
   isMineflayerUnsupportedVersionError,

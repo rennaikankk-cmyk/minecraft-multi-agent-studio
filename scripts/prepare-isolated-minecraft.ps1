@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
   [string]$RuntimeRoot = "",
-  [string]$ServerProfilePath = ""
+  [string]$ServerProfilePath = "",
+  [string]$ServerPort = $env:MC_TEST_SERVER_PORT
 )
 
 $ErrorActionPreference = "Stop"
@@ -165,6 +166,17 @@ $script:ServerUrl = "https://piston-data.mojang.com/v1/objects/6bce4ef400e4efaa6
 $script:ExpectedSha1 = "6bce4ef400e4efaa63a13d5e6f6b500be969ef81"
 $script:ExpectedSha256 = "2349d9a8f0d4be2c40e7692890ef46a4b07015e7955b075460d02793be7fbbe7"
 
+if ([string]::IsNullOrWhiteSpace($ServerPort)) {
+  $ServerPort = "25565"
+}
+if ($ServerPort -notmatch "^[0-9]+$") {
+  throw "MC_TEST_SERVER_PORT must be an integer between 1024 and 65535."
+}
+$serverPortValue = [int]$ServerPort
+if ($serverPortValue -lt 1024 -or $serverPortValue -gt 65535) {
+  throw "MC_TEST_SERVER_PORT must be an integer between 1024 and 65535."
+}
+
 if ([string]::IsNullOrWhiteSpace($RuntimeRoot)) {
   $RuntimeRoot = Join-Path $projectRoot "runtime-data\isolated-test"
 } else {
@@ -217,7 +229,7 @@ if (Test-Path -LiteralPath $serverJar) {
 
 $propertiesText = @(
   "server-ip=127.0.0.1"
-  "server-port=25565"
+  "server-port=$serverPortValue"
   "online-mode=false"
   "enable-rcon=false"
   "enable-query=false"
@@ -226,11 +238,13 @@ $propertiesText = @(
   "force-gamemode=true"
   "enable-status=true"
   "spawn-protection=0"
-  "difficulty=peaceful"
+  "difficulty=easy"
   "gamemode=survival"
   "spawn-animals=false"
   "spawn-monsters=false"
   "spawn-npcs=false"
+  # The isolated acceptance uses exactly two real offline clients to keep the
+  # local Java server within the available memory budget.
   "max-players=2"
   "motd=Minecraft Studio isolated test"
 ) -join [Environment]::NewLine
@@ -262,10 +276,18 @@ $profile = [ordered]@{
   purpose = "isolated-test"
   networkScope = "loopback"
   host = "127.0.0.1"
-  port = 25565
+  port = $serverPortValue
   minecraftVersion = $script:MinecraftVersion
-  username = "StudioBot"
+  username = "StudioBot01"
   auth = "offline"
+  combat = [ordered]@{
+    enabled = $true
+    stance = "preserve-life"
+    whitelist = [ordered]@{
+      usernames = @("StudioBot01", "StudioBot02")
+      uuids = @()
+    }
+  }
   statusIntervalMs = 1000
   heartbeatIntervalMs = 5000
   stopGracePeriodMs = 5000

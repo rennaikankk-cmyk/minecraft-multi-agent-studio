@@ -99,8 +99,14 @@ export const buildBlueprintInputSchema = z
   .strict();
 export type BuildBlueprintInput = z.infer<typeof buildBlueprintInputSchema>;
 
-const observedPositionSchema = coordinateSchema
-  .extend({ dimension: dimensionSchema, serverProfileId: identifierSchema })
+const observedPositionSchema = z
+  .object({
+    x: z.number().finite().min(-30_000_000).max(30_000_000),
+    y: z.number().finite().min(-2_048).max(2_048),
+    z: z.number().finite().min(-30_000_000).max(30_000_000),
+    dimension: dimensionSchema,
+    serverProfileId: identifierSchema,
+  })
   .strict();
 export const buildBlueprintStateSchema = z
   .object({

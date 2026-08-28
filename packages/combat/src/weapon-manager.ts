@@ -120,7 +120,12 @@ export type CombatSwingDecision = Readonly<{
   cooldownRatio: number;
   /** 不打时距下一次可打还差多少毫秒；可打时为 0。 */
   waitMs: number;
-  reason: "READY" | "COOLDOWN" | "NO_WEAPON" | "OUT_OF_RANGE";
+  reason:
+    | "READY"
+    | "COOLDOWN"
+    | "NO_WEAPON"
+    | "OUT_OF_RANGE"
+    | "TARGET_INVULNERABLE";
 }>;
 
 export type CombatRangedAction = "DRAW" | "HOLD" | "RELEASE" | "NONE";
@@ -337,9 +342,16 @@ export class WeaponManager {
     weapon: CombatWeaponCandidate | null,
     nowMs: number,
     targetInReach: boolean,
+    targetInvulnerableRemainingMs = 0,
   ): CombatSwingDecision {
     if (!Number.isFinite(nowMs)) {
       throw new TypeError("nowMs 必须是有限数。");
+    }
+    if (
+      !Number.isFinite(targetInvulnerableRemainingMs) ||
+      targetInvulnerableRemainingMs < 0
+    ) {
+      throw new TypeError("targetInvulnerableRemainingMs 必须是非负有限数。");
     }
     if (!weapon) {
       return {
@@ -358,6 +370,16 @@ export class WeaponManager {
         cooldownRatio: ratio,
         waitMs: 0,
         reason: "OUT_OF_RANGE",
+      };
+    }
+    if (targetInvulnerableRemainingMs > 0) {
+      // Unknown i-frame data is represented by 0ms at the caller. A positive
+      // value is therefore always an observed tactical delay.
+      return {
+        shouldAttack: false,
+        cooldownRatio: ratio,
+        waitMs: Math.ceil(targetInvulnerableRemainingMs),
+        reason: "TARGET_INVULNERABLE",
       };
     }
     if (ratio < this.policy.minimumCooldownRatio) {

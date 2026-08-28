@@ -118,7 +118,7 @@ const definitionMetadataSchema = z
       .array(skillCapabilitySchema)
       .max(16)
       .refine((values) => new Set(values).size === values.length),
-    timeoutMs: z.number().int().min(10).max(60_000),
+    timeoutMs: z.number().int().min(10).max(10 * 60_000),
     idempotent: z.boolean(),
     retryPolicy: retryPolicySchema,
     preconditions: z

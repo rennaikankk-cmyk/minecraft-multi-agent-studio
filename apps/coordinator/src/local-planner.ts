@@ -2,12 +2,20 @@ import { randomUUID } from "node:crypto";
 
 import {
   aiRequestPriorities,
+  parseStructuredOutput,
   type AIScheduledResult,
   type GenerateResult,
   type ScheduledAIRouter,
 } from "@minecraft-studio/ai-router";
+import type {
+  AppLogger,
+  LifecycleMetricName,
+  MetricRecorder,
+} from "@minecraft-studio/observability";
 import {
+  goalResultSummaryFromOutput,
   identifierSchema,
+  parseSkillExecutionResult,
   type BotSkillCatalogEntryV1,
   skillIdentifierSchema,
   skillInvocationV1Schema,
@@ -20,12 +28,17 @@ import {
 import {
   GoalPlanner,
   PlanSupervisor,
-  skillIdForStepKind,
   type GoalRequest,
   type PlanStep,
   type PlannerInventory,
   type StepOutcome,
+  type SupervisionResult,
 } from "@minecraft-studio/skills";
+import {
+  PersistentTaskStateMachine,
+  TaskExecutionError,
+  type TaskExecutionRecord,
+} from "@minecraft-studio/task-system";
 import { z } from "zod";
 
 import type { BotRegistry, BotRegistryRecord } from "./bot-registry.js";
@@ -51,6 +64,15 @@ export const LOCAL_PLANNER_REASON_CODES = Object.freeze([
 ] as const);
 const reasonCodeSchema = z.enum(LOCAL_PLANNER_REASON_CODES);
 const TRUSTED_SERVER_PROFILE_PLACEHOLDER = "$CURRENT_SERVER_PROFILE";
+// Operator cancellation is trusted only from AbortSignal/task state. Runtime
+// SKILL_CANCELLED is also emitted when L0 preempts an active normal Skill.
+const RECOVERABLE_L0_ERROR_CODES = new Set([
+  "NORMAL_ACTIONS_PAUSED",
+  "SKILL_CANCELLED",
+  "SKILL_EXECUTION_INTERRUPTED",
+]);
+const DEFAULT_SAFETY_RECOVERY_POLL_INTERVAL_MS = 100;
+const DEFAULT_MAX_SAFETY_RECOVERY_WAIT_MS = 30_000;
 
 const localPlannerNoopDecisionSchema = z
   .object({
@@ -60,6 +82,51 @@ const localPlannerNoopDecisionSchema = z
     reasonCode: reasonCodeSchema,
   })
   .strict();
+
+/**
+ * A catalog entry as constrained generation needs it. `inputSchema` is optional
+ * so callers that only know IDs and versions still compile; supplying it lets
+ * the grammar constrain that Skill's input instead of accepting any JSON.
+ */
+export type LocalPlannerGenerationSkill = Pick<
+  BotSkillCatalogEntryV1,
+  "skillId" | "skillVersion"
+> &
+  Partial<Pick<BotSkillCatalogEntryV1, "inputSchema">>;
+
+/**
+ * The trusted identity a decision must echo back. The Coordinator already owns
+ * both values and rejects any deviation as PLANNER_DECISION_MISMATCH, so
+ * generation never needs to produce them freely.
+ */
+export type LocalPlannerTrustedIdentity = Readonly<{
+  botId: string;
+  taskId: string;
+}>;
+
+/**
+ * Narrows `botId`/`taskId` to the exact trusted values for constrained
+ * generation. Free-form identifier generation leaves a region where the grammar
+ * accepts arbitrary whitespace, and a model that has already decided the
+ * outcome can stall there until `max_tokens` instead of emitting the remaining
+ * required keys. Pinning removes that region without weakening validation: the
+ * full protocol schema still re-parses the response before dispatch.
+ */
+function trustedIdentityFields(identity: LocalPlannerTrustedIdentity | undefined) {
+  if (!identity) return { botId: identifierSchema, taskId: identifierSchema };
+  const trusted = z.object({ botId: identifierSchema, taskId: identifierSchema });
+  const parsed = trusted.safeParse(identity);
+  if (!parsed.success) {
+    throw new LocalPlannerError(
+      "PLANNER_DECISION_MISMATCH",
+      "Trusted planner identity is not a valid identifier pair.",
+    );
+  }
+  return {
+    botId: z.literal(parsed.data.botId),
+    taskId: z.literal(parsed.data.taskId),
+  };
+}
 
 const planGoalItemNameSchema = z
   .string()
@@ -75,9 +142,12 @@ const planGoalSchema = z
   })
   .strict();
 
-function localPlannerInvokeDecisionSchema(
+function localPlannerInvokeDecisionSchema<
+  InputSchema extends z.ZodType = typeof skillJsonValueSchema,
+>(
   skillIdSchema: z.ZodType<string>,
   skillVersionValueSchema: z.ZodType<string>,
+  inputValueSchema: InputSchema = skillJsonValueSchema as unknown as InputSchema,
 ) {
   return z
     .object({
@@ -86,10 +156,55 @@ function localPlannerInvokeDecisionSchema(
       taskId: identifierSchema,
       skillId: skillIdSchema,
       skillVersion: skillVersionValueSchema,
-      input: skillJsonValueSchema,
+      input: inputValueSchema,
       reasonCode: reasonCodeSchema,
     })
     .strict();
+}
+
+/**
+ * Builds one constrained invoke branch per catalog Skill, pairing each exact
+ * `skillId`/`skillVersion` with that Skill's own advertised input schema.
+ *
+ * A single shared branch has to type `input` as arbitrary JSON, which is the
+ * only unconstrained region left in the decision grammar once identity and
+ * reason codes are pinned. Constrained decoding then steers away from
+ * `invoke_skill` toward the branches the grammar actually describes, so Skills
+ * never get invoked. Compiling each advertised schema into its own branch
+ * removes that asymmetry. This narrows generation only; every decision is still
+ * re-parsed by the protocol schema and re-validated against the advertised
+ * schema before dispatch.
+ *
+ * A Skill whose advertised schema will not compile is omitted rather than
+ * widened back to arbitrary JSON: `validateAdvertisedInput` would reject its
+ * dispatch anyway, so advertising it for generation could only produce a
+ * decision that cannot be executed.
+ */
+function localPlannerInvokeBranches(
+  availableSkills: readonly LocalPlannerGenerationSkill[],
+): z.ZodType[] {
+  const branches: z.ZodType[] = [];
+  for (const { skillId, skillVersion, inputSchema } of availableSkills) {
+    if (inputSchema === undefined) continue;
+    let inputValueSchema: z.ZodType;
+    try {
+      inputValueSchema = z.fromJSONSchema(
+        plannerInputSchema(inputSchema) as Parameters<
+          typeof z.fromJSONSchema
+        >[0],
+      );
+    } catch {
+      continue;
+    }
+    branches.push(
+      localPlannerInvokeDecisionSchema(
+        z.literal(skillId),
+        z.literal(skillVersion),
+        inputValueSchema,
+      ),
+    );
+  }
+  return branches;
 }
 
 function localPlannerPlanItemsDecisionSchema(
@@ -121,12 +236,11 @@ export const localPlannerDecisionSchema = z.discriminatedUnion("action", [
  * complete protocol-backed schema before dispatch.
  */
 export function buildLocalPlannerGenerationSchema(
-  availableSkills: readonly Pick<
-    BotSkillCatalogEntryV1,
-    "skillId" | "skillVersion"
-  >[],
+  availableSkills: readonly LocalPlannerGenerationSkill[],
   plannedItemNames: readonly string[] = new GoalPlanner().resourceGraph.knownItemNames(),
+  trustedIdentity?: LocalPlannerTrustedIdentity,
 ) {
+  const identity = trustedIdentityFields(trustedIdentity);
   const skillIds = [...new Set(availableSkills.map(({ skillId }) => skillId))];
   const skillVersions = [
     ...new Set(availableSkills.map(({ skillVersion }) => skillVersion)),
@@ -137,27 +251,169 @@ export function buildLocalPlannerGenerationSchema(
       "Bot Runtime has no versions available for constrained generation.",
     );
   }
-  const invokeSchema = localPlannerInvokeDecisionSchema(
-    z.enum(skillIds as [string, ...string[]]),
-    z.enum(skillVersions as [string, ...string[]]),
+  const perSkillInvokeBranches = localPlannerInvokeBranches(availableSkills).map(
+    (branch) => (branch as z.ZodObject).extend(identity),
   );
+  const invokeBranches = perSkillInvokeBranches.length > 0
+    ? perSkillInvokeBranches
+    : [
+        localPlannerInvokeDecisionSchema(
+          z.enum(skillIds as [string, ...string[]]),
+          z.enum(skillVersions as [string, ...string[]]),
+        ).extend(identity),
+      ];
+  const noopSchema = localPlannerNoopDecisionSchema.extend(identity);
   const itemNames = [...new Set(plannedItemNames)].filter(
     (itemName) => planGoalItemNameSchema.safeParse(itemName).success,
   );
+  const branches: z.ZodType[] = [noopSchema, ...invokeBranches];
   if (itemNames.length > 0) {
-    const planSchema = localPlannerPlanItemsDecisionSchema(
-      z.enum(itemNames as [string, ...string[]]),
+    branches.push(
+      localPlannerPlanItemsDecisionSchema(
+        z.enum(itemNames as [string, ...string[]]),
+      ).extend(identity),
     );
-    return z.discriminatedUnion("action", [
-      localPlannerNoopDecisionSchema,
-      invokeSchema,
-      planSchema,
-    ] as const);
   }
-  return z.discriminatedUnion("action", [
-    localPlannerNoopDecisionSchema,
-    invokeSchema,
-  ] as const);
+  return z.union(branches as [z.ZodType, z.ZodType, ...z.ZodType[]]);
+}
+
+/**
+ * Offers exactly one plan_items branch for a single trusted item, with no noop
+ * and no invoke branch.
+ *
+ * Reserved for the retry below. With all branches offered, the model answers a
+ * gather-then-craft goal with noop/NO_SAFE_SKILL every time: it reads "no one
+ * advertised skill completes this" as grounds to decline, and no amount of
+ * prompt wording moved it (v7 through v11 all measured 0). Removing the branch
+ * it wrongly prefers is the only lever left that does not weaken a check.
+ *
+ * Narrowing is safe precisely because it constrains generation only: the
+ * response is still re-parsed with the protocol-backed
+ * localPlannerDecisionSchema, still grounded against the operator goal, and
+ * every expanded step is still authorized by the deterministic GoalPlanner.
+ */
+export function buildLocalPlannerPlanItemsRetrySchema(
+  itemName: string,
+  trustedIdentity?: LocalPlannerTrustedIdentity,
+) {
+  if (!planGoalItemNameSchema.safeParse(itemName).success) {
+    throw new LocalPlannerError(
+      "PLANNER_GOAL_UNSUPPORTED",
+      "The retry item name is outside the trusted planning vocabulary.",
+    );
+  }
+  return localPlannerPlanItemsDecisionSchema(z.literal(itemName)).extend(
+    trustedIdentityFields(trustedIdentity),
+  );
+}
+
+/**
+ * 取得类动词。中文一侧此前只认书面的"获取/制作/采集/收集/合成"，
+ * 而"做一个熔炉""挖点铁矿"这类最常见的口语说法一个都不匹配——目标里明明写了
+ * 可达物品，却因为动词没登记而降级成 noop。英文一侧早已同时收 make 与 build，
+ * 中文补齐到同一水位。
+ *
+ * 放宽的只是"这句话是不是在要东西"，不是任何安全判定：候选仍只能来自
+ * 确定性规划器已证明可达的集合，且必须唯一命中，否则照样返回 null。
+ *
+ * 2026-08-26：上一轮补齐仍然漏了中文最常用的"获得"。实测一条 live 目标
+ * "获得一把木镐" 因此降级成 noop/NO_SAFE_SKILL——别名表里 `木镐` 在，
+ * 只是动词没登记；同一句换成"获取"立刻解析出 wooden_pickaxe。同批实测为 null
+ * 的还有 得到/拿到/弄/搞/我要 和英文的 get/need，一并登记。
+ * 未登记"整"("整一把木镐")：它会撞上"整个""整理"，收益不值这个误判。
+ *
+ * 拉丁一侧只加**前置** \b：这样 craft 仍然吃得下 crafting、get 吃得下 getting，
+ * 而 forget/target/budget 里的 get 不再算命中——顺带收掉了 determine 里的 mine、
+ * remake 里的 make 这类既有的误命中。中日韩没有 \b 意义上的词边界，所以分成两支。
+ */
+const PLAN_ITEMS_ACQUISITION_GOAL_PATTERN =
+  /(?:\b(?:obtain|craft|make|build|gather|collect|acquire|mine|smelt|get|need|want|fetch|bring)|获取|获得|得到|拿到|制作|采集|收集|合成|做|造|挖|烧|弄|搞|我要|想要|需要|给我)/iu;
+
+/**
+ * Names the single trusted item a declined goal is asking to acquire, or null
+ * when the goal is not an unambiguous single-item acquisition request.
+ *
+ * Both halves matter. The acquisition verb keeps goals that merely mention an
+ * item ("equip the best armor") out of the retry, and the exactly-one rule
+ * keeps a multi-item goal out, since plan_items carries exactly one goal and
+ * picking one of several would be the Coordinator inventing operator intent.
+ * Every candidate is drawn from the caller's trusted reachable set, so this
+ * reads the goal only to choose among items the deterministic planner has
+ * already proven it can reach.
+ */
+export function plannedAcquisitionGoalItem(
+  operatorGoal: string,
+  plannedItemNames: readonly string[],
+): string | null {
+  if (!PLAN_ITEMS_ACQUISITION_GOAL_PATTERN.test(operatorGoal)) return null;
+  const matched = [...new Set(plannedItemNames)]
+    .filter((itemName) => planGoalItemNameSchema.safeParse(itemName).success)
+    .map((itemName) => ({
+      itemName,
+      spans: goalNameSpans(operatorGoal, itemName),
+    }))
+    .filter(({ spans }) => spans.length > 0);
+  const distinct = matched.filter(
+    ({ itemName, spans }) =>
+      !spans.every((span) =>
+        matched.some(
+          (other) =>
+            other.itemName !== itemName &&
+            other.spans.some((cover) => strictlyCovers(cover, span)),
+        ),
+      ),
+  );
+  return distinct.length === 1 ? distinct[0]!.itemName : null;
+}
+
+type GoalSpan = Readonly<{ start: number; end: number }>;
+
+/**
+ * True when `cover` contains `span` and is strictly longer, which is what makes
+ * the shorter name an artifact of the longer spelling rather than a request.
+ */
+function strictlyCovers(cover: GoalSpan, span: GoalSpan): boolean {
+  return (
+    cover.start <= span.start &&
+    span.end <= cover.end &&
+    cover.end - cover.start > span.end - span.start
+  );
+}
+
+/**
+ * Where the goal spells an item, across its own name and every registered
+ * alias.
+ *
+ * Positions, not just a yes/no, because reachable item names nest: "钻石镐"
+ * contains "钻石" and "diamond chestplate" contains "diamond". Counting those
+ * as two hits made the exactly-one rule decline the entire diamond tier —
+ * goals the deterministic planner derives a full chain for — as if the operator
+ * had named two items. Containment is a spelling fact, and the spans are what
+ * distinguish it from a genuine second request.
+ */
+function goalNameSpans(operatorGoal: string, itemName: string): GoalSpan[] {
+  const spans: GoalSpan[] = [];
+  for (const spelling of [
+    itemName,
+    itemName.replaceAll("_", " "),
+    ...(PLANNED_ITEM_GOAL_ALIASES[itemName] ?? []),
+  ]) {
+    for (const match of operatorGoal.matchAll(
+      goalTokenPattern(spelling, "giu"),
+    )) {
+      spans.push({ start: match.index, end: match.index + match[0].length });
+    }
+  }
+  return spans;
+}
+
+/**
+ * The single spelling rule shared by the retry guard and the pre-dispatch
+ * grounding check, so a goal the guard treats as naming an item can never be
+ * one that assertPlanGoalsGrounded then rejects as ungrounded.
+ */
+function goalNamesPlannedItem(operatorGoal: string, itemName: string): boolean {
+  return goalNameSpans(operatorGoal, itemName).length > 0;
 }
 
 export type LocalPlannerDecision = z.infer<typeof localPlannerDecisionSchema>;
@@ -176,6 +432,16 @@ export type LocalPlanRequest = Readonly<{
    */
   assignmentLeaseOwner?: string;
   signal?: AbortSignal;
+  /** Versions captured when the slow request was created. */
+  planVersion?: number;
+  worldStateVersion?: number;
+  /** Re-read immediately before dispatch to reject a stale model response. */
+  currentVersions?: () => Readonly<{
+    planVersion: number;
+    worldStateVersion: number;
+    taskCancelled?: boolean;
+    taskCompleted?: boolean;
+  }>;
 }>;
 
 export type LocalPlanResult =
@@ -229,12 +495,36 @@ export type LocalPlannerErrorCode =
   | "PLANNER_GOAL_EXECUTION_FAILED"
   | "PLAN_STEP_DISPATCH_UNAVAILABLE"
   | "STEP_TARGET_NOT_FOUND"
-  | "SKILL_INVOCATION_INVALID";
+  | "SKILL_INVOCATION_INVALID"
+  | "PLANNER_STALE_RESPONSE"
+  | "PLANNER_EXECUTION_OWNED"
+  | "PLANNER_RESTART_RECOVERY_STALE"
+  | "PLANNER_RESTART_RECOVERY_UNSAFE"
+  | "PLANNER_RESTART_RECOVERY_EXHAUSTED"
+  | "PLANNER_CANCELLED"
+  | "PLANNER_SKILL_RESULT_INVALID";
 
 export class LocalPlannerError extends Error {
-  constructor(readonly code: LocalPlannerErrorCode, message: string) {
-    super(message);
+  /** Plan step the failure came from, when the failure had one. Log-only. */
+  readonly stepIndex?: number;
+  /** Skill the failing step was bound to, when it had been bound. Log-only. */
+  readonly stepSkillId?: string;
+
+  constructor(
+    readonly code: LocalPlannerErrorCode,
+    message: string,
+    options?: Readonly<{
+      cause?: unknown;
+      stepIndex?: number;
+      stepSkillId?: string;
+    }>,
+  ) {
+    super(message, options);
     this.name = "LocalPlannerError";
+    if (options?.stepIndex !== undefined) this.stepIndex = options.stepIndex;
+    if (options?.stepSkillId !== undefined) {
+      this.stepSkillId = options.stepSkillId;
+    }
   }
 }
 
@@ -256,8 +546,41 @@ export type CoordinatorLocalPlannerOptions = Readonly<{
   transport: SkillInvocationTransport;
   coordinatorInstanceId: string;
   actorId?: string;
+  /**
+   * Diagnostic sink for the step ladder.  Without it a failed multi-step goal
+   * is only visible as one coarse code at the control link, and the per-step
+   * outcome lives solely in the Runtime's own log — which is a different
+   * process, and the wrong place to start a triage.
+   */
+  logger?: AppLogger;
+  taskStateMachine?: PersistentTaskStateMachine;
+  metrics?: MetricRecorder;
   now?: () => Date;
   randomId?: () => string;
+  safetyRecoveryPollIntervalMs?: number;
+  maxSafetyRecoveryWaitMs?: number;
+}>;
+
+type PlannerExecutionContext = Readonly<{
+  task: TaskExecutionRecord;
+  worldStateVersion: number;
+  claim: PlannerExecutionClaim;
+}>;
+
+type PlannerExecutionClaim = Readonly<{
+  owner: string;
+  leaseExpiresAt: string;
+}>;
+
+/**
+ * The bindable/excluded split of every planner-known item, with the reason each
+ * exclusion was made. Named rather than inferred because both log helpers take
+ * it as a parameter, and an indexed access on a private method is not a type
+ * the compiler will hand out.
+ */
+type GoalBindability = Readonly<{
+  bindable: readonly string[];
+  excluded: readonly Readonly<{ itemName: string; reason: string }>[];
 }>;
 
 type BoundPlanStep = Readonly<{
@@ -272,26 +595,202 @@ type LastSkillResult = Readonly<{
   result: SkillExecutionResultV1;
 }>;
 
+/**
+ * The observed world facts one plan step is allowed to be bound against.
+ *
+ * Both fields are observations, never predictions. `placementSites` holds only
+ * positions the Runtime read back after confirming a block is really there, and
+ * `placementReference` holds a block a `world.scan` just returned. A step whose
+ * fact is absent binds to null and fails closed, which is what keeps the
+ * coordinator from asserting a workstation exists where it never looked.
+ */
+type PlanStepBinding = Readonly<{
+  placementSites: ReadonlyMap<string, PlacementPosition>;
+  placementReference: PlacementPosition | null;
+}>;
+
 const COORDINATOR_COLLECT_MAX_DISTANCE = 16;
 const REOBSERVE_TIMEOUT_MS = 5_000;
 const NON_IDEMPOTENT_RESULT_UNCERTAIN = "NON_IDEMPOTENT_RESULT_UNCERTAIN";
+
+/** The one face a scanned ground block can be built on without further observation. */
+const COORDINATOR_PLACEMENT_FACE = Object.freeze({ x: 0, y: 1, z: 0 });
+/** Stations the coordinator can place after observing a trusted ground block. */
+const COORDINATOR_PLACEABLE_STATIONS: ReadonlySet<string> = new Set([
+  "crafting_table",
+  "furnace",
+]);
+/** Both are needed for any placement: one to observe the site, one to build on it. */
+const COORDINATOR_PLACEMENT_SKILLS = Object.freeze([
+  "world.scan",
+  "world.place-block",
+]);
+/**
+ * Ground blocks worth scanning for a placement reference. Every one is solid by
+ * name, so whichever the scan actually returns is an observed fact rather than
+ * an assumption about what the bot happens to be standing on.
+ */
+const COORDINATOR_PLACEMENT_GROUND_BLOCKS = Object.freeze([
+  "grass_block",
+  "dirt",
+  "stone",
+  "cobblestone",
+  "sand",
+  "gravel",
+  "coarse_dirt",
+  "podzol",
+]);
+const COORDINATOR_PLACEMENT_SCAN_MAX_COUNT = 16;
+const COORDINATOR_PLACEMENT_SCAN_MAX_DISTANCE = 6;
+const COORDINATOR_PLACEMENT_OPEN_BLOCK = "air";
+/**
+ * A reference must be far enough not to be the block under the bot's own feet
+ * and near enough to stay inside placement reach. Outside this window the
+ * coordinator reports no site rather than dispatching a placement the Runtime
+ * would refuse.
+ */
+const COORDINATOR_PLACEMENT_MIN_DISTANCE = 2;
+// The Runtime defaults unknown servers to STRICT (3.8 block reach). The scan
+// distance is measured to the reference block corner while crafting checks the
+// placed station center one block higher, so 3.0 keeps the resulting station in
+// reach instead of merely keeping its supporting block in reach.
+const COORDINATOR_PLACEMENT_MAX_DISTANCE = 3.0;
+
+type PlacementPosition = Readonly<{ x: number; y: number; z: number }>;
+
+/**
+ * Why a plan step cannot be bound, or null when it can.
+ *
+ * The single rule shared by the advertised-item report and the pre-dispatch
+ * execution gate. Two copies of it drifted once already: a unit test observed
+ * `SKILL_NOT_ADVERTISED:world.place-block` while production observed
+ * `STEP_KIND_UNSUPPORTED:place-station` for the same goal, because each caller
+ * decided in its own order which gate to check first.
+ */
+function unbindableStepReason(
+  step: PlanStep,
+  advertised: ReadonlySet<string>,
+): string | null {
+  if (!advertised.has(step.skillId)) {
+    return `SKILL_NOT_ADVERTISED:${step.skillId}`;
+  }
+  if (step.kind === "mine") return null;
+  if (step.kind === "craft") {
+    if (step.station === null) return null;
+    return COORDINATOR_PLACEABLE_STATIONS.has(step.station)
+      ? placementSupportReason(advertised)
+      : `STATION_UNSUPPORTED:${step.station}`;
+  }
+  if (step.kind === "smelt") {
+    if (step.station === null) return "STATION_UNSUPPORTED:furnace";
+    return COORDINATOR_PLACEABLE_STATIONS.has(step.station)
+      ? placementSupportReason(advertised)
+      : `STATION_UNSUPPORTED:${step.station}`;
+  }
+  if (step.kind === "place-station") {
+    return COORDINATOR_PLACEABLE_STATIONS.has(step.itemName)
+      ? placementSupportReason(advertised)
+      : `STATION_UNSUPPORTED:${step.itemName}`;
+  }
+  return `STEP_KIND_UNSUPPORTED:${step.kind}`;
+}
+
+function placementSupportReason(advertised: ReadonlySet<string>): string | null {
+  for (const skillId of COORDINATOR_PLACEMENT_SKILLS) {
+    if (!advertised.has(skillId)) return `SKILL_NOT_ADVERTISED:${skillId}`;
+  }
+  return null;
+}
+/**
+ * 中文与自然英文说法 → 计划物品名。**只影响"这条目标提到了哪个物品"的判定**，
+ * 不放宽任何检查：候选永远来自确定性 GoalPlanner 已证明可达的集合，
+ * 命中之后仍要过 assertPlanGoalsGrounded。
+ *
+ * 覆盖面必须跟上 ResourceGraph。此前只登记了四个物品，于是"做一个熔炉"这类
+ * 目标在规划器明明推得出链条时仍然被判成"没提到任何可达物品"而降级 noop——
+ * 缺的不是能力，是这张表。下面的 `plannedItemGoalAliasCoverage` 把它变成测试。
+ */
 const PLANNED_ITEM_GOAL_ALIASES: Readonly<Record<string, readonly string[]>> =
   Object.freeze({
-    oak_log: Object.freeze(["oak log", "oak_log", "橡木原木", "原木"]),
+    oak_log: Object.freeze(["oak log", "oak_log", "橡木原木", "原木", "木头"]),
+    dirt: Object.freeze(["dirt", "泥土"]),
     oak_planks: Object.freeze([
       "oak planks",
       "oak_planks",
       "橡木木板",
       "木板",
     ]),
-    stick: Object.freeze(["stick", "sticks", "木棍"]),
+    stick: Object.freeze(["stick", "sticks", "木棍", "木棒"]),
     crafting_table: Object.freeze([
       "crafting table",
       "crafting_table",
       "工作台",
       "合成台",
     ]),
+    cobblestone: Object.freeze(["cobblestone", "圆石", "鹅卵石"]),
+    coal: Object.freeze(["coal", "煤炭", "煤"]),
+    raw_iron: Object.freeze(["raw iron", "raw_iron", "粗铁", "铁矿石"]),
+    iron_ingot: Object.freeze(["iron ingot", "iron_ingot", "铁锭"]),
+    diamond: Object.freeze(["diamond", "diamonds", "钻石"]),
+    furnace: Object.freeze(["furnace", "熔炉", "炉子"]),
+    wooden_pickaxe: Object.freeze([
+      "wooden pickaxe",
+      "wooden_pickaxe",
+      "木镐",
+      "木制镐",
+    ]),
+    stone_pickaxe: Object.freeze([
+      "stone pickaxe",
+      "stone_pickaxe",
+      "石镐",
+      "石制镐",
+    ]),
+    iron_pickaxe: Object.freeze([
+      "iron pickaxe",
+      "iron_pickaxe",
+      "铁镐",
+      "铁制镐",
+    ]),
+    diamond_pickaxe: Object.freeze([
+      "diamond pickaxe",
+      "diamond_pickaxe",
+      "钻石镐",
+    ]),
+    diamond_sword: Object.freeze([
+      "diamond sword",
+      "diamond_sword",
+      "钻石剑",
+    ]),
+    diamond_helmet: Object.freeze([
+      "diamond helmet",
+      "diamond_helmet",
+      "钻石头盔",
+    ]),
+    diamond_chestplate: Object.freeze([
+      "diamond chestplate",
+      "diamond_chestplate",
+      "钻石胸甲",
+    ]),
+    diamond_leggings: Object.freeze([
+      "diamond leggings",
+      "diamond_leggings",
+      "钻石护腿",
+    ]),
+    diamond_boots: Object.freeze([
+      "diamond boots",
+      "diamond_boots",
+      "钻石靴子",
+      "钻石鞋",
+    ]),
   });
+
+/**
+ * 别名表覆盖到的物品名，供测试与 ResourceGraph 对账。导出的是键集合而不是整张
+ * 表：调用方需要的是"哪些物品能被目标文本认出来"，不该拿到可改的别名列表。
+ */
+export const plannedItemGoalAliasCoverage: readonly string[] = Object.freeze(
+  Object.keys(PLANNED_ITEM_GOAL_ALIASES).sort(),
+);
 
 export class CoordinatorLocalPlanner {
   private readonly now: () => Date;
@@ -300,12 +799,30 @@ export class CoordinatorLocalPlanner {
   private readonly actorId: string;
   private readonly goalPlanner: GoalPlanner;
   private readonly planSupervisor: PlanSupervisor;
+  private readonly taskStateMachine: PersistentTaskStateMachine;
+  private readonly safetyRecoveryPollIntervalMs: number;
+  private readonly maxSafetyRecoveryWaitMs: number;
 
   constructor(private readonly options: CoordinatorLocalPlannerOptions) {
     this.coordinatorInstanceId = identifierSchema.parse(
       options.coordinatorInstanceId,
     );
     this.actorId = identifierSchema.parse(options.actorId ?? "local-planner");
+    this.taskStateMachine =
+      options.taskStateMachine ?? new PersistentTaskStateMachine();
+    this.safetyRecoveryPollIntervalMs = boundedInteger(
+      options.safetyRecoveryPollIntervalMs ??
+        DEFAULT_SAFETY_RECOVERY_POLL_INTERVAL_MS,
+      1,
+      5_000,
+      "safetyRecoveryPollIntervalMs",
+    );
+    this.maxSafetyRecoveryWaitMs = boundedInteger(
+      options.maxSafetyRecoveryWaitMs ?? DEFAULT_MAX_SAFETY_RECOVERY_WAIT_MS,
+      1,
+      60_000,
+      "maxSafetyRecoveryWaitMs",
+    );
     this.now = options.now ?? (() => new Date());
     this.randomId = options.randomId ?? randomUUID;
     this.goalPlanner = new GoalPlanner();
@@ -316,6 +833,47 @@ export class CoordinatorLocalPlanner {
     this.validateRequest(request);
     const startedAt = this.validNow();
     const deadlineMs = startedAt.getTime() + request.timeoutMs;
+    this.assertWithinDeadline(deadlineMs, request.signal);
+    const initialRecord = this.requireAvailableBot(request.botId);
+    let claim: PlannerExecutionClaim | null = null;
+    try {
+      const execution = await this.beginTaskExecution(
+        request,
+        initialRecord,
+        deadlineMs,
+        (acquired) => {
+          claim = acquired;
+        },
+      );
+      return await this.planAndDispatchOnce(request, execution, deadlineMs);
+    } catch (cause) {
+      await this.failTaskExecution(request, cause, claim);
+      if (
+        cause instanceof LocalPlannerError &&
+        cause.code === "PLANNER_STALE_RESPONSE"
+      ) {
+        this.options.metrics?.increment("bot_stale_responses_total", {
+          bot_id: request.botId,
+        });
+      }
+      if (request.signal?.aborted) {
+        this.options.metrics?.increment("bot_cancelled_requests_total", {
+          bot_id: request.botId,
+        });
+      }
+      throw cause;
+    }
+  }
+
+  async getTaskExecution(taskId: string): Promise<TaskExecutionRecord | null> {
+    return this.taskStateMachine.get(taskId);
+  }
+
+  private async planAndDispatchOnce(
+    request: LocalPlanRequest,
+    execution: PlannerExecutionContext,
+    deadlineMs: number,
+  ): Promise<LocalPlanResult> {
     this.assertWithinDeadline(deadlineMs, request.signal);
     const record = this.requireAvailableBot(request.botId);
     return this.withAssignment(request, record, deadlineMs, async () => {
@@ -329,10 +887,13 @@ export class CoordinatorLocalPlanner {
       );
     }
     const operatorGoal = safeOperatorGoal(request.operatorGoal, record);
-    const plannedItemNames = this.coordinatorBindableGoalNames(availableSkills);
+    const bindability = this.coordinatorGoalBindability(availableSkills);
+    this.logGoalBindability(request, bindability);
+    const plannedItemNames = bindability.bindable;
     const generationSchema = buildLocalPlannerGenerationSchema(
       availableSkills,
       plannedItemNames,
+      { botId: request.botId, taskId: request.taskId },
     );
 
     let prompt: string;
@@ -380,7 +941,10 @@ export class CoordinatorLocalPlanner {
       traceId: request.traceId,
       ...(request.signal ? { signal: request.signal } : {}),
     });
+    this.recordAIUsage(request, ai);
     this.assertWithinDeadline(deadlineMs, request.signal);
+    this.assertFreshResponse(request, ai, execution);
+    await this.assertTaskExecutionFresh(request, execution);
     const decision = parseDecision(ai.value.content);
     if (decision.botId !== request.botId || decision.taskId !== request.taskId) {
       throw new LocalPlannerError(
@@ -389,9 +953,36 @@ export class CoordinatorLocalPlanner {
       );
     }
     if (decision.action === "noop") {
+      const retried = await this.retryDeclinedAcquisitionGoal({
+        request,
+        operatorGoal,
+        plannedItemNames,
+        record,
+        availableSkills,
+        deadlineMs,
+      });
+      if (retried) return retried;
+      this.logUnbindableGoalNames(request, operatorGoal, bindability);
+      await this.abortTaskExecution(
+        request.taskId,
+        `PLANNER_NOOP:${decision.reasonCode}`,
+        execution.claim,
+        { expectedRevision: execution.task.revision },
+      );
       return { action: "noop", reasonCode: decision.reasonCode, ai };
     }
     if (decision.action === "plan_items") {
+      if (!planGoalsAreGrounded(decision.goals, operatorGoal)) {
+        const retried = await this.retryDeclinedAcquisitionGoal({
+          request,
+          operatorGoal,
+          plannedItemNames,
+          record,
+          availableSkills,
+          deadlineMs,
+        });
+        if (retried) return retried;
+      }
       return this.planItemsAndDispatch(
         request,
         decision,
@@ -418,11 +1009,14 @@ export class CoordinatorLocalPlanner {
     );
     assertGroundedSensitiveInput(modelInput, operatorGoal, record);
 
-    const currentRecord = this.requireUnchangedDispatchContext(
-      request.botId,
-      record,
-      advertisedSkill,
-    );
+    const currentRecord = await this.waitForSafetyClear({
+      request,
+      expectedTask: execution.task,
+      initialRecord: record,
+      initialSkill: advertisedSkill,
+      deadlineMs,
+      claim: execution.claim,
+    });
     const currentSkill = currentRecord.skillCatalog!.skills.find(
       ({ skillId, skillVersion, availability }) =>
         skillId === decision.skillId && skillVersion === decision.skillVersion,
@@ -434,35 +1028,66 @@ export class CoordinatorLocalPlanner {
     validateAdvertisedInput(currentSkill.inputSchema, trustedInput);
 
     this.assertWithinDeadline(deadlineMs, request.signal);
-    const dispatchStartedAt = this.validNow();
-    const invocationDeadlineMs = Math.min(
-      deadlineMs,
-      dispatchStartedAt.getTime() + currentSkill.timeoutMs,
+    const activeExecution = await this.transitionTaskExecution(
+      request.taskId,
+      "EXECUTE",
+      {
+        expectedRevision: execution.task.revision,
+        currentStep: decision.skillId,
+        expectedResult: {
+          outcome: "completed",
+          skillId: decision.skillId,
+          skillVersion: decision.skillVersion,
+        },
+        worldStateVersion: execution.worldStateVersion,
+      },
     );
-    const skillTimeoutMs = Math.max(
-      1,
-      Math.floor(invocationDeadlineMs - dispatchStartedAt.getTime()),
-    );
-    const invocation = this.invocation(
-      request,
-      decision.skillId,
-      decision.skillVersion,
-      trustedInput,
-      dispatchStartedAt,
-      invocationDeadlineMs,
-    );
-    const dispatchSignal = boundedAbortSignal(request.signal, skillTimeoutMs);
-    const result = await this.options.transport.sendSkillInvocation(
+    const {
       invocation,
-      currentRecord.runtimeInstanceId,
-      dispatchSignal,
-    );
-    this.assertWithinDeadline(deadlineMs, request.signal);
+      result: skillResult,
+      execution: completedExecution,
+    } = await this.dispatchSkillWithRecovery({
+      request,
+      decision,
+      trustedInput,
+      initialRecord: currentRecord,
+      initialSkill: currentSkill,
+      deadlineMs,
+      execution: activeExecution,
+      claim: execution.claim,
+    });
+    if (skillResult.payload.outcome === "completed") {
+      if (dispatchChangedNothing(skillResult)) {
+        const replanned = await this.retryDeclinedAcquisitionGoal({
+          request,
+          operatorGoal,
+          plannedItemNames,
+          record,
+          availableSkills,
+          deadlineMs,
+          execution: completedExecution,
+          claim: execution.claim,
+          emptyResult: skillResult,
+        });
+        if (replanned) {
+          this.logEmptyDispatchReplanned(request, decision.skillId);
+          return replanned;
+        }
+      }
+      await this.finishSuccessfulTaskExecution(
+        request,
+        skillResult,
+        completedExecution,
+      );
+      this.options.metrics?.increment("bot_llm_useful_responses_total", {
+        bot_id: request.botId,
+      });
+    }
     return {
       action: "skill_result",
       reasonCode: decision.reasonCode,
       invocation,
-      result,
+      result: skillResult,
       ai,
     };
     });
@@ -543,28 +1168,233 @@ export class CoordinatorLocalPlanner {
     }
   }
 
-  private coordinatorBindableGoalNames(
+  /**
+   * Splits every planner-known item into the set the coordinator can actually
+   * bind and the set it cannot, carrying the reason for each exclusion.
+   *
+   * The exclusions are the interesting half. A goal naming an excluded item
+   * comes back as a bare `action: "noop"`, which reads identically to the model
+   * honestly declining a reachable goal — so an operator asking for a stone
+   * pickaxe could not tell "this Runtime cannot place a crafting table" from
+   * "the model chose not to". Deriving the reason here lets the caller log it
+   * instead of leaving the difference invisible.
+   */
+  private coordinatorGoalBindability(
     availableSkills: readonly BotSkillCatalogEntryV1[],
-  ): readonly string[] {
+  ): GoalBindability {
     const available = new Set(
       availableSkills.map(({ skillId }) => skillId),
     );
-    const names: string[] = [];
+    const bindable: string[] = [];
+    const excluded: { itemName: string; reason: string }[] = [];
     for (const itemName of this.goalPlanner.resourceGraph.knownItemNames()) {
       const plan = this.goalPlanner.plan([{ itemName, count: 1 }], {});
       if (!plan.planned || plan.steps.length === 0) continue;
-      if (
-        plan.steps.every(
-          (step) =>
-            available.has(skillIdForStepKind[step.kind]) &&
-            (step.kind === "mine" ||
-              (step.kind === "craft" && step.station === null)),
-        )
-      ) {
-        names.push(itemName);
+      let reason: string | null = null;
+      for (const step of plan.steps) {
+        reason = unbindableStepReason(step, available);
+        if (reason !== null) break;
       }
+      if (reason === null) {
+        bindable.push(itemName);
+        continue;
+      }
+      excluded.push({ itemName, reason });
     }
-    return Object.freeze(names);
+    return Object.freeze({
+      bindable: Object.freeze(bindable),
+      excluded: Object.freeze(excluded),
+    });
+  }
+
+  /**
+   * Reports the bindable/excluded split once per planning attempt, with the
+   * exclusion reasons aggregated so the record stays a fixed size no matter how
+   * large the resource graph grows.
+   */
+  private logGoalBindability(
+    request: LocalPlanRequest,
+    bindability: GoalBindability,
+  ): void {
+    const logger = this.options.logger;
+    if (!logger) return;
+    try {
+      const reasonCounts: Record<string, number> = {};
+      for (const { reason } of bindability.excluded) {
+        reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1;
+      }
+      logger.info("coordinator_planner_goal_bindability", {
+        traceId: request.traceId,
+        taskId: request.taskId,
+        botId: request.botId,
+        bindableCount: bindability.bindable.length,
+        excludedCount: bindability.excluded.length,
+        exclusionReasons: reasonCounts,
+      });
+    } catch {
+      // Diagnostics must never change what the planner reports.
+    }
+  }
+
+  /**
+   * Re-asks a declined single-item acquisition goal with only the plan_items
+   * branch on offer, and returns null whenever the goal is not one.
+   *
+   * Measured behaviour, not a guess: offered every branch, the model answers
+   * "craft one crafting_table from nearby resources" with noop/NO_SAFE_SKILL on
+   * 6 of 6 requests while a forced single-branch probe produced the correct
+   * decision 4 of 4 times. The capability is there; the branch choice is what
+   * fails, so this removes the choice for the one goal shape that is provably
+   * reachable and asks again.
+   *
+   * A null return leaves the model's original noop standing untouched, which is
+   * why an honest decline can never be overturned here: the guard requires an
+   * acquisition verb and exactly one named item from the trusted reachable set,
+   * and no such goal is one the deterministic planner cannot serve.
+   */
+  private async retryDeclinedAcquisitionGoal({
+    request,
+    operatorGoal,
+    plannedItemNames,
+    record,
+    availableSkills,
+    deadlineMs,
+    execution,
+    claim,
+    emptyResult,
+  }: {
+    request: LocalPlanRequest;
+    operatorGoal: string;
+    plannedItemNames: readonly string[];
+    record: BotRegistryRecord;
+    availableSkills: readonly BotSkillCatalogEntryV1[];
+    deadlineMs: number;
+    execution?: TaskExecutionRecord;
+    claim?: PlannerExecutionClaim;
+    emptyResult?: SkillExecutionResultV1;
+  }): Promise<LocalPlanResult | null> {
+    const itemName = plannedAcquisitionGoalItem(operatorGoal, plannedItemNames);
+    if (itemName === null) return null;
+    if ((execution === undefined) !== (claim === undefined)) {
+      throw new TypeError("A deterministic retry needs both task execution and claim.");
+    }
+    if (execution !== undefined && emptyResult === undefined) {
+      throw new TypeError("A direct empty dispatch must include its result.");
+    }
+    if (execution !== undefined) {
+      await this.assertExecutionAttemptFresh(request, execution, claim!);
+    }
+    this.assertWithinDeadline(deadlineMs, request.signal);
+
+    const retryAi = await this.options.ai.generate({
+      requestId: `${request.requestId}:plan-items-retry`,
+      botId: request.botId,
+      priority: aiRequestPriorities.planning,
+      supersedeKey: `plan-items-retry:${request.taskId}`,
+      prompt: buildLocalPlannerPrompt({
+        promptVersion: LOCAL_PLANNER_PROMPT_VERSION,
+        operatorGoal,
+        bot: safeBotContext(record, request.taskId),
+        plannedItems: [itemName],
+        availableSkills: [],
+      }),
+      systemPrompt: LOCAL_PLANNER_SYSTEM_PROMPT,
+      schema: buildLocalPlannerPlanItemsRetrySchema(itemName, {
+        botId: request.botId,
+        taskId: request.taskId,
+      }),
+      maxTokens: 512,
+      temperature: 0,
+      timeoutMs: request.timeoutMs,
+      traceId: request.traceId,
+      ...(request.signal ? { signal: request.signal } : {}),
+    });
+    this.recordAIUsage(request, retryAi);
+    this.assertWithinDeadline(deadlineMs, request.signal);
+
+    // The narrowed grammar constrains generation only. The response still has
+    // to satisfy the protocol-backed schema and carry the trusted identity,
+    // exactly as a first-pass decision does.
+    const retryDecision = parseDecision(retryAi.value.content);
+    if (
+      retryDecision.action !== "plan_items" ||
+      retryDecision.botId !== request.botId ||
+      retryDecision.taskId !== request.taskId
+    ) {
+      this.logRetry(request, itemName, "discarded", retryDecision.action);
+      return null;
+    }
+    this.logRetry(request, itemName, "accepted", retryDecision.action);
+    let planExecution = execution;
+    if (planExecution !== undefined) {
+      planExecution = await this.assertExecutionAttemptFresh(
+        request,
+        planExecution,
+        claim!,
+      );
+      const replanned = await this.transitionTaskExecution(
+        request.taskId,
+        "REPLAN",
+        {
+          expectedRevision: planExecution.revision,
+          currentStep: "empty-dispatch-replan",
+          actualResult: skillResultSummary(emptyResult!),
+          failureReason: null,
+          worldStateVersion: planExecution.worldStateVersion,
+        },
+      );
+      planExecution = await this.transitionTaskExecution(
+        request.taskId,
+        "PLAN",
+        {
+          expectedRevision: replanned.revision,
+          currentStep: "slow-cognitive-loop",
+          expectedResult: { outcome: "completed" },
+          actualResult: null,
+          movementLease: null,
+          failureReason: null,
+          worldStateVersion: replanned.worldStateVersion,
+        },
+      );
+    }
+    const result = await this.planItemsAndDispatch(
+      request,
+      retryDecision,
+      record,
+      availableSkills,
+      retryAi,
+      deadlineMs,
+    );
+    if (
+      planExecution !== undefined &&
+      result.action === "skill_result" &&
+      result.result.payload.outcome === "completed"
+    ) {
+      const executing = await this.transitionTaskExecution(
+        request.taskId,
+        "EXECUTE",
+        {
+          expectedRevision: planExecution.revision,
+          currentStep: result.invocation.payload.skillId,
+          expectedResult: {
+            outcome: "completed",
+            skillId: result.invocation.payload.skillId,
+            skillVersion: result.invocation.payload.skillVersion,
+          },
+          actualResult: null,
+          worldStateVersion: planExecution.worldStateVersion,
+        },
+      );
+      await this.finishSuccessfulTaskExecution(
+        request,
+        result.result,
+        executing,
+      );
+      this.options.metrics?.increment("bot_llm_useful_responses_total", {
+        bot_id: request.botId,
+      });
+    }
+    return result;
   }
 
   private async planItemsAndDispatch(
@@ -591,25 +1421,23 @@ export class CoordinatorLocalPlanner {
         "The requested resource is outside the trusted planning graph.",
       );
     }
-    const plan = this.goalPlanner.plan(goals, {} satisfies PlannerInventory);
-    if (!plan.planned || plan.steps.length === 0) {
+    const inventory = plannerInventoryFromRecord(initialRecord);
+    const plan = this.goalPlanner.plan(goals, inventory);
+    if (!plan.planned) {
       throw new LocalPlannerError(
         "PLANNER_GOAL_UNSUPPORTED",
-        plan.planned
-          ? "The requested goal requires no dispatchable steps."
-          : `The trusted planner could not derive ${plan.blockedOn}.`,
+        `The trusted planner could not derive ${plan.blockedOn}.`,
       );
+    }
+    if (plan.steps.length === 0) {
+      return { action: "noop", reasonCode: "ADVANCE_TASK", ai };
     }
     const availableSkillIds = new Set(
       availableSkills.map(({ skillId }) => skillId),
     );
     if (
       plan.steps.some(
-        (step) =>
-          !availableSkillIds.has(step.skillId) ||
-          (step.kind === "craft" && step.station !== null) ||
-          step.kind === "smelt" ||
-          step.kind === "place-station",
+        (step) => unbindableStepReason(step, availableSkillIds) !== null,
       )
     ) {
       throw new LocalPlannerError(
@@ -619,10 +1447,37 @@ export class CoordinatorLocalPlanner {
     }
 
     let last: LastSkillResult | null = null;
+    // Where each station was actually observed to land, keyed by station item.
+    // Filled only from a Runtime-confirmed placement result, so a later craft
+    // step can never be handed a position the coordinator merely predicted.
+    const placementSites = new Map<string, PlacementPosition>();
     const supervision = await this.planSupervisor.run(
       plan.steps,
       async (step, _attempt): Promise<StepOutcome> => {
         this.assertWithinDeadline(deadlineMs, request.signal);
+        let placementReference: PlacementPosition | null = null;
+        if (step.kind === "place-station") {
+          try {
+            placementReference = await this.observePlacementReference(
+              request,
+              initialRecord,
+              availableSkills,
+              deadlineMs,
+            );
+          } catch (cause) {
+            if (
+              cause instanceof LocalPlannerError &&
+              (cause.code === "PLAN_STEP_DISPATCH_UNAVAILABLE" ||
+                cause.code === "SKILL_INVOCATION_INVALID")
+            ) {
+              return { ok: false, errorCode: cause.code };
+            }
+            throw cause;
+          }
+          if (placementReference === null) {
+            return { ok: false, errorCode: "STEP_TARGET_NOT_FOUND" };
+          }
+        }
         let bound: BoundPlanStep | null;
         try {
           bound = this.bindPlanStep(
@@ -632,6 +1487,7 @@ export class CoordinatorLocalPlanner {
             step,
             deadlineMs,
             request.signal,
+            { placementSites, placementReference },
           );
         } catch (cause) {
           if (
@@ -652,14 +1508,32 @@ export class CoordinatorLocalPlanner {
           );
           last = { step, invocation: bound.invocation, result };
           const outcome = stepOutcomeFromResult(step, result);
+          if (outcome.ok && step.kind === "place-station") {
+            // Recorded from the Runtime's read-back position, which it produces
+            // only after confirming a block is really there.
+            const placed = placedStationPosition(result);
+            if (placed === null) {
+              return { ok: false, errorCode: "STEP_OUTPUT_INSUFFICIENT" };
+            }
+            placementSites.set(step.itemName, placed);
+          }
           if (bound.idempotent) return outcome;
-          return nonIdempotentStepOutcome(result, outcome);
+          const guarded = nonIdempotentStepOutcome(result, outcome);
+          this.logMaskedStepFailure(request, step, outcome, guarded);
+          return guarded;
         } catch (cause) {
           if (!bound.idempotent) {
-            return {
-              ok: false,
+            const guarded = {
+              ok: false as const,
               errorCode: NON_IDEMPOTENT_RESULT_UNCERTAIN,
             };
+            this.logMaskedStepFailure(
+              request,
+              step,
+              { ok: false, errorCode: transportFailureCode(cause) },
+              guarded,
+            );
+            return guarded;
           }
           if (request.signal?.aborted) {
             return { ok: false, errorCode: "SKILL_CANCELLED" };
@@ -714,6 +1588,7 @@ export class CoordinatorLocalPlanner {
         },
       },
     );
+    this.logSupervision(request, plan.steps, supervision);
     this.assertWithinDeadline(deadlineMs, request.signal);
     const failure = supervision.failure;
     const observedLast = last as LastSkillResult | null;
@@ -725,23 +1600,35 @@ export class CoordinatorLocalPlanner {
         observedLast.result.payload.outcome !== "completed"
           ? observedLast
           : null;
+      const stepContext = {
+        stepIndex: failure.stepIndex,
+        ...(failedResult
+          ? { stepSkillId: failedResult.invocation.payload.skillId }
+          : {}),
+      };
       if (failure.errorCode === "STEP_TARGET_NOT_FOUND") {
         throw new LocalPlannerError(
           "STEP_TARGET_NOT_FOUND",
           "A trusted world target was not available for the next plan step.",
+          stepContext,
         );
       }
       if (
         failure.errorCode === "PLAN_STEP_DISPATCH_UNAVAILABLE" ||
         failure.errorCode === "SKILL_INVOCATION_INVALID"
       ) {
-        throw new LocalPlannerError(failure.errorCode, failure.errorCode);
+        throw new LocalPlannerError(
+          failure.errorCode,
+          failure.errorCode,
+          stepContext,
+        );
       }
       throw new LocalPlannerError(
         "PLANNER_GOAL_EXECUTION_FAILED",
         failedResult
           ? skillResultErrorCode(failedResult.result)
           : failure.errorCode,
+        stepContext,
       );
     }
     if (observedLast === null) {
@@ -773,7 +1660,8 @@ export class CoordinatorLocalPlanner {
     availableSkills: readonly BotSkillCatalogEntryV1[],
     step: PlanStep,
     deadlineMs: number,
-    externalSignal?: AbortSignal,
+    externalSignal: AbortSignal | undefined,
+    binding: PlanStepBinding,
   ): BoundPlanStep | null {
     const initialSkill = availableSkills.find(
       ({ skillId }) => skillId === step.skillId,
@@ -803,7 +1691,12 @@ export class CoordinatorLocalPlanner {
     }
     const dimension = currentRecord.currentStatus?.position?.dimension;
     if (!dimension) return null;
-    const input = this.planStepInput(step, dimension, currentRecord.serverProfileId);
+    const input = this.planStepInput(
+      step,
+      dimension,
+      currentRecord.serverProfileId,
+      binding,
+    );
     if (input === null) return null;
     let trustedInput: SkillJsonValue;
     try {
@@ -846,6 +1739,7 @@ export class CoordinatorLocalPlanner {
     step: PlanStep,
     dimension: string,
     serverProfileId: string,
+    binding: PlanStepBinding,
   ): SkillJsonValue | null {
     if (step.kind === "mine") {
       if (!step.targetBlock) return null;
@@ -857,19 +1751,1153 @@ export class CoordinatorLocalPlanner {
         serverProfileId,
       };
     }
-    if (step.kind === "craft" && step.station === null) {
+    if (step.kind === "craft") {
+      // A station-backed craft is bound only to a station this same plan placed
+      // and the Runtime confirmed. Anything else would be the coordinator
+      // asserting a workstation exists somewhere it has never observed one.
+      let craftingTable: SkillJsonValue = null;
+      if (step.station !== null) {
+        const site = binding.placementSites.get(step.station);
+        if (site === undefined) return null;
+        craftingTable = { x: site.x, y: site.y, z: site.z };
+      }
       return {
         itemName: step.itemName,
         count: step.runs,
-        craftingTable: null,
+        craftingTable,
         dimension,
         serverProfileId,
       };
     }
-    // Workstations, furnaces, and placement faces must come from a
-    // server-scoped observation provider. The coordinator has no such fact
-    // in the current registry, so it fails closed instead of guessing.
+    if (step.kind === "smelt") {
+      // A smelt is bound to the furnace this same plan placed and the Runtime
+      // confirmed. The input/fuel names come from the deterministic plan's
+      // consumption ledger; the model never gets to choose either one.
+      const site = step.station === null
+        ? undefined
+        : binding.placementSites.get(step.station);
+      if (site === undefined) return null;
+      const smelt = smeltInputsForStep(step);
+      if (smelt === null) return null;
+      return {
+        inputItemName: smelt.inputItemName,
+        fuelItemName: smelt.fuelItemName,
+        fuelCount: smelt.fuelCount,
+        count: step.runs,
+        furnace: { x: site.x, y: site.y, z: site.z },
+        dimension,
+        serverProfileId,
+      };
+    }
+    if (step.kind === "place-station") {
+      // The reference block comes from a `world.scan` observation taken moments
+      // ago, never from arithmetic on the bot's own position: subtracting one
+      // from y guesses that whatever is underfoot is solid, which is exactly
+      // the guess this method used to refuse to make.
+      const reference = binding.placementReference;
+      if (reference === null) return null;
+      return {
+        itemName: step.itemName,
+        referenceBlock: { x: reference.x, y: reference.y, z: reference.z },
+        face: { ...COORDINATOR_PLACEMENT_FACE },
+        dimension,
+        serverProfileId,
+      };
+    }
+    // Villager trades still need facts the coordinator does not hold, so they
+    // keep failing closed instead of guessing.
     return null;
+  }
+
+  /**
+   * Observes a solid block the next station can be built on top of, or null when
+   * none is in reach.
+   *
+   * `world.scan` is idempotent and read-only — it resolves a block name in the
+   * Runtime's own registry and returns only positions it could actually read —
+   * so the coordinator ends up holding an observed fact rather than a prediction.
+   * The candidate list is a list of *names to look for*, not an assumption about
+   * which one is there; whichever the scan returns is what the world has.
+   */
+  private async observePlacementReference(
+    request: LocalPlanRequest,
+    initialRecord: BotRegistryRecord,
+    availableSkills: readonly BotSkillCatalogEntryV1[],
+    deadlineMs: number,
+  ): Promise<PlacementPosition | null> {
+    const dimension = initialRecord.currentStatus?.position?.dimension;
+    if (!dimension) return null;
+    this.assertWithinDeadline(deadlineMs, request.signal);
+    const openOutput = await this.dispatchObservation(
+      request,
+      initialRecord,
+      availableSkills,
+      "world.scan",
+      {
+        blockName: COORDINATOR_PLACEMENT_OPEN_BLOCK,
+        maxCount: COORDINATOR_PLACEMENT_SCAN_MAX_COUNT,
+        maxDistance: COORDINATOR_PLACEMENT_SCAN_MAX_DISTANCE,
+        dimension,
+        serverProfileId: initialRecord.serverProfileId,
+      },
+      deadlineMs,
+    );
+    const openPositions = scannedPositionKeys(openOutput);
+    if (openPositions.size === 0) return null;
+    for (const blockName of COORDINATOR_PLACEMENT_GROUND_BLOCKS) {
+      this.assertWithinDeadline(deadlineMs, request.signal);
+      const output = await this.dispatchObservation(
+        request,
+        initialRecord,
+        availableSkills,
+        "world.scan",
+        {
+          blockName,
+          maxCount: COORDINATOR_PLACEMENT_SCAN_MAX_COUNT,
+          maxDistance: COORDINATOR_PLACEMENT_SCAN_MAX_DISTANCE,
+          dimension,
+          serverProfileId: initialRecord.serverProfileId,
+        },
+        deadlineMs,
+      );
+      const reference = nearestPlacementReference(output, openPositions);
+      if (reference !== null) {
+        this.logPlacementSite(request, blockName);
+        return reference;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Dispatches one read-only observation and returns its output, or null when
+   * the Runtime did not complete it.
+   *
+   * Held to the same context checks as a plan step — same Runtime instance, same
+   * ServerProfile, same advertised schema — because an observation the
+   * coordinator then builds a placement on is trusted input, not a free lookup.
+   * Restricted to idempotent Skills so a retry can never carry a side effect.
+   */
+  private async dispatchObservation(
+    request: LocalPlanRequest,
+    initialRecord: BotRegistryRecord,
+    availableSkills: readonly BotSkillCatalogEntryV1[],
+    skillId: string,
+    input: SkillJsonValue,
+    deadlineMs: number,
+  ): Promise<SkillJsonValue | null> {
+    const initialSkill = availableSkills.find(
+      (candidate) => candidate.skillId === skillId,
+    );
+    if (!initialSkill) {
+      throw new LocalPlannerError(
+        "PLAN_STEP_DISPATCH_UNAVAILABLE",
+        `No advertised skill is available for ${skillId}.`,
+      );
+    }
+    if (!initialSkill.idempotent) {
+      throw new LocalPlannerError(
+        "PLAN_STEP_DISPATCH_UNAVAILABLE",
+        `${skillId} is not idempotent and cannot be used as an observation.`,
+      );
+    }
+    const currentRecord = this.requireUnchangedDispatchContext(
+      request.botId,
+      initialRecord,
+      initialSkill,
+    );
+    let trustedInput: SkillJsonValue;
+    try {
+      trustedInput = validateAdvertisedInput(initialSkill.inputSchema, input);
+    } catch (cause) {
+      throw new LocalPlannerError(
+        "SKILL_INVOCATION_INVALID",
+        cause instanceof LocalPlannerError ? cause.message : `${skillId} input invalid.`,
+      );
+    }
+    this.assertWithinDeadline(deadlineMs, request.signal);
+    const startedAt = this.validNow();
+    const expiresAtMs = Math.min(
+      deadlineMs,
+      startedAt.getTime() + initialSkill.timeoutMs,
+    );
+    const invocation = this.invocation(
+      request,
+      skillId,
+      initialSkill.skillVersion,
+      trustedInput,
+      startedAt,
+      expiresAtMs,
+    );
+    const result = await this.options.transport.sendSkillInvocation(
+      invocation,
+      currentRecord.runtimeInstanceId,
+      boundedAbortSignal(
+        request.signal,
+        Math.max(1, Math.floor(expiresAtMs - startedAt.getTime())),
+      ),
+    );
+    return result.payload.outcome === "completed" ? result.payload.output : null;
+  }
+
+  private async dispatchSkillWithRecovery(input: Readonly<{
+    request: LocalPlanRequest;
+    decision: Extract<LocalPlannerDecision, { action: "invoke_skill" }>;
+    trustedInput: SkillJsonValue;
+    initialRecord: BotRegistryRecord;
+    initialSkill: BotSkillCatalogEntryV1;
+    deadlineMs: number;
+    execution: TaskExecutionRecord;
+    claim: PlannerExecutionClaim;
+  }>): Promise<Readonly<{
+    invocation: SkillInvocationV1;
+    result: SkillExecutionResultV1;
+    execution: TaskExecutionRecord;
+  }>> {
+    let execution = input.execution;
+    for (;;) {
+      await this.assertExecutionAttemptFresh(input.request, execution, input.claim);
+      this.assertWithinDeadline(input.deadlineMs, input.request.signal);
+      const currentRecord = await this.waitForSafetyClear({
+        request: input.request,
+        expectedTask: execution,
+        initialRecord: input.initialRecord,
+        initialSkill: input.initialSkill,
+        deadlineMs: input.deadlineMs,
+        claim: input.claim,
+      });
+      const dispatchStartedAt = this.validNow();
+      const invocationDeadlineMs = Math.min(
+        input.deadlineMs,
+        dispatchStartedAt.getTime() + input.initialSkill.timeoutMs,
+      );
+      const skillTimeoutMs = Math.max(
+        1,
+        Math.floor(invocationDeadlineMs - dispatchStartedAt.getTime()),
+      );
+      const invocation = this.invocation(
+        input.request,
+        input.decision.skillId,
+        input.decision.skillVersion,
+        input.trustedInput,
+        dispatchStartedAt,
+        invocationDeadlineMs,
+      );
+      const dispatchSignal = boundedAbortSignal(
+        input.request.signal,
+        skillTimeoutMs,
+      );
+      const result = this.validatedSkillResult(
+        await this.options.transport.sendSkillInvocation(
+          invocation,
+          currentRecord.runtimeInstanceId,
+          dispatchSignal,
+        ),
+        invocation,
+        currentRecord.runtimeInstanceId,
+      );
+      this.assertWithinDeadline(input.deadlineMs, input.request.signal);
+      await this.assertExecutionAttemptFresh(input.request, execution, input.claim);
+      if (result.payload.outcome === "completed") {
+        return { invocation, result, execution };
+      }
+      const retryExecution = await this.prepareL0RecoveryRetry({
+        request: input.request,
+        result,
+        execution,
+        initialRecord: input.initialRecord,
+        initialSkill: input.initialSkill,
+        deadlineMs: input.deadlineMs,
+        claim: input.claim,
+      });
+      if (retryExecution === null) return { invocation, result, execution };
+      execution = retryExecution;
+    }
+  }
+
+  private async prepareL0RecoveryRetry(input: Readonly<{
+    request: LocalPlanRequest;
+    result: SkillExecutionResultV1;
+    execution: TaskExecutionRecord;
+    initialRecord: BotRegistryRecord;
+    initialSkill: BotSkillCatalogEntryV1;
+    deadlineMs: number;
+    claim: PlannerExecutionClaim;
+  }>): Promise<TaskExecutionRecord | null> {
+    if (input.result.payload.outcome === "completed") {
+      throw new TypeError("Completed Skill results cannot enter recovery.");
+    }
+    const actualResult = skillResultSummary(input.result);
+    const errorCode = input.result.payload.errorCode;
+    const recoverableL0 = isRecoverableL0SkillResult(input.result);
+    if (!recoverableL0) {
+      await this.abortTaskExecution(
+        input.request.taskId,
+        errorCode,
+        input.claim,
+        {
+          expectedRevision: input.execution.revision,
+          currentStep: "terminal-skill-failure",
+          actualResult,
+        },
+      );
+      return null;
+    }
+    if (!isSafeL0Replay(input.result, input.initialSkill)) {
+      await this.abortTaskExecution(
+        input.request.taskId,
+        `NON_IDEMPOTENT_L0_RETRY_UNSAFE:${errorCode}`,
+        input.claim,
+        {
+          expectedRevision: input.execution.revision,
+          currentStep: "non-idempotent-recovery-requires-replan",
+          actualResult,
+        },
+      );
+      return null;
+    }
+
+    const recoveryBudgetExhausted =
+      input.execution.recoveryCount >= input.execution.maxRecoveryCount;
+    const recovered = await this.transitionTaskExecution(
+      input.request.taskId,
+      "RECOVER",
+      {
+        expectedRevision: input.execution.revision,
+        currentStep: recoveryBudgetExhausted
+          ? "recovery-budget-exhausted"
+          : "wait-for-safety-clear",
+        actualResult,
+        failureReason: errorCode,
+      },
+    );
+    if (recovered.state === "ABORT") {
+      this.options.metrics?.increment("bot_task_abort_total", {
+        bot_id: input.request.botId,
+        reason: recovered.failureReason ?? "RECOVERY_BUDGET_EXHAUSTED",
+      });
+      return null;
+    }
+
+    const readyRecord = await this.waitForSafetyClear({
+      request: input.request,
+      expectedTask: recovered,
+      initialRecord: input.initialRecord,
+      initialSkill: input.initialSkill,
+      deadlineMs: input.deadlineMs,
+      claim: input.claim,
+    });
+    const replanned = await this.transitionTaskExecution(
+      input.request.taskId,
+      "REPLAN",
+      {
+        expectedRevision: recovered.revision,
+        currentStep: "revalidate-after-l0-interruption",
+        worldStateVersion: worldStateVersion(readyRecord),
+      },
+    );
+    this.assertWithinDeadline(input.deadlineMs, input.request.signal);
+    return this.transitionTaskExecution(input.request.taskId, "EXECUTE", {
+      expectedRevision: replanned.revision,
+      currentStep: input.initialSkill.skillId,
+      expectedResult: {
+        outcome: "completed",
+        skillId: input.initialSkill.skillId,
+        skillVersion: input.initialSkill.skillVersion,
+      },
+      actualResult: null,
+      worldStateVersion: worldStateVersion(readyRecord),
+    });
+  }
+
+  private async beginTaskExecution(
+    request: LocalPlanRequest,
+    record: BotRegistryRecord,
+    deadlineMs: number,
+    onClaim: (claim: PlannerExecutionClaim) => void,
+  ): Promise<PlannerExecutionContext> {
+    const reportedWorldVersion = worldStateVersion(record);
+    const requestedWorldVersion = request.worldStateVersion;
+    const capturedWorldVersion = requestedWorldVersion ?? reportedWorldVersion;
+    const claim: PlannerExecutionClaim = {
+      owner: this.coordinatorInstanceId,
+      leaseExpiresAt: new Date(deadlineMs).toISOString(),
+    };
+    let task = await this.taskStateMachine.get(request.taskId);
+    this.assertTaskStartFresh(request, task);
+    if (task === null) {
+      try {
+        task = await this.taskStateMachine.create({
+          taskId: request.taskId,
+          botId: request.botId,
+          goal: request.operatorGoal,
+          worldStateVersion: capturedWorldVersion,
+          expectedResult: { outcome: "completed" },
+          executionOwner: claim.owner,
+          executionLeaseExpiresAt: claim.leaseExpiresAt,
+        });
+      } catch (cause) {
+        if (cause instanceof TaskExecutionError) {
+          const durable = cause.code === "TASK_EXECUTION_PERSISTENCE_FAILED"
+            ? await this.readTaskAfterPersistenceRace(request.taskId)
+            : null;
+          if (cause.code === "TASK_EXECUTION_EXISTS" || durable !== null) {
+            throw new LocalPlannerError(
+              "PLANNER_RESTART_RECOVERY_STALE",
+              "Another Coordinator created the task execution first.",
+            );
+          }
+        }
+        throw cause;
+      }
+      onClaim(claim);
+      this.recordTaskTransition(request, null, task);
+    } else {
+      if (task.botId !== request.botId || task.goal !== request.operatorGoal) {
+        throw new LocalPlannerError(
+          "PLANNER_STALE_RESPONSE",
+          "Goal task identity does not match the persisted execution.",
+        );
+      }
+      if (
+        task.state === "SUCCESS" ||
+        task.state === "ABORT" ||
+        task.cancellationToken.cancelled
+      ) {
+        throw new LocalPlannerError(
+          "PLANNER_STALE_RESPONSE",
+          "Goal task execution is terminal or cancelled.",
+        );
+      }
+      const unclaimed = task;
+      try {
+        task = await this.taskStateMachine.claimExecution(task.taskId, {
+          ...claim,
+          expectedRevision: task.revision,
+        });
+      } catch (cause) {
+        if (cause instanceof TaskExecutionError) {
+          if (cause.code === "TASK_EXECUTION_OWNED") {
+            throw new LocalPlannerError(
+              "PLANNER_EXECUTION_OWNED",
+              "Task execution already has an unexpired Coordinator lease.",
+            );
+          }
+          if (cause.code === "TASK_EXECUTION_CANCELLED") {
+            throw new LocalPlannerError(
+              "PLANNER_CANCELLED",
+              "Task execution was cancelled before its lease could be claimed.",
+            );
+          }
+          if (
+            cause.code === "TASK_EXECUTION_REVISION_CONFLICT" ||
+            cause.code === "TASK_EXECUTION_TERMINAL"
+          ) {
+            throw new LocalPlannerError(
+              "PLANNER_RESTART_RECOVERY_STALE",
+              "Task execution changed before its Coordinator lease was claimed.",
+            );
+          }
+          if (cause.code === "TASK_EXECUTION_PERSISTENCE_FAILED") {
+            const durable = await this.readTaskAfterPersistenceRace(request.taskId);
+            if (
+              durable !== null &&
+              (durable.revision !== unclaimed.revision ||
+                durable.executionOwner !== unclaimed.executionOwner ||
+                durable.executionLeaseExpiresAt !==
+                  unclaimed.executionLeaseExpiresAt)
+            ) {
+              throw new LocalPlannerError(
+                "PLANNER_RESTART_RECOVERY_STALE",
+                "Another Coordinator won the durable execution claim.",
+              );
+            }
+          }
+        }
+        throw cause;
+      }
+      onClaim(claim);
+      if (task.state !== "PRECHECK") {
+        task = await this.recoverTaskAfterRestart(
+          request,
+          record,
+          task,
+          capturedWorldVersion,
+          deadlineMs,
+        );
+      }
+    }
+    if (task.state === "PRECHECK") {
+      task = await this.transitionRestartTask(request, task, "PLAN", deadlineMs, {
+        currentStep: "slow-cognitive-loop",
+        worldStateVersion: capturedWorldVersion,
+      });
+    }
+    return { task, worldStateVersion: task.worldStateVersion, claim };
+  }
+
+  private async readTaskAfterPersistenceRace(
+    taskId: string,
+  ): Promise<TaskExecutionRecord | null> {
+    try {
+      return await this.taskStateMachine.get(taskId);
+    } catch {
+      return null;
+    }
+  }
+
+  private async recoverTaskAfterRestart(
+    request: LocalPlanRequest,
+    record: BotRegistryRecord,
+    task: TaskExecutionRecord,
+    worldStateVersion: number,
+    deadlineMs: number,
+  ): Promise<TaskExecutionRecord> {
+    if (task.state === "PLAN") {
+      const replanned = await this.transitionRestartTask(request, task, "REPLAN", deadlineMs, {
+        currentStep: "restart-replan-interrupted-plan",
+        worldStateVersion,
+      });
+      return this.transitionRestartTask(request, replanned, "PLAN", deadlineMs, {
+        currentStep: "slow-cognitive-loop",
+        expectedResult: { outcome: "completed" },
+        actualResult: null,
+        movementLease: null,
+        worldStateVersion,
+      });
+    }
+    if (task.state === "RECOVER") {
+      const replanned = await this.transitionRestartTask(request, task, "REPLAN", deadlineMs, {
+        currentStep: "restart-replan-interrupted-recovery",
+        worldStateVersion,
+      });
+      return this.transitionRestartTask(request, replanned, "PLAN", deadlineMs, {
+        currentStep: "slow-cognitive-loop",
+        expectedResult: { outcome: "completed" },
+        actualResult: null,
+        movementLease: null,
+        worldStateVersion,
+      });
+    }
+    if (task.state === "REPLAN") {
+      return this.transitionRestartTask(request, task, "PLAN", deadlineMs, {
+        currentStep: "slow-cognitive-loop",
+        expectedResult: { outcome: "completed" },
+        actualResult: null,
+        movementLease: null,
+        worldStateVersion,
+      });
+    }
+    if (task.state === "EXECUTE") {
+      const interruptedSkill = restartExecutionSkill(task, record);
+      if (interruptedSkill === null || !interruptedSkill.idempotent) {
+        const reason = interruptedSkill === null
+          ? "COORDINATOR_RESTART_EXECUTION_SKILL_UNKNOWN"
+          : "COORDINATOR_RESTART_EXECUTION_NON_IDEMPOTENT";
+        await this.abortRestartTask(request, task, reason, deadlineMs);
+        throw new LocalPlannerError(
+          "PLANNER_RESTART_RECOVERY_UNSAFE",
+          "Interrupted execution cannot be conservatively replanned after restart.",
+        );
+      }
+      const recovered = await this.transitionRestartTask(request, task, "RECOVER", deadlineMs, {
+        currentStep: "restart-recover-interrupted-execution",
+        failureReason: "COORDINATOR_RESTART_DURING_EXECUTE",
+        movementLease: null,
+        worldStateVersion,
+      });
+      if (recovered.state === "ABORT") {
+        this.recordTaskAbortMetric(
+          recovered,
+          recovered.failureReason ?? "RECOVERY_BUDGET_EXHAUSTED",
+        );
+        throw new LocalPlannerError(
+          "PLANNER_RESTART_RECOVERY_EXHAUSTED",
+          "Interrupted execution exhausted its persistent recovery budget.",
+        );
+      }
+      const replanned = await this.transitionRestartTask(request, recovered, "REPLAN", deadlineMs, {
+        currentStep: "restart-replan-interrupted-execution",
+        worldStateVersion,
+      });
+      return this.transitionRestartTask(request, replanned, "PLAN", deadlineMs, {
+        currentStep: "slow-cognitive-loop",
+        expectedResult: { outcome: "completed" },
+        actualResult: null,
+        movementLease: null,
+        worldStateVersion,
+      });
+    }
+    await this.abortRestartTask(
+      request,
+      task,
+      `COORDINATOR_RESTART_STATE_UNRECOVERABLE:${task.state}`,
+      deadlineMs,
+    );
+    throw new LocalPlannerError(
+      "PLANNER_RESTART_RECOVERY_UNSAFE",
+      "Persisted execution state cannot be conservatively resumed after restart.",
+    );
+  }
+
+  private async transitionRestartTask(
+    request: LocalPlanRequest,
+    task: TaskExecutionRecord,
+    to: Parameters<PersistentTaskStateMachine["transition"]>[1],
+    deadlineMs: number,
+    patch: Parameters<PersistentTaskStateMachine["transition"]>[2] = {},
+  ): Promise<TaskExecutionRecord> {
+    this.assertRestartRecoveryActive(request, deadlineMs);
+    try {
+      const transitioned = await this.transitionTaskExecution(task.taskId, to, {
+        ...patch,
+        expectedRevision: task.revision,
+      });
+      this.assertRestartRecoveryActive(request, deadlineMs);
+      return transitioned;
+    } catch (cause) {
+      if (
+        cause instanceof LocalPlannerError &&
+        cause.code === "PLANNER_STALE_RESPONSE"
+      ) {
+        throw new LocalPlannerError(
+          "PLANNER_RESTART_RECOVERY_STALE",
+          "Persisted task changed while restart recovery was committing.",
+        );
+      }
+      throw cause;
+    }
+  }
+
+  private async abortRestartTask(
+    request: LocalPlanRequest,
+    task: TaskExecutionRecord,
+    reason: string,
+    deadlineMs: number,
+  ): Promise<void> {
+    const aborted = await this.transitionRestartTask(request, task, "ABORT", deadlineMs, {
+      currentStep: "restart-recovery-aborted",
+      failureReason: reason,
+      movementLease: null,
+    });
+    this.recordTaskAbortMetric(aborted, reason);
+  }
+
+  private assertRestartRecoveryActive(
+    request: LocalPlanRequest,
+    deadlineMs: number,
+  ): void {
+    this.assertWithinDeadline(deadlineMs, request.signal);
+    const external = request.currentVersions?.();
+    if (external?.taskCancelled === true) {
+      throw new LocalPlannerError(
+        "PLANNER_CANCELLED",
+        "Task execution was cancelled during restart recovery.",
+      );
+    }
+    if (external?.taskCompleted === true) {
+      throw new LocalPlannerError(
+        "PLANNER_RESTART_RECOVERY_STALE",
+        "Task execution completed while restart recovery was active.",
+      );
+    }
+  }
+
+  private assertTaskStartFresh(
+    request: LocalPlanRequest,
+    task: TaskExecutionRecord | null,
+  ): void {
+    if (request.signal?.aborted) {
+      throw new LocalPlannerError(
+        "PLANNER_CANCELLED",
+        "Task execution was cancelled before planning started.",
+      );
+    }
+    const external = request.currentVersions?.();
+    if (external?.taskCancelled === true) {
+      throw new LocalPlannerError(
+        "PLANNER_CANCELLED",
+        "Task execution was cancelled before planning started.",
+      );
+    }
+    if (external?.taskCompleted === true) {
+      throw new LocalPlannerError(
+        "PLANNER_STALE_RESPONSE",
+        "Task execution completed before planning started.",
+      );
+    }
+    const expectedPlanVersion = task?.planVersion ?? 0;
+    if (
+      (request.planVersion !== undefined &&
+        request.planVersion !== expectedPlanVersion) ||
+      (task !== null &&
+        external !== undefined &&
+        external.planVersion !== task.planVersion) ||
+      (task !== null &&
+        request.worldStateVersion !== undefined &&
+        request.worldStateVersion < task.worldStateVersion) ||
+      (request.worldStateVersion !== undefined &&
+        external !== undefined &&
+        external.worldStateVersion !== request.worldStateVersion)
+    ) {
+      throw new LocalPlannerError(
+        "PLANNER_STALE_RESPONSE",
+        "Task or world version changed before planning started.",
+      );
+    }
+  }
+
+  private async assertTaskExecutionFresh(
+    request: LocalPlanRequest,
+    captured: PlannerExecutionContext,
+  ): Promise<void> {
+    const current = await this.taskStateMachine.get(request.taskId);
+    const currentBot = this.options.registry.get(request.botId);
+    if (
+      current === null ||
+      current.state !== "PLAN" ||
+      current.cancellationToken.cancelled ||
+      !this.hasActiveExecutionClaim(current, captured.claim) ||
+      current.planVersion !== captured.task.planVersion ||
+      current.worldStateVersion !== captured.worldStateVersion ||
+      (currentBot !== null &&
+        worldStateVersion(currentBot) !== 0 &&
+        worldStateVersion(currentBot) !== captured.worldStateVersion)
+    ) {
+      throw new LocalPlannerError(
+        "PLANNER_STALE_RESPONSE",
+        "Local planner response no longer matches the persistent task or world state.",
+      );
+    }
+  }
+
+  private async finishSuccessfulTaskExecution(
+    request: LocalPlanRequest,
+    result: SkillExecutionResultV1,
+    execution: TaskExecutionRecord,
+  ): Promise<void> {
+    const actualResult = skillResultSummary(result);
+    const verified = await this.transitionTaskExecution(
+      request.taskId,
+      "VERIFY",
+      {
+        expectedRevision: execution.revision,
+        currentStep: "postcondition-verify",
+        actualResult,
+      },
+    );
+    await this.transitionTaskExecution(request.taskId, "SUCCESS", {
+      expectedRevision: verified.revision,
+      currentStep: null,
+      actualResult,
+    });
+    this.options.metrics?.increment("bot_task_success_total", {
+      bot_id: request.botId,
+    });
+  }
+
+  private validatedSkillResult(
+    input: unknown,
+    invocation: SkillInvocationV1,
+    expectedRuntimeInstanceId: string,
+  ): SkillExecutionResultV1 {
+    let result: SkillExecutionResultV1;
+    try {
+      result = parseSkillExecutionResult(input);
+    } catch {
+      throw new LocalPlannerError(
+        "PLANNER_SKILL_RESULT_INVALID",
+        "Skill transport returned an invalid result envelope.",
+      );
+    }
+    if (
+      result.source.instanceId !== expectedRuntimeInstanceId ||
+      result.botId !== invocation.botId ||
+      result.taskId !== invocation.taskId ||
+      result.traceId !== invocation.traceId ||
+      result.payload.invocationId !== invocation.payload.invocationId ||
+      result.payload.skillId !== invocation.payload.skillId ||
+      result.payload.skillVersion !== invocation.payload.skillVersion
+    ) {
+      throw new LocalPlannerError(
+        "PLANNER_SKILL_RESULT_INVALID",
+        "Skill result identity does not match the active invocation.",
+      );
+    }
+    return result;
+  }
+
+  private async assertExecutionAttemptFresh(
+    request: LocalPlanRequest,
+    expected: TaskExecutionRecord,
+    claim: PlannerExecutionClaim,
+  ): Promise<TaskExecutionRecord> {
+    const current = await this.taskStateMachine.get(request.taskId);
+    const external = request.currentVersions?.();
+    if (
+      current?.cancellationToken.cancelled === true ||
+      external?.taskCancelled === true
+    ) {
+      throw new LocalPlannerError(
+        "PLANNER_CANCELLED",
+        "Task execution was cancelled while a Skill attempt was active.",
+      );
+    }
+    if (
+      current === null ||
+      external?.taskCompleted === true ||
+      !this.hasActiveExecutionClaim(current, claim) ||
+      current.state !== expected.state ||
+      current.revision !== expected.revision ||
+      current.planVersion !== expected.planVersion ||
+      current.worldStateVersion !== expected.worldStateVersion ||
+      (external !== undefined &&
+        (external.planVersion !== expected.planVersion ||
+          external.worldStateVersion !== expected.worldStateVersion))
+    ) {
+      throw new LocalPlannerError(
+        "PLANNER_STALE_RESPONSE",
+        "Skill result no longer matches the active task execution revision.",
+      );
+    }
+    return current;
+  }
+
+  private async waitForSafetyClear(input: Readonly<{
+    request: LocalPlanRequest;
+    expectedTask: TaskExecutionRecord;
+    initialRecord: BotRegistryRecord;
+    initialSkill: BotSkillCatalogEntryV1;
+    deadlineMs: number;
+    claim: PlannerExecutionClaim;
+  }>): Promise<BotRegistryRecord> {
+    let remainingWaitMs = Math.min(
+      this.maxSafetyRecoveryWaitMs,
+      Math.max(0, input.deadlineMs - this.validNow().getTime()),
+    );
+    for (;;) {
+      this.assertWithinDeadline(input.deadlineMs, input.request.signal);
+      await this.assertExecutionAttemptFresh(
+        input.request,
+        input.expectedTask,
+        input.claim,
+      );
+      const record = this.options.registry.get(input.request.botId);
+      if (
+        !record ||
+        record.connectionState !== "online" ||
+        !record.currentStatus ||
+        !record.currentStatus.safety ||
+        !dispatchContextMatches(
+          record,
+          input.initialRecord,
+          input.initialSkill,
+        )
+      ) {
+        throw new LocalPlannerError(
+          "PLANNER_BOT_UNAVAILABLE",
+          "Bot Runtime changed or disconnected during L0 recovery.",
+        );
+      }
+      if (!record.currentStatus.safety.normalTasksPaused) return record;
+      if (remainingWaitMs <= 0) {
+        throw new LocalPlannerError(
+          "PLANNER_SAFETY_PAUSED",
+          "L0 safety did not clear within the bounded recovery wait.",
+        );
+      }
+      const delayMs = Math.min(
+        this.safetyRecoveryPollIntervalMs,
+        remainingWaitMs,
+      );
+      await abortableDelay(delayMs, input.request.signal);
+      remainingWaitMs -= delayMs;
+      this.assertWithinDeadline(input.deadlineMs, input.request.signal);
+    }
+  }
+
+  private async failTaskExecution(
+    request: LocalPlanRequest,
+    cause: unknown,
+    claim: PlannerExecutionClaim | null,
+  ): Promise<void> {
+    if (claim === null) return;
+    const current = await this.readTaskAfterPersistenceRace(request.taskId);
+    if (
+      current === null ||
+      current.state === "SUCCESS" ||
+      current.state === "ABORT" ||
+      !this.hasActiveExecutionClaim(current, claim)
+    ) {
+      return;
+    }
+    if (
+      cause instanceof LocalPlannerError &&
+      cause.code === "PLANNER_RESTART_RECOVERY_STALE"
+    ) {
+      return;
+    }
+    const cancellationRequested =
+      request.signal?.aborted === true ||
+      (cause instanceof LocalPlannerError && cause.code === "PLANNER_CANCELLED");
+    const reason = cancellationRequested
+      ? "PLANNER_CANCELLED"
+      : cause instanceof LocalPlannerError
+        ? cause.code
+        : "PLANNER_EXECUTION_FAILED";
+    if (cancellationRequested) {
+      let cancelled: TaskExecutionRecord;
+      try {
+        cancelled = await this.taskStateMachine.cancel(
+          request.taskId,
+          reason,
+          current.revision,
+        );
+      } catch (cancelCause) {
+        if (
+          cancelCause instanceof TaskExecutionError &&
+          (cancelCause.code === "TASK_EXECUTION_REVISION_CONFLICT" ||
+            cancelCause.code === "TASK_EXECUTION_TERMINAL" ||
+            cancelCause.code === "TASK_EXECUTION_PERSISTENCE_FAILED")
+        ) {
+          return;
+        }
+        throw cancelCause;
+      }
+      if (
+        cancelled.state === "ABORT" &&
+        cancelled.cancellationToken.cancelled
+      ) {
+        this.recordTaskTransition(request, current, cancelled);
+        this.options.metrics?.increment("bot_task_abort_total", {
+          bot_id: request.botId,
+          reason,
+        });
+      }
+      return;
+    }
+    if (
+      cause instanceof LocalPlannerError &&
+      cause.code === "PLANNER_STALE_RESPONSE" &&
+      current.state !== "PLAN"
+    ) {
+      return;
+    }
+    await this.abortTaskExecution(request.taskId, reason, claim, {
+      expectedRevision: current.revision,
+    });
+  }
+
+  private async abortTaskExecution(
+    taskId: string,
+    reason: string,
+    claim: PlannerExecutionClaim,
+    patch: Parameters<PersistentTaskStateMachine["transition"]>[2] = {},
+  ): Promise<void> {
+    const current = await this.taskStateMachine.get(taskId);
+    if (
+      current === null ||
+      current.state === "SUCCESS" ||
+      current.state === "ABORT" ||
+      !this.hasActiveExecutionClaim(current, claim) ||
+      (patch.expectedRevision !== undefined &&
+        patch.expectedRevision !== current.revision)
+    ) {
+      return;
+    }
+    let aborted: TaskExecutionRecord;
+    try {
+      aborted = await this.transitionTaskExecution(taskId, "ABORT", {
+        ...patch,
+        expectedRevision: patch.expectedRevision ?? current.revision,
+        failureReason: reason,
+      });
+    } catch (abortCause) {
+      if (
+        abortCause instanceof LocalPlannerError &&
+        (abortCause.code === "PLANNER_STALE_RESPONSE" ||
+          abortCause.code === "PLANNER_CANCELLED")
+      ) {
+        return;
+      }
+      throw abortCause;
+    }
+    if (aborted.state === "ABORT") {
+      this.options.metrics?.increment("bot_task_abort_total", {
+        bot_id: current.botId,
+        reason,
+      });
+    }
+  }
+
+  private hasActiveExecutionClaim(
+    task: TaskExecutionRecord,
+    claim: PlannerExecutionClaim,
+  ): boolean {
+    return (
+      task.executionOwner === claim.owner &&
+      task.executionLeaseExpiresAt === claim.leaseExpiresAt &&
+      Date.parse(claim.leaseExpiresAt) > this.validNow().getTime()
+    );
+  }
+
+  private recordTaskAbortMetric(task: TaskExecutionRecord, reason: string): void {
+    this.options.metrics?.increment("bot_task_abort_total", {
+      bot_id: task.botId,
+      reason,
+    });
+  }
+
+  private async transitionTaskExecution(
+    taskId: string,
+    to: Parameters<PersistentTaskStateMachine["transition"]>[1],
+    patch: Parameters<PersistentTaskStateMachine["transition"]>[2] = {},
+  ): Promise<TaskExecutionRecord> {
+    const before = await this.taskStateMachine.get(taskId);
+    let after: TaskExecutionRecord;
+    try {
+      after = await this.taskStateMachine.transition(taskId, to, patch);
+    } catch (cause) {
+      if (cause instanceof TaskExecutionError) {
+        if (cause.code === "TASK_EXECUTION_CANCELLED") {
+          throw new LocalPlannerError(
+            "PLANNER_CANCELLED",
+            "Task execution was cancelled during a Coordinator transition.",
+          );
+        }
+        if (
+          cause.code === "TASK_EXECUTION_REVISION_CONFLICT" ||
+          cause.code === "TASK_EXECUTION_TERMINAL"
+        ) {
+          throw new LocalPlannerError(
+            "PLANNER_STALE_RESPONSE",
+            "Task execution changed before the Coordinator transition committed.",
+          );
+        }
+        if (
+          cause.code === "TASK_EXECUTION_PERSISTENCE_FAILED" &&
+          patch.expectedRevision !== undefined
+        ) {
+          let durable: TaskExecutionRecord | null = null;
+          try {
+            durable = await this.taskStateMachine.get(taskId);
+          } catch {
+            // Preserve the persistence failure when the durable winner is unknown.
+          }
+          if (durable?.cancellationToken.cancelled) {
+            throw new LocalPlannerError(
+              "PLANNER_CANCELLED",
+              "Task execution was cancelled while a transition was persisted.",
+            );
+          }
+          if (
+            durable !== null &&
+            durable.revision !== patch.expectedRevision
+          ) {
+            throw new LocalPlannerError(
+              "PLANNER_STALE_RESPONSE",
+              "A newer durable task revision won the transition race.",
+            );
+          }
+        }
+      }
+      throw cause;
+    }
+    this.recordTaskTransition(
+      { taskId, botId: after.botId, traceId: taskId },
+      before,
+      after,
+    );
+    return after;
+  }
+
+  private recordTaskTransition(
+    request: Pick<LocalPlanRequest, "taskId" | "botId" | "traceId">,
+    before: TaskExecutionRecord | null,
+    after: TaskExecutionRecord,
+  ): void {
+    if (before?.state === after.state) return;
+    this.options.metrics?.increment("bot_task_state_transitions_total", {
+      bot_id: request.botId,
+      from: before?.state ?? "CREATED",
+      to: after.state,
+    });
+    if (after.state === "SUCCESS" || after.state === "ABORT") {
+      this.recordPositiveMetric(
+        "bot_task_completion_time_ms_total",
+        {
+          bot_id: request.botId,
+          outcome: after.state === "SUCCESS" ? "success" : "abort",
+        },
+        Date.parse(after.updatedAt) - Date.parse(after.startTime),
+      );
+    }
+    const fields = {
+      traceId: request.traceId,
+      taskId: request.taskId,
+      botId: request.botId,
+      skillId: null,
+      modelName: null,
+      fromState: before?.state ?? null,
+      toState: after.state,
+      currentStep: after.currentStep,
+      planVersion: after.planVersion,
+      worldStateVersion: after.worldStateVersion,
+      retryCount: after.retryCount,
+      recoveryCount: after.recoveryCount,
+      expected: after.expectedResult,
+      actual: after.actualResult,
+      failureReason: after.failureReason,
+    };
+    try {
+      const write = after.state === "ABORT"
+        ? this.options.logger?.warn.bind(this.options.logger)
+        : this.options.logger?.info.bind(this.options.logger);
+      write?.("coordinator_task_transition", fields);
+    } catch {
+      // Observability cannot alter deterministic task execution.
+    }
+  }
+
+  private recordAIUsage(
+    request: Pick<LocalPlanRequest, "botId">,
+    ai: AIScheduledResult<GenerateResult>,
+  ): void {
+    const labels = { bot_id: request.botId };
+    this.recordPositiveMetric(
+      "bot_llm_prompt_tokens_total",
+      labels,
+      ai.value.usage.promptTokens,
+    );
+    this.recordPositiveMetric(
+      "bot_llm_completion_tokens_total",
+      labels,
+      ai.value.usage.completionTokens,
+    );
+    this.recordPositiveMetric(
+      "bot_llm_queue_time_ms_total",
+      labels,
+      ai.queueTimeMs,
+    );
+    this.recordPositiveMetric(
+      "bot_llm_execution_time_ms_total",
+      labels,
+      ai.executionTimeMs,
+    );
+    this.recordPositiveMetric(
+      "bot_llm_total_latency_ms_total",
+      labels,
+      ai.totalTimeMs,
+    );
+  }
+
+  private recordPositiveMetric(
+    name: LifecycleMetricName,
+    labels: Readonly<Record<string, string>>,
+    rawAmount: number,
+  ): void {
+    const amount = roundedPositiveSafeInteger(rawAmount);
+    if (amount !== null) this.options.metrics?.increment(name, labels, amount);
   }
 
   private validateRequest(request: LocalPlanRequest): void {
@@ -888,11 +2916,47 @@ export class CoordinatorLocalPlanner {
         identifierSchema.safeParse(request.assignmentLeaseOwner).success) &&
       Number.isSafeInteger(request.timeoutMs) &&
       request.timeoutMs >= 10 &&
-      request.timeoutMs <= 10 * 60_000;
+      request.timeoutMs <= 10 * 60_000 &&
+      (request.planVersion === undefined || Number.isSafeInteger(request.planVersion)) &&
+      (request.worldStateVersion === undefined || Number.isSafeInteger(request.worldStateVersion));
     if (!valid) {
       throw new LocalPlannerError(
         "PLANNER_REQUEST_INVALID",
         "Local planner request failed bounded validation.",
+      );
+    }
+  }
+
+  private assertFreshResponse(
+    request: LocalPlanRequest,
+    ai: AIScheduledResult<GenerateResult>,
+    expected: PlannerExecutionContext,
+  ): void {
+    const createdAtMs = Date.parse(ai.enqueuedAt);
+    const completedAtMs = Date.parse(ai.completedAt);
+    if (
+      ai.requestId !== request.requestId ||
+      ai.botId !== request.botId ||
+      !Number.isFinite(createdAtMs) ||
+      !Number.isFinite(completedAtMs) ||
+      completedAtMs < createdAtMs
+    ) {
+      throw new LocalPlannerError(
+        "PLANNER_STALE_RESPONSE",
+        "Local planner response identity or lifetime is stale.",
+      );
+    }
+    if (!request.currentVersions) return;
+    const current = request.currentVersions();
+    if (
+      current.taskCancelled === true ||
+      current.taskCompleted === true ||
+      current.planVersion !== expected.task.planVersion ||
+      current.worldStateVersion !== expected.worldStateVersion
+    ) {
+      throw new LocalPlannerError(
+        "PLANNER_STALE_RESPONSE",
+        "Local planner response no longer matches the active task or world version.",
       );
     }
   }
@@ -1003,24 +3067,365 @@ export class CoordinatorLocalPlanner {
     deadlineMs: number,
     signal?: AbortSignal,
   ): void {
-    if (signal?.aborted || this.validNow().getTime() >= deadlineMs) {
+    if (signal?.aborted) {
+      throw new LocalPlannerError(
+        "PLANNER_CANCELLED",
+        "Local planner request was cancelled.",
+      );
+    }
+    if (this.validNow().getTime() >= deadlineMs) {
       throw new LocalPlannerError(
         "PLANNER_TIMEOUT",
-        "Local planner exceeded or cancelled its total request deadline.",
+        "Local planner exceeded its total request deadline.",
       );
+    }
+  }
+
+  /**
+   * Records which ground block a placement was sited on.
+   *
+   * The block *name* only. The position stays out for the same reason the
+   * operator goal and Skill inputs do: diagnostics must not become a wider
+   * disclosure channel than the prompt, and a station coordinate is a base
+   * coordinate. The name is what triage actually needs — it says whether the
+   * scan ladder found a site on its first candidate or its last.
+   */
+  private logPlacementSite(
+    request: LocalPlanRequest,
+    referenceBlockName: string,
+  ): void {
+    const logger = this.options.logger;
+    if (!logger) return;
+    try {
+      logger.info("coordinator_planner_placement_site_observed", {
+        traceId: request.traceId,
+        taskId: request.taskId,
+        botId: request.botId,
+        referenceBlockName,
+      });
+    } catch {
+      // Diagnostics must never change what the planner reports.
+    }
+  }
+
+  /**
+   * Records that a one-shot dispatch which produced nothing was re-planned.
+   *
+   * Without it the second attempt is indistinguishable from a first-pass
+   * plan_items decision, and the operator-visible result no longer mentions the
+   * Skill that was tried first. The Skill id is planner-derived, so this adds no
+   * disclosure the catalog does not already carry.
+   */
+  private logEmptyDispatchReplanned(
+    request: LocalPlanRequest,
+    emptySkillId: string,
+  ): void {
+    const logger = this.options.logger;
+    if (!logger) return;
+    try {
+      logger.warn("coordinator_planner_empty_dispatch_replanned", {
+        traceId: request.traceId,
+        taskId: request.taskId,
+        botId: request.botId,
+        emptySkillId,
+      });
+    } catch {
+      // Diagnostics must never change what the planner reports.
+    }
+  }
+
+  /**
+   * Records whether the narrowed re-ask overturned a declined acquisition
+   * goal.  The retry is otherwise invisible: a discarded one looks exactly
+   * like a first-pass noop from outside the planner.
+   */
+  private logRetry(
+    request: LocalPlanRequest,
+    itemName: string,
+    disposition: "accepted" | "discarded",
+    retriedAction: string,
+  ): void {
+    const logger = this.options.logger;
+    if (!logger) return;
+    try {
+      logger.info("coordinator_planner_plan_items_retry", {
+        traceId: request.traceId,
+        taskId: request.taskId,
+        botId: request.botId,
+        itemName,
+        disposition,
+        retriedAction,
+      });
+    } catch {
+      // Diagnostics must never change what the planner reports.
+    }
+  }
+
+  /**
+   * Emits the step ladder for one goal.  Only planner-derived values are
+   * recorded — step kinds, trusted item names, and outcome codes.  The
+   * operator goal, Skill inputs, and world coordinates stay out, so turning
+   * diagnostics on never widens what a log reader can see.
+   */
+  private logSupervision(
+    request: LocalPlanRequest,
+    steps: readonly PlanStep[],
+    supervision: SupervisionResult,
+  ): void {
+    const logger = this.options.logger;
+    if (!logger) return;
+    const fields = {
+      traceId: request.traceId,
+      taskId: request.taskId,
+      botId: request.botId,
+      plannedSteps: steps.length,
+      stepsCompleted: supervision.stepsCompleted,
+      repairStepsInserted: supervision.repairStepsInserted,
+      failureCode: supervision.failure?.errorCode ?? null,
+      failureCategory: supervision.failure?.category ?? null,
+      failureAction: supervision.failure?.action ?? null,
+      failureStepIndex: supervision.failure?.stepIndex ?? null,
+      failureItemName: supervision.failure?.itemName ?? null,
+      steps: supervision.events.map((event) => ({
+        kind: event.kind,
+        stepIndex: event.stepIndex,
+        itemName: event.itemName,
+        attempt: event.attempt,
+        execution: event.execution,
+        ...(event.errorCode === undefined ? {} : { errorCode: event.errorCode }),
+        ...(event.category === undefined ? {} : { category: event.category }),
+        ...(event.action === undefined ? {} : { action: event.action }),
+        ...(event.insertedSteps === undefined
+          ? {}
+          : { insertedSteps: event.insertedSteps }),
+        ...(event.reason === undefined ? {} : { reason: event.reason }),
+      })),
+    };
+    try {
+      if (supervision.completed) {
+        logger.info("coordinator_planner_goal_supervision", fields);
+      } else {
+        logger.warn("coordinator_planner_goal_supervision", fields);
+      }
+    } catch {
+      // Diagnostics must never change what the planner reports.
+    }
+  }
+
+  /**
+   * `NON_IDEMPOTENT_RESULT_UNCERTAIN` is the right thing to *return* — a
+   * non-idempotent step that may have already had side effects must not be
+   * replayed. But it replaces the code the Skill actually reported, so the
+   * supervision log alone cannot say what went wrong: a live `crafting_table`
+   * plan recorded the mask while the real cause, `COLLECT_BLOCKS_FAILED`, was
+   * only visible by cross-referencing the Runtime log on another host.
+   *
+   * So the mask is recorded alongside the code it hid. The returned outcome is
+   * untouched; this only adds the one field that makes the coordinator log
+   * self-sufficient.
+   */
+  /**
+   * Names the excluded items a declined goal actually mentioned, so the one
+   * question a `noop` cannot otherwise answer — "was this even offered?" — has a
+   * recorded answer. Silence here means the goal named nothing excluded, which
+   * is the case where the model's decline stands on its own.
+   *
+   * Uses the same spelling rule as the retry guard, so an item reported here is
+   * exactly one the guard would also have recognised had it been bindable.
+   */
+  private logUnbindableGoalNames(
+    request: LocalPlanRequest,
+    operatorGoal: string,
+    bindability: GoalBindability,
+  ): void {
+    const logger = this.options.logger;
+    if (!logger) return;
+    try {
+      const named = bindability.excluded.filter(({ itemName }) =>
+        goalNamesPlannedItem(operatorGoal, itemName),
+      );
+      if (named.length === 0) return;
+      logger.warn("coordinator_planner_goal_named_unbindable_item", {
+        traceId: request.traceId,
+        taskId: request.taskId,
+        botId: request.botId,
+        unbindableItems: named.map(
+          ({ itemName, reason }) => `${itemName}=${reason}`,
+        ),
+      });
+    } catch {
+      // Diagnostics must never change what the planner reports.
+    }
+  }
+
+  private logMaskedStepFailure(
+    request: LocalPlanRequest,
+    step: PlanStep,
+    original: StepOutcome,
+    guarded: StepOutcome,
+  ): void {
+    const logger = this.options.logger;
+    if (!logger) return;
+    if (original.ok || guarded.ok) return;
+    if (original.errorCode === guarded.errorCode) return;
+    try {
+      logger.warn("coordinator_planner_step_failure_masked", {
+        traceId: request.traceId,
+        taskId: request.taskId,
+        botId: request.botId,
+        skillId: step.skillId,
+        itemName: step.itemName,
+        reportedErrorCode: guarded.errorCode,
+        skillErrorCode: original.errorCode,
+      });
+    } catch {
+      // Diagnostics must never change what the planner reports.
     }
   }
 }
 
 function parseDecision(content: string): LocalPlannerDecision {
   try {
-    return localPlannerDecisionSchema.parse(JSON.parse(content) as unknown);
-  } catch {
+    return parseStructuredOutput(content, {
+      name: "local-planner-decision",
+      schema: localPlannerDecisionSchema,
+    });
+  } catch (error) {
     throw new LocalPlannerError(
       "PLANNER_DECISION_INVALID",
       "Local planner response failed strict JSON validation.",
+      { cause: error },
     );
   }
+}
+
+function worldStateVersion(record: BotRegistryRecord): number {
+  const candidate = record.worldState?.version;
+  return typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 0
+    ? candidate
+    : 0;
+}
+
+function skillResultSummary(result: SkillExecutionResultV1): SkillJsonValue {
+  return skillJsonValueSchema.parse({
+    outcome: result.payload.outcome,
+    skillId: result.payload.skillId,
+    skillVersion: result.payload.skillVersion,
+    attempts: result.payload.attempts,
+    ...(result.payload.outcome === "completed"
+      ? { output: result.payload.output }
+      : { errorCode: result.payload.errorCode }),
+  });
+}
+
+function isRecoverableL0SkillResult(result: SkillExecutionResultV1): boolean {
+  return (
+    result.payload.outcome !== "completed" &&
+    RECOVERABLE_L0_ERROR_CODES.has(result.payload.errorCode)
+  );
+}
+
+function isSafeL0Replay(
+  result: SkillExecutionResultV1,
+  skill: BotSkillCatalogEntryV1,
+): boolean {
+  if (result.payload.outcome === "completed") return false;
+  // A precondition pause happens before a Skill can mutate the world. Other
+  // interruptions may have committed a partial side effect.
+  return skill.idempotent || result.payload.errorCode === "NORMAL_ACTIONS_PAUSED";
+}
+
+function dispatchContextMatches(
+  currentRecord: BotRegistryRecord,
+  initialRecord: BotRegistryRecord,
+  initialSkill: BotSkillCatalogEntryV1,
+): boolean {
+  const currentSkill = currentRecord.skillCatalog?.skills.find(
+    ({ skillId, skillVersion, availability }) =>
+      skillId === initialSkill.skillId &&
+      skillVersion === initialSkill.skillVersion &&
+      availability === "available",
+  );
+  return (
+    currentRecord.runtimeInstanceId === initialRecord.runtimeInstanceId &&
+    currentRecord.serverProfileId === initialRecord.serverProfileId &&
+    currentRecord.skillCatalog?.sequence === initialRecord.skillCatalog?.sequence &&
+    currentSkill !== undefined &&
+    JSON.stringify(currentSkill) === JSON.stringify(initialSkill)
+  );
+}
+
+function restartExecutionSkill(
+  task: TaskExecutionRecord,
+  record: BotRegistryRecord,
+): BotSkillCatalogEntryV1 | null {
+  if (
+    task.currentStep === null ||
+    task.expectedResult === null ||
+    Array.isArray(task.expectedResult) ||
+    typeof task.expectedResult !== "object"
+  ) {
+    return null;
+  }
+  const expected = task.expectedResult as Record<string, unknown>;
+  if (expected.outcome !== "completed") return null;
+  const skillId = expected.skillId;
+  const skillVersion = expected.skillVersion;
+  if (
+    typeof skillId !== "string" ||
+    typeof skillVersion !== "string" ||
+    task.currentStep !== skillId
+  ) {
+    return null;
+  }
+  return (
+    record.skillCatalog?.skills.find(
+      (skill) =>
+        skill.skillId === skillId && skill.skillVersion === skillVersion,
+    ) ?? null
+  );
+}
+
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(
+      new LocalPlannerError("PLANNER_CANCELLED", "Recovery wait was cancelled."),
+    );
+  }
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const onAbort = () => finish(
+      new LocalPlannerError("PLANNER_CANCELLED", "Recovery wait was cancelled."),
+    );
+    const finish = (error?: LocalPlannerError) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      if (error) reject(error);
+      else resolve();
+    };
+    const timer = setTimeout(() => finish(), ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function boundedInteger(
+  value: number,
+  minimum: number,
+  maximum: number,
+  field: string,
+): number {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new RangeError(`${field} must be between ${minimum} and ${maximum}.`);
+  }
+  return value;
+}
+
+function roundedPositiveSafeInteger(value: number): number | null {
+  if (!Number.isFinite(value) || value <= 0) return null;
+  const rounded = Math.round(value);
+  return Number.isSafeInteger(rounded) && rounded > 0 ? rounded : null;
 }
 
 function stepOutcomeFromResult(
@@ -1044,15 +3449,60 @@ function nonIdempotentStepOutcome(
   outcome: StepOutcome,
 ): StepOutcome {
   if (outcome.ok) return outcome;
-  if (
-    result.payload.outcome === "rejected" &&
-    result.payload.attempts === 0
-  ) {
-    return outcome;
-  }
-  // A handler may have produced partial side effects before any other terminal
-  // outcome. Only a pre-execution rejection proves a fresh invocation is safe.
+  // `rejected` 就是"谢绝了，什么都没动"。原先还额外要求 attempts === 0，那等于
+  // 用"跑了几次"冒充"动没动过"：executor 的 attempts 在 definition.execute 一进去
+  // 就是 1，不管适配器有没有真的碰过世界。实测代价是 collect.block 的**前置**
+  // 可达性检查（一块都没挖）被当成"可能挖了一半"，真实码
+  // COLLECT_TARGET_UNREACHABLE（STALE_WORLD → REOBSERVE_THEN_RETRY）被改写成
+  // NON_IDEMPOTENT_RESULT_UNCERTAIN（CONTRACT_BUG → ESCALATE_TO_OPERATOR），
+  // 第一次尝试就升级人工、repairStepsInserted=0。
+  //
+  // 不能改成按错误码放行：同一个码会从"动过"和"没动过"两个分支抛出
+  // （collect 的前置检查 vs NoPath catch），只有抛出点知道。所以判据是抛出点
+  // 自己声明的 SkillRefusal → executor 报 rejected，这里只读这一个事实。
+  if (result.payload.outcome === "rejected") return outcome;
+  // 其余终态都可能在失败前留下了部分副作用，重投不安全。
   return { ok: false, errorCode: NON_IDEMPOTENT_RESULT_UNCERTAIN };
+}
+
+/**
+ * The counts that say the world or the inventory actually moved.
+ *
+ * A deliberate subset of the goal-summary allow-list. The names left out are
+ * measurements, not production: `distanceToTarget: 0` means the bot arrived,
+ * `targetsFound: 0` is an observation, and `totalScoreBefore/After` describe a
+ * ranking. Reading a zero in any of those as "nothing happened" would be exactly
+ * the inversion this predicate exists to avoid.
+ */
+const PRODUCTION_COUNT_KEYS = Object.freeze([
+  "itemsCollected",
+  "craftedCount",
+  "smeltedCount",
+  "movedCount",
+  "changedCount",
+] as const);
+
+/**
+ * True when a completed dispatch published production counts and every one of
+ * them is zero — that is, the Skill succeeded at doing nothing.
+ *
+ * Fails closed in both directions that matter. A Skill that published no
+ * production count at all returns false, because "cannot tell" must not be
+ * spelled the same way as "told us it did nothing". And an unsuccessful outcome
+ * returns false, because an error code already explains itself and re-planning
+ * around it would be guessing at a cause.
+ *
+ * Reads the Skill's own output through the same allow-listed extraction the wire
+ * uses, so the coordinator never derives a count it was not given.
+ */
+function dispatchChangedNothing(result: SkillExecutionResultV1): boolean {
+  if (result.payload.outcome !== "completed") return false;
+  const summary = goalResultSummaryFromOutput(result.payload.output);
+  if (summary === undefined) return false;
+  const produced = PRODUCTION_COUNT_KEYS.map((key) => summary[key]).filter(
+    (count): count is number => count !== undefined,
+  );
+  return produced.length > 0 && produced.every((count) => count === 0);
 }
 
 function skillResultErrorCode(result: SkillExecutionResultV1): string {
@@ -1066,19 +3516,58 @@ function assertPlanGoalsGrounded(
   operatorGoal: string,
 ): void {
   for (const goal of goals) {
-    const spaced = goal.itemName.replaceAll("_", " ");
-    const aliases = PLANNED_ITEM_GOAL_ALIASES[goal.itemName] ?? [];
-    if (
-      !containsGoalToken(operatorGoal, goal.itemName) &&
-      !containsGoalToken(operatorGoal, spaced) &&
-      !aliases.some((alias) => containsGoalToken(operatorGoal, alias))
-    ) {
+    if (!goalNamesPlannedItem(operatorGoal, goal.itemName)) {
       throw new LocalPlannerError(
         "PLANNER_INPUT_UNGROUNDED",
         `Planned item ${goal.itemName} was not named by the operator goal.`,
       );
     }
   }
+}
+
+function planGoalsAreGrounded(
+  goals: readonly GoalRequest[],
+  operatorGoal: string,
+): boolean {
+  return goals.every((goal) =>
+    goalNamesPlannedItem(operatorGoal, goal.itemName),
+  );
+}
+
+type SmeltStepInputs = Readonly<{
+  inputItemName: string;
+  fuelItemName: string;
+  fuelCount: number;
+}>;
+
+/**
+ * Extracts the smelt request from the deterministic planner ledger. A smelt
+ * step consumes exactly one input material plus one selected fuel candidate;
+ * returning null for any malformed shape keeps the coordinator fail-closed.
+ */
+function smeltInputsForStep(step: PlanStep): SmeltStepInputs | null {
+  if (step.kind !== "smelt") return null;
+  const fuel = step.consumes.find(({ itemName }) =>
+    step.fuelCandidates.includes(itemName),
+  );
+  const input = step.consumes.find(({ itemName }) =>
+    !step.fuelCandidates.includes(itemName),
+  );
+  if (
+    !fuel ||
+    !input ||
+    !Number.isSafeInteger(fuel.count) ||
+    fuel.count < 1 ||
+    !Number.isSafeInteger(input.count) ||
+    input.count < 1
+  ) {
+    return null;
+  }
+  return {
+    inputItemName: input.itemName,
+    fuelItemName: fuel.itemName,
+    fuelCount: fuel.count,
+  };
 }
 
 function completedOutputSatisfiesStep(
@@ -1109,7 +3598,133 @@ function completedOutputSatisfiesStep(
       output.usedCraftingTable === (step.station !== null)
     );
   }
+  if (step.kind === "smelt") {
+    const smelt = smeltInputsForStep(step);
+    return (
+      smelt !== null &&
+      output.inputItemName === smelt.inputItemName &&
+      output.fuelItemName === smelt.fuelItemName &&
+      output.outputItemName === step.itemName &&
+      output.requestedCount === step.runs &&
+      output.insertedFuelCount === smelt.fuelCount &&
+      typeof output.smeltedCount === "number" &&
+      Number.isInteger(output.smeltedCount) &&
+      output.smeltedCount >= step.producedCount
+    );
+  }
+  if (step.kind === "place-station") {
+    // `placed: true` alone is the Runtime's word that it tried. The read-back
+    // name and position are what prove the station the plan needs is the one
+    // now standing there, so a later craft binds to an observed block.
+    return (
+      output.placed === true &&
+      output.placedBlockName === step.itemName &&
+      readPosition(output.position ?? null) !== null
+    );
+  }
   return false;
+}
+
+/**
+ * A whole-block position, or null when the value is not one.
+ *
+ * Integers specifically: a fractional coordinate is an entity position, not a
+ * block, and handing one back as a placement site would bind a later craft to a
+ * block address that does not exist.
+ */
+function readPosition(value: SkillJsonValue): PlacementPosition | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const { x, y, z } = value as Record<string, SkillJsonValue>;
+  if (
+    typeof x !== "number" ||
+    typeof y !== "number" ||
+    typeof z !== "number" ||
+    !Number.isInteger(x) ||
+    !Number.isInteger(y) ||
+    !Number.isInteger(z)
+  ) {
+    return null;
+  }
+  return { x, y, z };
+}
+
+/**
+ * Where the Runtime confirmed a station actually landed, or null when its result
+ * does not say.
+ *
+ * Read from the placement output rather than computed as `referenceBlock + face`,
+ * because the coordinator's arithmetic is a prediction while this field is the
+ * Runtime's own read-back of the block it found standing there afterwards.
+ */
+function placedStationPosition(
+  result: SkillExecutionResultV1,
+): PlacementPosition | null {
+  if (result.payload.outcome !== "completed") return null;
+  const output = result.payload.output;
+  if (!output || typeof output !== "object" || Array.isArray(output)) return null;
+  return readPosition((output as Record<string, SkillJsonValue>).position ?? null);
+}
+
+/**
+ * The closest scanned block inside the placement window, or null when the scan
+ * returned nothing usable.
+ *
+ * The window is both-sided on purpose. Below the minimum the match is the block
+ * under the bot's own feet, and building on it would place a station inside the
+ * bot; past the maximum it is out of placement reach and the Runtime would
+ * refuse. Returning null for an empty window makes the step report
+ * STEP_TARGET_NOT_FOUND rather than dispatching a placement that cannot work.
+ */
+function nearestPlacementReference(
+  output: SkillJsonValue | null,
+  openPositions: ReadonlySet<string>,
+): PlacementPosition | null {
+  if (!output || typeof output !== "object" || Array.isArray(output)) return null;
+  const matches = (output as Record<string, SkillJsonValue>).matches;
+  if (!Array.isArray(matches)) return null;
+  let best: PlacementPosition | null = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const match of matches) {
+    if (!match || typeof match !== "object" || Array.isArray(match)) continue;
+    const distance = (match as Record<string, SkillJsonValue>).distance;
+    if (
+      typeof distance !== "number" ||
+      !Number.isFinite(distance) ||
+      distance < COORDINATOR_PLACEMENT_MIN_DISTANCE ||
+      distance > COORDINATOR_PLACEMENT_MAX_DISTANCE ||
+      distance >= bestDistance
+    ) {
+      continue;
+    }
+    const position = readPosition(match);
+    if (position === null) continue;
+    if (!openPositions.has(positionKey({
+      x: position.x,
+      y: position.y + COORDINATOR_PLACEMENT_FACE.y,
+      z: position.z,
+    }))) {
+      continue;
+    }
+    best = position;
+    bestDistance = distance;
+  }
+  return best;
+}
+
+function scannedPositionKeys(output: SkillJsonValue | null): ReadonlySet<string> {
+  const positions = new Set<string>();
+  if (!output || typeof output !== "object" || Array.isArray(output)) return positions;
+  const matches = (output as Record<string, SkillJsonValue>).matches;
+  if (!Array.isArray(matches)) return positions;
+  for (const match of matches) {
+    const position = readPosition(match);
+    if (position !== null) positions.add(positionKey(position));
+  }
+  return positions;
+}
+
+function positionKey(position: PlacementPosition): string {
+  return `${position.x},${position.y},${position.z}`;
 }
 
 function transportFailureCode(cause: unknown): string {
@@ -1136,11 +3751,28 @@ function safeBotContext(record: BotRegistryRecord, taskId: string) {
     health: status.health.current,
     food: status.food.level,
     armorPoints: status.armorPoints,
+    inventory: (status.inventory ?? []).map(({ itemName, count }) => ({
+      itemName,
+      count,
+    })),
     safetyMode: status.safety?.mode ?? null,
     activeRiskCodes: status.safety?.activeRisks ?? ["SAFETY_STATUS_UNAVAILABLE"],
     minecraftVersion: record.minecraftVersion?.resolvedVersion ?? null,
     currentDimension: status.position?.dimension ?? null,
   };
+}
+
+function plannerInventoryFromRecord(
+  record: BotRegistryRecord,
+): PlannerInventory {
+  const items = record.currentStatus?.inventory;
+  if (!items) return {};
+  const inventory: Record<string, number> = {};
+  for (const { itemName, count } of items) {
+    if (!Number.isSafeInteger(count) || count < 1) continue;
+    inventory[itemName] = count;
+  }
+  return inventory;
 }
 
 function plannerInputSchema(schema: SkillJsonValue, depth = 0): SkillJsonValue {
@@ -1394,11 +4026,27 @@ function dimensionsFromGoal(
 }
 
 function containsGoalToken(goal: string, token: string): boolean {
+  return goalTokenPattern(token, "iu").test(goal);
+}
+
+/**
+ * The one spelling rule every goal-token reader shares. `goalNameSpans` needs
+ * the pattern itself rather than a boolean, so it lives here instead of being
+ * rebuilt per caller — two copies of this rule would be two chances for the
+ * retry guard and the grounding check to disagree.
+ *
+ * The word boundaries are lookarounds rather than consumed characters so a
+ * match spans the token alone. Consuming a delimiter would fold it into the
+ * span and make a nested name look the same length as its container, which is
+ * exactly the comparison `strictlyCovers` depends on. Acceptance is unchanged:
+ * either way a token must not be flanked by an identifier character.
+ */
+function goalTokenPattern(token: string, flags: string): RegExp {
   const escaped = token.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
   return new RegExp(
-    `(?:^|[^A-Za-z0-9_])${escaped}(?:$|[^A-Za-z0-9_])`,
-    "iu",
-  ).test(goal);
+    `(?<![A-Za-z0-9_])${escaped}(?![A-Za-z0-9_])`,
+    flags,
+  );
 }
 
 function boundedAbortSignal(

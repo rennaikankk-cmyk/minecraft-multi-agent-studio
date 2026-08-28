@@ -5,11 +5,27 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { parseEnv } from "node:util";
 
-const repositoryRoot = path.resolve(import.meta.dirname, "..");
-const runtimeRoot = path.join(repositoryRoot, "runtime-data");
+import {
+  createLocalBotSlots,
+  discoverLocalAIWithRetry,
+  loadLocalAIKeyFile,
+  StudioLocalManager,
+} from "./studio-local-manager.mjs";
+
+const packagedMode = process.env.STUDIO_SEA_BUNDLE === "1";
+const repositoryRoot = path.resolve(
+  process.env.STUDIO_BUNDLE_ROOT?.trim() || path.resolve(import.meta.dirname, ".."),
+);
+const configRoot = path.resolve(
+  process.env.STUDIO_CONFIG_ROOT?.trim() || repositoryRoot,
+);
+const runtimeRoot = path.resolve(
+  process.env.STUDIO_RUNTIME_ROOT?.trim() || path.join(repositoryRoot, "runtime-data"),
+);
 const logRoot = path.join(runtimeRoot, "logs");
 const secretPath = path.join(runtimeRoot, "local-control-secrets.json");
 const children = new Map();
+let studioManager = null;
 let stopping = false;
 let stopPromise = null;
 const shutdownPreload = `data:text/javascript,${encodeURIComponent(
@@ -20,10 +36,13 @@ process.once("SIGINT", () => void stopAll("SIGINT"));
 process.once("SIGTERM", () => void stopAll("SIGTERM"));
 
 const environmentFileValues = {
-  ...(await loadEnvironmentFile(path.join(repositoryRoot, ".env"))),
-  ...(await loadEnvironmentFile(path.join(repositoryRoot, ".env.local"))),
+  ...(await loadEnvironmentFile(path.join(configRoot, ".env"))),
+  ...(await loadEnvironmentFile(path.join(configRoot, ".env.local"))),
 };
-const hostEnvironment = { ...environmentFileValues, ...process.env };
+const hostEnvironment = await loadLocalAIKeyFile(
+  { ...environmentFileValues, ...process.env },
+  configRoot,
+);
 const runtimeLinkPort = boundedPort(
   hostEnvironment.COORDINATOR_RUNTIME_LINK_PORT ?? "3220",
   "COORDINATOR_RUNTIME_LINK_PORT",
@@ -37,7 +56,26 @@ const controlApiPort = boundedPort(
   "CONTROL_API_PORT",
 );
 const dashboardPort = boundedPort(hostEnvironment.STUDIO_DASHBOARD_PORT ?? "3000");
-const configuredPorts = [runtimeLinkPort, controlLinkPort, controlApiPort, dashboardPort];
+const managerPort = boundedPort(
+  hostEnvironment.STUDIO_MANAGER_PORT ?? "3230",
+  "STUDIO_MANAGER_PORT",
+);
+const productionTaskDelivery =
+  hostEnvironment.COORDINATOR_TASK_DELIVERY?.trim() === "production";
+const goalExecutionPort = productionTaskDelivery
+  ? boundedPort(
+      hostEnvironment.COORDINATOR_TASK_EXECUTION_PORT ?? "3222",
+      "COORDINATOR_TASK_EXECUTION_PORT",
+    )
+  : null;
+const configuredPorts = [
+  runtimeLinkPort,
+  controlLinkPort,
+  controlApiPort,
+  dashboardPort,
+  managerPort,
+  ...(goalExecutionPort === null ? [] : [goalExecutionPort]),
+];
 if (new Set(configuredPorts).size !== configuredPorts.length) {
   throw new Error("Studio service ports must be unique.");
 }
@@ -45,21 +83,61 @@ await assertPortsAvailable(configuredPorts);
 const dashboardUrl = `http://127.0.0.1:${dashboardPort}`;
 await mkdir(logRoot, { recursive: true });
 const secrets = await loadOrCreateSecrets();
-const environment = buildEnvironment(secrets, hostEnvironment, {
+const runtimeMasterSecret = firstValidSecret(
+  hostEnvironment.BOT_RUNTIME_LINK_SECRET_STUDIO_BOT_01,
+  hostEnvironment.BOT_RUNTIME_LINK_SECRET,
+  secrets.runtimeSecret,
+);
+const maxBots = boundedCount(
+  hostEnvironment.STUDIO_MAX_BOTS ?? "16",
+  "STUDIO_MAX_BOTS",
+  1,
+  16,
+);
+const botSlots = withConfiguredFirstSlotKey(
+  createLocalBotSlots(runtimeMasterSecret, maxBots),
+  hostEnvironment.BOT_RUNTIME_LINK_KEY_ID,
+);
+const aiDiscovery = await discoverLocalAIWithRetry(hostEnvironment);
+const effectiveHostEnvironment = aiDiscovery.config
+  ? {
+      ...hostEnvironment,
+      LOCAL_AI_PROVIDER: aiDiscovery.config.provider,
+      LOCAL_AI_HUB_URL: aiDiscovery.config.baseUrl,
+      LOCAL_AI_MODEL: aiDiscovery.config.model,
+    }
+  : hostEnvironment;
+const environment = buildEnvironment(secrets, effectiveHostEnvironment, {
   runtimeLinkPort,
   controlLinkPort,
   controlApiPort,
-});
+  managerPort,
+  goalExecutionPort,
+}, botSlots);
 
 await requireBuildArtifacts([
   "apps/coordinator/dist/main.js",
   "apps/control-api/dist/main.js",
-  "apps/dashboard/.next/BUILD_ID",
+  "apps/bot-runtime/dist/index.js",
+  packagedMode
+    ? "apps/dashboard/.next/standalone/apps/dashboard/.next/BUILD_ID"
+    : "apps/dashboard/.next/BUILD_ID",
+  ...(productionTaskDelivery ? ["apps/task-worker/dist/main.js"] : []),
 ]);
 
 try {
   const coordinator = startService("coordinator", "apps/coordinator/dist/main.js", [], environment);
   await waitForTcp(coordinator, "127.0.0.1", controlLinkPort, 15_000, "Coordinator Control Link");
+
+  if (productionTaskDelivery) {
+    const taskWorker = startService(
+      "task-worker",
+      "apps/task-worker/dist/main.js",
+      [],
+      environment,
+    );
+    await waitForServiceStable(taskWorker, 500, "Task Worker");
+  }
 
   const controlApi = startService("control-api", "apps/control-api/dist/main.js", [], environment);
   await waitForHttp(
@@ -70,6 +148,19 @@ try {
     "Control API",
   );
 
+  studioManager = new StudioLocalManager({
+    repositoryRoot,
+    runtimeRoot,
+    port: managerPort,
+    token: environment.DASHBOARD_STUDIO_MANAGER_TOKEN,
+    slots: botSlots,
+    aiStatus: aiDiscovery.status,
+    environment,
+    runtimeLinkPort,
+    packagedMode,
+  });
+  await studioManager.start();
+
   if (environment.BOT_SUPERVISOR_CONFIG_PATH) {
     startService(
       "bot-supervisor",
@@ -77,22 +168,49 @@ try {
       [],
       environment,
     );
+  } else if (environment.BOT_SERVER_PROFILE_PATH) {
+    startService(
+      "bot-runtime-explicit",
+      "apps/bot-runtime/dist/index.js",
+      [],
+      environment,
+    );
   }
 
-  const dashboard = startService(
-    "dashboard",
-    "apps/dashboard/node_modules/next/dist/bin/next",
-    ["start", "--hostname", "127.0.0.1", "--port", String(dashboardPort)],
-    environment,
-    path.join(repositoryRoot, "apps/dashboard"),
-  );
+  const dashboard = packagedMode
+    ? startService(
+        "dashboard",
+        "apps/dashboard/.next/standalone/apps/dashboard/server.js",
+        [],
+        {
+          ...environment,
+          HOSTNAME: "127.0.0.1",
+          PORT: String(dashboardPort),
+        },
+        path.join(repositoryRoot, "apps/dashboard/.next/standalone/apps/dashboard"),
+      )
+    : startService(
+        "dashboard",
+        "apps/dashboard/node_modules/next/dist/bin/next",
+        ["start", "--hostname", "127.0.0.1", "--port", String(dashboardPort)],
+        environment,
+        path.join(repositoryRoot, "apps/dashboard"),
+      );
   await waitForDashboard(dashboard, dashboardUrl, 20_000);
   process.stdout.write(`Minecraft Multi-Agent Studio ready: ${dashboardUrl}\n`);
+  if (packagedMode && hostEnvironment.STUDIO_OPEN_BROWSER?.trim() !== "0") {
+    openDashboardInBrowser(dashboardUrl);
+  }
   process.stdout.write(
     environment.BOT_SUPERVISOR_CONFIG_PATH
       ? "Bot Supervisor enabled from explicit configuration.\n"
-      : "Control plane ready with no Bot Supervisor configured.\n",
+      : environment.BOT_SERVER_PROFILE_PATH
+        ? "Single Bot Runtime enabled from explicit ServerProfile.\n"
+        : "Local Bot Manager ready for Dashboard-created runtimes.\n",
   );
+  if (productionTaskDelivery) {
+    process.stdout.write("Durable Coordinator goal execution is enabled.\n");
+  }
   process.stdout.write(
     environment.LOCAL_AI_HUB_URL && environment.LOCAL_AI_MODEL
       ? `Local AI configured: ${new URL(environment.LOCAL_AI_HUB_URL).origin}\n`
@@ -101,7 +219,7 @@ try {
   process.stdout.write(
     environment.COORDINATOR_TASK_POSTGRES_URL
       ? "Durable task history configured; the Coordinator will verify the pre-applied schema.\n"
-      : "Durable task history is not configured and will remain unavailable.\n",
+      : "Desktop task history is active in process memory for this session.\n",
   );
 } catch (cause) {
   process.stderr.write(`${boundedError(cause)}\n`);
@@ -113,7 +231,14 @@ function startService(name, relativeEntry, args, env, cwd = repositoryRoot) {
   if (stopping) throw new Error(`Cannot start ${name} while Studio is stopping.`);
   const entry = path.join(repositoryRoot, relativeEntry);
   const log = createWriteStream(path.join(logRoot, `${name}.log`), { flags: "a" });
-  const child = spawn(process.execPath, ["--import", shutdownPreload, entry, ...args], {
+  const childArgs = packagedMode
+    ? [
+        "--studio-service",
+        path.relative(repositoryRoot, entry).split(path.sep).join("/"),
+        ...args,
+      ]
+    : ["--import", shutdownPreload, entry, ...args];
+  const child = spawn(process.execPath, childArgs, {
     cwd,
     env,
     windowsHide: true,
@@ -143,11 +268,27 @@ function startService(name, relativeEntry, args, env, cwd = repositoryRoot) {
   return service;
 }
 
+function openDashboardInBrowser(url) {
+  const browser = spawn("explorer.exe", [url], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  browser.once("error", (cause) => {
+    process.stderr.write(`Unable to open the Dashboard automatically: ${boundedError(cause)}\n`);
+  });
+  browser.unref();
+}
+
 async function stopAll(reason) {
   if (stopPromise) return stopPromise;
   stopping = true;
   stopPromise = (async () => {
     process.stdout.write(`Stopping Studio services: ${reason}\n`);
+    if (studioManager) {
+      await studioManager.stop();
+      studioManager = null;
+    }
     const running = [...children.values()];
     await Promise.all(running.map((service) => stopService(service)));
   })();
@@ -198,18 +339,20 @@ async function loadOrCreateSecrets() {
   }
 }
 
-function buildEnvironment(secrets, hostEnvironment, ports) {
-  const runtimePeers = hostEnvironment.COORDINATOR_RUNTIME_LINK_PEERS_JSON ||
-    JSON.stringify([
-      {
-        keyId: "runtime-key-01",
-        botId: "studio-bot-01",
-        secretSha256: sha256(secrets.runtimeSecret),
-      },
-    ]);
+function buildEnvironment(secrets, hostEnvironment, ports, botSlots) {
+  const postgresConfigured = Boolean(
+    hostEnvironment.COORDINATOR_TASK_POSTGRES_URL?.trim(),
+  );
+  const runtimePeers = buildRuntimePeers(
+    hostEnvironment.COORDINATOR_RUNTIME_LINK_PEERS_JSON,
+    botSlots,
+  );
   const controlClientId = hostEnvironment.CONTROL_API_COORDINATOR_LINK_CLIENT_ID || "local-control-api";
   const controlKeyId = hostEnvironment.CONTROL_API_COORDINATOR_LINK_KEY_ID || "control-api-key-01";
   const controlSecret = hostEnvironment.CONTROL_API_COORDINATOR_LINK_SECRET || secrets.controlLinkSecret;
+  const taskExecutionSecret =
+    hostEnvironment.COORDINATOR_TASK_EXECUTION_SECRET ||
+    sha256(`minecraft-studio-task-execution\n${secrets.controlLinkSecret}`);
   const configuredControlClients = hostEnvironment.COORDINATOR_CONTROL_LINK_CLIENTS_JSON?.trim();
   const controlClients = configuredControlClients
     ? validateConfiguredControlClients(
@@ -238,6 +381,15 @@ function buildEnvironment(secrets, hostEnvironment, ports) {
         permissions: ["bot.read", "bot.position.read", "bot.stop", "goal.submit", "task.read"],
       },
     ]);
+  const taskWorkerEnvironment = ports.goalExecutionPort === null
+    ? {}
+    : {
+        COORDINATOR_TASK_EXECUTION_HOST: "127.0.0.1",
+        COORDINATOR_TASK_EXECUTION_PORT: String(ports.goalExecutionPort),
+        COORDINATOR_TASK_EXECUTION_SECRET: taskExecutionSecret,
+        TASK_WORKER_PURPOSE: "production",
+        TASK_WORKER_HANDLER_PROFILE: "coordinator-goal",
+      };
   return {
     ...hostEnvironment,
     COORDINATOR_RUNTIME_LINK_HOST: "127.0.0.1",
@@ -256,9 +408,74 @@ function buildEnvironment(secrets, hostEnvironment, ports) {
     CONTROL_API_COORDINATOR_LINK_SECRET: controlSecret,
     DASHBOARD_CONTROL_API_URL: `http://127.0.0.1:${ports.controlApiPort}`,
     DASHBOARD_CONTROL_API_TOKEN: dashboardToken,
+    DASHBOARD_STUDIO_MANAGER_URL: `http://127.0.0.1:${ports.managerPort}`,
+    DASHBOARD_STUDIO_MANAGER_TOKEN: dashboardToken,
+    COORDINATOR_TASK_POSTGRES_SCHEMA: postgresConfigured
+      ? hostEnvironment.COORDINATOR_TASK_POSTGRES_SCHEMA
+      : "",
+    COORDINATOR_LOCAL_MEMORY_MODE:
+      postgresConfigured ? "0" : "1",
+    ...taskWorkerEnvironment,
     BOT_RUNTIME_LINK_SECRET_STUDIO_BOT_01:
       hostEnvironment.BOT_RUNTIME_LINK_SECRET_STUDIO_BOT_01 || secrets.runtimeSecret,
   };
+}
+
+function buildRuntimePeers(raw, botSlots) {
+  let peers = [];
+  if (raw?.trim()) {
+    try {
+      peers = JSON.parse(raw);
+    } catch {
+      throw new Error("COORDINATOR_RUNTIME_LINK_PEERS_JSON is invalid JSON.");
+    }
+    if (!Array.isArray(peers)) {
+      throw new Error("COORDINATOR_RUNTIME_LINK_PEERS_JSON must be an array.");
+    }
+  }
+  for (const slot of botSlots) {
+    const byKey = peers.find((entry) => entry?.keyId === slot.keyId);
+    const byBot = peers.find((entry) => entry?.botId === slot.botId);
+    const existing = byKey ?? byBot;
+    if (existing) {
+      if (
+        existing.keyId !== slot.keyId ||
+        existing.botId !== slot.botId ||
+        existing.secretSha256 !== slot.secretSha256
+      ) {
+        throw new Error(
+          `Runtime Link ACL conflicts with managed Bot slot ${slot.botId}.`,
+        );
+      }
+      continue;
+    }
+    peers.push({
+      keyId: slot.keyId,
+      botId: slot.botId,
+      secretSha256: slot.secretSha256,
+    });
+  }
+  return JSON.stringify(peers);
+}
+
+function withConfiguredFirstSlotKey(slots, configuredKeyId) {
+  const keyId = configuredKeyId?.trim();
+  if (!keyId) return slots;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(keyId)) {
+    throw new Error("BOT_RUNTIME_LINK_KEY_ID is invalid.");
+  }
+  return slots.map((slot, index) =>
+    index === 0 ? Object.freeze({ ...slot, keyId }) : slot,
+  );
+}
+
+async function waitForServiceStable(service, durationMs, label) {
+  const deadline = Date.now() + durationMs;
+  while (Date.now() < deadline) {
+    assertServiceAlive(service, label);
+    await delay(50);
+  }
+  assertServiceAlive(service, label);
 }
 
 function validateConfiguredControlClients(raw, clientId, keyId, secret, explicitSecret) {
@@ -296,7 +513,10 @@ function validateConfiguredPrincipals(raw, token, explicitToken) {
   if (!matching || !Array.isArray(matching.permissions) || !matching.permissions.includes("bot.read")) {
     throw new Error("Dashboard Control API credentials do not match the configured ACL.");
   }
-  return raw;
+  if (!matching.permissions.includes("task.read")) {
+    matching.permissions = [...matching.permissions, "task.read"];
+  }
+  return JSON.stringify(principals);
 }
 
 async function requireBuildArtifacts(relativePaths) {
@@ -431,6 +651,7 @@ async function stopService(service) {
     if (process.platform === "win32" && child.connected) {
       child.send({ type: "studio.shutdown" }, (error) => {
         if (error && child.exitCode === null) child.kill("SIGTERM");
+        disconnectChild(child);
       });
     } else {
       child.kill("SIGTERM");
@@ -438,8 +659,23 @@ async function stopService(service) {
   });
 }
 
+function disconnectChild(child) {
+  if (!child.connected || typeof child.disconnect !== "function") return;
+  try {
+    child.disconnect();
+  } catch {
+    // The child may have exited between the connected check and disconnect.
+  }
+}
+
 function validSecret(value) {
   return typeof value === "string" && value.length >= 32 && value.length <= 512;
+}
+
+function firstValidSecret(...values) {
+  const selected = values.find(validSecret);
+  if (!selected) throw new Error("No valid local Runtime Link secret is available.");
+  return selected;
 }
 
 function sha256(value) {
@@ -452,6 +688,17 @@ function boundedPort(value, name = "STUDIO_DASHBOARD_PORT") {
     throw new Error(`${name} is invalid.`);
   }
   return port;
+}
+
+function boundedCount(value, name, minimum, maximum) {
+  if (!/^[0-9]+$/u.test(String(value))) {
+    throw new Error(`${name} is invalid.`);
+  }
+  const count = Number(value);
+  if (!Number.isSafeInteger(count) || count < minimum || count > maximum) {
+    throw new Error(`${name} must be between ${minimum} and ${maximum}.`);
+  }
+  return count;
 }
 
 function boundedError(cause) {

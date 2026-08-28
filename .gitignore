@@ -19,3 +19,4 @@ netcafe-session/
 configs/servers/*.local.json
 .pnpm-store/
 .claude/
+.studio-exe/

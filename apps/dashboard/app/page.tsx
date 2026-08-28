@@ -8,6 +8,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { BotOverviewStrip } from "@/components/bot-overview-strip";
+import { StudioStatusPanel } from "@/components/studio-status-panel";
 
 type EnvironmentResponse = {
   requestId: string;
@@ -239,6 +240,7 @@ export default function HomePage() {
       </section>
 
       <BotOverviewStrip />
+      <StudioStatusPanel />
 
       {error ? (
         <section className="errorPanel" role="alert">
@@ -366,7 +368,7 @@ export default function HomePage() {
         <article><i className="ready" /><div><strong>Control API</strong><small>状态以实时请求结果为准</small></div></article>
         <article><i /><div><strong>Bot Runtime</strong><small>Runtime Link 已接入；无遥测不显示在线</small></div></article>
         <article><i /><div><strong>Coordinator</strong><small>Control Link 已接入；断线明确标记不可用</small></div></article>
-        <article><i /><div><strong>Local AI Hub</strong><small>待通过 AI Router 接入</small></div></article>
+        <article><i className="ready" /><div><strong>Local AI Hub</strong><small>自动探测与健康检查</small></div></article>
       </section>
 
       <footer>

@@ -14,7 +14,13 @@ import {
   type SkillJsonValue,
 } from "@minecraft-studio/protocol";
 
-import { SkillAbortError, SkillFault, SkillFrameworkError } from "./errors.js";
+import {
+  SkillAbortError,
+  SkillFault,
+  SkillFrameworkError,
+  SkillRefusal,
+  SKILL_FAULT_DEFAULT_MESSAGE,
+} from "./errors.js";
 import { ServerPolicyGate } from "./policy/policy-gate.js";
 import {
   baselineServerPolicy,
@@ -258,7 +264,14 @@ export class SkillExecutor {
             );
           } catch (error) {
             if (error instanceof SkillFault) throw error;
-            throw new SkillFault("SKILL_CAPABILITY_FAILED");
+            // 适配器抛出的非 SkillFault 就是"没人预料到的那种坏"——把原因丢在这里
+            // 等于让 onFault 只报得出屏蔽码。原因带走，屏蔽码不变。
+            throw new SkillFault(
+              "SKILL_CAPABILITY_FAILED",
+              error instanceof Error && error.message.trim().length > 0
+                ? error.message.trim()
+                : undefined,
+            );
           }
           const parsedOutput = skillJsonValueSchema.safeParse(adapterOutput);
           if (!parsedOutput.success) {
@@ -317,9 +330,15 @@ export class SkillExecutor {
             attempts < definition.retryPolicy.maxAttempts &&
             definition.retryPolicy.retryableErrorCodes.includes(errorCode);
           if (!mayRetry) {
+            this.reportFault(invocation, errorCode, attempts, error);
+            // `SkillRefusal` 是抛出点在断言"这次调用什么都没改动"。`rejected` 在
+            // 这份协议里一直就是这个意思——原先八个 rejected 站点全是执行前的
+            // 谢绝——所以拒绝走同一个出口，而不是新加一个字段。`attempts` 保持
+            // 真实值：它记的是"跑了几次"，从来不是"动没动过"，用它兼职表达副作用
+            // 正是屏蔽误判的根源。
             return this.result(
               invocation,
-              "failed",
+              error instanceof SkillRefusal ? "rejected" : "failed",
               attempts,
               undefined,
               errorCode,
@@ -433,6 +452,38 @@ export class SkillExecutor {
       return "SKILL_CAPABILITY_DENIED";
     }
     return null;
+  }
+
+  /**
+   * 把终态失败的原因交给宿主。这里刻意只在"不再重试"的那一支调用：中途重试成功
+   * 的那次不是故障，记下来只会让日志把自愈当事故。钩子抛出的异常必须吞掉——诊断
+   * 不能反过来改写它正在描述的那次失败。
+   */
+  private reportFault(
+    invocation: SkillInvocationV1,
+    errorCode: string,
+    attempts: number,
+    error: unknown,
+  ): void {
+    if (!this.options.onFault) return;
+    const raw = error instanceof Error ? error.message.trim() : "";
+    // 占位文本不是原因。留 null 让运维知道"这次确实没人说明白"，
+    // 而不是给一句读起来像解释、其实什么都没说的话。
+    const message = raw === SKILL_FAULT_DEFAULT_MESSAGE ? "" : raw;
+    try {
+      this.options.onFault({
+        traceId: invocation.traceId,
+        taskId: invocation.taskId,
+        skillId: invocation.payload.skillId,
+        skillVersion: invocation.payload.skillVersion,
+        invocationId: invocation.payload.invocationId,
+        errorCode,
+        attempts,
+        reason: message.length > 0 ? message.slice(0, 200) : null,
+      });
+    } catch {
+      // 宿主的日志坏了不该把技能失败换成另一种失败。
+    }
   }
 
   private result(

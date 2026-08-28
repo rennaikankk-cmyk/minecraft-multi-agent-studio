@@ -10,7 +10,7 @@
 - 通过真实 API 在响应式前端展示检测结果；Dashboard 页面可见期间每 5 秒只重新读取其服务端主机或容器的 `os.totalmem()` / `os.freemem()`，不重跑软件/GPU 探测，也不持久化历史。
 - Dashboard 服务端代理与 Control API 契约已完成，可显示经过校验的在线、离线、失联和后端不可用状态。
 - 定义并测试 Bot 状态、心跳、断线和安全停止协议 v1。
-- 实现只允许隔离测试服的单 Bot Mineflayer Runtime。
+- 实现受控的 Mineflayer Runtime：Dashboard 创建的真实服 Bot 最多 16 个，隔离服验收固定两个 Bot。
 - 新增增量 Bot Process Supervisor，可配置一至三个 Bot 共用一个子进程；正式、灰度、测试和批处理按部署等级隔离故障域，旧单 Bot 启动入口继续可用。
 - Supervisor 使用双向 HMAC 的版本化 Node IPC、固定子入口、有界队列、Profile SHA-256 复验、优雅停止和有限崩溃退避；认证后的子进程 PID 可注册到 CPU Resource Manager。
 - CPU Resource Manager 能可靠探测时建立 P/E Pool，无法可靠识别时使用普通核心回退；affinity 和动态 scheduler 仍默认关闭。
@@ -32,9 +32,9 @@
 
 当前项目具备单 Bot 安全执行、可选多 Bot 进程托管和任务基础设施，但不是已经完成的多智能体产品。Supervisor 已通过不连接 Minecraft 的真实子进程认证、分组、优雅停止和崩溃恢复验收；真实 1/5/10/20 Bot 联机与 P/E Core 实体机性能门禁仍未完成。Runtime ↔ Coordinator 已通过双进程验收，Dashboard → Control API → Coordinator → Runtime 已通过不连接 Minecraft 的四进程服务级验收。Control Link 不可用时不会沿用旧快照：Control API 返回 503，Dashboard 清空 Bot 列表并明确显示错误。
 
-当前不会自动连接 Minecraft，不会调用模型，也不会显示模拟 Bot。
-
-仅在显式设置隔离测试服配置并执行 `pnpm bot:start` 时才会尝试连接 Minecraft。
+启动器不会创建模拟 Bot。已保存的 Dashboard Bot 会在启动时恢复；显式设置
+`BOT_SERVER_PROFILE_PATH` 时也会启动该 Profile 对应的单 Bot Runtime。Spark 只在实际
+发现或配置可用时接入，不会用模拟状态代替不可用服务。
 
 ## 环境要求
 
@@ -84,11 +84,25 @@ pnpm smoke
 
 ```dotenv
 STUDIO_MODE=standard
+STUDIO_MAX_BOTS=16
 ```
 
 可选值：`standard`、`docker`、`portable`、`netcafe`。
 
+`STUDIO_MAX_BOTS` 控制桌面启动器为真实 Minecraft 服务器暴露的 Bot 槽位，允许值为 1-16，默认值为 16；内存较小时可调小。隔离服真实验收固定只启动两个 Bot，即使启动器上限仍为 16。
+
 当前模块完成模式识别。Docker 镜像、便携数据迁移，以及网吧模式的 API 训练、成果导出、断点恢复和安全清理将在后续独立模块实现。
+
+## 连接真实 Minecraft 服务器
+
+启动 `pnpm start` 后打开 Dashboard 的 Bot 页面，填写服务器地址、端口和版本即可创建
+真实服 Bot。Manager 会按 `STUDIO_MAX_BOTS` 分配 `studio-bot-01` 到
+`studio-bot-16` 的独立槽位；状态页显示当前已创建数量、Runtime 进程状态和真实遥测连接状态。
+每个 Bot 使用独立的 Runtime Link 身份和 Profile，重启 Studio 后会恢复已保存的 Bot。
+
+当前真实服入口保持受控范围：只接受本机或私有局域网地址，并使用 Minecraft 离线认证；
+公网地址、在线账号登录和账号密码尚未接入。要连接在线认证服务器，不能把密码写入 Profile，
+需要后续单独接入安全的账号凭据流程。
 
 ## 启动隔离测试 Bot
 
@@ -167,10 +181,10 @@ Benchmark。DGX Spark 的 ARM64 双簇不会被猜测为 Intel P/E Core，而会
 多版本 Skill 策略：
 
 - Skill 的 SemVer 是执行契约版本，不等于 Minecraft 版本。每个定义另带有序兼容变体；Runtime 使用连接后真实协商出的 `minecraftVersion`、`protocolVersion`、`majorVersion` 和 registry/feature 能力选择第一个满足条件的变体。
-- 当前七个已注册 Skill 声明为 `portable` 通用变体，因此不会仅因版本号不同被禁用；“可用性”和“实机验证状态”分开上报，它们在跨版本真实场景矩阵完成前仍标记为 `unverified`。
+- 当前 21 个已注册 Skill 声明为 `portable` 通用变体，因此不会仅因版本号不同被禁用；“可用性”和“实机验证状态”分开上报，它们在跨版本真实场景矩阵完成前仍标记为 `unverified`。
 - 新版本特色 Skill 应声明所需 feature、物品/方块/实体及必要的服务端能力。缺少资源时标记 `unavailable`；服务端能力尚未经过显式探针时标记 `unknown` 并拒绝执行，不按版本号猜测。
 - 当前通用输入仍使用目标版本 registry 的原生名称，例如旧版本和新版本的原木 ID 可能不同。兼容层已经支持有序资源变体，但面向规划器的跨版本语义资源别名仍是下一模块。
-- 回环协议夹具已验证 `minecraftVersion: "auto"` 能分别协商 1.8.8、1.12.2、1.16.5 和 1.21.11，并得到对应协议号；该测试不连接外部服务器，也不等于七个 Skill 已在四个版本真实执行。
+- 回环协议夹具已验证 `minecraftVersion: "auto"` 能分别协商 1.8.8、1.12.2、1.16.5 和 1.21.11，并得到对应协议号；该测试不连接外部服务器，也不等于 21 个 Skill 已在四个版本真实执行。
 
 ## 真实联机验收
 
@@ -190,7 +204,7 @@ pnpm prepare:minecraft
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-isolated-minecraft-test.ps1
 ```
 
-脚本仅绑定 `127.0.0.1:25565`，验证真实连接、七个内建技能各一个成功场景、正常停止、服务端断开和有限重连，完成后自动关闭本次启动的服务。只有实际运行通过才能登记证据；脚本或测试代码存在本身不会把技能从 `unverified` 升级。服务器文件、世界、日志和本地 ServerProfile 均不会提交到版本库。
+脚本仅绑定 `127.0.0.1:25565`，验证两个真实 Bot、21 个内建技能各一个成功场景、正常停止、服务端断开和有限重连，完成后自动关闭本次启动的服务。只有实际运行通过才能登记证据；脚本或测试代码存在本身不会把技能从 `unverified` 升级。服务器文件、世界、日志和本地 ServerProfile 均不会提交到版本库。
 
 ## Coordinator 当前边界
 
@@ -200,7 +214,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-isolated-m
 - Control API 只有在收到 `snapshot-begin → snapshot-item* → snapshot-end` 完整快照后才原子替换可读状态；链路断开、协议/序列异常或 75 秒没有任何入站帧/ping 时会立即丢弃镜像、关闭状态流，并让列表、详情和停止返回 `503 CONTROL_UNAVAILABLE`。同一 Coordinator 实例短暂重连可重投原操作；Coordinator 实例变化时旧停止操作以身份变化失败，不会污染新链路。
 - 停止 RPC 只接受固定契约：同一 UUID 绑定 `commandId/traceId/decisionId`、`graceful`、`dashboard_operator_confirmed`、5 秒宽限、15 秒超时和仅 `bot.stop` 权限；结果身份不匹配或超时都不能报告成功。
 - Dashboard → Control API → Coordinator → Runtime 已通过真实回环四进程服务级验收；验收中的 Runtime 是测试专用 fixture，未连接 Minecraft，也不是浏览器 E2E。用户登录和持久化审计仍未接入。
-- 当前不提供连接正式 Minecraft 服务器的入口。
+- Dashboard 已提供受控真实服入口，最多 16 个 Bot；公网地址、在线认证和账号凭据仍未接入。
 
 ## 验证 Runtime Link
 
@@ -354,7 +368,7 @@ Dashboard 的 Bot 卡片显示真实 L0 状态。旧 Runtime 未上报该字段�
 
 ## Pathfinder 确定性技能
 
-当前已注册的七个确定性 Skill 见 [`SKILLS.md`](SKILLS.md)。其中 `movement.goto@1.0.0` 的目标必须与 Bot 当前 ServerProfile 和维度一致，距离最多 64 格，半径 1～4 格，超时 20 秒。L0 暂停、Runtime 停止、断线或取消会停止寻路。
+当前已注册的 21 个确定性 Skill 见 [`SKILLS.md`](SKILLS.md)。其中 `movement.goto@1.0.0` 的目标必须与 Bot 当前 ServerProfile 和维度一致，距离最多 64 格，半径 1～4 格，超时 20 秒。L0 暂停、Runtime 停止、断线或取消会停止寻路。
 
 该技能已通过离线测试，但尚未在真实隔离服运行路径场景和跨版本矩阵，因此不能视为实机寻路验收完成。
 
@@ -362,9 +376,9 @@ Dashboard 的 Bot 卡片显示真实 L0 状态。旧 Runtime 未上报该字段�
 
 `@minecraft-studio/task-system` 提供任务 Schema、状态机、重试预算、创建幂等、操作重放、租约、参数化 PostgreSQL 仓库、`pg` 连接适配器、BullMQ 队列和 Worker。迁移文件位于 `packages/task-system/migrations`，不会由普通启动命令自动执行。
 
-Coordinator 可把 `/v1/goals` 的完整生命周期写入 PostgreSQL，并通过已认证的 Control Link 向 Control API 提供受 `task.read` 保护的分页列表与详情。Dashboard 的任务页从该读路径恢复刷新前的历史；列表只返回任务摘要，详情只额外返回经授权的 operator goal，不返回 `target`、原始输入、证据或任意结果对象。未配置数据库、连接失败或 schema 未应用到 `0005_task_goal_input.sql` 时，历史明确显示不可用；开启 Local AI 目标执行却没有配置永久事实源时，Coordinator 拒绝启动。
+Coordinator 可把 `/v1/goals` 的完整生命周期写入 PostgreSQL，并通过已认证的 Control Link 向 Control API 提供受 `task.read` 保护的分页列表与详情。Dashboard 的任务页从该读路径恢复刷新前的历史；列表只返回任务摘要，详情只额外返回经授权的 operator goal，不返回 `target`、原始输入、证据或任意结果对象。未配置数据库、连接失败或 schema 未应用到 `0006_task_execution_fsm.sql` 时，历史明确显示不可用；开启 Local AI 目标执行却没有配置永久事实源时，Coordinator 拒绝启动。
 
-启用前由人工或受控迁移流程依次应用 `0001` 至 `0005`，然后配置：
+启用前由人工或受控迁移流程依次应用 `0001` 至 `0006`，然后配置：
 
 ```dotenv
 COORDINATOR_TASK_POSTGRES_URL=postgresql://<user>:<password>@<approved-host>:5432/<database>

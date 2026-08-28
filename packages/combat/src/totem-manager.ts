@@ -35,6 +35,11 @@ export type CombatTotemSnapshot = Readonly<{
   nowMs: number;
   /** 副手当前是否是图腾。 */
   offhandIsTotem: boolean;
+  /**
+   * 最近一次由服务端确认的自身 POP 时间。副手同步可能滞后，因此这个事实
+   * 必须在检查 `offhandIsTotem` 之前消费；null/缺省表示当前没有活动 POP。
+   */
+  totemPopObservedAtMs?: number | null;
   /** 背包中可用于补位的图腾数（不含副手那一个）。 */
   inventoryTotemCount: number;
   selfHealth: number;
@@ -70,6 +75,8 @@ export type CombatTotemAction = "NONE" | "REEQUIP_OFFHAND" | "RETREAT";
 
 export type CombatTotemReason =
   | "OFFHAND_EMPTY"
+  | "TOTEM_POP_OBSERVED"
+  | "TOTEM_POP_HANDLED"
   | "PREEMPTIVE_CHECK"
   | "NO_TOTEM_AVAILABLE"
   | "FIGHTING_WITHOUT_TOTEM"
@@ -90,6 +97,7 @@ export type CombatTotemDecision = Readonly<{
 export class TotemManager {
   private readonly policy: CombatTotemPolicy;
   private lastReequipAtMs: number | null = null;
+  private lastHandledTotemPopAtMs: number | null = null;
 
   constructor(policy: CombatTotemPolicy = DEFAULT_TOTEM_POLICY) {
     if (
@@ -107,6 +115,7 @@ export class TotemManager {
   /** 换服或重连后必须清掉节流记忆，否则会拿上一场的时间戳压制补位。 */
   reset(): void {
     this.lastReequipAtMs = null;
+    this.lastHandledTotemPopAtMs = null;
   }
 
   /**
@@ -117,6 +126,60 @@ export class TotemManager {
     validateTotemSnapshot(snapshot);
 
     const hasSpare = snapshot.inventoryTotemCount > 0;
+    const popObservedAtMs = snapshot.totemPopObservedAtMs ?? null;
+
+    // A server POP event is authoritative before the equipment slot catches up.
+    // Do not let a stale offhand snapshot turn a consumed totem into NONE.
+    if (
+      popObservedAtMs !== null &&
+      this.hasUnhandledTotemPop(popObservedAtMs)
+    ) {
+      if (hasSpare) {
+        if (this.throttled(snapshot.nowMs)) {
+          return {
+            action: "NONE",
+            reason: "THROTTLED",
+            preempts: false,
+            totemsRemainingAfter: snapshot.inventoryTotemCount,
+          };
+        }
+        return {
+          action: "REEQUIP_OFFHAND",
+          reason: "TOTEM_POP_OBSERVED",
+          preempts: true,
+          totemsRemainingAfter: snapshot.inventoryTotemCount - 1,
+        };
+      }
+      if (!totemAbsenceForcesRetreat(this.policy.stance)) {
+        return {
+          action: "NONE",
+          reason: "FIGHTING_WITHOUT_TOTEM",
+          preempts: false,
+          totemsRemainingAfter: 0,
+        };
+      }
+      return {
+        action: "RETREAT",
+        reason: "NO_TOTEM_AVAILABLE",
+        preempts: true,
+        totemsRemainingAfter: 0,
+      };
+    }
+
+    // A successful replacement can be acknowledged before the equipment slot
+    // update arrives. Suppress that same POP's stale OFFHAND_EMPTY view; after
+    // the five-second POP signal expires, a genuinely empty slot is retryable.
+    if (
+      popObservedAtMs !== null &&
+      this.lastHandledTotemPopAtMs === popObservedAtMs
+    ) {
+      return {
+        action: "NONE",
+        reason: "TOTEM_POP_HANDLED",
+        preempts: false,
+        totemsRemainingAfter: snapshot.inventoryTotemCount,
+      };
+    }
 
     if (!snapshot.offhandIsTotem) {
       if (!hasSpare) {
@@ -201,10 +264,33 @@ export class TotemManager {
     this.lastReequipAtMs = nowMs;
   }
 
+  /**
+   * Mark the POP that caused a successful replacement as handled. Failed
+   * equipment acknowledgements intentionally do not call this method, so the
+   * same event remains retryable on the next observation.
+   */
+  recordTotemPopHandled(popObservedAtMs: number): void {
+    if (!Number.isSafeInteger(popObservedAtMs) || popObservedAtMs < 0) {
+      throw new TypeError("图腾 POP 时间必须是非负安全整数。");
+    }
+    if (
+      this.lastHandledTotemPopAtMs !== null &&
+      popObservedAtMs < this.lastHandledTotemPopAtMs
+    ) {
+      throw new RangeError("图腾 POP 时间早于上一次处理，拒绝记账。");
+    }
+    this.lastHandledTotemPopAtMs = popObservedAtMs;
+  }
+
   private throttled(nowMs: number): boolean {
     if (this.lastReequipAtMs === null) return false;
     if (this.policy.minimumReequipIntervalMs === 0) return false;
     return nowMs - this.lastReequipAtMs < this.policy.minimumReequipIntervalMs;
+  }
+
+  private hasUnhandledTotemPop(popObservedAtMs: number): boolean {
+    return this.lastHandledTotemPopAtMs === null ||
+      popObservedAtMs > this.lastHandledTotemPopAtMs;
   }
 }
 
@@ -220,5 +306,14 @@ function validateTotemSnapshot(snapshot: CombatTotemSnapshot): void {
     snapshot.inventoryTotemCount < 0
   ) {
     throw new TypeError("inventoryTotemCount 必须是非负整数。");
+  }
+  if (
+    snapshot.totemPopObservedAtMs !== undefined &&
+    snapshot.totemPopObservedAtMs !== null &&
+    (!Number.isSafeInteger(snapshot.totemPopObservedAtMs) ||
+      snapshot.totemPopObservedAtMs < 0 ||
+      snapshot.totemPopObservedAtMs > snapshot.nowMs)
+  ) {
+    throw new TypeError("totemPopObservedAtMs 必须是不晚于当前快照的非负安全整数。");
   }
 }

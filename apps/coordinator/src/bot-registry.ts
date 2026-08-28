@@ -6,11 +6,19 @@ import {
   type BotStatusV1,
   type BotStopResultV1,
   type BotTelemetryMessageV1,
+  type BotWorldStateV1,
   type MinecraftVersionCompatibility,
 } from "@minecraft-studio/protocol";
 
 export type RegistryConnectionState =
   BotStatusV1["payload"]["connectionState"];
+
+export type BotRegistryWorldState = Readonly<
+  BotWorldStateV1["payload"] & {
+    /** Registry alias used by execution freshness guards. */
+    version: number;
+  }
+>;
 
 export type BotRegistryRecord = Readonly<{
   botId: string;
@@ -22,7 +30,9 @@ export type BotRegistryRecord = Readonly<{
   lastMessageAt: string;
   lastHeartbeatAt: string | null;
   lastStatusAt: string | null;
+  lastWorldStateAt: string | null;
   currentStatus: BotStatusV1["payload"] | null;
+  worldState: BotRegistryWorldState | null;
   minecraftVersion: MinecraftVersionCompatibility | null;
   skillCatalog: BotSkillCatalogV1["payload"] | null;
   offlineReason: BotDisconnectedV1["payload"]["reason"] | null;
@@ -99,7 +109,9 @@ type InternalRecord = {
   lastLivenessMs: number;
   lastHeartbeatAt: string | null;
   lastStatusAt: string | null;
+  lastWorldStateAt: string | null;
   currentStatus: BotStatusV1["payload"] | null;
+  worldState: BotRegistryWorldState | null;
   minecraftVersion: MinecraftVersionCompatibility | null;
   skillCatalog: BotSkillCatalogV1["payload"] | null;
   offlineReason: BotDisconnectedV1["payload"]["reason"] | null;
@@ -215,7 +227,9 @@ export class BotRegistry {
       record.lastSequence = -1;
       record.lastHeartbeatAt = null;
       record.lastStatusAt = null;
+      record.lastWorldStateAt = null;
       record.currentStatus = null;
+      record.worldState = null;
       record.minecraftVersion = null;
       record.skillCatalog = null;
       record.offlineReason = null;
@@ -259,7 +273,13 @@ export class BotRegistry {
       record.minecraftVersion = structuredClone(message.payload.compatibility);
     } else if (message.type === "bot.skill-catalog.v1") {
       record.skillCatalog = structuredClone(message.payload);
-    } else {
+    } else if (message.type === "bot.world-state.v1") {
+      record.lastWorldStateAt = record.lastMessageAt;
+      record.worldState = {
+        ...structuredClone(message.payload),
+        version: message.payload.worldStateVersion,
+      };
+    } else if (message.type === "bot.disconnected.v1") {
       record.connectionState = "offline";
       record.offlineReason = message.payload.reason;
     }
@@ -388,7 +408,9 @@ export class BotRegistry {
       lastLivenessMs: receivedMs,
       lastHeartbeatAt: null,
       lastStatusAt: null,
+      lastWorldStateAt: null,
       currentStatus: null,
+      worldState: null,
       minecraftVersion: null,
       skillCatalog: null,
       offlineReason: null,
@@ -459,8 +481,12 @@ function snapshot(record: InternalRecord): BotRegistryRecord {
     lastMessageAt: record.lastMessageAt,
     lastHeartbeatAt: record.lastHeartbeatAt,
     lastStatusAt: record.lastStatusAt,
+    lastWorldStateAt: record.lastWorldStateAt,
     currentStatus: record.currentStatus
       ? structuredClone(record.currentStatus)
+      : null,
+    worldState: record.worldState
+      ? structuredClone(record.worldState)
       : null,
     minecraftVersion: record.minecraftVersion
       ? structuredClone(record.minecraftVersion)

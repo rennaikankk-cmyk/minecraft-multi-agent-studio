@@ -1,0 +1,12 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1011,7 +1011,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
+     # CUDA 13.0.88 ptxas rejects the e2m1x2 conversion used by these NVFP4
+     # kernels for sm_120. The GB10 target is sm_121, where the instruction is
+     # supported, so select the native SM121 code path explicitly.
+-    cuda_archs_loose_intersection(FP4_SM120_ARCHS "12.1" "${CUDA_ARCHS}")
++    cuda_archs_loose_intersection(FP4_SM120_ARCHS "12.1a" "${CUDA_ARCHS}")
+   else()
+     cuda_archs_loose_intersection(FP4_SM120_ARCHS "12.0a;12.1a" "${CUDA_ARCHS}")
+   endif()

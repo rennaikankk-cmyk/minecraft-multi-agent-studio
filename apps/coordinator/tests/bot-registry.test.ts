@@ -89,6 +89,54 @@ function disconnected(runtimeInstanceId: string, sequence: number, id = sequence
   };
 }
 
+function worldState(
+  runtimeInstanceId: string,
+  sequence: number,
+  worldStateVersion: number,
+  observedAt = BASE_TIME,
+  id = sequence,
+) {
+  return {
+    schemaVersion: "1.0" as const,
+    messageId: messageId(id),
+    traceId: "trace-registry",
+    timestamp: observedAt,
+    source: { service: "bot-runtime" as const, instanceId: runtimeInstanceId },
+    botId: "worker-01",
+    type: "bot.world-state.v1" as const,
+    payload: {
+      serverProfileId: "isolated-test",
+      runtimeInstanceId,
+      sequence,
+      observedAt,
+      worldStateVersion,
+      inventory: [
+        { name: "oak_planks", count: worldStateVersion, durability: null },
+      ],
+      nearbyUtilityBlocks: [
+        {
+          name: "crafting_table" as const,
+          dimension: "minecraft:overworld",
+          position: { x: 3, y: 64, z: 0 },
+          reachable: true,
+          source: "observation" as const,
+          confidence: 1,
+        },
+      ],
+      navigation: {
+        owner: "skill:movement.goto:invocation-1",
+        target: {
+          x: 10,
+          y: 64,
+          z: 0,
+          dimension: "minecraft:overworld",
+        },
+        version: worldStateVersion,
+      },
+    },
+  };
+}
+
 describe("BotRegistry", () => {
   it("accepts status and heartbeat while preserving real status data", () => {
     const registry = new BotRegistry({ staleAfterMs: 5_000 });
@@ -288,6 +336,57 @@ describe("BotRegistry", () => {
           }),
         ],
       },
+    });
+  });
+
+  it("stores only the latest world-state snapshot without changing liveness", () => {
+    const registry = new BotRegistry({ staleAfterMs: 5_000 });
+    const start = new Date(BASE_TIME);
+    registry.ingest(heartbeat("runtime-a", 1, BASE_TIME, 1), start);
+
+    const firstAt = new Date(start.getTime() + 100);
+    registry.ingest(
+      worldState("runtime-a", 2, 7, firstAt.toISOString(), 702),
+      firstAt,
+    );
+    const latestAt = new Date(start.getTime() + 200);
+    const result = registry.ingest(
+      worldState("runtime-a", 3, 8, latestAt.toISOString(), 803),
+      latestAt,
+    );
+
+    expect(result.record).toMatchObject({
+      connectionState: "online",
+      lastWorldStateAt: latestAt.toISOString(),
+      worldState: {
+        sequence: 3,
+        version: 8,
+        worldStateVersion: 8,
+        inventory: [{ name: "oak_planks", count: 8, durability: null }],
+      },
+    });
+  });
+
+  it("clears world state when a newer runtime instance takes ownership", () => {
+    const registry = new BotRegistry({ staleAfterMs: 5_000 });
+    const start = new Date(BASE_TIME);
+    registry.ingest(heartbeat("runtime-old", 1, BASE_TIME, 1), start);
+    const stateAt = new Date(start.getTime() + 100);
+    registry.ingest(
+      worldState("runtime-old", 2, 4, stateAt.toISOString(), 402),
+      stateAt,
+    );
+
+    const restartedAt = new Date(start.getTime() + 1_000);
+    const restarted = registry.ingest(
+      heartbeat("runtime-new", 1, restartedAt.toISOString(), 1_001),
+      restartedAt,
+    );
+
+    expect(restarted.record).toMatchObject({
+      runtimeInstanceId: "runtime-new",
+      worldState: null,
+      lastWorldStateAt: null,
     });
   });
 

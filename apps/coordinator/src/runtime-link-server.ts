@@ -24,6 +24,7 @@ import {
   runtimeLinkStateRequestV1Schema,
   runtimeLinkTelemetryAckV1Schema,
   skillCancellationV1Schema,
+  type BotSkillCatalogV1,
   type BotStopResultV1,
   type ControlAuthorizationContext,
   type RuntimeLinkAuthenticateV1,
@@ -783,6 +784,9 @@ export class RuntimeLinkServer implements StopCommandTransport {
       if (result.record.runtimeInstanceId === session.runtimeInstanceId) {
         this.activateSession(session);
       }
+      if (message.type === "bot.skill-catalog.v1") {
+        this.logSkillCatalog(message, result.accepted, result.reason);
+      }
       const acknowledgement = runtimeLinkTelemetryAckV1Schema.parse({
         schemaVersion: "1.0",
         messageId: this.randomId(),
@@ -813,6 +817,36 @@ export class RuntimeLinkServer implements StopCommandTransport {
       });
       session.socket.close(1008, "telemetry_rejected");
     }
+  }
+
+  /**
+   * 广告目录此前只进 registry，不进日志：一个技能到底有没有被提供给 planner，
+   * 运维和排查都无从确认。这里把已接受的目录本身记下来——只记技能身份与可用性，
+   * 不记 serverProfileId、坐标或任何世界内容。
+   */
+  private logSkillCatalog(
+    message: BotSkillCatalogV1,
+    accepted: boolean,
+    reason: string,
+  ): void {
+    const available: string[] = [];
+    const unavailable: string[] = [];
+    for (const entry of message.payload.skills) {
+      const identity = `${entry.skillId}@${entry.skillVersion}`;
+      if (entry.availability === "available") available.push(identity);
+      else unavailable.push(identity);
+    }
+    safeLog(this.options.logger, "info", "coordinator_runtime_link_skill_catalog", {
+      traceId: message.traceId,
+      botId: message.botId,
+      runtimeInstanceId: message.payload.runtimeInstanceId,
+      accepted,
+      reason,
+      skillCount: message.payload.skills.length,
+      availableCount: available.length,
+      availableSkills: available,
+      unavailableSkills: unavailable,
+    });
   }
 
   private handleStopResult(

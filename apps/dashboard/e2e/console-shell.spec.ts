@@ -121,7 +121,7 @@ test("tasks page renders a real goal result and preserves failed styling", async
       contentType: "application/json",
       body: JSON.stringify({
         schemaVersion: "1.0",
-        requestId: UUID,
+        requestId: input.requestId,
         data: {
           action: "skill_result",
           botId: "worker-01",

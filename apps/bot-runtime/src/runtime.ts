@@ -1,12 +1,16 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  BOT_WORLD_STATE_MAX_INVENTORY_ITEMS,
+  BOT_WORLD_STATE_MAX_UTILITY_BLOCKS,
   botSkillCatalogV1Schema,
   botVersionV1Schema,
   botStopResultV1Schema,
   botDisconnectedV1Schema,
   botHeartbeatV1Schema,
   botStatusV1Schema,
+  botWorldStateUtilityBlockNameV1Schema,
+  botWorldStateV1Schema,
   parseBotProtocolMessage,
   parseBotTelemetryMessage,
   parseSkillCancellation,
@@ -22,6 +26,7 @@ import {
   type BotStopResultV1,
   type BotStatusV1,
   type BotVersionV1,
+  type BotWorldStateV1,
   type ControlAuthorizationContext,
   type MinecraftVersionCompatibility,
   type L0SafetyStatus,
@@ -40,6 +45,8 @@ import {
 } from "@minecraft-studio/safety";
 import {
   builtinSkills,
+  craftItemCapabilityOutputSchema,
+  inventorySnapshotCapabilityOutputSchema,
   ServerPolicyGate,
   ServerPolicyStore,
   SkillExecutor,
@@ -66,12 +73,15 @@ import type {
   BotClient,
   BotClientFactory,
   BotClientSnapshot,
+  BotDamageInfo,
   BotDisconnectInfo,
+  BotRecoveryAction,
 } from "./client.js";
 import type { ServerProfile } from "./server-profile.js";
 import {
   CombatDriver,
   type CombatDriverReceipt,
+  type CombatPrimitiveAction,
 } from "./combat-driver.js";
 import type { CombatReflexProbeReport } from "@minecraft-studio/combat";
 import type {
@@ -80,6 +90,12 @@ import type {
   RuntimeLogger,
 } from "./runtime-types.js";
 import { unsupportedVersionCompatibility } from "./version-compatibility.js";
+import {
+  ProgressWatchdog,
+  type ProgressWatchdogEvent,
+  type ProgressWatchdogSnapshot,
+} from "./progress-watchdog.js";
+import { WorldStateStore, type WorldStateSnapshot } from "./world-state.js";
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 type RuntimeCurrentTask = NonNullable<BotStatusV1["payload"]["currentTask"]>;
@@ -87,6 +103,32 @@ type ActiveCoordinatorTask = Readonly<{
   task: RuntimeCurrentTask;
   order: number;
 }>;
+
+const COMBAT_REACTION_MAX_STEPS = 32;
+const COMBAT_REACTION_MAX_DURATION_MS = 8_000;
+const COMBAT_REACTION_TICK_MS = 100;
+const COMBAT_REACTION_TERMINAL_REASONS = new Set([
+  "COMBAT_NO_HOSTILE_TARGET",
+  "COMBAT_NO_USABLE_WEAPON",
+  "COMBAT_NO_TOTEM_AVAILABLE",
+  "COMBAT_HEALTH_BELOW_ENGAGE_FLOOR",
+  "COMBAT_TOTEM_RESERVE_INSUFFICIENT",
+  "COMBAT_OUTNUMBERED",
+  "COMBAT_GEAR_OUTCLASSED",
+  "COMBAT_OBSERVATION_UNAVAILABLE",
+  "COMBAT_TARGET_OBSERVATION_STALE",
+  "COMBAT_HAZARD_OBSERVATION_UNAVAILABLE",
+  "COMBAT_MOVEMENT_BLOCKED_BY_HAZARD",
+  "COMBAT_MOVEMENT_NOT_REQUIRED",
+  "COMBAT_REFLEX_NOT_CLEARED",
+  "COMBAT_ACTION_EXECUTION_FAILED",
+  "COMBAT_EXECUTION_ACK_INVALID",
+  "COMBAT_TARGET_NOT_FOUND",
+  "COMBAT_WEAPON_NOT_IN_INVENTORY",
+  "COMBAT_TOTEM_NOT_IN_INVENTORY",
+]);
+
+type CombatReactionOutcome = "completed" | "cancelled" | "failed";
 
 export type RuntimeDependencies = {
   createClient: BotClientFactory;
@@ -238,6 +280,8 @@ export class SingleBotRuntime {
   private readonly skillRegistry: SkillRegistry;
   private readonly skillExecutor: SkillExecutor;
   private readonly goalExecutor: GoalExecutor;
+  private readonly worldState = new WorldStateStore();
+  private readonly progressWatchdog = new ProgressWatchdog();
   private state: BotConnectionState = "offline";
   private client: BotClient | null = null;
   private generation = 0;
@@ -251,6 +295,10 @@ export class SingleBotRuntime {
   private deferredStatusTimer: TimerHandle | null = null;
   private reconnectTimer: TimerHandle | null = null;
   private lastStatusAt = 0;
+  // 本次连接有没有成功发出过一条状态。spawn 之后服务端还没送出第一个 health
+  // 包时快照里 health 是 undefined，L0 边界据此拒绝——这是每次启动都会发生的
+  // 预期情形，不是缺陷。用它把"第一条还没成"和"已经成过又坏了"分开。
+  private statusEmittedForConnection = false;
   private minecraftVersionCompatibility: MinecraftVersionCompatibility | null =
     null;
   private skillCompatibilityEnvironment: SkillCompatibilityEnvironment | null =
@@ -263,6 +311,7 @@ export class SingleBotRuntime {
   private versionUnsupported = false;
   private stopPromise: Promise<RuntimeStopOutcome> | null = null;
   private safetyActionQueue: Promise<void> = Promise.resolve();
+  private watchdogRecovery: Promise<void> | null = null;
   private safetyStatus: L0SafetyStatus = {
     mode: "monitoring",
     activeRisks: [],
@@ -275,6 +324,20 @@ export class SingleBotRuntime {
     { fingerprint: string; result: Promise<BotStopResultV1> }
   >();
   private readonly activeSkillControllers = new Map<string, AbortController>();
+  private readonly activeSkillTasks = new Map<
+    string,
+    Readonly<{
+      taskId: string;
+      title: string;
+      startedAt: string;
+    }>
+  >();
+  private combatReaction: {
+    generation: number;
+    client: BotClient;
+    taskId: string;
+    controller: AbortController;
+  } | null = null;
   private readonly skillExecutions = new Map<
     string,
     { fingerprint: string; result: Promise<SkillExecutionResultV1> }
@@ -325,6 +388,24 @@ export class SingleBotRuntime {
       // 缓存住就会拿旧档位裁决。闸门本身有频率窗口状态，所以不跨调用复用。
       policyView: (serverProfileId) =>
         new ServerPolicyGate(this.serverPolicyStore.resolve(serverProfileId)),
+      // 终态失败的屏蔽码只说"哪一类坏了"，说不出"为什么"。原因留在这条 warn 里，
+      // 不进结果消息：协议面向协调器,诊断面向运维,两者的收敛面不该混。
+      onFault: (fault) => {
+        this.dependencies.logger.warn(
+          "bot_runtime_skill_fault",
+          this.logFields(
+            {
+              skillVersion: fault.skillVersion,
+              errorCode: fault.errorCode,
+              attempts: fault.attempts,
+              reason: fault.reason,
+            },
+            fault.traceId,
+            fault.taskId,
+            fault.skillId,
+          ),
+        );
+      },
     });
     // §4 的接线：目标分解与恢复阶梯从此走真实派发路径。invoke 直接绑到
     // handleSkillInvocation——同一条路径、同一套协议校验、同一份遥测，
@@ -361,6 +442,14 @@ export class SingleBotRuntime {
 
   getSafetyStatus(): L0SafetyStatus {
     return structuredClone(this.safetyStatus);
+  }
+
+  getWorldStateSnapshot(): WorldStateSnapshot {
+    return this.worldState.snapshot();
+  }
+
+  getProgressWatchdogSnapshot(): ProgressWatchdogSnapshot {
+    return this.progressWatchdog.snapshot();
   }
 
   canAcceptNormalActions(): boolean {
@@ -457,6 +546,12 @@ export class SingleBotRuntime {
     externalSignal?.addEventListener("abort", cancelFromCaller, { once: true });
     if (externalSignal?.aborted) cancelFromCaller();
     this.activeSkillControllers.set(invocation.payload.invocationId, controller);
+    this.activeSkillTasks.set(invocation.payload.invocationId, {
+      taskId: invocation.taskId,
+      title: invocation.payload.skillId,
+      startedAt: this.now().toISOString(),
+    });
+    this.requestStatus(this.generation);
 
     try {
       const startedAtMs = this.now().getTime();
@@ -503,6 +598,8 @@ export class SingleBotRuntime {
       if (this.activeSkillControllers.get(invocation.payload.invocationId) === controller) {
         this.activeSkillControllers.delete(invocation.payload.invocationId);
       }
+      this.activeSkillTasks.delete(invocation.payload.invocationId);
+      this.requestStatus(this.generation);
       externalSignal?.removeEventListener("abort", cancelFromCaller);
     }
   }
@@ -668,6 +765,8 @@ export class SingleBotRuntime {
   ): Promise<RuntimeStopOutcome> {
     this.stopping = true;
 
+    this.cancelCombatReaction();
+    this.client?.interruptNormalActions?.();
     if (this.cancelRunningCoordinatorTasks()) {
       this.emitStatus(this.generation, false);
     }
@@ -809,6 +908,8 @@ export class SingleBotRuntime {
     const activeGeneration = this.generation;
     this.combatDriver?.reset();
     this.safetyController.reset();
+    this.progressWatchdog.reset();
+    this.watchdogRecovery = null;
     this.safetyStatus = {
       mode: "monitoring",
       activeRisks: [],
@@ -833,11 +934,12 @@ export class SingleBotRuntime {
     }));
 
     try {
-      const client = this.dependencies.createClient(this.profile);
+      const client = this.dependencies.createClient(this.profile, this.worldState);
       this.client = client;
       client.setHandlers({
         onSpawn: () => this.handleSpawn(activeGeneration),
         onStateChanged: () => this.requestStatus(activeGeneration),
+        onDamaged: (info) => this.handleDamaged(activeGeneration, info),
         onDisconnected: (info) =>
           this.handleDisconnected(activeGeneration, info),
         onError: () => {
@@ -902,6 +1004,8 @@ export class SingleBotRuntime {
     }
     this.state = "online";
     this.reconnectAttempts = 0;
+    // 每条连接各自算一次：重连后同样要等服务端补上第一个 health 包。
+    this.statusEmittedForConnection = false;
     this.emitVersion();
     this.emitSkillCatalog();
     this.startStatusTimer(generation);
@@ -938,6 +1042,8 @@ export class SingleBotRuntime {
     info: BotDisconnectInfo,
   ): void {
     if (generation !== this.generation) return;
+    this.cancelCombatReaction();
+    this.client?.interruptNormalActions?.();
     if (this.cancelRunningCoordinatorTasks()) {
       this.emitStatus(generation, false);
     }
@@ -999,11 +1105,21 @@ export class SingleBotRuntime {
   private requestStatus(generation: number): void {
     if (generation !== this.generation || this.state !== "online") return;
     try {
-      if (this.client) this.evaluateSafetySnapshot(generation, this.client.snapshot());
-    } catch {
+      if (this.client) {
+        const snapshot = this.client.snapshot();
+        this.updateWorldState(snapshot);
+        this.evaluateSafetySnapshot(generation, snapshot);
+      }
+    } catch (cause) {
+      // A bare code cannot distinguish a field the server has not sent yet
+      // from a real L0 boundary violation. The reason comes from our own
+      // safety boundary, which names fields rather than values.
       this.dependencies.logger.error(
         "l0_safety_snapshot_invalid",
-        this.logFields({ code: "SAFETY_SNAPSHOT_INVALID" }),
+        this.logFields({
+          code: "SAFETY_SNAPSHOT_INVALID",
+          reason: statusFailureReason(cause),
+        }),
       );
     }
     const elapsed = this.now().getTime() - this.lastStatusAt;
@@ -1043,6 +1159,7 @@ export class SingleBotRuntime {
 
     try {
       const snapshot = this.client.snapshot();
+      this.updateWorldState(snapshot);
       if (evaluateSafety) this.evaluateSafetySnapshot(generation, snapshot);
       const sequence = this.nextSequence();
       const observedAt = this.now().toISOString();
@@ -1057,9 +1174,10 @@ export class SingleBotRuntime {
           health: snapshot.health,
           food: snapshot.food,
           armorPoints: snapshot.armorPoints,
+          inventory: snapshot.inventory,
           position: snapshot.position,
           latencyMs: snapshot.latencyMs,
-          currentTask: this.currentTask,
+          currentTask: this.currentTaskTelemetry(),
           safety: this.safetyStatus,
           ...(this.combatDriver &&
           this.client?.combatObservation &&
@@ -1074,11 +1192,93 @@ export class SingleBotRuntime {
       });
       this.lastStatusSequence = sequence;
       this.lastStatusAt = this.now().getTime();
+      this.statusEmittedForConnection = true;
+      this.emit(message);
+      this.emitWorldState(generation);
+    } catch (cause) {
+      // Without the originating reason this event cannot distinguish a
+      // transient pre-first-packet field from a real boundary violation or a
+      // protocol schema regression. The message comes from our own schemas and
+      // safety boundary, which name fields rather than values.
+      //
+      // 严重级按"这条连接发出过状态没有"分。实测每次启动都会有恰好一条：
+      // handleSpawn 在 online 转换里立刻 emitStatus，而服务端的第一个 health
+      // 包还没到，快照里 health 是 undefined，L0 边界拒绝（reason:
+      // "health is outside the L0 safety boundary."）。把这个预期情形记成
+      // error 会训练运维忽略 error 行，而真正的边界违规也长这样——所以降级的
+      // 判据不能是"消息里含 health"，只能是"第一条还没发出去过"。已经发出过
+      // 之后再坏，说明服务端已经在送状态了，那就是真问题，仍然 error。
+      const reason = statusFailureReason(cause);
+      const fields = this.logFields({
+        reason,
+        firstStatusPending: !this.statusEmittedForConnection,
+      });
+      if (this.statusEmittedForConnection) {
+        this.dependencies.logger.error("bot_runtime_status_invalid", fields);
+      } else {
+        this.dependencies.logger.warn("bot_runtime_status_invalid", fields);
+      }
+    }
+  }
+
+  private emitWorldState(generation: number): void {
+    if (generation !== this.generation || this.state !== "online") return;
+    try {
+      const snapshot = this.worldState.snapshot();
+      const inventory = snapshot.inventory
+        .filter(({ count }) => Number.isSafeInteger(count) && count > 0)
+        .slice(0, BOT_WORLD_STATE_MAX_INVENTORY_ITEMS)
+        .map(({ name, count, durability }) => ({ name, count, durability }));
+      const nearbyUtilityBlocks = snapshot.nearbyBlocks
+        .filter(
+          (block) =>
+            block.position.serverProfileId === this.profile.id &&
+            botWorldStateUtilityBlockNameV1Schema.safeParse(block.name).success,
+        )
+        .slice(0, BOT_WORLD_STATE_MAX_UTILITY_BLOCKS)
+        .map((block) => ({
+          name: botWorldStateUtilityBlockNameV1Schema.parse(block.name),
+          dimension: block.position.dimension,
+          position: {
+            x: block.position.x,
+            y: block.position.y,
+            z: block.position.z,
+          },
+          reachable: block.reachable,
+          source: block.source,
+          confidence: block.confidence,
+        }));
+      const target =
+        snapshot.navigation.target?.serverProfileId === this.profile.id
+          ? {
+              x: snapshot.navigation.target.x,
+              y: snapshot.navigation.target.y,
+              z: snapshot.navigation.target.z,
+              dimension: snapshot.navigation.target.dimension,
+            }
+          : null;
+      const message: BotWorldStateV1 = botWorldStateV1Schema.parse({
+        ...this.envelope("bot.world-state.v1"),
+        payload: {
+          serverProfileId: this.profile.id,
+          runtimeInstanceId: this.runtimeInstanceId,
+          sequence: this.nextSequence(),
+          observedAt: snapshot.observedAt,
+          worldStateVersion: snapshot.version,
+          inventory,
+          nearbyUtilityBlocks,
+          navigation: {
+            owner: snapshot.navigation.movementOwner,
+            target,
+            version: snapshot.version,
+          },
+        },
+      });
       this.emit(message);
     } catch {
       this.dependencies.logger.error(
-        "bot_runtime_status_invalid",
-        this.logFields(),
+        "bot_runtime_world_state_invalid",
+        this.logFields({ code: "WORLD_STATE_TELEMETRY_INVALID" }),
       );
     }
   }
@@ -1088,6 +1288,7 @@ export class SingleBotRuntime {
     snapshot: BotClientSnapshot,
   ): void {
     if (generation !== this.generation || this.state !== "online") return;
+    const normalTasksWerePaused = this.safetyStatus.normalTasksPaused;
     const decision = this.safetyController.evaluate({
       observedAtMs: this.now().getTime(),
       health: snapshot.health.current,
@@ -1109,6 +1310,9 @@ export class SingleBotRuntime {
     const emergencyStopping = decision.actions.some(
       ({ kind }) => kind === "EMERGENCY_STOP",
     );
+    const defensiveCombatAllowed = decision.activeRisks.every(
+      (risk) => risk === "LOW_HEALTH" || risk === "HUNGER",
+    );
     this.safetyStatus = {
       mode: emergencyStopping
         ? "emergency_stopping"
@@ -1123,11 +1327,24 @@ export class SingleBotRuntime {
       lastAction: this.safetyStatus.lastAction,
     };
     if (decision.normalTasksPaused) {
-      this.cancelActiveSkills();
-      // L0 pause is not a new server session; retain the current connection's
-      // probe report so combat can resume after safety clears.
-      this.combatDriver?.reset(false);
-      this.client?.resetCombat?.();
+      if (!defensiveCombatAllowed) this.cancelCombatReaction();
+      if (!defensiveCombatAllowed) this.cancelActiveSkills();
+      // A damage event is delivered before the matching health snapshot. If
+      // that hit crosses the low-health threshold, handleDamaged has already
+      // cancelled the ordinary task and started a defensive reaction. Do not
+      // immediately stop that reaction again; low health is exactly when its
+      // retreat decision matters most. Environmental/critical interventions
+      // still own the client and cancel combat above.
+      if (
+        !defensiveCombatAllowed ||
+        (!normalTasksWerePaused && this.combatReaction === null)
+      ) {
+        this.client?.interruptNormalActions?.();
+        // L0 pause is not a new server session; retain the current connection's
+        // probe report so combat can resume after safety clears.
+        this.combatDriver?.reset(false);
+        this.client?.resetCombat?.();
+      }
     }
 
     if (decision.changed || decision.actions.length > 0) {
@@ -1149,6 +1366,146 @@ export class SingleBotRuntime {
     if (decision.actions.length > 0 && decision.decisionId) {
       this.queueSafetyActions(generation, decision);
     }
+  }
+
+  private updateWorldState(snapshot: BotClientSnapshot): void {
+    const observedAt = this.now();
+    if (!Number.isFinite(observedAt.getTime())) return;
+    const position = {
+      ...snapshot.position,
+      serverProfileId: this.profile.id,
+    };
+    let worldSnapshot: WorldStateSnapshot | null = null;
+    try {
+      worldSnapshot = this.client?.worldStateSnapshot?.() ?? null;
+    } catch {
+      worldSnapshot = null;
+    }
+    if (worldSnapshot !== null) {
+      this.worldState.observe({
+        observedAt,
+        position: worldSnapshot.position,
+        inventory: worldSnapshot.inventory,
+        nearbyBlocks: worldSnapshot.nearbyBlocks,
+        replaceNearbyBlocks: true,
+        entities: worldSnapshot.entities,
+        navigation: worldSnapshot.navigation,
+      });
+      const inventoryFingerprint = worldSnapshot.inventory
+        .map((item) => `${item.name}:${item.count}:${item.durability ?? ""}`)
+        .join("|");
+      const events = this.progressWatchdog.observe({
+        observedAtMs: observedAt.getTime(),
+        position,
+        inventoryFingerprint,
+        targetDistance: worldSnapshot.navigation.target
+          ? Math.hypot(
+              worldSnapshot.navigation.target.x - position.x,
+              worldSnapshot.navigation.target.y - position.y,
+              worldSnapshot.navigation.target.z - position.z,
+            )
+          : null,
+        goalKey: worldSnapshot.navigation.target
+          ? `${worldSnapshot.navigation.target.dimension}:${worldSnapshot.navigation.target.x},${worldSnapshot.navigation.target.y},${worldSnapshot.navigation.target.z}`
+          : null,
+        pathResetCount: worldSnapshot.navigation.pathResetCount,
+        active:
+          this.activeSkillTasks.size > 0 &&
+          worldSnapshot.navigation.movementOwner !== null,
+        movementExpected:
+          this.activeSkillTasks.size > 0 &&
+          worldSnapshot.navigation.movementOwner !== null,
+      });
+      for (const event of events) {
+        if (event.kind === "stuck") {
+          this.metrics.increment("bot_watchdog_stuck_total", { bot_id: this.profile.botId });
+          this.dependencies.logger.warn("bot_progress_stuck", this.logFields({ ageMs: event.ageMs, recovery: event.recoverySuggested }));
+          this.queueWatchdogRecovery(event);
+        } else if (event.kind === "loop") {
+          this.metrics.increment("bot_watchdog_loops_total", { bot_id: this.profile.botId });
+          this.dependencies.logger.warn("bot_progress_loop", this.logFields({ ageMs: event.ageMs, recovery: event.recoverySuggested }));
+          this.queueWatchdogRecovery(event);
+        } else if (event.kind === "no-progress") {
+          this.dependencies.logger.warn("bot_progress_no_progress", this.logFields({ ageMs: event.ageMs, recovery: event.recoverySuggested }));
+          this.queueWatchdogRecovery(event);
+        }
+      }
+      return;
+    }
+    this.worldState.observe({ observedAt, position });
+    this.progressWatchdog.observe({
+      observedAtMs: observedAt.getTime(),
+      position,
+      inventoryFingerprint: `${snapshot.safety.inventory.usedSlots}/${snapshot.safety.inventory.totalSlots}`,
+      active:
+        this.activeSkillTasks.size > 0 && snapshot.safety.movementRequested,
+      movementExpected:
+        this.activeSkillTasks.size > 0 && snapshot.safety.movementRequested,
+    });
+  }
+
+  private queueWatchdogRecovery(event: ProgressWatchdogEvent): void {
+    if (this.watchdogRecovery !== null || event.kind === "progress") return;
+    const client = this.client;
+    const task = this.currentTaskTelemetry();
+    if (
+      client === null ||
+      client.executeRecoveryAction === undefined ||
+      task === null ||
+      this.state !== "online"
+    ) {
+      return;
+    }
+    const generation = this.generation;
+    const action: BotRecoveryAction = {
+      kind: event.kind === "stuck" ? "local-unstick" : "local-replan",
+      trigger: event.kind,
+      taskId: task.taskId,
+      goalKey: event.goalKey,
+      durationMs: event.kind === "stuck" ? 600 : 350,
+    };
+    const pending = Promise.resolve()
+      .then(() => client.executeRecoveryAction!(action))
+      .then((result) => {
+        if (
+          generation !== this.generation ||
+          this.client !== client ||
+          this.state !== "online"
+        ) {
+          return;
+        }
+        if (result.outcome === "executed") {
+          this.progressWatchdog.reset();
+          this.metrics.increment("bot_watchdog_recoveries_total", {
+            action: action.kind,
+            bot_id: this.profile.botId,
+          });
+          this.metrics.increment("bot_movement_preemptions_total", {
+            bot_id: this.profile.botId,
+            preemptor: "watchdog-recovery",
+          });
+        }
+        const log = result.outcome === "executed"
+          ? this.dependencies.logger.info.bind(this.dependencies.logger)
+          : this.dependencies.logger.warn.bind(this.dependencies.logger);
+        log("bot_watchdog_recovery_result", this.logFields({
+          action: action.kind,
+          trigger: action.trigger,
+          outcome: result.outcome,
+          errorCode: result.errorCode,
+        }, undefined, task.taskId));
+      })
+      .catch(() => {
+        if (generation !== this.generation || this.client !== client) return;
+        this.dependencies.logger.error(
+          "bot_watchdog_recovery_failed",
+          this.logFields({ action: action.kind, trigger: action.trigger }, undefined, task.taskId),
+        );
+      })
+      .finally(() => {
+        if (this.watchdogRecovery === pending) this.watchdogRecovery = null;
+      });
+    this.watchdogRecovery = pending;
   }
 
   private queueSafetyActions(
@@ -1282,7 +1639,7 @@ export class SingleBotRuntime {
         connectionState: this.state,
         uptimeMs: Math.max(0, Math.round(process.uptime() * 1000)),
         lastStatusSequence: this.lastStatusSequence,
-        currentTaskId: this.currentTask?.taskId ?? null,
+        currentTaskId: this.currentTaskTelemetry()?.taskId ?? null,
       },
     });
     this.metrics.increment("bot_heartbeats_total", {
@@ -1360,6 +1717,13 @@ export class SingleBotRuntime {
     // 背包占用与 position 同源同帧：分两次读会让"够不着"和"装不下"基于两个
     // 不同时刻的世界状态，前置条件就不再是一致快照的纯判断了。
     let inventory: BotClientSnapshot["safety"]["inventory"] | null = null;
+    // Mining skills need an explicit safety fact. Unknown state stays unsafe;
+    // only a live client snapshot can clear the flags for this invocation.
+    let safety = {
+      lavaAdjacent: true,
+      waterAdjacent: true,
+      voidRisk: true,
+    };
     if (this.state === "online" && this.client) {
       try {
         const snapshot = this.client.snapshot();
@@ -1368,23 +1732,62 @@ export class SingleBotRuntime {
           serverProfileId: this.profile.id,
         };
         inventory = snapshot.safety.inventory;
+        safety = {
+          // Mineflayer exposes current liquid contact at this boundary. The
+          // execution adapter still re-checks each target before digging.
+          lavaAdjacent: snapshot.safety.inLava,
+          waterAdjacent: snapshot.safety.inWater,
+          voidRisk: snapshot.position.y <= -58,
+        };
       } catch {
         position = null;
         inventory = null;
       }
     }
+    const policy = this.serverPolicyStore.resolve(this.profile.id);
     return {
       online: this.state === "online",
       normalActionsAllowed: this.canAcceptNormalActions(),
       serverProfileId: this.profile.id,
+      isolatedTestServer: this.profile.purpose === "isolated-test",
+      policyLimits: {
+        allowSprint: policy.limits.allowSprint,
+        allowSprintJumpCombo: policy.limits.allowSprintJumpCombo,
+        allowAirStrafe: policy.limits.allowAirStrafe,
+        maxFallBlocks: policy.limits.maxFallBlocks,
+      },
+      safety,
       combatAvailable:
         this.combatDriver !== null &&
         this.client?.combatObservation !== undefined &&
         this.client?.executeCombatAction !== undefined,
       combatObservationAvailable: this.combatObservationAvailable(),
+      retreatInProgress: this.combatDriver?.status().stance === "retreating",
       position,
       inventory,
     };
+  }
+
+  private currentTaskTelemetry(): RuntimeCurrentTask | null {
+    const tasks = [...this.activeSkillTasks.values()];
+    if (tasks.length > 0) {
+      if (this.currentTask?.status !== "running") {
+        const terminalTaskIsStillActive = tasks.some(
+          ({ taskId }) => taskId === this.currentTask?.taskId,
+        );
+        if (terminalTaskIsStillActive) return this.currentTask;
+      } else {
+        return this.currentTask;
+      }
+      const task = tasks.find(({ title }) => title === "goal.ensure-item") ?? tasks[0]!;
+      return {
+        taskId: task.taskId,
+        title: task.title,
+        status: "running",
+        startedAt: task.startedAt,
+      };
+    }
+    return this.currentTask;
   }
 
   private combatObservationAvailable(): boolean {
@@ -1460,6 +1863,31 @@ export class SingleBotRuntime {
       (this.safetyStatus.normalTasksPaused && !isCombatDisengage)
     ) {
       throw new SkillFault("SKILL_EXECUTION_INTERRUPTED");
+    }
+    if (
+      request.capability === "inventory.read" &&
+      request.operation === "inventory.snapshot"
+    ) {
+      const parsed = inventorySnapshotCapabilityOutputSchema.safeParse(output);
+      if (
+        !parsed.success ||
+        parsed.data.worldStateVersion !== this.worldState.snapshot().version
+      ) {
+        throw new SkillFault("SKILL_CAPABILITY_OUTPUT_INVALID");
+      }
+      this.emitWorldState(this.generation);
+    }
+    if (
+      request.capability === "craft.execute" &&
+      request.operation === "craft.item-safe"
+    ) {
+      const parsed = craftItemCapabilityOutputSchema.safeParse(output);
+      if (parsed.success && parsed.data.craftedCount === 0) {
+        this.metrics.increment("bot_duplicate_crafting_prevented_total", {
+          bot_id: this.profile.botId,
+          guard: "inventory-short-circuit",
+        });
+      }
     }
     return output;
   }
@@ -1543,6 +1971,7 @@ export class SingleBotRuntime {
     requestedAtMs: number,
     activeClient: BotClient,
     signal: AbortSignal,
+    retaliation = false,
   ): Promise<CombatDriverReceipt> {
     let observation: ReturnType<NonNullable<BotClient["combatObservation"]>>;
     try {
@@ -1569,12 +1998,277 @@ export class SingleBotRuntime {
         "COMBAT_OBSERVATION_UNAVAILABLE",
       );
     }
-    return this.combatDriver!.engage(
-      observation,
-      requestedAtMs,
-      (action, actionSignal) =>
-        activeClient.executeCombatAction!(action, actionSignal),
-      signal,
+    const execute = (action: CombatPrimitiveAction, actionSignal: AbortSignal) =>
+      activeClient.executeCombatAction!(action, actionSignal);
+    return retaliation
+      ? this.combatDriver!.retaliate(
+          observation,
+          requestedAtMs,
+          execute,
+          signal,
+        )
+      : this.combatDriver!.engage(
+          observation,
+          requestedAtMs,
+          execute,
+          signal,
+        );
+  }
+
+  private handleDamaged(generation: number, info: BotDamageInfo): void {
+    if (
+      generation !== this.generation ||
+      this.stopping ||
+      this.state !== "online" ||
+      !this.client ||
+      this.combatReaction
+    ) {
+      return;
+    }
+    const activeClient = this.client;
+    if (
+      !this.combatDriver ||
+      !activeClient.combatObservation ||
+      !activeClient.executeCombatAction
+    ) {
+      this.dependencies.logger.info(
+        "bot_runtime_damage_reaction_unavailable",
+        this.logFields({
+          previousHealth: info.previousHealth,
+          currentHealth: info.currentHealth,
+          reasonCode: "COMBAT_DRIVER_UNAVAILABLE",
+        }),
+      );
+      return;
+    }
+    if (
+      this.safetyStatus.normalTasksPaused &&
+      !this.safetyAllowsDefensiveCombat()
+    ) {
+      this.dependencies.logger.info(
+        "bot_runtime_damage_reaction_suppressed",
+        this.logFields({
+          previousHealth: info.previousHealth,
+          currentHealth: info.currentHealth,
+          reasonCode: "NORMAL_ACTIONS_PAUSED",
+        }),
+      );
+      return;
+    }
+    if (!this.combatObservationAvailable()) {
+      this.combatDriver.recordUnavailable(
+        "COMBAT_OBSERVATION_UNAVAILABLE",
+        this.now().getTime(),
+      );
+      this.dependencies.logger.warn(
+        "bot_runtime_damage_reaction_unavailable",
+        this.logFields({
+          previousHealth: info.previousHealth,
+          currentHealth: info.currentHealth,
+          reasonCode: "COMBAT_OBSERVATION_UNAVAILABLE",
+        }),
+      );
+      return;
+    }
+
+    this.cancelRunningCoordinatorTasks();
+    this.cancelActiveSkills();
+    activeClient.interruptNormalActions?.();
+    // A live damage event starts a fresh deterministic combat epoch. This
+    // releases an in-flight movement/attack ACK without carrying stale target
+    // or rate-window state into the reaction.
+    this.combatDriver.reset(false);
+
+    const taskId = `combat-reaction-${this.randomId()}`;
+    const task: RuntimeCurrentTask = {
+      taskId,
+      title: "战斗反应: 受到攻击",
+      status: "running",
+      startedAt: this.now().toISOString(),
+    };
+    const controller = new AbortController();
+    this.currentTask = task;
+    const placeholder = {
+      generation,
+      client: activeClient,
+      taskId,
+      controller,
+    };
+    this.combatReaction = placeholder;
+    const promise = this.runCombatReaction(
+      generation,
+      activeClient,
+      taskId,
+      controller,
+    ).catch((error): CombatReactionOutcome => {
+      this.dependencies.logger.error(
+        "bot_runtime_damage_reaction_failed",
+        this.logFields({
+          previousHealth: info.previousHealth,
+          currentHealth: info.currentHealth,
+          error: error instanceof Error ? error.message : String(error),
+        }, this.traceId, taskId),
+      );
+      return "failed";
+    });
+    this.combatReaction = placeholder;
+    this.publishCurrentTaskState();
+    void promise.then((outcome) =>
+      this.finishCombatReaction(generation, activeClient, taskId, outcome),
+    );
+    this.dependencies.logger.warn(
+      "bot_runtime_damage_reaction_started",
+      this.logFields({
+        previousHealth: info.previousHealth,
+        currentHealth: info.currentHealth,
+        maxSteps: COMBAT_REACTION_MAX_STEPS,
+        maxDurationMs: COMBAT_REACTION_MAX_DURATION_MS,
+      }, this.traceId, taskId),
+    );
+  }
+
+  private async runCombatReaction(
+    generation: number,
+    activeClient: BotClient,
+    taskId: string,
+    controller: AbortController,
+  ): Promise<CombatReactionOutcome> {
+    const startedAtMs = this.now().getTime();
+    for (let step = 0; step < COMBAT_REACTION_MAX_STEPS; step += 1) {
+      if (
+        !this.combatReactionIsActive(
+          generation,
+          activeClient,
+          taskId,
+          controller.signal,
+        )
+      ) {
+        return "cancelled";
+      }
+      if (!this.safetyAllowsDefensiveCombat()) return "cancelled";
+      if (this.now().getTime() - startedAtMs >= COMBAT_REACTION_MAX_DURATION_MS) {
+        return "completed";
+      }
+
+      const requestedAtMs = this.now().getTime();
+      const receipt = await this.runCombatEngage(
+        requestedAtMs,
+        activeClient,
+        controller.signal,
+        true,
+      );
+      this.dependencies.logger.info(
+        "bot_runtime_damage_reaction_step",
+        this.logFields({
+          step: step + 1,
+          maxSteps: COMBAT_REACTION_MAX_STEPS,
+          requestedAtMs,
+          actualAction: receipt.actual.action,
+          primitiveAction: receipt.actual.primitiveAction,
+          disposition: receipt.actual.disposition,
+          reasonCode: receipt.actual.reasonCode,
+          targetEntityId: receipt.actual.targetEntityId,
+        }, this.traceId, taskId),
+      );
+      if (controller.signal.aborted) return "cancelled";
+      if (combatReactionShouldStop(receipt)) return "completed";
+      if (
+        this.now().getTime() - startedAtMs >= COMBAT_REACTION_MAX_DURATION_MS ||
+        step + 1 >= COMBAT_REACTION_MAX_STEPS
+      ) {
+        return "completed";
+      }
+      if (!(await this.waitForCombatReactionTick(controller.signal))) {
+        return "cancelled";
+      }
+    }
+    return "completed";
+  }
+
+  private combatReactionIsActive(
+    generation: number,
+    activeClient: BotClient,
+    taskId: string,
+    signal: AbortSignal,
+  ): boolean {
+    return (
+      !signal.aborted &&
+      generation === this.generation &&
+      this.state === "online" &&
+      this.client === activeClient &&
+      this.combatReaction?.taskId === taskId
+    );
+  }
+
+  private safetyAllowsDefensiveCombat(): boolean {
+    return this.safetyStatus.activeRisks.every(
+      (risk) => risk === "LOW_HEALTH" || risk === "HUNGER",
+    );
+  }
+
+  private waitForCombatReactionTick(signal: AbortSignal): Promise<boolean> {
+    if (signal.aborted) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (keepGoing: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        resolve(keepGoing);
+      };
+      const onAbort = () => finish(false);
+      const timer = setTimeout(
+        () => finish(!signal.aborted),
+        COMBAT_REACTION_TICK_MS,
+      );
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    });
+  }
+
+  private cancelCombatReaction(): void {
+    const reaction = this.combatReaction;
+    if (!reaction) return;
+    this.combatReaction = null;
+    reaction.controller.abort();
+    if (
+      this.currentTask?.taskId === reaction.taskId &&
+      this.currentTask.status === "running"
+    ) {
+      this.currentTask = { ...this.currentTask, status: "cancelled" };
+      this.publishCurrentTaskState(false);
+    }
+  }
+
+  private finishCombatReaction(
+    generation: number,
+    activeClient: BotClient,
+    taskId: string,
+    outcome: CombatReactionOutcome,
+  ): void {
+    const isCurrent = this.combatReaction?.taskId === taskId;
+    if (isCurrent) this.combatReaction = null;
+    if (
+      !isCurrent ||
+      generation !== this.generation ||
+      this.client !== activeClient ||
+      this.currentTask?.taskId !== taskId
+    ) {
+      return;
+    }
+    this.currentTask = {
+      ...this.currentTask,
+      status: outcome === "failed"
+        ? "failed"
+        : outcome === "cancelled"
+          ? "cancelled"
+          : "completed",
+    };
+    this.publishCurrentTaskState();
+    this.dependencies.logger.info(
+      "bot_runtime_damage_reaction_finished",
+      this.logFields({ outcome }, this.traceId, taskId),
     );
   }
 
@@ -1633,8 +2327,8 @@ export class SingleBotRuntime {
     return true;
   }
 
-  private publishCurrentTaskState(): void {
-    this.emitStatus(this.generation);
+  private publishCurrentTaskState(evaluateSafety = true): void {
+    this.emitStatus(this.generation, evaluateSafety);
     this.emitHeartbeat();
   }
 
@@ -1648,6 +2342,30 @@ export class SingleBotRuntime {
       this[key] = null;
     }
   }
+}
+
+function combatReactionShouldStop(receipt: CombatDriverReceipt): boolean {
+  if (receipt.actual.action === "RETREAT") return true;
+  if (receipt.actual.primitiveAction !== "NONE") return false;
+  return (
+    receipt.actual.reasonCode === null ||
+    COMBAT_REACTION_TERMINAL_REASONS.has(receipt.actual.reasonCode)
+  );
+}
+
+/**
+ * A ZodError carries every issue in `message` as a JSON blob. Take the first
+ * issue with its path instead, matching how ServerProfile validation reports
+ * failures, and keep the result bounded for the log sink.
+ */
+function statusFailureReason(cause: unknown): string {
+  if (cause instanceof z.ZodError) {
+    const issue = cause.issues[0];
+    if (!issue) return "status payload failed schema validation";
+    const path = issue.path.join(".");
+    return path.length > 0 ? `${path}: ${issue.message}` : issue.message;
+  }
+  return cause instanceof Error ? cause.message : String(cause);
 }
 
 type CombatIntent = "ENGAGE" | "DISENGAGE";

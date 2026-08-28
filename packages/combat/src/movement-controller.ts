@@ -44,6 +44,11 @@ export type CombatMovementSnapshot = Readonly<{
    * 为 null 表示当前不撤退。
    */
   retreatDirection: CombatVector3 | null;
+  /**
+   * Observed target i-frame time. While positive, spacing uses the tighter
+   * 2.4-3.8 tactical band instead of advancing into a zero-damage swing.
+   */
+  targetInvulnerableRemainingMs?: number;
 }>;
 
 export type CombatMovementPolicy = Readonly<{
@@ -51,6 +56,10 @@ export type CombatMovementPolicy = Readonly<{
   minimumDistance: number;
   /** 外圈：比这更远就贴上去。 */
   maximumDistance: number;
+  /** Inner edge of the observed target i-frame spacing band. */
+  invulnerableMinimumDistance: number;
+  /** Outer edge of the observed target i-frame spacing band. */
+  invulnerableMaximumDistance: number;
   /** 探测落点用的步长（格）。 */
   stepProbeDistance: number;
   /** 落点距 hazard 小于此值视为不安全。 */
@@ -67,6 +76,8 @@ export const DEFAULT_MOVEMENT_POLICY: CombatMovementPolicy = {
   // 3 格是近战可达距离，6 格是水晶有效半径：带内既能打到人，又不至于贴脸。
   minimumDistance: 3,
   maximumDistance: 5,
+  invulnerableMinimumDistance: 2.4,
+  invulnerableMaximumDistance: 3.8,
   stepProbeDistance: 1,
   hazardClearance: 1.5,
   sprintAboveDistance: 6,
@@ -126,6 +137,10 @@ export class MovementController {
       policy.minimumDistance <= 0 ||
       !Number.isFinite(policy.maximumDistance) ||
       policy.maximumDistance <= policy.minimumDistance ||
+      !Number.isFinite(policy.invulnerableMinimumDistance) ||
+      policy.invulnerableMinimumDistance <= 0 ||
+      !Number.isFinite(policy.invulnerableMaximumDistance) ||
+      policy.invulnerableMaximumDistance <= policy.invulnerableMinimumDistance ||
       !Number.isFinite(policy.stepProbeDistance) ||
       policy.stepProbeDistance <= 0 ||
       !Number.isFinite(policy.hazardClearance) ||
@@ -219,7 +234,15 @@ export class MovementController {
       };
     }
 
-    if (distance < this.policy.minimumDistance) {
+    const targetInvulnerable = (snapshot.targetInvulnerableRemainingMs ?? 0) > 0;
+    const minimumDistance = targetInvulnerable
+      ? this.policy.invulnerableMinimumDistance
+      : this.policy.minimumDistance;
+    const maximumDistance = targetInvulnerable
+      ? this.policy.invulnerableMaximumDistance
+      : this.policy.maximumDistance;
+
+    if (distance < minimumDistance) {
       return this.withHazardCheck(
         "BACK_OFF",
         { x: -toTarget.x, y: 0, z: -toTarget.z },
@@ -229,7 +252,7 @@ export class MovementController {
         0,
       );
     }
-    if (distance > this.policy.maximumDistance) {
+    if (distance > maximumDistance) {
       return this.withHazardCheck(
         "CLOSE_IN",
         toTarget,
@@ -352,6 +375,13 @@ function validateMovementSnapshot(snapshot: CombatMovementSnapshot): void {
   }
   if (snapshot.retreatDirection !== null) {
     validateVector(snapshot.retreatDirection, "retreatDirection");
+  }
+  if (
+    snapshot.targetInvulnerableRemainingMs !== undefined &&
+    (!Number.isFinite(snapshot.targetInvulnerableRemainingMs) ||
+      snapshot.targetInvulnerableRemainingMs < 0)
+  ) {
+    throw new TypeError("targetInvulnerableRemainingMs 必须是非负有限数。");
   }
   for (const hazard of snapshot.hazards) {
     validateVector(hazard, "hazard");

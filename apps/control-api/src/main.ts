@@ -64,6 +64,13 @@ void main().catch((cause: unknown) => {
     cause instanceof CoordinatorLinkConfigError
       ? cause.code
       : "CONTROL_API_START_FAILED";
-  logger.error("control_api_start_failed", { code });
+  // Without the originating reason a startup failure is indistinguishable
+  // between missing configuration, a rejected Control Link handshake, and a
+  // bind conflict. The message is authored by our own error types; secrets
+  // stay out of it because configuration errors name keys, never values.
+  logger.error("control_api_start_failed", {
+    code,
+    reason: cause instanceof Error ? cause.message : String(cause),
+  });
   process.exitCode = 1;
 });

@@ -11,6 +11,25 @@ export {
 } from "./environment.js";
 
 export {
+  studioAiProviderSchema,
+  studioAiStateSchema,
+  studioAiStatusV1Schema,
+  studioCreateBotRequestV1Schema,
+  studioManagedBotProcessStateSchema,
+  studioManagedBotResponseV1Schema,
+  studioManagedBotV1Schema,
+  studioManagerErrorCodeSchema,
+  studioManagerErrorV1Schema,
+  studioManagerStatusV1Schema,
+  type StudioAiStatusV1,
+  type StudioCreateBotRequestV1,
+  type StudioManagedBotResponseV1,
+  type StudioManagedBotV1,
+  type StudioManagerErrorCode,
+  type StudioManagerStatusV1,
+} from "./studio-manager.js";
+
+export {
   botDetailResponseV1Schema,
   botListResponseV1Schema,
   botStreamEventV1Schema,
@@ -19,6 +38,7 @@ export {
   controlApiErrorV1Schema,
   controlApiPermissionSchema,
   goalDispatchResultV1Schema,
+  goalResultSummaryFromOutput,
   publicBotDetailV1Schema,
   publicBotSummaryV1Schema,
   stopBotHttpRequestV1Schema,
@@ -35,6 +55,7 @@ export {
   type ControlApiErrorV1,
   type ControlApiPermission,
   type GoalDispatchResultV1,
+  type GoalResultSummaryV1,
   type PublicBotDetailV1,
   type PublicBotSummaryV1,
   type StopBotHttpRequestV1,
@@ -82,6 +103,8 @@ export {
 
 export {
   ProtocolAuthorizationError,
+  BOT_WORLD_STATE_MAX_INVENTORY_ITEMS,
+  BOT_WORLD_STATE_MAX_UTILITY_BLOCKS,
   botConnectionStateSchema,
   botDisconnectedV1Schema,
   botHeartbeatV1Schema,
@@ -98,6 +121,11 @@ export {
   botStopResultV1Schema,
   botTelemetryMessageV1Schema,
   botVersionV1Schema,
+  botWorldStateInventoryItemV1Schema,
+  botWorldStateNavigationV1Schema,
+  botWorldStateUtilityBlockNameV1Schema,
+  botWorldStateUtilityBlockV1Schema,
+  botWorldStateV1Schema,
   controlPermissionSchema,
   combatReflexDenialCodeSchema,
   combatRuntimeStanceSchema,
@@ -125,6 +153,11 @@ export {
   type BotStopResultV1,
   type BotTelemetryMessageV1,
   type BotVersionV1,
+  type BotWorldStateInventoryItemV1,
+  type BotWorldStateNavigationV1,
+  type BotWorldStateUtilityBlockNameV1,
+  type BotWorldStateUtilityBlockV1,
+  type BotWorldStateV1,
   type ControlAuthorizationContext,
   type ControlPermission,
   type CombatReflexDenialCode,
@@ -258,6 +291,14 @@ export {
   taskQueueSourceSchema,
   type TaskDispatchV1,
 } from "./task-dispatch.js";
+
+export {
+  COORDINATOR_GOAL_EXECUTION_PATH,
+  coordinatorGoalExecutionRequestV1Schema,
+  coordinatorGoalExecutionResponseV1Schema,
+  type CoordinatorGoalExecutionRequestV1,
+  type CoordinatorGoalExecutionResponseV1,
+} from "./goal-execution.js";
 
 export {
   SUPERVISOR_IPC_MAX_BOTS_PER_PROCESS,

@@ -2,8 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   DEFAULT_GEAR_POLICY,
+  JAVA_1_21_EXPLOSION_RULES,
+  assessExplosionProtection,
   assessGearMatchup,
   assessWorstMatchup,
+  explosionKnockbackResistance01,
+  explosionMitigation01,
+  explosionRuleSetForMinecraftVersion,
   gearPower,
   type CombatGearSnapshot,
 } from "../src/gear-assessor.js";
@@ -14,6 +19,8 @@ function gear(
   return {
     armorMaterial: "iron",
     protectionLevel: 0,
+    blastProtectionLevel: 0,
+    armorPieceCount: 4,
     weaponDamage: 7,
     health: 20,
     hasTotem: false,
@@ -65,6 +72,12 @@ describe("gearPower", () => {
 
   it("rejects malformed gear", () => {
     expect(() => gearPower(gear({ protectionLevel: 5 }))).toThrowError(TypeError);
+    expect(() => gearPower(gear({ blastProtectionLevel: 5 }))).toThrowError(
+      TypeError,
+    );
+    expect(() => gearPower(gear({ armorPieceCount: 5 }))).toThrowError(
+      TypeError,
+    );
     expect(() => gearPower(gear({ health: 21 }))).toThrowError(TypeError);
     expect(() => gearPower(gear({ weaponDamage: Number.NaN }))).toThrowError(
       TypeError,
@@ -72,6 +85,69 @@ describe("gearPower", () => {
     expect(() =>
       gearPower({ ...gear(), armorMaterial: "mythril" as never }),
     ).toThrowError(TypeError);
+  });
+});
+
+describe("explosion protection axis", () => {
+  const RULES = JAVA_1_21_EXPLOSION_RULES.id;
+
+  it("combines generic and blast protection under the 80% cap", () => {
+    const protectedGear = gear({
+      protectionLevel: 1,
+      blastProtectionLevel: 4,
+      armorPieceCount: 4,
+    });
+    expect(assessExplosionProtection(protectedGear, RULES)).toMatchObject({
+      verified: true,
+      totalProtectionLevel: 4,
+      totalBlastProtectionLevel: 16,
+      mitigation01: 0.8,
+      knockbackResistance01: 1,
+    });
+  });
+
+  it("keeps mitigation and knockback as independent exported scalars", () => {
+    const onePiece = gear({
+      protectionLevel: 0,
+      blastProtectionLevel: 2,
+      armorPieceCount: 1,
+    });
+    expect(explosionMitigation01(onePiece, RULES)).toBeCloseTo(0.16, 10);
+    expect(explosionKnockbackResistance01(onePiece, RULES)).toBeCloseTo(
+      0.3,
+      10,
+    );
+  });
+
+  it("fails closed to zero mitigation when version rules are unknown", () => {
+    const observed = gear({ blastProtectionLevel: 4, armorPieceCount: 4 });
+    expect(assessExplosionProtection(observed, null)).toMatchObject({
+      verified: false,
+      ruleSet: null,
+      mitigation01: 0,
+      knockbackResistance01: 0,
+    });
+  });
+
+  it("guards the constants to stable Java 1.21.x only", () => {
+    expect(explosionRuleSetForMinecraftVersion("1.21")).toBe(RULES);
+    expect(explosionRuleSetForMinecraftVersion("1.21.11")).toBe(RULES);
+    expect(explosionRuleSetForMinecraftVersion("1.20.6")).toBeNull();
+    expect(explosionRuleSetForMinecraftVersion("1.21-pre4")).toBeNull();
+    expect(explosionRuleSetForMinecraftVersion("1.22")).toBeNull();
+  });
+
+  it("exposes blast resistance without changing the general verdict", () => {
+    const assessment = assessGearMatchup(
+      gear({ blastProtectionLevel: 4 }),
+      gear({ blastProtectionLevel: 0 }),
+      DEFAULT_GEAR_POLICY,
+      RULES,
+    );
+    expect(assessment.verdict).toBe("even");
+    expect(assessment.selfExplosionProtection.mitigation01).toBeGreaterThan(
+      assessment.opponentExplosionProtection?.mitigation01 ?? 1,
+    );
   });
 });
 

@@ -19,6 +19,7 @@
 - 新增 PostgreSQL 权威的持久取消消费：首个取消操作不可覆盖，执行租约所有者有界轮询并确认请求，跨 Worker 发起方可等待同一 cancelled 终态；租约失效后由无租约解析者完成取消。
 - 新增独立 `@minecraft-studio/task-worker` Node 进程入口与 `isolated.acceptance.wait@1.0.0` 验收处理器。入口强制使用回环 PostgreSQL/Redis、专用 Schema、`isolated-test` purpose 和固定 handler profile，不注册生产或 Minecraft 处理器。
 - 真实基础设施套件新增队列取消原子性、不同 Worker 发起/消费取消，以及独立 Worker 子进程消费持久取消的场景；2026-08-14 GitHub Actions 运行 `31793333384` 已在临时 PostgreSQL/Redis 上 20/20 通过。
+- 2026-08-27 本地真实基础设施运行 `studio_test_20260827_real03` 已在临时 PostgreSQL/Redis 上 28/28 通过。
 - 新增“Minecraft 技能隔离验收”GitHub Actions 门禁：仅支持人工勾选 EULA 后手动运行，或由仓库变量确认 EULA 后通过 `minecraft-acceptance` 标签触发；拒绝 Fork、无 Secret、只读权限、固定 Mojang 官方 JAR 与 SHA-1、仅本机回环临时服。
 - 新增严格版本化的 Minecraft 技能验收场景清单，为 7 个内置技能统一定义成功、材料不足、权限/位置拒绝、L0 抢占、取消、断线和部分成功读回矩阵。
 - 新增 `pnpm test:minecraft-skills` 一键回环隔离验收入口；复用既有官方服务端哈希、人工 EULA、安全属性和未知端口进程拒绝检查，并加入真实 `smelt.item@1.0.0` 场景握手与中文通过标记。

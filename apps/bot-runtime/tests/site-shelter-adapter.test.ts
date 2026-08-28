@@ -134,4 +134,128 @@ describe("N2 site-shelter runtime adapter", () => {
     }, new AbortController().signal)).rejects.toMatchObject({ code: "SHELTER_STEP_BLOCKED" });
     expect((bot as { placeBlock: ReturnType<typeof vi.fn> }).placeBlock).not.toHaveBeenCalled();
   });
+
+  it("equips a harvestable tool before digging a stone shelter", async () => {
+    const equip = vi.fn(async () => undefined);
+    const pickaxe = { name: "iron_pickaxe", type: 1 };
+    const entity = { position: new Vec3(12_345, 40, 15_678), type: "player" };
+    const dug = new Set<string>();
+    const bot = fakeBot({
+      entity,
+      dig: vi.fn(async (block: { position?: Vec3 }) => {
+        if (block.position) dug.add(block.position.toString());
+      }),
+      placeBlock: vi.fn(async () => undefined),
+      equip,
+      inventory: { items: vi.fn(() => [pickaxe, { name: "cobblestone", type: 2 }]) },
+      blockAt: vi.fn((position: Vec3) => ({
+        name: position.x < 12_347 ? "stone" : "air",
+        boundingBox: dug.has(position.toString()) || position.x >= 12_347 ? "empty" : "block",
+        position,
+        canHarvest: (itemType: number | null) => itemType === 1,
+      })),
+      pathfinder: {
+        goto: vi.fn(async () => {
+          entity.position = new Vec3(12_347, 40, 15_678);
+        }),
+        stop: vi.fn(),
+      },
+    });
+    await expect(digShelter(bot, "isolated-local", {
+      direction: "east", depth: 2, sealItemName: "cobblestone", dimension: "minecraft:overworld", serverProfileId: "isolated-local",
+    }, new AbortController().signal)).resolves.toMatchObject({ dugBlocks: 2, movedInside: true, sealed: true });
+    expect(equip).toHaveBeenCalledWith(pickaxe, "hand");
+  });
+
+  it("seals the original standing cell from inside the shelter", async () => {
+    const origin = new Vec3(12_345, 40, 15_678);
+    const shelter = origin.offset(2, 0, 0);
+    const entity = { position: origin, type: "player" };
+    const dug = new Set<string>();
+    const placeBlock = vi.fn(async () => undefined);
+    const bot = fakeBot({
+      entity,
+      dig: vi.fn(async (block: { position?: Vec3 }) => {
+        if (block.position) dug.add(block.position.toString());
+      }),
+      placeBlock,
+      equip: vi.fn(async () => undefined),
+      inventory: { items: vi.fn(() => [{ name: "cobblestone", type: 2 }]) },
+      blockAt: vi.fn((position: Vec3) => {
+        const key = position.toString();
+        const inTunnel = position.x >= origin.x + 1 && position.x <= shelter.x &&
+          (position.y === origin.y || position.y === origin.y + 1) && position.z === origin.z;
+        if (inTunnel && dug.has(key)) return { name: "air", boundingBox: "empty", position };
+        return { name: "stone", boundingBox: "block", position };
+      }),
+      pathfinder: {
+        goto: vi.fn(async () => {
+          entity.position = shelter;
+        }),
+        stop: vi.fn(),
+      },
+    });
+
+    await expect(digShelter(bot, "isolated-local", {
+      direction: "east", depth: 2, sealItemName: "cobblestone", dimension: "minecraft:overworld", serverProfileId: "isolated-local",
+    }, new AbortController().signal)).resolves.toMatchObject({
+      shelterPosition: { x: shelter.x, y: shelter.y, z: shelter.z },
+      sealed: true,
+    });
+
+    expect(placeBlock).toHaveBeenCalledTimes(1);
+    const [support, face] = placeBlock.mock.calls[0] as [
+      { position: Vec3 },
+      Vec3,
+    ];
+    expect(support.position).toEqual(origin.offset(0, -1, 0));
+    expect(face).toEqual(new Vec3(0, 1, 0));
+  });
+
+  it("falls back to a bounded forward walk when pathfinder entry times out", async () => {
+    vi.useFakeTimers();
+    try {
+      const origin = new Vec3(12_345, 40, 15_678);
+      const shelter = origin.offset(2, 0, 0);
+      const entity = { position: origin, type: "player" };
+      const dug = new Set<string>();
+      const goto = vi.fn(() => new Promise<void>(() => {}));
+      const setGoal = vi.fn();
+      const setControlState = vi.fn((state: string, enabled: boolean) => {
+        if (state === "forward" && enabled) entity.position = shelter;
+      });
+      const bot = fakeBot({
+        entity,
+        dig: vi.fn(async (block: { position?: Vec3 }) => {
+          if (block.position) dug.add(block.position.toString());
+        }),
+        placeBlock: vi.fn(async () => undefined),
+        equip: vi.fn(async () => undefined),
+        setControlState,
+        look: vi.fn(async () => undefined),
+        clearControlStates: vi.fn(),
+        inventory: { items: vi.fn(() => [{ name: "cobblestone", type: 2 }]) },
+        blockAt: vi.fn((position: Vec3) => {
+          const key = position.toString();
+          const inTunnel = position.x >= origin.x + 1 && position.x <= shelter.x &&
+            (position.y === origin.y || position.y === origin.y + 1) && position.z === origin.z;
+          if (inTunnel && dug.has(key)) return { name: "air", boundingBox: "empty", position };
+          return { name: "stone", boundingBox: "block", position };
+        }),
+        pathfinder: { goto, setGoal, stop: vi.fn() },
+      });
+
+      const completion = digShelter(bot, "isolated-local", {
+        direction: "east", depth: 2, sealItemName: "cobblestone", dimension: "minecraft:overworld", serverProfileId: "isolated-local",
+      }, new AbortController().signal);
+      await vi.advanceTimersByTimeAsync(8_000);
+
+      await expect(completion).resolves.toMatchObject({ movedInside: true, sealed: true });
+      expect(goto).toHaveBeenCalledTimes(1);
+      expect(setGoal).toHaveBeenCalledWith(null);
+      expect(setControlState).toHaveBeenCalledWith("forward", true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -40,6 +40,11 @@ describe("ResourceGraph consistency", () => {
   it("ships a self-consistent vanilla recipe table", () => {
     const graph = new ResourceGraph();
     expect(graph.issues).toEqual([]);
+    expect(graph.recipeFor("dirt")).toMatchObject({
+      kind: "mine",
+      sourceBlock: "dirt",
+      toolTier: "none",
+    });
     expect(graph.knows("diamond_pickaxe")).toBe(true);
     expect(graph.recipeFor("nether_star")).toBeNull();
   });

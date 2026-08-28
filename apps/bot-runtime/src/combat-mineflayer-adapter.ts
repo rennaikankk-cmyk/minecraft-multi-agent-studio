@@ -1,15 +1,26 @@
 import type { Bot } from "mineflayer";
+import { Vec3 } from "vec3";
 
 import {
   combatEntityFromMineflayer,
   type MineflayerCombatEntityView,
 } from "./combat-entity-adapter.js";
-import type { CombatGearSnapshot } from "@minecraft-studio/combat";
+import {
+  HitWindowTracker,
+  TotemPopTracker,
+  explosionRuleSetForMinecraftVersion,
+  type CombatGearSnapshot,
+  type CombatWeaponCandidate,
+} from "@minecraft-studio/combat";
 import type {
   CombatActionAcknowledgement,
   CombatDriverObservation,
   CombatPrimitiveAction,
 } from "./combat-driver.js";
+import {
+  ExplosionPacketAdapter,
+  type CombatExplosionObservation,
+} from "./explosion-packet-adapter.js";
 
 type VecLike = Readonly<{ x: number; y: number; z: number }>;
 type ItemLike = Readonly<{
@@ -18,6 +29,7 @@ type ItemLike = Readonly<{
   count?: unknown;
   durabilityUsed?: unknown;
   maxDurability?: unknown;
+  enchants?: unknown;
 }>;
 type EntityLike = MineflayerCombatEntityView &
   Readonly<{
@@ -32,21 +44,38 @@ type EntityLike = MineflayerCombatEntityView &
   }>;
 type CombatBotLike = Readonly<{
   entity?: EntityLike;
+  health?: unknown;
+  version?: unknown;
   entities?: Readonly<Record<string, EntityLike>>;
   inventory?: Readonly<{
     items?: () => readonly ItemLike[];
     slots?: readonly (ItemLike | null | undefined)[];
   }>;
   game?: Readonly<{ dimension?: unknown }>;
+  _client?: MineflayerWireClient;
   registry?: unknown;
   player?: Readonly<{ ping?: unknown }>;
   getEquipmentDestSlot?: (destination: string) => number;
   equip?: (item: unknown, destination: string) => Promise<void>;
   attack?: (entity: unknown) => Promise<void> | void;
+  activateItem?: (offHand?: boolean) => void;
+  deactivateItem?: () => void;
   look?: (yaw: number, pitch: number, force?: boolean) => Promise<void>;
   setControlState?: (control: string, state: boolean) => void;
   clearControlStates?: () => void;
   pathfinder?: Readonly<{ stop?: () => void }>;
+  blockAt?: (position: VecLike) => Readonly<{ name?: unknown }> | null;
+}>;
+
+type CombatBotHeldItemState = {
+  usingHeldItem?: boolean;
+};
+
+type MineflayerWireClient = Readonly<{
+  on?: (event: string, listener: (packet: unknown) => void) => void;
+  prependListener?: (event: string, listener: (packet: unknown) => void) => void;
+  off?: (event: string, listener: (packet: unknown) => void) => void;
+  removeListener?: (event: string, listener: (packet: unknown) => void) => void;
 }>;
 
 type RegistryEntityInfo = Readonly<{
@@ -190,27 +219,171 @@ const ARMOR_MATERIAL_RANK: Readonly<Record<Exclude<ArmorMaterial, "none">, numbe
   netherite: 5,
 };
 
+const COMBAT_HAZARD_BLOCKS = new Set([
+  "lava",
+  "fire",
+  "soul_fire",
+  "magma_block",
+  "cactus",
+  "powder_snow",
+  "sweet_berry_bush",
+  "campfire",
+  "soul_campfire",
+  "pointed_dripstone",
+]);
+const COMBAT_HAZARD_SCAN_RADIUS = 2;
+
 /**
- * Narrow Mineflayer boundary for W0. It intentionally does not enumerate
- * world geometry or combat placements: those observations are unavailable
- * until a versioned, tested adapter exists.
+ * Narrow Mineflayer boundary for the deterministic combat layer. World
+ * geometry and combat placements remain unavailable until versioned adapters
+ * exist; server-authoritative entity status events are safe to observe here.
  */
 export class MineflayerCombatAdapter {
   private clock: () => number = () => Date.now();
   private movementAbortController: AbortController | null = null;
+  private readonly totemPopTracker = new TotemPopTracker();
+  private readonly hitWindowTracker: HitWindowTracker;
+  private explosionPacketAdapter: ExplosionPacketAdapter | null = null;
+  private explosionObservations: CombatExplosionObservation[] = [];
+  private boundWire: MineflayerWireClient | null = null;
+  private heldItemBeforeForeignStatus = new WeakMap<
+    object,
+    boolean
+  >();
+  private readonly onEntityStatus = (packet: unknown): void => {
+    this.recordTotemPop(packet);
+    this.recordEntityStatusHurt(packet);
+  };
+  private readonly onEntityStatusBeforeMineflayer = (packet: unknown): void => {
+    const entityId = entityStatusEntityId(packet);
+    const bot = this.bot as unknown as CombatBotLike;
+    if (
+      entityId !== null &&
+      Number.isSafeInteger(bot.entity?.id) &&
+      entityId !== bot.entity?.id
+    ) {
+      const usingHeldItem = (bot as CombatBotHeldItemState).usingHeldItem;
+      if (typeof usingHeldItem === "boolean") {
+        const record = asRecord(packet);
+        if (record !== null) {
+          this.heldItemBeforeForeignStatus.set(record, usingHeldItem);
+        }
+      }
+    }
+    this.recordTotemPop(packet);
+    this.recordEntityStatusHurt(packet);
+  };
+  private readonly onEntityStatusAfterMineflayer = (packet: unknown): void => {
+    const record = asRecord(packet);
+    if (record === null) return;
+    const previous = this.heldItemBeforeForeignStatus.get(record);
+    if (previous === undefined) return;
+    this.heldItemBeforeForeignStatus.delete(record);
+    // Mineflayer's inventory listener clears this flag for every status packet.
+    // Restore it only for another entity; self status packets keep Mineflayer's
+    // original semantics (including self POP/eating completion).
+    (this.bot as unknown as CombatBotHeldItemState).usingHeldItem = previous;
+  };
+  private readonly onDamageEvent = (packet: unknown): void => {
+    this.recordEntityHurt(entityStatusEntityId(packet));
+  };
+  private readonly onAnimation = (packet: unknown): void => {
+    const record = asRecord(packet);
+    if (record?.animation !== 0) return;
+    const entityId = entityStatusEntityId(packet);
+    if (entityId === null) return;
+    const bot = this.bot as unknown as CombatBotLike;
+    const entity = Object.values(bot.entities ?? {}).find(
+      (candidate) => candidate.id === entityId,
+    );
+    const observedAtMs = this.clock();
+    if (
+      !entity ||
+      !Number.isSafeInteger(observedAtMs) ||
+      observedAtMs < 0
+    ) return;
+    try {
+      this.hitWindowTracker.recordSwingObserved(
+        entityId,
+        observedAtMs,
+        observedAttackCooldownMs(entity),
+      );
+    } catch {
+      // Ignore malformed/out-of-order wire observations.
+    }
+  };
+  private readonly onExplosion = (packet: unknown): void => {
+    const adapter = this.explosionPacketAdapter;
+    if (adapter === null) return;
+    const bot = this.bot as unknown as CombatBotLike;
+    const dimension = normalizeDimension(bot.game?.dimension);
+    const observedAtMs = this.clock();
+    if (
+      dimension === null ||
+      !Number.isSafeInteger(observedAtMs) ||
+      observedAtMs < 0
+    ) return;
+    try {
+      this.explosionObservations.push(adapter.adapt(packet, {
+        observedAtMs,
+        serverProfileId: this.serverProfileId,
+        dimension,
+      }));
+      if (this.explosionObservations.length > 64) {
+        this.explosionObservations.splice(
+          0,
+          this.explosionObservations.length - 64,
+        );
+      }
+    } catch {
+      // The wire is untrusted. A malformed packet is not converted into a
+      // partial observation and does not take down unrelated combat tracking.
+    }
+  };
 
   constructor(
     private readonly bot: Bot,
     private readonly serverProfileId: string,
     private readonly enabled: boolean,
-  ) {}
+  ) {
+    this.hitWindowTracker = enabled
+      ? new HitWindowTracker(serverProfileId)
+      : new HitWindowTracker();
+    const version = (bot as unknown as CombatBotLike).version;
+    if (enabled && typeof version === "string") {
+      this.initializeExplosionProtocol();
+    }
+    this.bindTotemPopEvents();
+  }
 
   setClock(clock: () => number): void {
     this.clock = clock;
   }
 
+  /** Called again after auto-version negotiation; unknown schemas throw. */
+  initializeExplosionProtocol(): void {
+    if (!this.enabled) return;
+    const version = (this.bot as unknown as CombatBotLike).version;
+    if (typeof version !== "string" || version.trim().length === 0) {
+      throw new TypeError("Combat explosion protocol version is unavailable.");
+    }
+    if (this.explosionPacketAdapter?.minecraftVersion === version) return;
+    this.explosionPacketAdapter = new ExplosionPacketAdapter(version);
+  }
+
+  drainExplosionObservations(): readonly CombatExplosionObservation[] {
+    const observations = this.explosionObservations.map((entry) => ({
+      ...entry,
+      center: { ...entry.center },
+      knockback: entry.knockback === null ? null : { ...entry.knockback },
+    }));
+    this.explosionObservations = [];
+    return observations;
+  }
+
   observation(nowMs: number): CombatDriverObservation | null {
     if (!this.enabled || !Number.isSafeInteger(nowMs) || nowMs < 0) return null;
+    this.bindTotemPopEvents();
     const bot = this.bot as unknown as CombatBotLike;
     const self = bot.entity;
     const position = self?.position;
@@ -223,11 +396,24 @@ export class MineflayerCombatAdapter {
     ) return null;
     const dimension = normalizeDimension(bot.game?.dimension);
     if (dimension === null) return null;
+    let selfPopWindow;
+    try {
+      selfPopWindow = this.totemPopTracker.windowFor({
+        entityId: self.id,
+        observedAtMs: nowMs,
+        serverProfileId: this.serverProfileId,
+        dimension,
+      });
+    } catch {
+      return null;
+    }
 
     // These values are required by the deterministic driver. Do not turn a
     // pre-spawn/partially populated Mineflayer entity into a fabricated safe
     // snapshot (for example health=0 or onGround=false).
-    const health = finiteNumber(self.health) ? Number(self.health) : null;
+    // Mineflayer exposes the local player's health on `bot.health`; entity
+    // health is optional and is primarily populated for observed mobs.
+    const health = finiteNumber(bot.health) ? Number(bot.health) : null;
     const yaw = finiteNumber(self.yaw) ? Number(self.yaw) : null;
     const pitch = finiteNumber(self.pitch) ? Number(self.pitch) : null;
     if (
@@ -261,14 +447,27 @@ export class MineflayerCombatAdapter {
       // whether any remaining observations are sufficient to act.
       .map((entity) => {
         try {
-          return this.entityObservation(entity, bot.registry);
+          return this.entityObservation(entity, bot.registry, nowMs, dimension);
         } catch {
           return null;
         }
       })
       .filter((value): value is NonNullable<typeof value> => value !== null);
     const offhand = this.equipmentItem(bot, "off-hand");
+    const heldItem = this.equipmentItem(bot, "hand");
     const selfGear = this.gearSnapshot(self, inventoryItems, offhand);
+    const weapons = inventoryItems
+      .map((item) => this.weaponCandidate(item))
+      .filter((value): value is NonNullable<typeof value> => value !== null);
+    const heldFallback = heldItem === null
+      ? null
+      : this.weaponCandidate(heldItem, true);
+    if (
+      heldFallback !== null &&
+      !weapons.some(({ slot }) => slot === heldFallback.slot)
+    ) {
+      weapons.push(heldFallback);
+    }
     const orientation = {
       yaw: radiansToDegrees(yaw),
       pitch: radiansToDegrees(pitch),
@@ -279,28 +478,33 @@ export class MineflayerCombatAdapter {
       serverProfileId: this.serverProfileId,
       dimension,
       latencyMs: Number.isFinite(latency) && latency >= 0 ? Math.round(latency) : null,
+      explosionRuleSet: typeof bot.version === "string"
+        ? explosionRuleSetForMinecraftVersion(bot.version)
+        : null,
       self: {
         position: { x: position.x, y: position.y, z: position.z },
         health,
         offhandIsTotem: offhand?.name === "totem_of_undying",
+        totemPopObservedAtMs: selfPopWindow.phase === "PUNISH"
+          ? selfPopWindow.popObservedAtMs
+          : null,
         inventoryTotemCount: inventoryItems.filter(
           (item) => item.name === "totem_of_undying",
         ).length,
         gear: selfGear,
         orientation,
         heldItemSlot: this.heldItemSlot(bot),
+        usingHeldItem: (bot as CombatBotHeldItemState).usingHeldItem === true,
         onGround: self.onGround === true,
         fallDistance: finiteNumber((self as EntityLike & { fallDistance?: unknown }).fallDistance)
           ? Number((self as EntityLike & { fallDistance?: unknown }).fallDistance)
           : null,
       },
       entities,
-      weapons: inventoryItems
-        .map((item) => this.weaponCandidate(item))
-        .filter((value): value is NonNullable<typeof value> => value !== null),
+      weapons,
       crystalCandidates: null,
       mineCandidates: null,
-      hazards: null,
+      hazards: this.hazardsAround(position),
     };
   }
 
@@ -315,6 +519,7 @@ export class MineflayerCombatAdapter {
       switch (action.kind) {
         case "DISENGAGE":
           this.movementAbortController?.abort();
+          bot.deactivateItem?.();
           bot.pathfinder?.stop?.();
           bot.clearControlStates?.();
           return { outcome: "executed", executedAtMs: this.clock() };
@@ -340,6 +545,26 @@ export class MineflayerCombatAdapter {
           await bot.attack(target);
           return { outcome: "executed", executedAtMs: this.clock() };
         }
+        case "DRAW_RANGED_WEAPON": {
+          const item = bot.inventory?.slots?.[action.weaponSlot];
+          if (!item || !bot.activateItem) {
+            return {
+              outcome: "unavailable",
+              reasonCode: "COMBAT_WEAPON_NOT_IN_INVENTORY",
+            };
+          }
+          bot.activateItem(false);
+          return { outcome: "executed", executedAtMs: this.clock() };
+        }
+        case "RELEASE_RANGED_WEAPON":
+          if (!bot.deactivateItem) {
+            return {
+              outcome: "unavailable",
+              reasonCode: "COMBAT_ACTION_ADAPTER_UNAVAILABLE",
+            };
+          }
+          bot.deactivateItem();
+          return { outcome: "executed", executedAtMs: this.clock() };
         case "ROTATE":
           if (!bot.look) return { outcome: "unavailable", reasonCode: "COMBAT_ROTATION_UNAVAILABLE" };
           await bot.look(
@@ -379,15 +604,68 @@ export class MineflayerCombatAdapter {
 
   reset(): void {
     const bot = this.bot as unknown as CombatBotLike;
+    this.totemPopTracker.reset();
+    this.hitWindowTracker.reset();
+    this.explosionObservations = [];
     this.movementAbortController?.abort();
     this.movementAbortController = null;
+    bot.deactivateItem?.();
     bot.pathfinder?.stop?.();
     bot.clearControlStates?.();
+  }
+
+  /**
+   * MovementController needs an honest local hazard set. Mineflayer's blockAt
+   * is synchronous, so a small loaded-area scan is cheap and keeps ordinary
+   * weapon movement from being rejected simply because hazards were left
+   * permanently unknown. Any missing sample remains unknown and fails closed.
+   */
+  private hazardsAround(position: VecLike): readonly VecLike[] | null {
+    const bot = this.bot as unknown as CombatBotLike;
+    if (typeof bot.blockAt !== "function") return null;
+    const hazards: VecLike[] = [];
+    const baseX = Math.floor(position.x);
+    const baseY = Math.floor(position.y);
+    const baseZ = Math.floor(position.z);
+    for (
+      let dx = -COMBAT_HAZARD_SCAN_RADIUS;
+      dx <= COMBAT_HAZARD_SCAN_RADIUS;
+      dx += 1
+    ) {
+      for (
+        let dz = -COMBAT_HAZARD_SCAN_RADIUS;
+        dz <= COMBAT_HAZARD_SCAN_RADIUS;
+        dz += 1
+      ) {
+        for (const dy of [-1, 0, 1] as const) {
+          let block: Readonly<{ name?: unknown }> | null;
+          try {
+            block = bot.blockAt(
+              new Vec3(baseX + dx, baseY + dy, baseZ + dz),
+            );
+          } catch {
+            return null;
+          }
+          if (block === null || typeof block.name !== "string") return null;
+          const name = block.name.toLowerCase().replace(/^minecraft:/u, "");
+          if (COMBAT_HAZARD_BLOCKS.has(name)) {
+            hazards.push({
+              x: baseX + dx,
+              y: baseY + dy,
+              z: baseZ + dz,
+            });
+          }
+        }
+      }
+    }
+    return hazards;
   }
 
   private entityObservation(
     entity: EntityLike,
     registry: unknown,
+    observedAtMs: number,
+    dimension: string,
   ): CombatDriverObservation["entities"][number] | null {
     if (!entity.position || !finiteVector(entity.position)) return null;
     const name = typeof entity.name === "string" ? entity.name.toLowerCase() : null;
@@ -422,6 +700,16 @@ export class MineflayerCombatAdapter {
     const velocity = entity.velocity && finiteVector(entity.velocity)
       ? { x: entity.velocity.x, y: entity.velocity.y, z: entity.velocity.z }
       : null;
+    const popWindow = this.totemPopTracker.windowFor({
+      entityId: combatEntity.entityId,
+      observedAtMs,
+      serverProfileId: this.serverProfileId,
+      dimension,
+    });
+    const hitWindow = this.hitWindowTracker.stateFor(
+      combatEntity.entityId,
+      observedAtMs,
+    );
     return {
       entity: combatEntity,
       position: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
@@ -430,11 +718,113 @@ export class MineflayerCombatAdapter {
       armorPoints: this.entityArmorPoints(entity),
       wieldingWeapon: this.entityWieldsWeapon(entity),
       crystalNearby: false,
+      // Mineflayer does not expose a trustworthy bounded block enumeration at
+      // this boundary. Unknown anchor presence must not become a fabricated
+      // threat fact; a future world scanner can replace this explicit false.
+      anchorNearby: false,
+      invulnerableRemainingMs: hitWindow.invulnerableRemainingMs,
+      targetCooldownRatio01: hitWindow.cooldownRatio01,
+      ...(popWindow.phase === "PUNISH" ? { recentlyPopped: true } : {}),
       // A complete Mineflayer equipment array is a useful tactical fact. If
       // either equipment or health is incomplete, preserve GearAssessor's
       // fail-closed `unknown` path by returning null instead of guessing.
       gear: this.gearSnapshotForEntity(entity),
     };
+  }
+
+  private bindTotemPopEvents(): void {
+    if (!this.enabled) return;
+    const bot = this.bot as unknown as CombatBotLike;
+    const wire = bot._client;
+    if (wire === this.boundWire) return;
+    this.unbindTotemPopEvents();
+    if (!wire || typeof wire.on !== "function") return;
+    if (typeof wire.prependListener === "function") {
+      // Mineflayer's inventory plugin is already registered in production.
+      // Capture before it clears usingHeldItem, then restore after its listener
+      // only when the status belonged to another entity.
+      wire.prependListener("entity_status", this.onEntityStatusBeforeMineflayer);
+      wire.on("entity_status", this.onEntityStatusAfterMineflayer);
+    } else {
+      // Compatibility path for minimal test doubles/older clients: POP
+      // observation still works, but the ordering repair is unavailable.
+      wire.on("entity_status", this.onEntityStatus);
+    }
+    wire.on("damage_event", this.onDamageEvent);
+    wire.on("animation", this.onAnimation);
+    wire.on("explosion", this.onExplosion);
+    this.boundWire = wire;
+  }
+
+  private unbindTotemPopEvents(): void {
+    const wire = this.boundWire;
+    if (wire === null) return;
+    if (typeof wire.off === "function") {
+      wire.off("entity_status", this.onEntityStatus);
+      wire.off("entity_status", this.onEntityStatusBeforeMineflayer);
+      wire.off("entity_status", this.onEntityStatusAfterMineflayer);
+      wire.off("damage_event", this.onDamageEvent);
+      wire.off("animation", this.onAnimation);
+      wire.off("explosion", this.onExplosion);
+    } else {
+      wire.removeListener?.("entity_status", this.onEntityStatus);
+      wire.removeListener?.("entity_status", this.onEntityStatusBeforeMineflayer);
+      wire.removeListener?.("entity_status", this.onEntityStatusAfterMineflayer);
+      wire.removeListener?.("damage_event", this.onDamageEvent);
+      wire.removeListener?.("animation", this.onAnimation);
+      wire.removeListener?.("explosion", this.onExplosion);
+    }
+    this.heldItemBeforeForeignStatus = new WeakMap<object, boolean>();
+    this.boundWire = null;
+  }
+
+  private recordTotemPop(packet: unknown): void {
+    const record = asRecord(packet);
+    if (record?.entityStatus !== 35) return;
+    const entityId = entityStatusEntityId(packet);
+    if (entityId === null) return;
+    const bot = this.bot as unknown as CombatBotLike;
+    const dimension = normalizeDimension(bot.game?.dimension);
+    const observedAtMs = this.clock();
+    if (
+      dimension === null ||
+      this.serverProfileId.trim().length === 0 ||
+      !Number.isSafeInteger(observedAtMs) ||
+      observedAtMs < 0
+    ) return;
+    try {
+      this.totemPopTracker.record({
+        entityId,
+        observedAtMs,
+        serverProfileId: this.serverProfileId,
+        dimension,
+      });
+    } catch {
+      // Packet data is untrusted. A malformed or out-of-order event must not
+      // take down the Runtime or invent a combat fact.
+    }
+  }
+
+  private recordEntityStatusHurt(packet: unknown): void {
+    const record = asRecord(packet);
+    if (record?.entityStatus !== 2) return;
+    this.recordEntityHurt(entityStatusEntityId(packet));
+  }
+
+  private recordEntityHurt(entityId: number | null): void {
+    if (entityId === null || this.serverProfileId.trim().length === 0) return;
+    const observedAtMs = this.clock();
+    if (!Number.isSafeInteger(observedAtMs) || observedAtMs < 0) return;
+    try {
+      this.hitWindowTracker.recordHurt(
+        entityId,
+        observedAtMs,
+        this.serverProfileId,
+      );
+    } catch {
+      // Wire data and event ordering are untrusted. Refuse the fact without
+      // crashing Runtime or extending an old i-frame window.
+    }
   }
 
   private gearSnapshotForEntity(entity: EntityLike): CombatGearSnapshot | null {
@@ -443,11 +833,13 @@ export class MineflayerCombatAdapter {
     if (health === null || health < 0 || health > 20) return null;
     const armorPoints = this.entityArmorPoints(entity);
     if (armorPoints === null) return null;
+    const enchantments = armorEnchantmentFacts(entity.equipment);
+    if (enchantments === null) return null;
     return {
       armorMaterial: armorMaterialForItems(entity.equipment, armorPoints),
-      // Enchantments are not part of this read-only boundary yet. Zero is a
-      // conservative lower bound; it never invents protection data.
-      protectionLevel: 0,
+      protectionLevel: enchantments.protectionLevel,
+      blastProtectionLevel: enchantments.blastProtectionLevel,
+      armorPieceCount: enchantments.armorPieceCount,
       weaponDamage: weaponDamageForItems(entity.equipment),
       health,
       hasTotem: entity.equipment.some(
@@ -468,27 +860,34 @@ export class MineflayerCombatAdapter {
       (sum, item) => sum + (typeof item.name === "string" ? ARMOR_POINTS[item.name] ?? 0 : 0),
       0,
     );
+    const enchantments = armorEnchantmentFacts(self.equipment ?? []);
+    if (enchantments === null) return null;
     const weapon = inventory
       .map((item) => this.weaponCandidate(item))
       .filter((item): item is NonNullable<typeof item> => item !== null)
       .sort((left, right) => right.baseDamage - left.baseDamage)[0];
     return {
       armorMaterial: armorMaterialForItems(self.equipment ?? [], armorPoints),
-      protectionLevel: 0,
+      protectionLevel: enchantments.protectionLevel,
+      blastProtectionLevel: enchantments.blastProtectionLevel,
+      armorPieceCount: enchantments.armorPieceCount,
       weaponDamage: weapon?.baseDamage ?? 0,
       health: Math.max(0, Number(self.health)),
       hasTotem: offhand?.name === "totem_of_undying",
     } as const;
   }
 
-  private weaponCandidate(item: ItemLike) {
+  private weaponCandidate(
+    item: ItemLike,
+    allowOther = false,
+  ): CombatWeaponCandidate | null {
     const name = typeof item.name === "string" ? item.name : null;
     if (!name) return null;
     const kindEntry = [...WEAPON_KINDS.entries()].find(([suffix]) => name.endsWith(`_${suffix}`) || name === suffix);
-    if (!kindEntry) return null;
+    if (!kindEntry && !allowOther) return null;
     const slot = Number.isSafeInteger(item.slot) ? Number(item.slot) : -1;
     if (slot < 0) return null;
-    const kind = kindEntry[1];
+    const kind = kindEntry?.[1] ?? "other";
     const ranged = kind === "bow" || kind === "crossbow";
     return {
       slot,
@@ -502,9 +901,17 @@ export class MineflayerCombatAdapter {
       enchantmentDamageBonus: 0,
       ...(ranged
         ? {
-            ammoRemaining: (this.bot as unknown as CombatBotLike).inventory?.items?.().filter(
-              (candidate) => candidate.name === "arrow",
-            ).length ?? 0,
+            ammoRemaining: (this.bot as unknown as CombatBotLike).inventory
+              ?.items?.()
+              .filter((candidate) => candidate.name === "arrow")
+              .reduce(
+                (sum, candidate) =>
+                  sum +
+                  (Number.isSafeInteger(candidate.count)
+                    ? Number(candidate.count)
+                    : 0),
+                0,
+              ) ?? 0,
             drawTimeMs: kind === "bow" ? 1_000 : 1_250,
             effectiveRange: kind === "bow" ? 32 : 32,
           }
@@ -597,6 +1004,21 @@ export class MineflayerCombatAdapter {
       bot.clearControlStates?.();
     }
   }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function entityStatusEntityId(packet: unknown): number | null {
+  const entityId = asRecord(packet)?.entityId;
+  return typeof entityId === "number" &&
+      Number.isSafeInteger(entityId) &&
+      entityId >= 0
+    ? entityId
+    : null;
 }
 
 function finiteNumber(value: unknown): boolean {
@@ -713,6 +1135,14 @@ function weaponKindForName(name: string | null): "sword" | "axe" | "trident" | "
   return null;
 }
 
+function observedAttackCooldownMs(entity: EntityLike): number {
+  const heldName = normalizeItemName(entity.equipment?.[0] ?? {});
+  const kind = weaponKindForName(heldName);
+  if (kind === "axe") return 1_000;
+  if (kind === "trident") return 910;
+  return 625;
+}
+
 function weaponDamageForItems(items: readonly ItemLike[]): number {
   return items.reduce((damage, item) => {
     switch (weaponKindForName(normalizeItemName(item))) {
@@ -728,4 +1158,60 @@ function weaponDamageForItems(items: readonly ItemLike[]): number {
         return damage;
     }
   }, 0);
+}
+
+function armorEnchantmentFacts(
+  items: readonly ItemLike[],
+): Readonly<{
+  protectionLevel: number;
+  blastProtectionLevel: number;
+  armorPieceCount: number;
+}> | null {
+  const armorItems = items.filter((item) => {
+    const name = normalizeItemName(item);
+    return name !== null && name in ARMOR_POINTS;
+  });
+  if (armorItems.length > 4) return null;
+  if (armorItems.length === 0) {
+    return {
+      protectionLevel: 0,
+      blastProtectionLevel: 0,
+      armorPieceCount: 0,
+    };
+  }
+
+  let protectionTotal = 0;
+  let blastProtectionTotal = 0;
+  for (const item of armorItems) {
+    let enchants: unknown;
+    try {
+      enchants = item.enchants;
+    } catch {
+      return null;
+    }
+    if (!Array.isArray(enchants)) return null;
+    for (const enchantment of enchants) {
+      const record = asRecord(enchantment);
+      const rawName = record?.name;
+      const rawLevel = record?.lvl;
+      if (
+        typeof rawName !== "string" ||
+        typeof rawLevel !== "number" ||
+        !Number.isFinite(rawLevel) ||
+        rawLevel < 0 ||
+        rawLevel > 4
+      ) {
+        return null;
+      }
+      const name = rawName.toLowerCase().replace(/^minecraft:/u, "");
+      if (name === "protection") protectionTotal += rawLevel;
+      if (name === "blast_protection") blastProtectionTotal += rawLevel;
+    }
+  }
+
+  return {
+    protectionLevel: protectionTotal / armorItems.length,
+    blastProtectionLevel: blastProtectionTotal / armorItems.length,
+    armorPieceCount: armorItems.length,
+  };
 }

@@ -37,6 +37,7 @@ function observation(
     armorPoints: 0,
     wieldingWeapon: false,
     crystalNearby: false,
+    anchorNearby: false,
     ...overrides,
   };
 }
@@ -167,6 +168,60 @@ describe("ThreatAnalyzer", () => {
     expect(assessment.threats[0]?.distance).toBeCloseTo(30, 6);
   });
 
+  it("uses the 12-block crystal range without over-escalating its outer edge", () => {
+    const outer = analyzer().assess(
+      snapshot({
+        entities: [observation({ position: { x: 11.5, y: 64, z: 0 } })],
+      }),
+    );
+    expect(outer.level).toBe("low");
+    expect(outer.threats[0]).toMatchObject({
+      score: 15,
+      reasons: ["WITHIN_CRYSTAL_RANGE"],
+    });
+
+    const placed = analyzer().assess(
+      snapshot({
+        entities: [
+          observation({
+            position: { x: 11.5, y: 64, z: 0 },
+            crystalNearby: true,
+          }),
+        ],
+      }),
+    );
+    expect(placed.level).toBe("elevated");
+    expect(placed.threats[0]?.score).toBe(40);
+  });
+
+  it("keeps hostile anchors on their independent 10-block range", () => {
+    const atEdge = analyzer().assess(
+      snapshot({
+        entities: [observation({
+          position: { x: 10, y: 64, z: 0 },
+          anchorNearby: true,
+        })],
+      }),
+    );
+    expect(atEdge.threats[0]).toMatchObject({
+      score: 40,
+      reasons: ["WITHIN_CRYSTAL_RANGE", "ANCHOR_PLACED"],
+    });
+
+    const outside = analyzer().assess(
+      snapshot({
+        entities: [observation({
+          position: { x: 10.01, y: 64, z: 0 },
+          anchorNearby: true,
+        })],
+      }),
+    );
+    expect(outside.threats[0]).toMatchObject({
+      score: 15,
+      reasons: ["WITHIN_CRYSTAL_RANGE"],
+    });
+  });
+
   it("treats an unobservable velocity as stationary, not as worst case", () => {
     const assessment = analyzer().assess(
       snapshot({
@@ -214,6 +269,30 @@ describe("ThreatAnalyzer", () => {
     expect(assessment.hostileCount).toBe(3);
   });
 
+  it("prioritizes a recently popped hostile without changing allegiance", () => {
+    const assessment = analyzer().assess(
+      snapshot({
+        entities: [
+          observation({
+            entity: { entityId: 10, kind: "player", username: "Older", uuid: null },
+            position: { x: 4, y: 64, z: 0 },
+          }),
+          observation({
+            entity: { entityId: 11, kind: "player", username: "Popped", uuid: null },
+            position: { x: 4, y: 64, z: 0 },
+            recentlyPopped: true,
+          }),
+        ],
+      }),
+    );
+
+    expect(assessment.threats.map(({ entityId }) => entityId)).toEqual([11, 10]);
+    expect(assessment.threats[0]).toMatchObject({
+      allegiance: "hostile",
+      reasons: ["WITHIN_CRYSTAL_RANGE", "TARGET_RECENTLY_POPPED"],
+    });
+  });
+
   it("flags a depleted totem reserve as the §1 downgrade signal", () => {
     const assessment = analyzer().assess(snapshot({ totemCount: 0 }));
     expect(assessment.totemDepleted).toBe(true);
@@ -234,6 +313,9 @@ describe("ThreatAnalyzer", () => {
         }),
       ),
     ).toThrowError(TypeError);
+    expect(() => analyzer().assess(snapshot({
+      entities: [observation({ anchorNearby: "unknown" as never })],
+    }))).toThrowError(TypeError);
   });
 
   it("refuses to assess entities observed on a different server", () => {

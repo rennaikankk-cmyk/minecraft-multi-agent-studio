@@ -9,11 +9,105 @@ type Position = Readonly<{ x: number; y: number; z: number; dimension: string; s
 type SitePolicy = Readonly<{ minHighwayDistance: number; minPortalLineDistance: number; hazardClearance: number; burialDepthTarget: number }>;
 const hazards = new Set(["lava", "fire", "soul_fire", "magma_block", "cactus", "powder_snow"]);
 const logs = new Set(["oak_log", "spruce_log", "birch_log", "jungle_log", "acacia_log", "dark_oak_log", "mangrove_log", "cherry_log"]);
+const SHELTER_DIG_CONFIRM_TIMEOUT_MS = 2_000;
+const SHELTER_ENTRY_PATH_TIMEOUT_MS = 8_000;
+const SHELTER_ENTRY_WALK_TIMEOUT_MS = 5_000;
 function dimension(value: string): string { return value.includes(":") ? value.toLowerCase() : `minecraft:${value.toLowerCase()}`; }
 function scope(bot: Bot, profile: string, target: { serverProfileId: string; dimension: string }): void {
   if (target.serverProfileId !== profile) throw new SkillFault("TARGET_SERVER_PROFILE_MISMATCH");
   if (target.dimension !== dimension(String(bot.game.dimension))) throw new SkillFault("TARGET_DIMENSION_MISMATCH");
 }
+
+async function waitForAir(
+  bot: Pick<Bot, "blockAt">,
+  position: Vec3,
+  signal: AbortSignal,
+): Promise<void> {
+  const deadline = Date.now() + SHELTER_DIG_CONFIRM_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+    const block = bot.blockAt(position);
+    if (block?.boundingBox === "empty") return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new SkillFault("SHELTER_STEP_BLOCKED");
+}
+
+function shelterPositionReached(position: Vec3, shelter: Vec3): boolean {
+  const floored = position.floored();
+  return floored.x === shelter.x && floored.y === shelter.y && floored.z === shelter.z;
+}
+
+async function walkIntoShelter(
+  bot: Bot,
+  shelter: Vec3,
+  direction: Vec3,
+  signal: AbortSignal,
+): Promise<boolean> {
+  if (
+    typeof bot.look !== "function" ||
+    typeof bot.setControlState !== "function" ||
+    typeof bot.clearControlStates !== "function"
+  ) {
+    return false;
+  }
+
+  const yaw = Math.atan2(-direction.x, -direction.z);
+  const waitForTick = typeof bot.waitForTicks === "function"
+    ? () => bot.waitForTicks(1)
+    : () => new Promise<void>((resolve) => setTimeout(resolve, 50));
+  const deadline = Date.now() + SHELTER_ENTRY_WALK_TIMEOUT_MS;
+  try {
+    await bot.look(yaw, 0, true);
+    bot.clearControlStates();
+    bot.setControlState("forward", true);
+    while (Date.now() < deadline) {
+      if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      if (shelterPositionReached(bot.entity.position, shelter)) return true;
+      await waitForTick();
+    }
+    return shelterPositionReached(bot.entity.position, shelter);
+  } finally {
+    bot.clearControlStates();
+  }
+}
+
+async function enterShelter(
+  bot: Bot,
+  origin: Vec3,
+  shelter: Vec3,
+  direction: Vec3,
+  signal: AbortSignal,
+  pathfinder: {
+    goto: (goal: object) => Promise<void>;
+    stop?: () => void;
+    setGoal?: (goal: object | null) => void;
+    setMovements?: (movements: Movements) => void;
+  },
+  movements: Movements | undefined,
+): Promise<void> {
+  if (movements !== undefined && typeof pathfinder.setMovements === "function") {
+    pathfinder.setMovements(movements);
+  }
+
+  const pathResult = await Promise.race([
+    pathfinder.goto(new goals.GoalBlock(shelter.x, shelter.y, shelter.z))
+      .then(() => "completed" as const, () => "failed" as const),
+    new Promise<"timed_out">((resolve) => {
+      setTimeout(() => resolve("timed_out"), SHELTER_ENTRY_PATH_TIMEOUT_MS);
+    }),
+  ]);
+  if (pathResult === "completed" && shelterPositionReached(bot.entity.position, shelter)) return;
+
+  if (typeof pathfinder.setGoal === "function") pathfinder.setGoal(null);
+  else pathfinder.stop?.();
+  bot.clearControlStates();
+  if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+
+  const walkedInside = await walkIntoShelter(bot, shelter, direction, signal);
+  if (!walkedInside) throw new SkillFault("SHELTER_STEP_BLOCKED");
+}
+
 export function observeSite(bot: Bot, profile: string, input: { candidate: Position; policy: SitePolicy }) {
   scope(bot, profile, input.candidate);
   const c = new Vec3(input.candidate.x, input.candidate.y, input.candidate.z);
@@ -86,7 +180,12 @@ export async function digShelter(
     dig?: Bot["dig"];
     placeBlock?: Bot["placeBlock"];
     equip?: Bot["equip"];
-    pathfinder?: { goto?: (goal: object) => Promise<void>; stop?: () => void; setMovements?: (movements: Movements) => void };
+    pathfinder?: {
+      goto?: (goal: object) => Promise<void>;
+      stop?: () => void;
+      setGoal?: (goal: object | null) => void;
+      setMovements?: (movements: Movements) => void;
+    };
   };
   if (
     typeof mutableBot.dig !== "function" ||
@@ -110,33 +209,62 @@ export async function digShelter(
         const block = bot.blockAt(position);
         if (!block || block.boundingBox === "empty") continue;
         if (mutableBot.canDigBlock && !mutableBot.canDigBlock(block)) throw new SkillFault("SHELTER_STEP_BLOCKED");
-        await mutableBot.dig(block);
+        const harvestableBlock = block as typeof block & {
+          canHarvest?: (itemType: number | null) => boolean | null;
+        };
+        if (typeof harvestableBlock.canHarvest === "function") {
+          const tool = bot.inventory.items().find(
+            (item) => harvestableBlock.canHarvest(item.type) === true,
+          );
+          if (!tool && harvestableBlock.canHarvest(null) !== true) {
+            throw new SkillFault("SHELTER_STEP_BLOCKED");
+          }
+          if (tool) await mutableBot.equip(tool, "hand");
+        }
+        await mutableBot.dig(block, true);
+        await waitForAir(bot, position, signal);
         dugBlocks += 1;
       }
     }
-    if (typeof mutableBot.pathfinder?.setMovements === "function") {
-      const movements = new Movements(bot);
+    const movements = typeof mutableBot.pathfinder?.setMovements === "function"
+      ? new Movements(bot)
+      : undefined;
+    if (movements !== undefined) {
       movements.canDig = false;
       movements.allow1by1towers = false;
       movements.allowFreeMotion = false;
       movements.allowParkour = false;
       movements.allowSprinting = false;
       movements.maxDropDown = 2;
-      mutableBot.pathfinder.setMovements(movements);
     }
     const stopOnAbort = () => mutableBot.pathfinder?.stop?.();
     signal.addEventListener("abort", stopOnAbort, { once: true });
     try {
       if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
-      await mutableBot.pathfinder!.goto!(new goals.GoalNear(shelter.x, shelter.y, shelter.z, 0.75));
+      await enterShelter(
+        bot,
+        origin,
+        shelter,
+        direction,
+        signal,
+        mutableBot.pathfinder! as {
+          goto: (goal: object) => Promise<void>;
+          stop?: () => void;
+          setGoal?: (goal: object | null) => void;
+          setMovements?: (movements: Movements) => void;
+        },
+        movements,
+      );
     } finally {
       signal.removeEventListener("abort", stopOnAbort);
     }
     if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
     if (bot.entity.position.distanceTo(shelter) > 1.5) throw new SkillFault("SHELTER_STEP_BLOCKED");
 
-    const entrance = origin.minus(direction);
-    const support = bot.blockAt(entrance.minus(new Vec3(0, 1, 0)));
+    // The opening is the original standing cell. Placing one block on the
+    // outside of it leaves the opening unsealed and can also trap a bot that
+    // needs to leave the shelter in the opposite direction.
+    const support = bot.blockAt(origin.minus(new Vec3(0, 1, 0)));
     if (!support || support.boundingBox === "empty") throw new SkillFault("SHELTER_STEP_BLOCKED");
     await mutableBot.equip(sealItem, "hand");
     await mutableBot.placeBlock(support, new Vec3(0, 1, 0));

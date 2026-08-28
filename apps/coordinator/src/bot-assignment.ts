@@ -408,7 +408,10 @@ export class BotAssignmentService {
     const status = record.currentStatus;
     if (!status || !status.safety || status.safety.mode !== "monitoring" || status.safety.normalTasksPaused || status.safety.activeRisks.length > 0) return false;
     if (request.dimension !== null && status.position.dimension !== request.dimension) return false;
-    if (status.health.maximum === null || status.health.maximum <= 0 || status.health.current <= 0) return false;
+    // Mineflayer may not expose the max_health attribute even after the Bot is
+    // fully online. A positive observed current value is still a usable
+    // liveness signal; an unknown maximum only lowers the ranking score.
+    if (status.health.current <= 0) return false;
     if (status.currentTask && status.currentTask.taskId !== request.taskId && !TERMINAL_TASK_STATUSES.has(status.currentTask.status)) return false;
     const catalog = record.skillCatalog;
     if (!catalog) return false;

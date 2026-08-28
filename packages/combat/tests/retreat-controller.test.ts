@@ -127,6 +127,20 @@ describe("RetreatController", () => {
     expect(decision.urgency).toBe("emergency");
   });
 
+  it("reports an anchor threat independently from a crystal threat", () => {
+    const decision = new RetreatController().evaluate(
+      assessment([threat({ reasons: ["ANCHOR_PLACED"] })]),
+      20,
+      SELF,
+      positions([1, { x: 5, y: 64, z: 0 }]),
+    );
+    expect(decision).toMatchObject({
+      urgency: "withdraw",
+      reasons: ["ANCHOR_THREAT"],
+      suppressOffense: true,
+    });
+  });
+
   it("withdraws on low health without escalating to emergency", () => {
     const decision = new RetreatController().evaluate(
       assessment([threat({ reasons: ["WITHIN_MELEE_RANGE"] })]),

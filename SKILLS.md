@@ -26,7 +26,7 @@
 - 自相矛盾的证据组合**拒绝装载**，例如"真实服跑过但运行时没接线"。
 - 只有四道闸全绿才允许对外称"已验证"（`evidenceSupportsVerifiedClaim`）。
 
-当前注册表包含 20 个技能；已接入 Runtime 的条目保持 **Partial**，其余规划/策略条目标为 **Experimental**。所有技能仍缺 `isolated-server-scenarios` 与 `cross-version-matrix` 两道真实环境闸。
+当前注册表包含 21 个技能；已接入 Runtime 的条目保持 **Partial**，其余规划/策略条目标为 **Experimental**。所有技能仍缺 `isolated-server-scenarios` 与 `cross-version-matrix` 两道真实环境闸。
 真实隔离服六类场景与 1.21.8 跨版本矩阵一次没跑过。这与编译产物里的
 `verification=unverified` 是同一个事实的两种表述（AGENTS.md §8：无隔离测试服时不得声称联机测试通过）。
 
@@ -34,7 +34,7 @@
 
 - Skill ID 后的 SemVer 表示技能输入、输出和行为契约，不表示 Minecraft 服务器版本。
 - 每个 Skill 另有有序 `compatibility.variants`。Runtime 只使用连接后真实协商出的版本/协议，以及当前 registry 的 feature、物品、方块、实体和显式服务端能力探针解析变体；不以 `minVersion/maxVersion` 一刀切。
-- 当前目录中的 20 个 Skill 都声明无额外资源要求的 `portable` 变体；只有证据中的 `runtime-wiring=true` 条目可由 Runtime 执行，其余条目保持 `Experimental`。跨版本真实场景矩阵尚未执行，所以目录上报 `availability=available`、`verification=unverified`，不冒充实机已验证。
+- 当前目录中的 21 个 Skill 都声明无额外资源要求的 `portable` 变体；只有证据中的 `runtime-wiring=true` 条目可由 Runtime 执行，其余条目保持 `Experimental`。跨版本真实场景矩阵尚未执行，所以目录上报 `availability=available`、`verification=unverified`，不冒充实机已验证。
 - 新版本特色 Skill 必须声明它实际依赖的 feature/资源；如果还依赖服务器插件、数据包或规则，则必须等待显式探针。能力为 `unknown` 时 fail-closed，不从版本号猜测。
 - `collect.block`、`craft.item`、`world.place-block` 和 `container.transfer` 当前仍接收目标版本 registry 的原生资源名。兼容变体可以表达旧/新 ID 的替代顺序，但规划器使用的语义资源别名尚未接入。
 
@@ -138,6 +138,41 @@
 - 自动重试：无（战斗意图不是幂等操作）
 
 控制面只提交有界的 `DISENGAGE` 意图。Runtime 必须返回结构化实际回执；已延迟、丢弃或修改的请求都要带稳定原因码，不能伪造已执行。
+
+## `world.scan@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`world.read`
+- 风险：R0
+- 适配器操作：`world.scan-blocks-safe`
+- 超时：10 秒
+- 自动重试：无（只读，失败重试没有额外信息）
+- 底层：mineflayer 自带的 `registry.blocksByName` + `findBlocks` + `blockAt`，不加插件
+- 并发：与任何技能都不互斥（不移动、不挖掘、不占用移动通道）
+
+`site.assess` 只把世界压成 `resources` 的 0–1 密度分，那个分数无法瞄准
+`collect.block`；本技能补的就是这一段——返回**带坐标的命中结果**，让上层
+先看清再决定挖哪一个，而不是拿 `movement.goto` 盲跳去试。
+
+输入：
+
+```json
+{ "blockName": "oak_log", "maxCount": 8, "maxDistance": 32,
+  "dimension": "minecraft:overworld", "serverProfileId": "isolated-local" }
+```
+
+输出遥测：`matches`（按 `distance` 升序的整数方块坐标）、`targetsFound`
+（`findBlocks` 命中的位置数）、`complete`（每个命中位置都读到了方块数据）。
+
+约束：
+
+- 单次最多 16 个命中、64 格半径；只读，不消耗、不挖掘、不移动。
+- `matches.length < targetsFound` 时 `complete` 为 false：区块未加载导致
+  `blockAt` 读不到，观测不完整必须如实说，不能把缺失当成"附近没有"。
+- `matches: []` 且 `complete: true` 是合法完成（附近确实没有该方块）。
+- 只读也照样受 L0 约束：`normalTasksPaused` 期间拒绝执行，不给暂停开绕道。
+- 命中项不重复携带 `dimension`/`serverProfileId`：整次扫描只在一个维度、
+  一个 ServerProfile 内进行，那两个事实由输出顶层承载。
 
 ## `collect.block@1.0.0`
 

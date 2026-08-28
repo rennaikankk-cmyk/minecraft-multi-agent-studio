@@ -10,6 +10,7 @@ import type {
   SkillCapabilityRequest,
   SkillExecutionAuthorization,
 } from "@minecraft-studio/skills";
+import { ensureItemOutputSchema } from "@minecraft-studio/skills";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -17,10 +18,20 @@ import type {
   BotClientHandlers,
   BotClientSnapshot,
   BotDisconnectInfo,
+  BotRecoveryAction,
+  BotRecoveryActionResult,
 } from "../src/client.js";
+import type {
+  CombatDriverObservation,
+  CombatPrimitiveAction,
+} from "../src/combat-driver.js";
 import { SingleBotRuntime } from "../src/runtime.js";
 import type { ServerProfile } from "../src/server-profile.js";
 import type { RuntimeLogger } from "../src/runtime-types.js";
+import {
+  WorldStateStore,
+  type WorldStateSnapshot,
+} from "../src/world-state.js";
 
 const FIXED_UUID = "11111111-1111-4111-8111-111111111111";
 
@@ -50,6 +61,10 @@ const snapshot: BotClientSnapshot = {
   health: { current: 18, maximum: 20 },
   food: { level: 16, saturation: 4.5 },
   armorPoints: 7,
+  inventory: [
+    { itemName: "oak_log", count: 7 },
+    { itemName: "wooden_pickaxe", count: 1 },
+  ],
   position: { x: 10.25, y: 64, z: -20.5, dimension: "minecraft:overworld" },
   latencyMs: 45,
   safety: {
@@ -64,11 +79,82 @@ const snapshot: BotClientSnapshot = {
   },
 };
 
+const combatGear = {
+  armorMaterial: "iron" as const,
+  protectionLevel: 0,
+  blastProtectionLevel: 0,
+  armorPieceCount: 4,
+  weaponDamage: 6,
+  health: 20,
+  hasTotem: true,
+};
+
+function combatObservation(observedAtMs: number): CombatDriverObservation {
+  return {
+    observedAtMs,
+    serverProfileId: profile.id,
+    dimension: "minecraft:overworld",
+    latencyMs: 0,
+    explosionRuleSet: "java-1.21-release",
+    self: {
+      position: { x: 10, y: 64, z: -20 },
+      health: 18,
+      offhandIsTotem: true,
+      inventoryTotemCount: 1,
+      gear: combatGear,
+      orientation: { yaw: -90, pitch: 0 },
+      heldItemSlot: 0,
+      onGround: true,
+      fallDistance: 0,
+    },
+    entities: [{
+      entity: {
+        entityId: 42,
+        kind: "player",
+        username: "Enemy",
+        uuid: null,
+      },
+      position: { x: 12, y: 64, z: -20 },
+      velocity: null,
+      health: 20,
+      armorPoints: 7,
+      wieldingWeapon: true,
+      crystalNearby: false,
+      anchorNearby: false,
+      gear: combatGear,
+    }],
+    weapons: [{
+      slot: 0,
+      itemName: "iron_sword",
+      kind: "sword",
+      baseDamage: 6,
+      fullCooldownMs: 625,
+      durabilityRemaining: 100,
+      enchantmentDamageBonus: 0,
+    }],
+    crystalCandidates: null,
+    mineCandidates: null,
+    hazards: [],
+  };
+}
+
+const combatProfile: ServerProfile = {
+  ...profile,
+  combat: {
+    enabled: true,
+    stance: "preserve-life",
+    whitelist: { usernames: [], uuids: [] },
+  },
+};
+
 class FakeBotClient implements BotClient {
   private handlers: BotClientHandlers | null = null;
   closeCalls = 0;
   actionCalls: L0SafetyAction[] = [];
   capabilityCalls: SkillCapabilityRequest[] = [];
+  combatEnabled = false;
+  combatActions: CombatPrimitiveAction[] = [];
+  interruptNormalActionsCalls = 0;
 
   constructor(private currentSnapshot: BotClientSnapshot = structuredClone(snapshot)) {}
 
@@ -105,6 +191,23 @@ class FakeBotClient implements BotClient {
       finalPosition: input.target,
       distanceToTarget: 0,
     };
+  }
+
+  combatObservation(nowMs: number): CombatDriverObservation | null {
+    return this.combatEnabled ? combatObservation(nowMs) : null;
+  }
+
+  async executeCombatAction(
+    action: CombatPrimitiveAction,
+    signal: AbortSignal,
+  ) {
+    if (signal.aborted) return { outcome: "failed" as const, reasonCode: "SKILL_CANCELLED" };
+    this.combatActions.push(action);
+    return { outcome: "executed" as const, executedAtMs: Date.now() };
+  }
+
+  interruptNormalActions(): void {
+    this.interruptNormalActionsCalls += 1;
   }
 
   versionCompatibility() {
@@ -153,6 +256,86 @@ class FakeBotClient implements BotClient {
   disconnect(info: BotDisconnectInfo): void {
     this.handlers?.onDisconnected(info);
   }
+
+  damage(info: { previousHealth: number; currentHealth: number }): void {
+    this.handlers?.onDamaged?.(info);
+  }
+}
+
+class WorldStateBotClient extends FakeBotClient {
+  constructor(private readonly currentWorldState: WorldStateSnapshot) {
+    super();
+  }
+
+  worldStateSnapshot(): WorldStateSnapshot {
+    return structuredClone(this.currentWorldState);
+  }
+}
+
+class WatchdogBotClient extends WorldStateBotClient {
+  readonly recoveryActions: BotRecoveryAction[] = [];
+
+  async executeRecoveryAction(
+    action: BotRecoveryAction,
+  ): Promise<BotRecoveryActionResult> {
+    this.recoveryActions.push(action);
+    return { outcome: "executed", errorCode: null };
+  }
+}
+
+class SharedWorldStateBotClient extends FakeBotClient {
+  constructor(private readonly worldState: WorldStateStore) {
+    super();
+  }
+
+  worldStateSnapshot(): WorldStateSnapshot {
+    this.worldState.observe({
+      observedAt: new Date(Date.now()),
+      position: {
+        ...snapshot.position,
+        serverProfileId: profile.id,
+      },
+      inventory: [
+        {
+          name: "oak_log",
+          count: 1,
+          durability: null,
+          maxDurability: null,
+        },
+      ],
+      nearbyBlocks: [],
+      entities: [],
+      navigation: {
+        target: null,
+        movementOwner: null,
+        pathLength: null,
+        pathResetCount: 0,
+        stuckSince: null,
+        lastFailureTarget: null,
+        blacklist: [],
+      },
+    });
+    return this.worldState.snapshot();
+  }
+
+  async invokeSkillCapability(
+    request: SkillCapabilityRequest,
+  ): Promise<unknown> {
+    this.capabilityCalls.push(request);
+    if (
+      request.capability !== "inventory.read" ||
+      request.operation !== "inventory.snapshot"
+    ) {
+      throw new Error(`Unexpected capability operation: ${request.operation}`);
+    }
+    const worldState = this.worldStateSnapshot();
+    return {
+      dimension: snapshot.position.dimension,
+      serverProfileId: profile.id,
+      worldStateVersion: worldState.version,
+      items: [{ itemName: "oak_log", count: 1 }],
+    };
+  }
 }
 
 const logger: RuntimeLogger = {
@@ -196,6 +379,37 @@ function movementInvocation(): SkillInvocationV1 {
   };
 }
 
+function ensureItemInvocation(): SkillInvocationV1 {
+  return {
+    schemaVersion: "1.0",
+    messageId: "55555555-5555-4555-8555-555555555555",
+    traceId: "trace-ensure-item-runtime",
+    timestamp: "2026-07-19T10:00:00.000Z",
+    source: { service: "coordinator", instanceId: "coordinator-01" },
+    botId: profile.botId,
+    taskId: "task-ensure-item-runtime",
+    type: "skill.invoke.v1",
+    payload: {
+      invocationId: "66666666-6666-4666-8666-666666666666",
+      skillId: "goal.ensure-item",
+      skillVersion: "1.0.0",
+      expiresAt: "2026-07-19T10:01:00.000Z",
+      input: {
+        itemName: "oak_log",
+        count: 1,
+        dimension: snapshot.position.dimension,
+        serverProfileId: profile.id,
+      },
+      authorization: {
+        decisionId: "77777777-7777-4777-8777-777777777777",
+        actorId: "coordinator-agent",
+        issuedAt: "2026-07-19T09:59:59.000Z",
+        expiresAt: "2026-07-19T10:01:00.000Z",
+      },
+    },
+  };
+}
+
 function skillAuthorization(
   invocation: SkillInvocationV1,
 ): SkillExecutionAuthorization {
@@ -212,6 +426,29 @@ function skillAuthorization(
     issuedAt: invocation.payload.authorization.issuedAt,
     expiresAt: invocation.payload.authorization.expiresAt,
     allowedCapabilities: new Set(["bot.move"]),
+  };
+}
+
+function ensureItemAuthorization(
+  invocation: SkillInvocationV1,
+): SkillExecutionAuthorization {
+  return {
+    decisionId: invocation.payload.authorization.decisionId,
+    actorId: invocation.payload.authorization.actorId,
+    sourceInstanceId: invocation.source.instanceId,
+    traceId: invocation.traceId,
+    taskId: invocation.taskId,
+    botId: invocation.botId,
+    invocationId: invocation.payload.invocationId,
+    skillId: invocation.payload.skillId,
+    skillVersion: invocation.payload.skillVersion,
+    issuedAt: invocation.payload.authorization.issuedAt,
+    expiresAt: invocation.payload.authorization.expiresAt,
+    allowedCapabilities: new Set([
+      "inventory.read",
+      "world.interact",
+      "craft.execute",
+    ]),
   };
 }
 
@@ -297,6 +534,7 @@ describe("SingleBotRuntime", () => {
       "bot.version.v1",
       "bot.skill-catalog.v1",
       "bot.status.v1",
+      "bot.world-state.v1",
       "bot.heartbeat.v1",
     ]);
     expect(messages.at(-1)?.timestamp).toBe("2026-07-19T10:00:00.010Z");
@@ -312,6 +550,157 @@ describe("SingleBotRuntime", () => {
       type: "bot.disconnected.v1",
       payload: { reason: "requested_stop", expected: true },
     });
+  });
+
+  it("reports why a snapshot was rejected instead of dropping it silently", async () => {
+    const messages: BotTelemetryMessageV1[] = [];
+    const client = new FakeBotClient();
+    const runtime = new SingleBotRuntime(profile, {
+      createClient: () => client,
+      messageSink: (message) => messages.push(message),
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+
+    runtime.start();
+    client.spawn();
+    const publishedBefore = messages.filter(
+      ({ type }) => type === "bot.status.v1",
+    ).length;
+
+    client.setSnapshot({
+      ...snapshot,
+      health: { ...snapshot.health, current: Number.NaN },
+    });
+    client.stateChanged();
+
+    expect(
+      messages.filter(({ type }) => type === "bot.status.v1").length,
+    ).toBe(publishedBefore);
+    expect(logger.error).toHaveBeenCalledWith(
+      "l0_safety_snapshot_invalid",
+      expect.objectContaining({
+        botId: profile.botId,
+        code: "SAFETY_SNAPSHOT_INVALID",
+        reason: expect.stringContaining("health"),
+      }),
+    );
+
+    await runtime.stop();
+  });
+
+  it("logs the pre-first-packet status rejection as a warning, then as an error once status has flowed", async () => {
+    // 实测每次启动都恰好有一条 `bot_runtime_status_invalid`，reason
+    // "health is outside the L0 safety boundary."：handleSpawn 在转 online 时
+    // 立刻 emitStatus，而服务端的第一个 health 包还没到，mineflayer 的
+    // bot.health 是 undefined。把这个必然发生的情形记成 error 会训练运维忽略
+    // error 行，而真正的边界违规长得一模一样（同一个字段名、同一句话）——所以
+    // 判据只能是"这条连接发出过状态没有"，不能是消息内容。
+    const messages: BotTelemetryMessageV1[] = [];
+    const client = new FakeBotClient({
+      ...snapshot,
+      health: { ...snapshot.health, current: Number.NaN },
+    });
+    const runtime = new SingleBotRuntime(profile, {
+      createClient: () => client,
+      messageSink: (message) => messages.push(message),
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+
+    runtime.start();
+    client.spawn();
+
+    expect(messages.some(({ type }) => type === "bot.status.v1")).toBe(false);
+    expect(logger.warn).toHaveBeenCalledWith(
+      "bot_runtime_status_invalid",
+      expect.objectContaining({
+        botId: profile.botId,
+        firstStatusPending: true,
+        reason: expect.stringContaining("health"),
+      }),
+    );
+    expect(logger.error).not.toHaveBeenCalledWith(
+      "bot_runtime_status_invalid",
+      expect.anything(),
+    );
+
+    // 服务端补上 health 之后状态发得出去，这条连接的"第一条"就算过了。
+    client.setSnapshot(snapshot);
+    client.stateChanged();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(messages.some(({ type }) => type === "bot.status.v1")).toBe(true);
+
+    // 已经发出过之后再坏，就是真问题：降级不能把它一起吞掉。
+    client.setSnapshot({
+      ...snapshot,
+      health: { ...snapshot.health, current: Number.NaN },
+    });
+    client.stateChanged();
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(logger.error).toHaveBeenCalledWith(
+      "bot_runtime_status_invalid",
+      expect.objectContaining({
+        botId: profile.botId,
+        firstStatusPending: false,
+        reason: expect.stringContaining("health"),
+      }),
+    );
+
+    await runtime.stop();
+  });
+
+  it("treats each reconnect as its own first status, not as an already-flowing one", async () => {
+    // 降级的判据是"这条连接发出过状态没有"，所以它必须按连接重置。重连后
+    // 服务端同样要重新送第一个 health 包，那一条拒绝和首次启动的那条是同一
+    // 件事；不重置就会让重连时的预期情形升级成 error，而这正是本次修复要
+    // 消除的噪声。
+    const clients = [
+      new FakeBotClient(),
+      new FakeBotClient({
+        ...snapshot,
+        health: { ...snapshot.health, current: Number.NaN },
+      }),
+    ];
+    let factoryCalls = 0;
+    const runtime = new SingleBotRuntime(profile, {
+      createClient: () => clients[factoryCalls++]!,
+      messageSink: () => undefined,
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+
+    runtime.start();
+    // 第一条连接一切正常，status 发得出去，标志被置真。
+    clients[0]!.spawn();
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      "bot_runtime_status_invalid",
+      expect.anything(),
+    );
+
+    clients[0]!.disconnect({
+      reason: "network_error",
+      expected: false,
+      detail: "isolated_test_disconnect",
+    });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(factoryCalls).toBe(2);
+    clients[1]!.spawn();
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      "bot_runtime_status_invalid",
+      expect.objectContaining({ firstStatusPending: true }),
+    );
+    expect(logger.error).not.toHaveBeenCalledWith(
+      "bot_runtime_status_invalid",
+      expect.anything(),
+    );
+
+    await runtime.stop();
   });
 
   it("reconnects with bounded backoff after an unexpected disconnect", async () => {
@@ -456,6 +845,7 @@ describe("SingleBotRuntime", () => {
     });
     expect(client.actionCalls.map(({ kind }) => kind)).toEqual([
       "PAUSE_NORMAL_TASKS",
+      "CONSUME_SAFE_FOOD",
       "RETREAT_STEP",
     ]);
     expect(messages).toContainEqual(
@@ -468,6 +858,35 @@ describe("SingleBotRuntime", () => {
         }),
       }),
     );
+    await runtime.stop("test_cleanup");
+  });
+
+  it("requests bounded food recovery when low health has no safe food", async () => {
+    const client = new FakeBotClient();
+    const runtime = new SingleBotRuntime(profile, {
+      createClient: () => client,
+      messageSink: () => undefined,
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+
+    runtime.start();
+    client.spawn();
+    client.setSnapshot({
+      ...snapshot,
+      health: { current: 8, maximum: 20 },
+      food: { level: 17, saturation: 0 },
+      safety: { ...snapshot.safety, hasSafeFood: false },
+    });
+    client.stateChanged();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(client.actionCalls.map(({ kind }) => kind)).toEqual([
+      "PAUSE_NORMAL_TASKS",
+      "FORAGE_SAFE_FOOD",
+      "RETREAT_STEP",
+    ]);
     await runtime.stop("test_cleanup");
   });
 
@@ -874,14 +1293,23 @@ describe("SingleBotRuntime", () => {
 
   it("cancels an active Pathfinder skill when L0 takes control", async () => {
     const client = new FakeBotClient();
+    let activeSignal: AbortSignal | null = null;
+    let release!: () => void;
     vi.spyOn(client, "invokeSkillCapability").mockImplementation(
       async (request) =>
-        new Promise((_resolve, reject) => {
-          request.signal.addEventListener(
-            "abort",
-            () => reject(new Error("cancelled by L0")),
-            { once: true },
-          );
+        new Promise((resolve) => {
+          activeSignal = request.signal;
+          release = () => resolve({
+            reached: true,
+            finalPosition: {
+              x: 1,
+              y: 64,
+              z: 1,
+              dimension: "minecraft:overworld",
+              serverProfileId: profile.id,
+            },
+            distanceToTarget: 0,
+          });
         }),
     );
     const runtime = new SingleBotRuntime(profile, {
@@ -908,12 +1336,82 @@ describe("SingleBotRuntime", () => {
     client.stateChanged();
     await vi.advanceTimersByTimeAsync(0);
 
+    expect(activeSignal?.aborted).toBe(false);
+    client.setSnapshot(snapshot);
+    client.stateChanged();
+    await vi.advanceTimersByTimeAsync(0);
+    release();
     await expect(pending).resolves.toMatchObject({
       payload: {
-        outcome: "cancelled",
-        errorCode: "SKILL_CANCELLED",
+        outcome: "completed",
       },
     });
+    await runtime.stop("test_cleanup");
+  });
+
+  it("reports the active task while a skill is running and clears it afterward", async () => {
+    const client = new FakeBotClient();
+    const messages: unknown[] = [];
+    let release!: () => void;
+    vi.spyOn(client, "invokeSkillCapability").mockImplementation(
+      async () => new Promise((resolve) => {
+        release = () => resolve({
+          reached: true,
+          finalPosition: {
+            x: 1,
+            y: 64,
+            z: 1,
+            dimension: "minecraft:overworld",
+            serverProfileId: profile.id,
+          },
+          distanceToTarget: 0,
+        });
+      }),
+    );
+    const runtime = new SingleBotRuntime(profile, {
+      createClient: () => client,
+      messageSink: (message) => messages.push(message),
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+    runtime.start();
+    client.spawn();
+    const invocation = movementInvocation();
+    const pending = runtime.handleSkillInvocation(
+      invocation,
+      skillAuthorization(invocation),
+    );
+    await vi.advanceTimersByTimeAsync(profile.statusIntervalMs);
+
+    expect(messages).toContainEqual(expect.objectContaining({
+      type: "bot.status.v1",
+      payload: expect.objectContaining({
+        currentTask: expect.objectContaining({
+          taskId: invocation.taskId,
+          title: "movement.goto",
+          status: "running",
+        }),
+      }),
+    }));
+
+    release();
+    await pending;
+    await vi.advanceTimersByTimeAsync(profile.statusIntervalMs);
+    const statuses = messages.filter(
+      (message): message is Extract<
+        BotTelemetryMessageV1,
+        { type: "bot.status.v1" }
+      > =>
+        typeof message === "object" &&
+        message !== null &&
+        "type" in message &&
+        message.type === "bot.status.v1",
+    );
+    expect(statuses.at(-1)).toEqual(expect.objectContaining({
+      type: "bot.status.v1",
+      payload: expect.objectContaining({ currentTask: null }),
+    }));
     await runtime.stop("test_cleanup");
   });
 
@@ -968,6 +1466,138 @@ describe("SingleBotRuntime", () => {
     await expect(pending).resolves.toMatchObject({
       payload: { outcome: "cancelled", errorCode: "SKILL_CANCELLED" },
     });
+    await runtime.stop("test_cleanup");
+  });
+
+  it("preempts a normal task and starts a deterministic reaction when damaged", async () => {
+    const messages: BotTelemetryMessageV1[] = [];
+    const client = new FakeBotClient();
+    client.combatEnabled = true;
+    vi.spyOn(client, "invokeSkillCapability").mockImplementation(
+      (request) =>
+        new Promise((_resolve, reject) => {
+          request.signal.addEventListener(
+            "abort",
+            () => reject(new Error("cancelled by damage reaction")),
+            { once: true },
+          );
+        }),
+    );
+    const runtime = new SingleBotRuntime(combatProfile, {
+      createClient: () => client,
+      messageSink: (message) => messages.push(message),
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+    runtime.start();
+    client.spawn();
+
+    const invocation = movementInvocation();
+    const pending = runtime.handleCoordinatorSkillInvocation(
+      invocation,
+      invocation.source.instanceId,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    client.damage({ previousHealth: 20, currentHealth: 18 });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(client.interruptNormalActionsCalls).toBe(1);
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "bot.status.v1",
+        payload: expect.objectContaining({
+          currentTask: expect.objectContaining({
+            title: "战斗反应: 受到攻击",
+            status: "running",
+          }),
+        }),
+      }),
+    );
+    await expect(pending).resolves.toMatchObject({
+      payload: { outcome: "cancelled" },
+    });
+
+    await vi.advanceTimersByTimeAsync(250);
+    expect(client.combatActions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "MELEE_ATTACK", targetEntityId: 42 }),
+      ]),
+    );
+    expect(client.combatActions.every(({ kind }) =>
+      kind !== "PLACE_CRYSTAL" && kind !== "PACKET_MINE",
+    )).toBe(true);
+    await runtime.stop("test_cleanup");
+  });
+
+  it("keeps normal tasks paused but still reacts defensively when damaged at low health", async () => {
+    const messages: BotTelemetryMessageV1[] = [];
+    const client = new FakeBotClient();
+    client.combatEnabled = true;
+    const runtime = new SingleBotRuntime(combatProfile, {
+      createClient: () => client,
+      messageSink: (message) => messages.push(message),
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+    runtime.start();
+    client.spawn();
+    client.setSnapshot({
+      ...snapshot,
+      health: { current: 8, maximum: 20 },
+    });
+    client.stateChanged();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(runtime.canAcceptNormalActions()).toBe(false);
+
+    client.damage({ previousHealth: 8, currentHealth: 7 });
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(client.combatActions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "MELEE_ATTACK", targetEntityId: 42 }),
+      ]),
+    );
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "bot.status.v1",
+        payload: expect.objectContaining({
+          safety: expect.objectContaining({ normalTasksPaused: true }),
+          currentTask: expect.objectContaining({
+            title: "战斗反应: 受到攻击",
+          }),
+        }),
+      }),
+    );
+    await runtime.stop("test_cleanup");
+  });
+
+  it("bounds an automatic damage reaction and publishes its terminal task state", async () => {
+    const messages: BotTelemetryMessageV1[] = [];
+    const client = new FakeBotClient();
+    client.combatEnabled = true;
+    const runtime = new SingleBotRuntime(combatProfile, {
+      createClient: () => client,
+      messageSink: (message) => messages.push(message),
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+    runtime.start();
+    client.spawn();
+    client.damage({ previousHealth: 20, currentHealth: 18 });
+
+    await vi.advanceTimersByTimeAsync(4_000);
+
+    const statuses = messages.filter(
+      (message): message is Extract<BotTelemetryMessageV1, { type: "bot.status.v1" }> =>
+        message.type === "bot.status.v1" &&
+        message.payload.currentTask?.title === "战斗反应: 受到攻击",
+    );
+    expect(statuses.at(-1)?.payload.currentTask?.status).toBe("completed");
+    expect(client.combatActions.length).toBeLessThanOrEqual(32);
     await runtime.stop("test_cleanup");
   });
 

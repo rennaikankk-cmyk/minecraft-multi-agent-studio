@@ -5,13 +5,35 @@
 ## 默认配置
 
 ```text
-AI_MAX_CONCURRENCY=4
+AI_MAX_CONCURRENCY=12
 AI_MAX_QUEUE=64
 AI_PER_BOT_CONCURRENCY=1
-AI_REQUEST_TIMEOUT_MS=30000
+AI_REQUEST_TIMEOUT_MS=120000
 ```
 
-并发值 `4` 来自当前已有 Spark 基准，正式值必须由 `1/2/4/8/10` 并发矩阵重新验证。`maxQueue` 只统计等待请求，不包含正在执行的请求。
+桌面启动器会在启动 Coordinator 前扫描批准的 Spark 主机和端口，读取
+`/v1/models`，并把当前可用的模型 ID 传给 Coordinator。Spark 若仍在启动，
+`STUDIO_SPARK_STARTUP_WAIT_MS` 提供有界重试窗口；找不到服务时保持 fail-closed。
+
+本地 AI 可用时，Coordinator 默认会为每个空闲且通过 L0 安全检查的 Bot 自动领取
+有限的生存工作。该路径和 Dashboard 目标共用同一个 Scheduler、Bot assignment 与
+Runtime Link；人工目标获得同一 Bot 的独占租约后，自主任务会等待。关闭自动工作：
+
+```text
+STUDIO_AUTONOMY_ENABLED=0
+```
+
+自主序列从木材、工作台、工具、圆石、熔炉、铁和安全避难所开始；每个 Bot 单独维护
+进度，失败会进入冷却并继续尝试后续工作。它不会绕过 Skill 输入校验、服务器策略或
+L0 安全暂停。
+
+For an authenticated OpenAI-compatible vLLM endpoint, set `LOCAL_AI_API_KEY`
+in the local, ignored environment file, or point `LOCAL_AI_API_KEY_FILE` at a
+private file containing `LOCAL_AI_API_KEY` or `VLLM_API_KEY`. `AI_MAX_CONCURRENCY` is the global
+number of in-flight requests across all Bots; `AI_PER_BOT_CONCURRENCY` is the
+per-Bot limit, and `AI_MAX_QUEUE` bounds requests waiting for a slot.
+
+全局并发上限为 `12`，低于当前 Spark vLLM 的 `max-num-seqs=16`。`maxQueue` 只统计等待请求，不包含正在执行的请求。
 
 ## 优先级
 
@@ -31,10 +53,10 @@ AI_REQUEST_TIMEOUT_MS=30000
 
 ```ts
 const scheduler = new AIRequestScheduler({
-  maxConcurrency: 4,
+  maxConcurrency: 12,
   maxQueue: 64,
   perBotConcurrency: 1,
-  defaultTimeoutMs: 30_000,
+  defaultTimeoutMs: 120_000,
   onEvent: recordSchedulerEvent,
 });
 
@@ -49,7 +71,7 @@ const result = await ai.generate({
   prompt,
   maxTokens: 512,
   temperature: 0,
-  timeoutMs: 30_000,
+  timeoutMs: 120_000,
 });
 ```
 

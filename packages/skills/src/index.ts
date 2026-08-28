@@ -3,6 +3,7 @@ export {
   SkillFault,
   SkillFrameworkError,
   type SkillFrameworkErrorCode,
+  SkillRefusal,
 } from "./errors.js";
 export {
   COMBAT_CONTROL_TIMEOUT_MS,
@@ -79,6 +80,17 @@ export {
   collectBlockStateSchema,
 } from "./builtin/collect-block.js";
 export {
+  SCAN_BLOCKS_TIMEOUT_MS,
+  SCAN_MAX_COUNT,
+  SCAN_MAX_DISTANCE,
+  scanBlocksCapabilityInputSchema,
+  scanBlocksCapabilityOutputSchema,
+  scanBlocksInputSchema,
+  scanBlocksOutputSchema,
+  scanBlocksSkill,
+  scanBlocksStateSchema,
+} from "./builtin/scan-blocks.js";
+export {
   blockCenterDistance,
   blockWithinPolicyReach,
   type BlockCoordinate,
@@ -92,6 +104,7 @@ export {
   type ObservedInventory,
 } from "./builtin/inventory-space.js";
 export {
+  CRAFT_CAPABILITY_MAX_COUNT,
   CRAFT_ITEM_TIMEOUT_MS,
   CRAFT_MAX_COUNT,
   craftItemCapabilityInputSchema,
@@ -130,6 +143,19 @@ export {
   smeltItemSkill,
   smeltItemStateSchema,
 } from "./builtin/smelt-item.js";
+export {
+  closedLoopSkillStatuses,
+  closedLoopSkillStatusSchema,
+  ENSURE_ITEM_TIMEOUT_MS,
+  ensureItemInputSchema,
+  ensureItemOutputSchema,
+  ensureItemSkill,
+  ensureItemSmeltCapabilityInputSchema,
+  ensureItemStateSchema,
+  INVENTORY_SNAPSHOT_MAX_ITEM_TYPES,
+  inventorySnapshotCapabilityInputSchema,
+  inventorySnapshotCapabilityOutputSchema,
+} from "./builtin/ensure-item.js";
 export {
   antiCheatCompatibilityProfiles,
   antiCheatCompatibilityProfileSchema,
@@ -289,6 +315,7 @@ export {
   type SkillExecutionAuthorization,
   type SkillExecutionContext,
   type SkillExecutorOptions,
+  type SkillFaultDiagnostic,
   type SkillMetadata,
   type SkillPolicyView,
   type SkillPrecondition,
@@ -296,6 +323,36 @@ export {
   type SkillRetryPolicy,
   type SkillVariantCompatibility,
 } from "./types.js";
+export {
+  MOVEMENT_PRIORITIES,
+  MovementArbiter,
+  MovementController,
+  MovementLeaseUnavailableError,
+  StaleMovementLeaseError,
+  movementPriorities,
+  type MovementArbiterOptions,
+  type MovementControllerOptions,
+  type MovementLease,
+  type MovementLeaseEndReason,
+  type MovementLeaseEvent,
+  type MovementLeasePreemptHandler,
+  type MovementLeaseReleaseHandler,
+  type MovementLeaseRequest,
+  type MovementLeaseSnapshot,
+  type MovementLeaseState,
+  type MovementOperation,
+  type MovementPriority,
+  type MovementPriorityInput,
+  type MovementPriorityName,
+} from "./movement-arbiter.js";
+export {
+  actionLockKinds,
+  ActionLockError,
+  ActionLockManager,
+  type ActionLockAcquireOptions,
+  type ActionLockKind,
+  type ActionLockSnapshot,
+} from "./runtime/action-lock.js";
 export {
   tradeVillagerSkill, tradeVillagerInputSchema, tradeVillagerOutputSchema, tradeVillagerStateSchema, tradeVillagerCapabilityInputSchema, tradeVillagerCapabilityOutputSchema,
 } from "./builtin/trade-villager.js";

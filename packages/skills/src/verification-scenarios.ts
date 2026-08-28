@@ -135,6 +135,7 @@ const baseInputs: Readonly<Record<string, z.infer<typeof skillJsonValueSchema>>>
   "travel.route": { destination: { x: 4, y: 64, z: 0 }, dimension, serverProfileId: server, maxSegments: 1, corridorPolicy: "pathfinder" },
   "combat.engage": { serverProfileId: server },
   "combat.disengage": { serverProfileId: server },
+  "world.scan": { blockName: "oak_log", maxCount: 8, maxDistance: 32, dimension, serverProfileId: server },
   "collect.block": { blockName: "oak_log", maxCount: 4, maxDistance: 16, dimension, serverProfileId: server },
   "craft.item": { itemName: "crafting_table", count: 1, craftingTable: null, dimension, serverProfileId: server },
   "world.place-block": { itemName: "cobblestone", referenceBlock: { x: 1, y: 63, z: 0 }, face: { x: 0, y: 1, z: 0 }, dimension, serverProfileId: server },

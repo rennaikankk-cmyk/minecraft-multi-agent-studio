@@ -48,6 +48,7 @@ const snapshot: BotClientSnapshot = {
   health: { current: 20, maximum: 20 },
   food: { level: 20, saturation: 5 },
   armorPoints: 0,
+  inventory: [],
   position: { x: 0, y: 64, z: 0, dimension: "minecraft:overworld" },
   latencyMs: 10,
   safety: {

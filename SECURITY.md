@@ -235,7 +235,7 @@
 - R3/R4 任务在可信审批上下文尚未接入前一律禁止领取，不能依靠命令内字段自证批准。
 - `studio_tasks` 禁止直接删除，`studio_task_history` 禁止更新或删除。取消、失败和过期通过状态与历史表达。
 - 所有 SQL 使用固定语句和参数绑定，不拼接任务输入。唯一的动态 SQL 片段是源码固定的 `FOR UPDATE` 选择。
-- 四个迁移文件在真实测试运行前分别校验 SHA-256：`0001_task_system.sql` 为 `8a66af4a41c4a3d8d938e997ac5c96a3d3c644c3eec0b7d947f9b584a2bbfb3a`，`0002_task_lease_invariants.sql` 为 `5c1514a76f11b201e5eb95613441f77aaab49ce4e05da3182c21b173bb237a6c`，`0003_task_delivery.sql` 为 `0c12859e03273ea6f3940cded8828989d7f82b6ed8208dfd40d31be1a29482b0`，`0004_task_delivery_hardening.sql` 为 `f4f5de71e67fbbd7037678127724ba5be6dbc939a6262f476dc35edd92f395f2`。
+- 六个迁移文件在真实测试运行前分别校验 SHA-256：`0001_task_system.sql` 为 `8a66af4a41c4a3d8d938e997ac5c96a3d3c644c3eec0b7d947f9b584a2bbfb3a`，`0002_task_lease_invariants.sql` 为 `5c1514a76f11b201e5eb95613441f77aaab49ce4e05da3182c21b173bb237a6c`，`0003_task_delivery.sql` 为 `0c12859e03273ea6f3940cded8828989d7f82b6ed8208dfd40d31be1a29482b0`，`0004_task_delivery_hardening.sql` 为 `f4f5de71e67fbbd7037678127724ba5be6dbc939a6262f476dc35edd92f395f2`，`0005_task_goal_input.sql` 为 `dd273906f80d672dde5f01ecf4b075fac5ebc385070e65be557b7bd46d99f472`，`0006_task_execution_fsm.sql` 为 `a31a75eacc054473e0d10c5a766eadc32064ae80b6145eb0217843ab9bc636ff`。
 - 队列只接受严格 `TaskDispatchV1`，job 名称和 ID 均由代码固定。消息不包含可执行代码、Shell、模型文本或 URL；Worker 只调用任务、派发和注册表三方处理器版本/幂等策略完全一致的确定性处理器。
 - Redis 只用于消息投递和 BullMQ 临时锁，不能覆盖 PostgreSQL 事实。BullMQ 固定 `attempts=1`，领域重试必须经过任务状态机、幂等处理器声明和持久化重试预算。
 - 取消意图先以唯一操作 ID 和指纹持久化；不同取消不得覆盖首个请求。租约所有者轮询并确认请求后传播 `AbortSignal`，再原子写入 cancelled。任务行锁保证已持久取消优先于新租约、完成、失败、截止时间和租约恢复；租约失效后只允许无租约解析者完成取消。

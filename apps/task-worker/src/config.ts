@@ -4,10 +4,10 @@ import {
 } from "@minecraft-studio/task-system";
 
 const ISOLATED_NAMESPACE_PATTERN = /^studio_test_[a-z0-9_]{8,48}$/u;
+const SCHEMA_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/u;
+const QUEUE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{2,63}$/u;
 
-export type TaskWorkerProcessConfig = Readonly<{
-  purpose: "isolated-test";
-  handlerProfile: "isolated-acceptance";
+type TaskWorkerCommonConfig = Readonly<{
   schemaName: string;
   infrastructure: IsolatedTaskInfrastructureConfig;
   concurrency: number;
@@ -18,6 +18,19 @@ export type TaskWorkerProcessConfig = Readonly<{
   cancellationWaitMs: number;
   cancellationPollIntervalMs: number;
 }>;
+
+export type TaskWorkerProcessConfig = TaskWorkerCommonConfig &
+  (
+    | Readonly<{
+        purpose: "isolated-test";
+        handlerProfile: "isolated-acceptance";
+      }>
+    | Readonly<{
+        purpose: "production";
+        handlerProfile: "coordinator-goal";
+        coordinatorExecution: Readonly<{ url: string; secret: string }>;
+      }>
+  );
 
 export class TaskWorkerConfigError extends Error {
   readonly code = "TASK_WORKER_CONFIG_INVALID";
@@ -35,7 +48,9 @@ function boundedInteger(
   maximum: number,
   name: string,
 ): number {
-  const candidate = value === undefined ? fallback : Number(value);
+  const candidate = value === undefined || value.trim().length === 0
+    ? fallback
+    : Number(value);
   if (
     !Number.isInteger(candidate) ||
     candidate < minimum ||
@@ -51,23 +66,63 @@ function boundedInteger(
 export function loadTaskWorkerConfig(
   environment: NodeJS.ProcessEnv = process.env,
 ): TaskWorkerProcessConfig {
-  if (environment.TASK_WORKER_PURPOSE !== "isolated-test") {
+  const purpose = environment.TASK_WORKER_PURPOSE?.trim();
+  const handlerProfile = environment.TASK_WORKER_HANDLER_PROFILE?.trim();
+  if (
+    !(
+      (purpose === "isolated-test" &&
+        handlerProfile === "isolated-acceptance") ||
+      (purpose === "production" && handlerProfile === "coordinator-goal")
+    )
+  ) {
     throw new TaskWorkerConfigError(
-      "TASK_WORKER_PURPOSE must explicitly select isolated-test.",
-    );
-  }
-  if (environment.TASK_WORKER_HANDLER_PROFILE !== "isolated-acceptance") {
-    throw new TaskWorkerConfigError(
-      "TASK_WORKER_HANDLER_PROFILE must explicitly select isolated-acceptance.",
-    );
-  }
-  const schemaName = environment.TASK_INFRA_TEST_NAMESPACE;
-  if (!schemaName || !ISOLATED_NAMESPACE_PATTERN.test(schemaName)) {
-    throw new TaskWorkerConfigError(
-      "TASK_INFRA_TEST_NAMESPACE must be a dedicated studio_test_ identifier.",
+      "TASK_WORKER_PURPOSE and TASK_WORKER_HANDLER_PROFILE must select an approved matching profile.",
     );
   }
 
+  const schemaName = purpose === "isolated-test"
+    ? environment.TASK_INFRA_TEST_NAMESPACE
+    : environment.COORDINATOR_TASK_POSTGRES_SCHEMA?.trim() || "public";
+  if (
+    !schemaName ||
+    !(purpose === "isolated-test"
+      ? ISOLATED_NAMESPACE_PATTERN
+      : SCHEMA_NAME_PATTERN
+    ).test(schemaName)
+  ) {
+    throw new TaskWorkerConfigError(
+      "The Task Worker PostgreSQL schema is invalid for the selected profile.",
+    );
+  }
+
+  const queueName = purpose === "isolated-test"
+    ? environment.TASK_QUEUE_NAME ?? "studio_tasks_v1"
+    : environment.COORDINATOR_TASK_QUEUE_NAME?.trim() || "studio_tasks_v1";
+  const queuePrefix = purpose === "isolated-test"
+    ? schemaName
+    : environment.COORDINATOR_TASK_QUEUE_PREFIX?.trim() || schemaName;
+  if (
+    !QUEUE_NAME_PATTERN.test(queueName) ||
+    !QUEUE_NAME_PATTERN.test(queuePrefix) ||
+    queuePrefix !== schemaName
+  ) {
+    throw new TaskWorkerConfigError(
+      "Task Worker queue names must be valid and the prefix must match the PostgreSQL schema.",
+    );
+  }
+
+  const infrastructure = parseIsolatedTaskInfrastructureConfig({
+    postgresUrl:
+      purpose === "isolated-test"
+        ? environment.TASK_POSTGRES_URL
+        : environment.COORDINATOR_TASK_POSTGRES_URL,
+    redisUrl:
+      purpose === "isolated-test"
+        ? environment.TASK_REDIS_URL
+        : environment.COORDINATOR_TASK_REDIS_URL,
+    queueName,
+    queuePrefix,
+  });
   const concurrency = boundedInteger(
     environment.TASK_WORKER_CONCURRENCY,
     1,
@@ -133,16 +188,9 @@ export function loadTaskWorkerConfig(
     );
   }
 
-  return {
-    purpose: "isolated-test",
-    handlerProfile: "isolated-acceptance",
+  const common: TaskWorkerCommonConfig = {
     schemaName,
-    infrastructure: parseIsolatedTaskInfrastructureConfig({
-      postgresUrl: environment.TASK_POSTGRES_URL,
-      redisUrl: environment.TASK_REDIS_URL,
-      queueName: environment.TASK_QUEUE_NAME ?? "studio_tasks_v1",
-      queuePrefix: schemaName,
-    }),
+    infrastructure,
     concurrency,
     leaseDurationMs,
     renewIntervalMs,
@@ -150,5 +198,39 @@ export function loadTaskWorkerConfig(
     stalledIntervalMs,
     cancellationWaitMs,
     cancellationPollIntervalMs,
+  };
+  if (purpose === "isolated-test") {
+    return { ...common, purpose, handlerProfile: "isolated-acceptance" };
+  }
+
+  const host = environment.COORDINATOR_TASK_EXECUTION_HOST?.trim() ||
+    "127.0.0.1";
+  if (host !== "127.0.0.1" && host !== "::1") {
+    throw new TaskWorkerConfigError(
+      "COORDINATOR_TASK_EXECUTION_HOST must be an explicit loopback address.",
+    );
+  }
+  const port = boundedInteger(
+    environment.COORDINATOR_TASK_EXECUTION_PORT,
+    3_222,
+    1,
+    65_535,
+    "COORDINATOR_TASK_EXECUTION_PORT",
+  );
+  const secret = environment.COORDINATOR_TASK_EXECUTION_SECRET?.trim() ?? "";
+  if (secret.length < 32 || secret.length > 512) {
+    throw new TaskWorkerConfigError(
+      "COORDINATOR_TASK_EXECUTION_SECRET must contain 32 to 512 characters.",
+    );
+  }
+  const urlHost = host === "::1" ? "[::1]" : host;
+  return {
+    ...common,
+    purpose,
+    handlerProfile: "coordinator-goal",
+    coordinatorExecution: {
+      url: `http://${urlHost}:${port}`,
+      secret,
+    },
   };
 }

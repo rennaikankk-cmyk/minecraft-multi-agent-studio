@@ -105,6 +105,34 @@ function repository(overrides: Record<string, unknown>): PostgresTaskRepository 
 }
 
 describe("PostgresGoalLifecycleStore", () => {
+  it("submits production goals through the durable dispatch outbox", async () => {
+    const queued = task("queued", { dispatchBotId: "worker-01" });
+    const submitTask = vi.fn(async () => ({
+      task: queued,
+      created: true,
+      dispatch: {},
+      outbox: {},
+    }));
+    const store = new PostgresGoalLifecycleStore({
+      repository: repository({ submitTask }),
+      coordinatorInstanceId: "coordinator-test",
+    });
+
+    await expect(store.submitQueued(request())).resolves.toMatchObject({
+      taskId: OPERATION_ID,
+      botId: "worker-01",
+      status: "queued",
+    });
+    expect(submitTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskType: "coordinator.goal",
+        handlerVersion: "1.0.0",
+        executionIdempotent: false,
+        dispatchBotId: "worker-01",
+      }),
+    );
+  });
+
   it("verifies the migration contract before loading lifecycle state", async () => {
     const verifyGoalLifecycleSchema = vi.fn(async () => undefined);
     const getDatabaseTime = vi.fn(async () => NOW);
@@ -148,6 +176,23 @@ describe("PostgresGoalLifecycleStore", () => {
       durableGoalFingerprint(original),
     );
     expect(durableGoalFingerprint(differentActor)).not.toBe(
+      durableGoalFingerprint(original),
+    );
+
+    // PostgreSQL JSONB can return the same persisted object in a different
+    // key order after a restart. The durable identity must not change with it.
+    const reordered = {
+      timeoutMs: original.payload.timeoutMs,
+      operatorGoal: original.payload.operatorGoal,
+      botId: original.payload.botId,
+      actorId: original.payload.actorId,
+      clientId: original.payload.clientId,
+      taskId: original.payload.taskId,
+      operationId: original.payload.operationId,
+      kind: "coordinator.goal.v1" as const,
+      schemaVersion: "1.0" as const,
+    };
+    expect(durableGoalFingerprint(reordered)).toBe(
       durableGoalFingerprint(original),
     );
   });
@@ -404,7 +449,11 @@ describe("PostgresGoalLifecycleStore", () => {
       repository: repository({
         createTask: vi.fn(async () => ({ task: expiredRunning, created: false })),
         getDatabaseTime: vi.fn(async () => NOW),
-        expireLease: vi.fn(async () => failed),
+        recoverExpiredLease: vi.fn(async () => ({
+          task: failed,
+          dispatch: null,
+          outbox: null,
+        })),
         acquireLease,
       }),
       coordinatorInstanceId: "coordinator-test",
@@ -417,6 +466,44 @@ describe("PostgresGoalLifecycleStore", () => {
       snapshot: { status: "failed" },
     });
     expect(acquireLease).not.toHaveBeenCalled();
+  });
+
+  it("rebuilds dispatch state while refreshing an expired assigned lease", async () => {
+    const assigned = task("assigned", {
+      leaseExpiresAt: new Date(NOW.getTime() - 1).toISOString(),
+    });
+    const queued = task("queued", {
+      revision: assigned.revision + 1,
+      updatedAt: NOW.toISOString(),
+    });
+    const recoverExpiredLease = vi.fn(async () => ({
+      task: queued,
+      dispatch: null,
+      outbox: null,
+    }));
+    const expireLease = vi.fn();
+    const store = new PostgresGoalLifecycleStore({
+      repository: repository({
+        getDatabaseTime: vi.fn(async () => NOW),
+        listTaskLifecycle: vi.fn(async () => [assigned]),
+        recoverExpiredLease,
+        expireLease,
+      }),
+      coordinatorInstanceId: "coordinator-test",
+      randomId: () => "99999999-9999-4999-8999-999999999999",
+    });
+
+    await expect(store.refresh(5 * 60_000)).resolves.toMatchObject([
+      { status: "queued" },
+    ]);
+    expect(recoverExpiredLease).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: assigned.taskId,
+        expectedRevision: assigned.revision,
+        reasonCode: "TASK_LEASE_EXPIRED",
+      }),
+    );
+    expect(expireLease).not.toHaveBeenCalled();
   });
 
   it("records unsuccessful planner outcomes as replayable terminal results", async () => {

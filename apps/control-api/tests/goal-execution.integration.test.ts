@@ -145,7 +145,9 @@ describe("goal execution across the production control path", () => {
       "craft.item:oak_planks",
       "craft.item:crafting_table",
     ]);
-    expect(stack.plannerRegistryGet).toHaveBeenCalledTimes(7);
+    // Durable execution freshness checks read the authoritative Bot record
+    // before planning and before each bound dispatch.
+    expect(stack.plannerRegistryGet).toHaveBeenCalledTimes(9);
     expect(stack.requestFreshStatus).toHaveBeenCalledTimes(1);
     expect(stack.client.snapshotCalls).toBeGreaterThan(1);
     assertInvocationChain(stack, 4, 3);

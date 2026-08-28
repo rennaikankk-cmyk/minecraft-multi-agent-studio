@@ -13,6 +13,9 @@ import { defineSkill } from "../types.js";
 
 export const CRAFT_ITEM_TIMEOUT_MS = 20_000;
 export const CRAFT_MAX_COUNT = 64;
+// Internal plans may need more than one stack of an intermediate ingredient
+// even when the operator's final goal is bounded to 64 items.
+export const CRAFT_CAPABILITY_MAX_COUNT = 4_096;
 
 const dimensionSchema = z
   .string()
@@ -47,6 +50,9 @@ const observedPositionSchema = z
 export const craftItemInputSchema = z
   .object({
     itemName: itemNameSchema,
+    // Desired minimum count in inventory. The runtime checks the shortfall
+    // before crafting, but a timeout or partial acknowledgement can still
+    // leave the write outcome uncertain.
     count: z.number().int().min(1).max(CRAFT_MAX_COUNT),
     // null = 只允许 2x2 随身合成；给坐标 = 用该处工作台（3x3）。
     craftingTable: blockPositionSchema.nullable(),
@@ -67,14 +73,16 @@ export const craftItemStateSchema = z
 export const craftItemOutputSchema = z
   .object({
     itemName: itemNameSchema,
-    requestedCount: z.number().int().min(1).max(CRAFT_MAX_COUNT),
-    // 库存实际增量（合成后读回），不是"配方理论产量"。不伪造成功。
+    requestedCount: z.number().int().min(1).max(CRAFT_CAPABILITY_MAX_COUNT),
+    // 库存实际增量（合成后读回），不是"配方理论产量"。已经满足目标时为 0。
     craftedCount: z.number().int().min(0),
     usedCraftingTable: z.boolean(),
   })
   .strict();
 
-export const craftItemCapabilityInputSchema = craftItemInputSchema;
+export const craftItemCapabilityInputSchema = craftItemInputSchema.extend({
+  count: z.number().int().min(1).max(CRAFT_CAPABILITY_MAX_COUNT),
+});
 export const craftItemCapabilityOutputSchema = craftItemOutputSchema;
 
 export const craftItemSkill = defineSkill({
@@ -90,7 +98,8 @@ export const craftItemSkill = defineSkill({
   },
   requiredCapabilities: ["craft.execute"] as const,
   timeoutMs: CRAFT_ITEM_TIMEOUT_MS,
-  // 合成部分成功后重试会重复消耗材料，禁止自动重试。
+  // 合成会消耗材料，在协调器能够确认完整结果之前可能已经产生副作用；
+  // 对不确定或部分结果禁止自动重放。
   idempotent: false,
   retryPolicy: {
     maxAttempts: 1,

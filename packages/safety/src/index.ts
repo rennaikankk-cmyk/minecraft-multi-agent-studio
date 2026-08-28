@@ -46,10 +46,12 @@ const LOW_OXYGEN_LEVEL = 6;
 const FALL_VELOCITY_Y = -0.75;
 const STUCK_AFTER_MS = 5_000;
 const MOVEMENT_EPSILON = 0.2;
+const LOW_HEALTH_RETREAT_MAX_STEPS = 2;
 
 const ACTION_COOLDOWN_MS: Readonly<Record<L0SafetyActionKind, number>> = {
   PAUSE_NORMAL_TASKS: 1_000,
   CONSUME_SAFE_FOOD: 5_000,
+  FORAGE_SAFE_FOOD: 20_000,
   RETREAT_STEP: 2_000,
   ASCEND: 750,
   ESCAPE_LAVA: 750,
@@ -82,6 +84,7 @@ export class L0SafetyController {
   private movementAnchor: L0SafetySnapshot["position"] | null = null;
   private movementAnchorAt = 0;
   private lastFingerprint = "";
+  private lowHealthRetreatSteps = 0;
 
   reset(): void {
     this.sequence = 0;
@@ -89,23 +92,29 @@ export class L0SafetyController {
     this.movementAnchor = null;
     this.movementAnchorAt = 0;
     this.lastFingerprint = "";
+    this.lowHealthRetreatSteps = 0;
   }
 
   evaluate(snapshot: L0SafetySnapshot): L0SafetyDecision {
     validateSnapshot(snapshot);
     const risks = this.detectRisks(snapshot);
+    if (!risks.includes("LOW_HEALTH")) this.lowHealthRetreatSteps = 0;
     const normalTasksPaused = risks.length > 0;
     const fingerprint = `${risks.join(",")}|${normalTasksPaused}`;
     const changed = fingerprint !== this.lastFingerprint;
     this.lastFingerprint = fingerprint;
 
     const actions: L0SafetyAction[] = [];
-    const pushAction = (kind: L0SafetyActionKind, risk: L0SafetyRisk) => {
+    const pushAction = (
+      kind: L0SafetyActionKind,
+      risk: L0SafetyRisk,
+    ): boolean => {
       const lastAt = this.lastActionAt.get(kind) ?? Number.NEGATIVE_INFINITY;
-      if (snapshot.observedAtMs - lastAt < ACTION_COOLDOWN_MS[kind]) return;
+      if (snapshot.observedAtMs - lastAt < ACTION_COOLDOWN_MS[kind]) return false;
       this.lastActionAt.set(kind, snapshot.observedAtMs);
       const durationMs = ACTION_DURATION_MS[kind];
       actions.push({ kind, risk, ...(durationMs ? { durationMs } : {}) });
+      return true;
     };
 
     if (risks.includes("CRITICAL_HEALTH")) {
@@ -123,8 +132,19 @@ export class L0SafetyController {
         pushAction("HALT_HORIZONTAL_MOVEMENT", "FALLING");
       } else if (risks.includes("LOW_HEALTH")) {
         pushAction("PAUSE_NORMAL_TASKS", "LOW_HEALTH");
-        if (snapshot.onGround && !snapshot.inWater && !snapshot.inLava) {
-          pushAction("RETREAT_STEP", "LOW_HEALTH");
+        if (snapshot.hasSafeFood && snapshot.foodLevel < 20) {
+          pushAction("CONSUME_SAFE_FOOD", "LOW_HEALTH");
+        } else if (!snapshot.hasSafeFood && snapshot.foodLevel < 20) {
+          pushAction("FORAGE_SAFE_FOOD", "LOW_HEALTH");
+        }
+        if (
+          this.lowHealthRetreatSteps < LOW_HEALTH_RETREAT_MAX_STEPS &&
+          snapshot.onGround &&
+          !snapshot.inWater &&
+          !snapshot.inLava &&
+          pushAction("RETREAT_STEP", "LOW_HEALTH")
+        ) {
+          this.lowHealthRetreatSteps += 1;
         }
       } else if (risks.includes("STUCK")) {
         pushAction("PAUSE_NORMAL_TASKS", "STUCK");
@@ -132,8 +152,11 @@ export class L0SafetyController {
         this.movementAnchorAt = snapshot.observedAtMs;
       } else if (risks.includes("INVENTORY_FULL")) {
         pushAction("PAUSE_NORMAL_TASKS", "INVENTORY_FULL");
-      } else if (risks.includes("HUNGER") && snapshot.hasSafeFood) {
-        pushAction("CONSUME_SAFE_FOOD", "HUNGER");
+      } else if (risks.includes("HUNGER")) {
+        pushAction(
+          snapshot.hasSafeFood ? "CONSUME_SAFE_FOOD" : "FORAGE_SAFE_FOOD",
+          "HUNGER",
+        );
       }
     }
 

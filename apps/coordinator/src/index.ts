@@ -4,6 +4,7 @@ export {
   type BotRegistryOptions,
   type BotRegistryListener,
   type BotRegistryRecord,
+  type BotRegistryWorldState,
   type CoordinatorTelemetryErrorCode,
   type RegistryConnectionState,
   type TelemetryIgnoreReason,
@@ -78,6 +79,12 @@ export {
 } from "./control-link-server.js";
 
 export {
+  CoordinatorGoalExecutionServer,
+  type GoalExecutionServerAddress,
+  type GoalExecutionServerOptions,
+} from "./goal-execution-server.js";
+
+export {
   GoalLifecycleStoreError,
   PostgresGoalLifecycleStore,
   durableGoalFingerprint,
@@ -85,6 +92,7 @@ export {
   type GoalLifecycleBeginResult,
   type GoalLifecycleSnapshot,
   type GoalLifecycleStore,
+  type QueuedGoalLifecycleStore,
   type PostgresGoalLifecycleStoreOptions,
 } from "./goal-lifecycle-store.js";
 
@@ -102,6 +110,10 @@ export {
   type TaskHistoryReader,
   type TaskHistoryReaderErrorCode,
 } from "./task-history-reader.js";
+export {
+  InMemoryGoalLifecycleStore,
+  type InMemoryGoalLifecycleStoreOptions,
+} from "./in-memory-goal-store.js";
 
 export {
   ExpiredLeaseRecoveryController,
@@ -128,6 +140,8 @@ export {
   LocalPlannerError,
   LOCAL_PLANNER_REASON_CODES,
   buildLocalPlannerGenerationSchema,
+  buildLocalPlannerPlanItemsRetrySchema,
+  plannedAcquisitionGoalItem,
   localPlannerDecisionSchema,
   type CoordinatorLocalPlannerOptions,
   type LocalPlanRequest,
@@ -136,6 +150,22 @@ export {
   type LocalPlannerErrorCode,
   type SkillInvocationTransport,
 } from "./local-planner.js";
+
+export {
+  AutonomousConfigError,
+  loadAutonomousConfig,
+  type AutonomousConfig,
+  type AutonomousConfigErrorCode,
+} from "./autonomous-config.js";
+
+export {
+  AUTONOMOUS_GOAL_SEQUENCE,
+  AutonomousDirector,
+  type AutonomousDirectorOptions,
+  type AutonomousTaskListener,
+  type AutonomousTaskSource,
+  type AutonomousTaskView,
+} from "./autonomous-director.js";
 
 export {
   MAX_LOCAL_PLANNER_PROMPT_BYTES,

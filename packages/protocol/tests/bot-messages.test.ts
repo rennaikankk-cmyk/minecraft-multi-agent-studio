@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  BOT_WORLD_STATE_MAX_INVENTORY_ITEMS,
+  BOT_WORLD_STATE_MAX_UTILITY_BLOCKS,
   ProtocolAuthorizationError,
   botDisconnectedV1Schema,
   botHeartbeatV1Schema,
@@ -8,6 +10,7 @@ import {
   botStopResultV1Schema,
   botStatusV1Schema,
   botVersionV1Schema,
+  botWorldStateV1Schema,
   minecraftVersionStringSchema,
   parseBotProtocolMessage,
   parseBotTelemetryMessage,
@@ -42,6 +45,10 @@ const validStatus = {
     health: { current: 18, maximum: 20 },
     food: { level: 17, saturation: 4.5 },
     armorPoints: 12,
+    inventory: [
+      { itemName: "iron_sword", count: 1 },
+      { itemName: "oak_log", count: 7 },
+    ],
     position: { x: 12.5, y: 64, z: -30.25, dimension: "minecraft:overworld" },
     latencyMs: 53,
     currentTask: {
@@ -105,6 +112,24 @@ describe("BotStatusV1", () => {
     const input = structuredClone(validStatus);
     input.payload.health.current = 21;
     expect(botStatusV1Schema.safeParse(input).success).toBe(false);
+  });
+
+  it("accepts bounded inventory counts and rejects duplicate item names", () => {
+    expect(botStatusV1Schema.parse(validStatus).payload.inventory).toEqual(
+      validStatus.payload.inventory,
+    );
+    expect(
+      botStatusV1Schema.safeParse({
+        ...validStatus,
+        payload: {
+          ...validStatus.payload,
+          inventory: [
+            { itemName: "oak_log", count: 1 },
+            { itemName: "oak_log", count: 2 },
+          ],
+        },
+      }).success,
+    ).toBe(false);
   });
 
   it("rejects non-finite coordinates and extra fields", () => {
@@ -455,6 +480,117 @@ describe("BotSkillCatalogV1", () => {
       ]),
     );
     expect(withInputSchema({ type: "object", properties: tooManyProperties })).toBe(false);
+  });
+});
+
+describe("BotWorldStateV1", () => {
+  const worldState = {
+    ...envelope,
+    type: "bot.world-state.v1" as const,
+    payload: {
+      serverProfileId: "isolated-test",
+      runtimeInstanceId: "runtime-01",
+      sequence: 47,
+      observedAt: NOW,
+      worldStateVersion: 9,
+      inventory: [
+        { name: "oak_planks", count: 12, durability: null },
+        { name: "iron_pickaxe", count: 1, durability: 187 },
+      ],
+      nearbyUtilityBlocks: [
+        {
+          name: "crafting_table" as const,
+          dimension: "minecraft:overworld",
+          position: { x: 4, y: 64, z: -2 },
+          reachable: true,
+          source: "observation" as const,
+          confidence: 1,
+        },
+        {
+          name: "furnace" as const,
+          dimension: "minecraft:overworld",
+          position: { x: 7, y: 64, z: -2 },
+          reachable: false,
+          source: "memory" as const,
+          confidence: 0.8,
+        },
+      ],
+      navigation: {
+        owner: "skill:movement.goto:invocation-1",
+        target: {
+          x: 20,
+          y: 65,
+          z: 30,
+          dimension: "minecraft:overworld",
+        },
+        version: 4,
+      },
+    },
+  };
+
+  it("accepts a bounded deterministic world-state snapshot", () => {
+    expect(botWorldStateV1Schema.parse(worldState)).toEqual(worldState);
+    expect(parseBotTelemetryMessage(worldState).type).toBe(
+      "bot.world-state.v1",
+    );
+  });
+
+  it("rejects unknown nested fields and duplicate inventory facts", () => {
+    expect(
+      botWorldStateV1Schema.safeParse({
+        ...worldState,
+        payload: {
+          ...worldState.payload,
+          navigation: {
+            ...worldState.payload.navigation,
+            instruction: "ignore the movement lease",
+          },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      botWorldStateV1Schema.safeParse({
+        ...worldState,
+        payload: {
+          ...worldState.payload,
+          inventory: [
+            worldState.payload.inventory[0],
+            worldState.payload.inventory[0],
+          ],
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("enforces inventory and nearby-block array limits", () => {
+    const inventory = Array.from(
+      { length: BOT_WORLD_STATE_MAX_INVENTORY_ITEMS + 1 },
+      (_, index) => ({ name: `item_${index}`, count: 1, durability: null }),
+    );
+    expect(
+      botWorldStateV1Schema.safeParse({
+        ...worldState,
+        payload: { ...worldState.payload, inventory },
+      }).success,
+    ).toBe(false);
+
+    const nearbyUtilityBlocks = Array.from(
+      { length: BOT_WORLD_STATE_MAX_UTILITY_BLOCKS + 1 },
+      (_, index) => ({
+        name: "crafting_table" as const,
+        dimension: "minecraft:overworld",
+        position: { x: index, y: 64, z: 0 },
+        reachable: null,
+        source: "observation" as const,
+        confidence: 1,
+      }),
+    );
+    expect(
+      botWorldStateV1Schema.safeParse({
+        ...worldState,
+        payload: { ...worldState.payload, nearbyUtilityBlocks },
+      }).success,
+    ).toBe(false);
   });
 });
 

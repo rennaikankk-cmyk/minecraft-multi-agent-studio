@@ -21,6 +21,33 @@ export {
 } from "./identity.js";
 export { DeterministicJitter } from "./deterministic-jitter.js";
 export {
+  ChainSequencer,
+  DEFAULT_CHAIN_SEQUENCER_POLICY,
+  type CombatChainContext,
+  type CombatChainDecision,
+  type CombatChainRefusalCode,
+  type CombatChainSequencerPolicy,
+  type CombatChainStep,
+  type CombatChainStepRecord,
+  type CombatInteractionClass,
+} from "./chain-sequencer.js";
+export {
+  BLAST_POWER,
+  blastDamage,
+  entityRangeFor,
+  redLineBreached,
+  type CombatBlastDamage,
+  type CombatBlastDamageInput,
+  type CombatDifficulty,
+} from "./blast-model.js";
+export {
+  HIT_WINDOW_STALE_AFTER_MS,
+  TARGET_INVULNERABILITY_WINDOW_MS,
+  HitWindowTracker,
+  type CombatHitWindowConfidence,
+  type CombatHitWindowState,
+} from "./hit-window-tracker.js";
+export {
   CombatReflexNotClearedError,
   REFLEX_BUDGET_MS,
   decideReflexClearance,
@@ -39,6 +66,22 @@ export {
   type CombatCrystalScore,
   type CombatCrystalSelfState,
 } from "./crystal-engine.js";
+export {
+  AnchorEngine,
+  DEFAULT_ANCHOR_POLICY,
+  anchorChargeFromLightLevel,
+  type CombatAnchorCandidate,
+  type CombatAnchorChargeLevel,
+  type CombatAnchorDimension,
+  type CombatAnchorPlan,
+  type CombatAnchorPolicy,
+  type CombatAnchorRefusalCode,
+  type CombatAnchorScore,
+  type CombatAnchorSelfState,
+  type CombatHostileAnchorArmLevel,
+  type CombatHostileAnchorAssessment,
+  type CombatHostileAnchorObservation,
+} from "./anchor-engine.js";
 export {
   DEFAULT_SURVIVAL_STANCE,
   totemAbsenceForcesRetreat,
@@ -62,6 +105,23 @@ export {
   type CombatMovementPolicy,
   type CombatMovementSnapshot,
 } from "./movement-controller.js";
+export {
+  SURROUND_BLAST_RESISTANCE,
+  SurroundPlanner,
+  type CombatSurroundBlockClass,
+  type CombatSurroundExposedOffset,
+  type CombatSurroundExplosiveReadiness,
+  type CombatSurroundInventoryBlock,
+  type CombatSurroundOccupancy,
+  type CombatSurroundOccupancyQuery,
+  type CombatSurroundOffsetRole,
+  type CombatSurroundPlacement,
+  type CombatSurroundPlan,
+  type CombatSurroundProtectionEffect,
+  type CombatSurroundRefusalCode,
+  type CombatSurroundSnapshot,
+  type CombatSurroundThreatDirection,
+} from "./surround-planner.js";
 export {
   DEFAULT_MINE_POLICY,
   MAX_CONCURRENT_MINE,
@@ -106,12 +166,19 @@ export {
   type CombatRotationStep,
 } from "./rotation-controller.js";
 export {
+  JAVA_1_21_EXPLOSION_RULES,
   DEFAULT_GEAR_POLICY,
   assessGearMatchup,
+  assessExplosionProtection,
   assessWorstMatchup,
+  explosionKnockbackResistance01,
+  explosionMitigation01,
+  explosionRuleSetForMinecraftVersion,
   gearPower,
   validateGearPolicy,
   type CombatArmorMaterial,
+  type CombatExplosionProtectionAssessment,
+  type CombatExplosionRuleSet,
   type CombatGearAssessment,
   type CombatGearPolicy,
   type CombatGearSnapshot,
@@ -145,3 +212,14 @@ export {
   type CombatThreatSnapshot,
   type CombatVector3,
 } from "./threat-analyzer.js";
+export {
+  TOTEM_POP_ABSORPTION_WINDOW_MS,
+  TOTEM_POP_REGEN_WINDOW_MS,
+  TOTEM_POP_REGENERATION_WINDOW_MS,
+  TotemPopTracker,
+  type CombatTotemPopPhase,
+  type CombatTotemPopQuery,
+  type CombatTotemPopRecord,
+  type CombatTotemPopWindow,
+  type CombatTotemPopWindowReason,
+} from "./totem-pop-tracker.js";

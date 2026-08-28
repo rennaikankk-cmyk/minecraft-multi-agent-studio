@@ -31,6 +31,7 @@ import {
   LocalPlannerError,
   type GoalLifecycleSnapshot,
   type GoalLifecycleStore,
+  type QueuedGoalLifecycleStore,
   type TaskHistoryReader,
 } from "../src/index.js";
 
@@ -691,6 +692,181 @@ describe("Coordinator Control Link server", () => {
     expect(planAndDispatch).toHaveBeenCalledTimes(1);
   });
 
+  it("streams queued goal state through completion before acknowledging success", async () => {
+    const operationId = testUuid(1100);
+    const request = goalRequest(operationId, testUuid(1101));
+    const result: GoalDispatchResultV1 = {
+      action: "skill_result",
+      botId: BOT_ID,
+      taskId: operationId,
+      reasonCode: "GOAL_COMPLETED",
+      skillId: "collect.block",
+      skillVersion: "1.0.0",
+      outcome: "completed",
+      ai: {
+        attempts: 1,
+        queueTimeMs: 2,
+        executionTimeMs: 98,
+        totalTimeMs: 100,
+      },
+    };
+    const queued = goalSnapshot(request, "queued");
+    const terminal = goalSnapshot(request, "completed", result);
+    const queuedGoalStore: QueuedGoalLifecycleStore = {
+      submitQueued: vi.fn(async (submittedRequest) => {
+        expect(submittedRequest).toEqual(request);
+        return queued;
+      }),
+      waitForQueuedTerminal: vi.fn(async (taskId, signal) => {
+        expect(taskId).toBe(operationId);
+        expect(signal.aborted).toBe(false);
+        return terminal;
+      }),
+      requestQueuedCancellation: vi.fn(async () => undefined),
+    };
+    const planAndDispatch = vi.fn(async () => {
+      throw new Error("queued_goal_must_not_use_local_planner");
+    });
+    const { registry, url } = await startServer({
+      goalPlanner: { planAndDispatch },
+      queuedGoalStore,
+    });
+    registry.ingest(statusMessage(1), NOW);
+    const { socket, reader } = await authenticate(url);
+    await readSnapshot(reader);
+    socket.send(JSON.stringify(request));
+
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.state-upsert.v1",
+      payload: {
+        bot: {
+          botId: BOT_ID,
+          currentTask: {
+            taskId: operationId,
+            title: "Submitted goal",
+            status: "queued",
+            startedAt: null,
+          },
+        },
+      },
+    });
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.state-upsert.v1",
+      payload: {
+        bot: {
+          botId: BOT_ID,
+          currentTask: {
+            taskId: operationId,
+            status: "completed",
+          },
+        },
+      },
+    });
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.goal-response.v1",
+      ok: true,
+      payload: {
+        operationId,
+        taskId: operationId,
+        result: {
+          action: "skill_result",
+          outcome: "completed",
+        },
+      },
+    });
+    expect(queuedGoalStore.submitQueued).toHaveBeenCalledTimes(1);
+    expect(queuedGoalStore.waitForQueuedTerminal).toHaveBeenCalledTimes(1);
+    expect(queuedGoalStore.requestQueuedCancellation).not.toHaveBeenCalled();
+    expect(planAndDispatch).not.toHaveBeenCalled();
+  });
+
+  it("requests durable cancellation and returns AI_TIMEOUT for a queued goal timeout", async () => {
+    const operationId = testUuid(1110);
+    const request = goalRequest(operationId, testUuid(1111), 1_000);
+    const queued = goalSnapshot(request, "queued");
+    const requestQueuedCancellation = vi.fn(async () => undefined);
+    const queuedGoalStore: QueuedGoalLifecycleStore = {
+      submitQueued: vi.fn(async () => queued),
+      waitForQueuedTerminal: vi.fn(
+        async (_taskId, signal) =>
+          new Promise<GoalLifecycleSnapshot>((_resolve, reject) => {
+            signal.addEventListener(
+              "abort",
+              () => reject(signal.reason),
+              { once: true },
+            );
+          }),
+      ),
+      requestQueuedCancellation,
+    };
+    const { registry, url } = await startServer({
+      goalPlanner: { planAndDispatch: vi.fn(async () => undefined) },
+      queuedGoalStore,
+    });
+    registry.ingest(statusMessage(1), NOW);
+    const { socket, reader } = await authenticate(url);
+    await readSnapshot(reader);
+    socket.send(JSON.stringify(request));
+
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.state-upsert.v1",
+      payload: { bot: { currentTask: { taskId: operationId, status: "queued" } } },
+    });
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.goal-response.v1",
+      ok: false,
+      payload: {
+        operationId,
+        taskId: operationId,
+        errorCode: "AI_TIMEOUT",
+      },
+    });
+    expect(requestQueuedCancellation).toHaveBeenCalledWith(
+      operationId,
+      "AI_TIMEOUT",
+    );
+  });
+
+  it("requests durable cancellation when the Coordinator stops a queued goal", async () => {
+    const operationId = testUuid(1120);
+    const request = goalRequest(operationId, testUuid(1121));
+    const queued = goalSnapshot(request, "queued");
+    const requestQueuedCancellation = vi.fn(async () => undefined);
+    const queuedGoalStore: QueuedGoalLifecycleStore = {
+      submitQueued: vi.fn(async () => queued),
+      waitForQueuedTerminal: vi.fn(
+        async (_taskId, signal) =>
+          new Promise<GoalLifecycleSnapshot>((_resolve, reject) => {
+            signal.addEventListener(
+              "abort",
+              () => reject(signal.reason),
+              { once: true },
+            );
+          }),
+      ),
+      requestQueuedCancellation,
+    };
+    const { registry, server, url } = await startServer({
+      goalPlanner: { planAndDispatch: vi.fn(async () => undefined) },
+      queuedGoalStore,
+    });
+    registry.ingest(statusMessage(1), NOW);
+    const { socket, reader } = await authenticate(url);
+    await readSnapshot(reader);
+    socket.send(JSON.stringify(request));
+    await expect(reader.next()).resolves.toMatchObject({
+      type: "control.link.state-upsert.v1",
+      payload: { bot: { currentTask: { taskId: operationId, status: "queued" } } },
+    });
+
+    await server.stop();
+
+    expect(requestQueuedCancellation).toHaveBeenCalledWith(
+      operationId,
+      "CONTROL_LINK_STOPPED",
+    );
+  });
+
   it("does not acknowledge success when the terminal result is not durable", async () => {
     const baseStore = testGoalStore();
     const recordResult = vi.fn(async () => {
@@ -759,6 +935,79 @@ describe("Coordinator Control Link server", () => {
     });
     expect(recordResult).toHaveBeenCalledTimes(1);
     expect(recordError).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a completed Skill's own counts, including zeros", async () => {
+    const planAndDispatch = vi.fn(async () => ({
+      action: "skill_result",
+      reasonCode: "GOAL_COMPLETED",
+      result: {
+        payload: {
+          skillId: "collect.block",
+          skillVersion: "1.0.0",
+          outcome: "completed",
+          // What a live collect reported for trace 80a6506a: it found nothing.
+          // Before the summary field the operator saw the same bare
+          // `outcome: "completed"` a full eight-log collect produces.
+          output: {
+            blockName: "cobblestone",
+            targetsFound: 0,
+            itemsCollected: 0,
+          },
+        },
+      },
+      ai: {
+        attempts: 1,
+        queueTimeMs: 2,
+        executionTimeMs: 55,
+        totalTimeMs: 57,
+      },
+    }));
+    const { registry, url } = await startServer({
+      goalPlanner: { planAndDispatch },
+    });
+    registry.ingest(statusMessage(1), NOW);
+    const { socket, reader } = await authenticate(url);
+    await readSnapshot(reader);
+    const operationId = testUuid(987);
+    socket.send(JSON.stringify(controlLinkGoalRequestV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: testUuid(988),
+      timestamp: NOW.toISOString(),
+      type: "control.link.goal-request.v1",
+      payload: {
+        coordinatorInstanceId: "coordinator-test",
+        clientId: CLIENT_ID,
+        controlApiInstanceId: CONTROL_API_INSTANCE_ID,
+        operationId,
+        taskId: operationId,
+        botId: BOT_ID,
+        actorId: "operator-01",
+        operatorGoal: "采集一些圆石",
+        timeoutMs: 30_000,
+        issuedAt: NOW.toISOString(),
+        expiresAt: new Date(NOW.getTime() + 35_000).toISOString(),
+      },
+    })));
+
+    let response = await reader.next();
+    while (response.type !== "control.link.goal-response.v1") {
+      response = await reader.next();
+    }
+    expect(response).toMatchObject({
+      ok: true,
+      payload: {
+        operationId,
+        result: {
+          action: "skill_result",
+          outcome: "completed",
+          summary: { targetsFound: 0, itemsCollected: 0 },
+        },
+      },
+    });
+    // The allow-list is by name: a block name is not a count, and the goal
+    // response must not become wider than the planner's prompt boundary.
+    expect(JSON.stringify(response)).not.toContain("cobblestone");
   });
 
   it("streams the submitted task ID from running through completion", async () => {
@@ -921,6 +1170,64 @@ describe("Coordinator Control Link server", () => {
     });
   });
 
+  it("logs the originating planner code and step without widening the client error", async () => {
+    const planAndDispatch = vi.fn(async () => {
+      throw new LocalPlannerError(
+        "PLANNER_GOAL_EXECUTION_FAILED",
+        "injected step failure",
+        { stepIndex: 1, stepSkillId: "craft.item" },
+      );
+    });
+    const { registry, url } = await startServer({
+      goalPlanner: { planAndDispatch },
+    });
+    registry.ingest(statusMessage(1), NOW);
+    const { socket, reader } = await authenticate(url);
+    await readSnapshot(reader);
+    const operationId = testUuid(989);
+    socket.send(JSON.stringify(controlLinkGoalRequestV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: testUuid(992),
+      timestamp: NOW.toISOString(),
+      type: "control.link.goal-request.v1",
+      payload: {
+        coordinatorInstanceId: "coordinator-test",
+        clientId: CLIENT_ID,
+        controlApiInstanceId: CONTROL_API_INSTANCE_ID,
+        operationId,
+        taskId: operationId,
+        botId: BOT_ID,
+        actorId: "operator-01",
+        operatorGoal: "采集附近的木材",
+        timeoutMs: 30_000,
+        issuedAt: NOW.toISOString(),
+        expiresAt: new Date(NOW.getTime() + 35_000).toISOString(),
+      },
+    })));
+
+    // The wire keeps the coarse code, so no planner internals leak to the
+    // client; the log is where triage learns which failure it actually was.
+    let failure: any;
+    await vi.waitFor(async () => {
+      failure = await reader.next();
+      expect(failure).toMatchObject({
+        type: "control.link.goal-response.v1",
+        ok: false,
+        payload: { operationId, errorCode: "PLANNER_REJECTED" },
+      });
+    });
+    expect(JSON.stringify(failure)).not.toContain("craft.item");
+    expect(logger.warn).toHaveBeenCalledWith(
+      "coordinator_control_link_goal_failed",
+      expect.objectContaining({
+        code: "PLANNER_REJECTED",
+        plannerCode: "PLANNER_GOAL_EXECUTION_FAILED",
+        plannerStepIndex: 1,
+        plannerStepSkillId: "craft.item",
+      }),
+    );
+  });
+
   it("aborts an active goal when the Coordinator stops", async () => {
     let receivedSignal: AbortSignal | undefined;
     const baseStore = testGoalStore();
@@ -985,6 +1292,7 @@ async function startServer(
     stopController: { requestStop: (...args: any[]) => Promise<any> };
     goalPlanner: { planAndDispatch: (...args: any[]) => Promise<any> };
     goalStore: GoalLifecycleStore;
+    queuedGoalStore: QueuedGoalLifecycleStore;
     taskHistoryReader: TaskHistoryReader;
     taskReadCapability: boolean;
     maxPendingTaskReads: number;
@@ -1023,6 +1331,9 @@ async function startServer(
           goalPlanner: overrides.goalPlanner,
           goalStore: overrides.goalStore ?? testGoalStore(),
         }),
+    ...(overrides.queuedGoalStore === undefined
+      ? {}
+      : { queuedGoalStore: overrides.queuedGoalStore }),
     ...(overrides.taskHistoryReader === undefined
       ? {}
       : { taskHistoryReader: overrides.taskHistoryReader }),
@@ -1110,6 +1421,52 @@ function testGoalStore(): GoalLifecycleStore {
       states.set(request.payload.operationId, snapshot);
       return snapshot;
     },
+  };
+}
+
+function goalRequest(
+  operationId: string,
+  messageId: string,
+  timeoutMs = 30_000,
+): ControlLinkGoalRequestV1 {
+  return controlLinkGoalRequestV1Schema.parse({
+    schemaVersion: "1.0",
+    messageId,
+    timestamp: NOW.toISOString(),
+    type: "control.link.goal-request.v1",
+    payload: {
+      coordinatorInstanceId: "coordinator-test",
+      clientId: CLIENT_ID,
+      controlApiInstanceId: CONTROL_API_INSTANCE_ID,
+      operationId,
+      taskId: operationId,
+      botId: BOT_ID,
+      actorId: "operator-01",
+      operatorGoal: "排队目标",
+      timeoutMs,
+      issuedAt: NOW.toISOString(),
+      expiresAt: new Date(NOW.getTime() + timeoutMs + 5_000).toISOString(),
+    },
+  });
+}
+
+function goalSnapshot(
+  request: ControlLinkGoalRequestV1,
+  status: GoalLifecycleSnapshot["status"],
+  result: GoalDispatchResultV1 | null = null,
+  errorCode: ControlLinkGoalErrorCode | null = null,
+): GoalLifecycleSnapshot {
+  return {
+    operationId: request.payload.operationId,
+    taskId: request.payload.taskId,
+    botId: request.payload.botId,
+    fingerprint: durableGoalFingerprint(request),
+    title: "Submitted goal",
+    status,
+    startedAt: status === "queued" ? null : NOW.toISOString(),
+    updatedAt: NOW.toISOString(),
+    result,
+    errorCode,
   };
 }
 
