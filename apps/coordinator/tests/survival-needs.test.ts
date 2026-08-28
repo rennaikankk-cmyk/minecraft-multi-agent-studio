@@ -44,14 +44,13 @@ describe("assessSurvivalNeeds", () => {
     });
   });
 
-  it("treats rotten flesh as not safe food", () => {
+  it("counts rotten flesh as emergency safe food", () => {
+    // 无规则立场：腐肉只有饥饿 debuff 不掉血，饿死面前算安全食物。
     const needs = assess({
       inventory: [{ itemName: "rotten_flesh", count: 32 }],
-      foodLevel: 12,
+      foodLevel: 20,
     });
-    expect(needs.find((need) => need.key === "FOOD_SECURITY")).toMatchObject({
-      score: 92,
-    });
+    expect(needs.find((need) => need.key === "FOOD_SECURITY")).toBeUndefined();
   });
 
   it("counts planks toward the wood reserve at a quarter rate", () => {

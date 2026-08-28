@@ -86,7 +86,19 @@ export const serverProfileCombatConfigSchema = z
 export const serverProfilePurposeSchema = z.enum([
   "isolated-test",
   "managed",
+  /**
+   * 无规则（anarchy）服务器：对抗开挂玩家，强度优先。允许公网地址；
+   * 导航默认切到 ANARCHY 档（沿途挖掘/疾跑/跑酷/搭高）。
+   */
+  "anarchy",
 ]);
+
+/**
+ * 导航档位。safe = 反作弊兼容立场（不沿途挖掘、不跑酷、限下落）；
+ * anarchy = 无规则服强度优先，全部放开（仅保留防活埋/防引液两条例外，
+ * 它们是存活安全，不是反作弊让步）。
+ */
+export const serverProfileNavigationSchema = z.enum(["safe", "anarchy"]);
 
 function isLoopbackHost(host: string): boolean {
   const normalized = host.toLowerCase();
@@ -125,15 +137,28 @@ function isPrivateIpv6(host: string): boolean {
   );
 }
 
-function hostMatchesScope(host: string, scope: "loopback" | "private-lan"): boolean {
+function hostMatchesScope(
+  host: string,
+  scope: "loopback" | "private-lan" | "public",
+): boolean {
   if (isLoopbackHost(host)) return true;
   if (scope === "loopback") return false;
+  if (scope === "public") return true;
 
   return (
     isPrivateIpv4(host) ||
     isPrivateIpv6(host) ||
     host.toLowerCase() === "host.docker.internal"
   );
+}
+
+function isResolvablePublicHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase();
+  if (!normalized) return false;
+  // IPv4 / IPv6 字面量或 DNS 名（排除内网保留名）。公网由调用方显式声明，
+  // 这里只挡明显写错的东西（空串、带协议前缀、带空格）。
+  if (/^https?:\/\//u.test(normalized)) return false;
+  return /^[a-z0-9.:\-]+$/u.test(normalized);
 }
 
 export const serverProfileSchema = z
@@ -150,7 +175,7 @@ export const serverProfileSchema = z
       .max(128)
       .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u),
     purpose: serverProfilePurposeSchema,
-    networkScope: z.enum(["loopback", "private-lan"]),
+    networkScope: z.enum(["loopback", "private-lan", "public"]),
     host: z.string().trim().min(1).max(253),
     port: z.number().int().min(1).max(65_535),
     minecraftVersion: z.union([
@@ -171,6 +196,8 @@ export const serverProfileSchema = z
       .regex(MINECRAFT_USERNAME_PATTERN),
     auth: z.literal("offline"),
     combat: serverProfileCombatConfigSchema.optional(),
+    /** 导航档位；缺省 safe。anarchy purpose 建议配 anarchy（也可手动选 safe）。 */
+    navigation: serverProfileNavigationSchema.optional(),
     statusIntervalMs: z.number().int().min(250).max(30_000),
     heartbeatIntervalMs: z.number().int().min(1_000).max(60_000),
     stopGracePeriodMs: z.number().int().min(0).max(30_000),
@@ -190,6 +217,26 @@ export const serverProfileSchema = z
         code: "custom",
         path: ["host"],
         message: "Host must be loopback or a private LAN address allowed by networkScope.",
+      });
+    }
+    if (
+      profile.networkScope === "public" &&
+      profile.purpose !== "anarchy"
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["networkScope"],
+        message: "Public network scope is only permitted for anarchy-purpose profiles.",
+      });
+    }
+    if (
+      profile.networkScope === "public" &&
+      !isResolvablePublicHost(profile.host)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["host"],
+        message: "Public host must be a bare IPv4/IPv6 literal or DNS name.",
       });
     }
     if (profile.reconnect.baseDelayMs > profile.reconnect.maxDelayMs) {

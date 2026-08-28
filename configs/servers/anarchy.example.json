@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "1.0",
+  "id": "anarchy-main",
+  "botId": "studio-bot-01",
+  "purpose": "anarchy",
+  "networkScope": "public",
+  "host": "example-anarchy-server.net",
+  "port": 25565,
+  "minecraftVersion": "auto",
+  "username": "ChangeMe01",
+  "auth": "offline",
+  "navigation": "anarchy",
+  "combat": {
+    "enabled": true,
+    "stance": "preserve-life",
+    "whitelist": {
+      "usernames": ["ChangeMe01"],
+      "uuids": []
+    }
+  },
+  "statusIntervalMs": 1000,
+  "heartbeatIntervalMs": 5000,
+  "stopGracePeriodMs": 5000,
+  "reconnect": {
+    "enabled": true,
+    "maxAttempts": 20,
+    "baseDelayMs": 2000,
+    "maxDelayMs": 60000
+  }
+}

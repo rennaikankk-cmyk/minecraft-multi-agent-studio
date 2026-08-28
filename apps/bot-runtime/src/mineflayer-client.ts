@@ -246,6 +246,8 @@ const SAFE_FORAGE_ENTITY_NAMES = new Set([
   "pig",
   "rabbit",
   "sheep",
+  // 鸡此前缺席：生鸡肉是可靠食物来源，击杀无反击风险。
+  "chicken",
 ]);
 const SAFE_FORAGE_BLOCK_NAMES = Object.freeze([
   "sweet_berry_bush",
@@ -292,7 +294,7 @@ const INVENTORY_TIDY_KEEP_THRESHOLDS: Readonly<Record<string, number>> = Object.
   pumpkin_seeds: 8,
   melon_seeds: 8,
   oak_sapling: 8,
-  rotten_flesh: 0,
+  rotten_flesh: 16,
   bone: 16,
   string: 16,
   spider_eye: 0,
@@ -628,6 +630,47 @@ function normalizeDimension(value: string): string {
   if (value.includes(":")) return value.toLowerCase();
   const normalized = value.toLowerCase().replace(/[^a-z0-9_./-]/gu, "_");
   return `minecraft:${normalized || "unknown"}`;
+}
+
+/**
+ * 无规则服导航档：没有反作弊、没有封号风险，强度优先。与 safe 档唯一的
+ * 交集是两条**存活安全**约束（dontCreateFlow / dontMineUnderFallingBlock）
+ * ——它们防的是把岩浆/水引进家和被沙砾活埋，与反作弊无关。
+ */
+export function configureAnarchyPathfinderMovements(
+  movements: Movements,
+  bot: Pick<Bot, "registry">,
+): Movements {
+  movements.canDig = true;
+  movements.canOpenDoors = true;
+  movements.dontCreateFlow = true;
+  movements.dontMineUnderFallingBlock = true;
+  movements.allow1by1towers = true;
+  movements.allowFreeMotion = true;
+  movements.allowParkour = true;
+  movements.allowSprinting = true;
+  const registry = bot.registry as unknown as {
+    blocksByName?: Readonly<Record<string, { id: number }>>;
+  };
+  movements.scafoldingBlocks = ["cobblestone", "dirt", "oak_planks", "netherrack"]
+    .map((name) => registry.blocksByName?.[name]?.id)
+    .filter((id): id is number => typeof id === "number");
+  movements.maxDropDown = 4;
+  movements.infiniteLiquidDropdownDistance = false;
+  // 元组类型要求至少一个函数；() => 0 即"无额外代价"。
+  movements.exclusionAreasBreak = [() => 0];
+  movements.exclusionAreasPlace = [() => 0];
+  return movements;
+}
+
+export function configureNavigationMovements(
+  movements: Movements,
+  bot: Pick<Bot, "registry">,
+  anarchy: boolean,
+): Movements {
+  return anarchy
+    ? configureAnarchyPathfinderMovements(movements, bot)
+    : configureSafePathfinderMovements(movements);
 }
 
 export function configureSafePathfinderMovements(
@@ -1055,6 +1098,9 @@ export class MineflayerBotClient implements BotClient {
   private versionUnsupportedReported = false;
   private inventoryListenerBound = false;
   /** Single owner for Pathfinder, collectblock, combat and recovery motion. */
+  private readonly anarchyNavigation: boolean = false;
+  /** 最近一次熔炉掠夺的物品名（诊断留痕，不参与计数）。 */
+  private lastFurnaceLoot: string[] = [];
   readonly movementController: MovementController;
   private readonly worldState: WorldStateStore;
   private readonly actionLocks = new ActionLockManager();
@@ -1090,7 +1136,10 @@ export class MineflayerBotClient implements BotClient {
     private readonly serverProfileId: string | null = null,
     combatEnabledOrWorldState: boolean | WorldStateStore = false,
     worldState = new WorldStateStore(),
+    navigationProfile: ServerProfile["navigation"] = "safe",
   ) {
+    /** 无规则服导航档：true = 沿途挖掘/疾跑/跑酷/搭高全部放开。 */
+    this.anarchyNavigation = navigationProfile === "anarchy";
     const combatEnabled = typeof combatEnabledOrWorldState === "boolean"
       ? combatEnabledOrWorldState
       : false;
@@ -1952,7 +2001,7 @@ export class MineflayerBotClient implements BotClient {
     if (!Number.isFinite(distance) || distance > SAFE_PATH_MAX_DISTANCE) {
       throw new SkillFault("TARGET_OUT_OF_SAFE_RANGE");
     }
-    const movements = configureSafePathfinderMovements(new Movements(this.bot));
+    const movements = configureNavigationMovements(new Movements(this.bot), this.bot, this.anarchyNavigation);
     this.bot.pathfinder.setMovements(movements);
     this.bot.pathfinder.thinkTimeout = MINE_PATH_THINK_TIMEOUT_MS;
     this.bot.pathfinder.tickTimeout = MINE_PATH_TICK_TIMEOUT_MS;
@@ -2974,7 +3023,7 @@ export class MineflayerBotClient implements BotClient {
 
     const inventoryBefore = this.countStaircaseCollectionItems(blockName);
     let targetBlocksDug = 0;
-    const movements = configureSafePathfinderMovements(new Movements(this.bot));
+    const movements = configureNavigationMovements(new Movements(this.bot), this.bot, this.anarchyNavigation);
     this.bot.pathfinder.setMovements(movements);
     this.bot.pathfinder.thinkTimeout = COLLECT_PATH_THINK_TIMEOUT_MS;
     this.bot.pathfinder.tickTimeout = COLLECT_PATH_TICK_TIMEOUT_MS;
@@ -3489,7 +3538,7 @@ export class MineflayerBotClient implements BotClient {
     // 采集途中不允许插件把物品倒进任何箱子——入库是 container.transfer
     // 的职责，且必须显式授权。
     this.bot.collectBlock.chestLocations = [];
-    const movements = configureSafePathfinderMovements(new Movements(this.bot));
+    const movements = configureNavigationMovements(new Movements(this.bot), this.bot, this.anarchyNavigation);
     const targetBlockKeys = new Set(
       targets.map(
         ({ position, type }) =>
@@ -4102,7 +4151,7 @@ export class MineflayerBotClient implements BotClient {
     });
     if (lease === null) throw new SkillFault("BOT_MOVEMENT_BUSY");
 
-    const movements = configureSafePathfinderMovements(new Movements(this.bot));
+    const movements = configureNavigationMovements(new Movements(this.bot), this.bot, this.anarchyNavigation);
     this.bot.pathfinder.setMovements(movements);
     this.bot.pathfinder.thinkTimeout = 5_000;
     this.bot.pathfinder.tickTimeout = 20;
@@ -4343,8 +4392,25 @@ export class MineflayerBotClient implements BotClient {
     let smeltedCount = 0;
     try {
       furnace = await this.bot.openFurnace(block);
-      if (furnace.inputItem() || furnace.fuelItem() || furnace.outputItem()) {
-        throw new SkillFault("FURNACE_NOT_EMPTY");
+      // 无规则立场：别人的炉子先**掠夺**再使用（拿走产物/在烧物/燃料），
+      // 而不是拒绝使用。空出来的炉子就是我们的炉子。读回计数只认自己
+      // 投入后取出的部分，炉内旧物在 loot 日志里单独留痕。
+      const openFurnace = furnace;
+      if (openFurnace.outputItem() || openFurnace.inputItem() || openFurnace.fuelItem()) {
+        const takeOrder: Array<() => Promise<unknown>> = [
+          () => openFurnace.takeOutput(),
+          () => openFurnace.takeInput(),
+          () => openFurnace.takeFuel(),
+        ];
+        const lootedNames: string[] = [];
+        for (const take of takeOrder) {
+          if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+          const taken = await take().catch(() => null);
+          if (taken && typeof (taken as { name?: string }).name === "string") {
+            lootedNames.push((taken as { name: string }).name);
+          }
+        }
+        this.lastFurnaceLoot = lootedNames;
       }
       if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
       await furnace.putInput(inputType.id, null, input.data.count);
@@ -5405,6 +5471,7 @@ export function createMineflayerClient(
     profile.id,
     profile.combat?.enabled === true,
     worldState,
+    profile.navigation ?? "safe",
   );
 }
 

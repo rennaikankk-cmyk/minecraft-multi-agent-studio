@@ -15,8 +15,11 @@ import { defineSkill } from "../types.js";
 // ---------------------------------------------------------------------------
 
 export const COLLECT_BLOCK_TIMEOUT_MS = 60_000;
-export const COLLECT_MAX_COUNT = 32;
-export const COLLECT_MAX_DISTANCE = 32;
+export const COLLECT_MAX_COUNT = 64;
+// 无规则服强度优先：半径上限直接拉满（findBlocks 有 count 截断，稀疏目标
+// 才会吃满扫描面积）。反作弊兼容档位不受此影响——那是每动作合法性，
+// 不是"找多远"。
+export const COLLECT_MAX_DISTANCE = 64;
 
 const dimensionSchema = z
   .string()

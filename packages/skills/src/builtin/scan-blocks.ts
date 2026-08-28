@@ -16,8 +16,8 @@ import { defineSkill } from "../types.js";
 // ---------------------------------------------------------------------------
 
 export const SCAN_BLOCKS_TIMEOUT_MS = 10_000;
-export const SCAN_MAX_COUNT = 16;
-export const SCAN_MAX_DISTANCE = 64;
+export const SCAN_MAX_COUNT = 32;
+export const SCAN_MAX_DISTANCE = 96;
 
 const dimensionSchema = z
   .string()

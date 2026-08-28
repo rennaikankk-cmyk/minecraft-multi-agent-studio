@@ -40,6 +40,9 @@ export const SAFE_FOOD_ITEM_NAMES: ReadonlySet<string> = new Set([
   "potato",
   "melon_slice",
   "sweet_berries",
+  // 与 runtime L0 的应急口粮口径一致：腐肉有饥饿 debuff 但不掉血，
+  // 饿死面前算安全食物（排序/进食选择自然把它放在最后）。
+  "rotten_flesh",
 ]);
 
 export type SurvivalNeedKey =

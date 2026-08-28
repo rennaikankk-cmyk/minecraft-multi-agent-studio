@@ -33,6 +33,39 @@ describe("ServerProfile", () => {
     expect(serverProfileSchema.parse(validProfile)).toEqual(validProfile);
   });
 
+  it("accepts an anarchy profile with a public host and anarchy navigation", () => {
+    const anarchy = serverProfileSchema.parse({
+      ...validProfile,
+      purpose: "anarchy",
+      networkScope: "public",
+      host: "example-anarchy.net",
+      navigation: "anarchy",
+    });
+    expect(anarchy.navigation).toBe("anarchy");
+  });
+
+  it("rejects a public scope outside the anarchy purpose", () => {
+    expect(() =>
+      serverProfileSchema.parse({
+        ...validProfile,
+        purpose: "isolated-test",
+        networkScope: "public",
+        host: "example-anarchy.net",
+      }),
+    ).toThrow(/anarchy-purpose/u);
+  });
+
+  it("rejects malformed public hosts", () => {
+    expect(() =>
+      serverProfileSchema.parse({
+        ...validProfile,
+        purpose: "anarchy",
+        networkScope: "public",
+        host: "https://example-anarchy.net",
+      }),
+    ).toThrow(/bare IPv4/u);
+  });
+
   it("accepts an explicit bounded combat configuration", () => {
     const combat = {
       enabled: true,

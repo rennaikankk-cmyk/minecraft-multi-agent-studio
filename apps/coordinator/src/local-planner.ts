@@ -587,10 +587,9 @@ type PlanStepBinding = Readonly<{
   placementReference: PlacementPosition | null;
 }>;
 
-// collect.block 的契约上限是 32；实测 16 在稀疏林地/平原上大量目标被
-// 判不可达（"No exposed oak_log target was found within 16 blocks"），
-// 恢复梯被迫一次又一次换区，采集吞吐极低。用到契约上限。
-const COORDINATOR_COLLECT_MAX_DISTANCE = 32;
+// collect.block 的契约上限（无规则服强度优先已拉到 64）；实测 16 在稀疏
+// 林地/平原上大量目标被判不可达，恢复梯被迫反复换区。直接用契约上限。
+const COORDINATOR_COLLECT_MAX_DISTANCE = 64;
 const REOBSERVE_TIMEOUT_MS = 5_000;
 const NON_IDEMPOTENT_RESULT_UNCERTAIN = "NON_IDEMPOTENT_RESULT_UNCERTAIN";
 
