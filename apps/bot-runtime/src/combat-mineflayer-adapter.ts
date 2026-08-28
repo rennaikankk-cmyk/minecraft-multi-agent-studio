@@ -1,4 +1,5 @@
 import type { Bot } from "mineflayer";
+import { Vec3 } from "vec3";
 
 import {
   combatEntityFromMineflayer,
@@ -9,6 +10,7 @@ import {
   TotemPopTracker,
   explosionRuleSetForMinecraftVersion,
   type CombatGearSnapshot,
+  type CombatWeaponCandidate,
 } from "@minecraft-studio/combat";
 import type {
   CombatActionAcknowledgement,
@@ -56,10 +58,13 @@ type CombatBotLike = Readonly<{
   getEquipmentDestSlot?: (destination: string) => number;
   equip?: (item: unknown, destination: string) => Promise<void>;
   attack?: (entity: unknown) => Promise<void> | void;
+  activateItem?: (offHand?: boolean) => void;
+  deactivateItem?: () => void;
   look?: (yaw: number, pitch: number, force?: boolean) => Promise<void>;
   setControlState?: (control: string, state: boolean) => void;
   clearControlStates?: () => void;
   pathfinder?: Readonly<{ stop?: () => void }>;
+  blockAt?: (position: VecLike) => Readonly<{ name?: unknown }> | null;
 }>;
 
 type CombatBotHeldItemState = {
@@ -213,6 +218,20 @@ const ARMOR_MATERIAL_RANK: Readonly<Record<Exclude<ArmorMaterial, "none">, numbe
   diamond: 4,
   netherite: 5,
 };
+
+const COMBAT_HAZARD_BLOCKS = new Set([
+  "lava",
+  "fire",
+  "soul_fire",
+  "magma_block",
+  "cactus",
+  "powder_snow",
+  "sweet_berry_bush",
+  "campfire",
+  "soul_campfire",
+  "pointed_dripstone",
+]);
+const COMBAT_HAZARD_SCAN_RADIUS = 2;
 
 /**
  * Narrow Mineflayer boundary for the deterministic combat layer. World
@@ -435,7 +454,20 @@ export class MineflayerCombatAdapter {
       })
       .filter((value): value is NonNullable<typeof value> => value !== null);
     const offhand = this.equipmentItem(bot, "off-hand");
+    const heldItem = this.equipmentItem(bot, "hand");
     const selfGear = this.gearSnapshot(self, inventoryItems, offhand);
+    const weapons = inventoryItems
+      .map((item) => this.weaponCandidate(item))
+      .filter((value): value is NonNullable<typeof value> => value !== null);
+    const heldFallback = heldItem === null
+      ? null
+      : this.weaponCandidate(heldItem, true);
+    if (
+      heldFallback !== null &&
+      !weapons.some(({ slot }) => slot === heldFallback.slot)
+    ) {
+      weapons.push(heldFallback);
+    }
     const orientation = {
       yaw: radiansToDegrees(yaw),
       pitch: radiansToDegrees(pitch),
@@ -462,18 +494,17 @@ export class MineflayerCombatAdapter {
         gear: selfGear,
         orientation,
         heldItemSlot: this.heldItemSlot(bot),
+        usingHeldItem: (bot as CombatBotHeldItemState).usingHeldItem === true,
         onGround: self.onGround === true,
         fallDistance: finiteNumber((self as EntityLike & { fallDistance?: unknown }).fallDistance)
           ? Number((self as EntityLike & { fallDistance?: unknown }).fallDistance)
           : null,
       },
       entities,
-      weapons: inventoryItems
-        .map((item) => this.weaponCandidate(item))
-        .filter((value): value is NonNullable<typeof value> => value !== null),
+      weapons,
       crystalCandidates: null,
       mineCandidates: null,
-      hazards: null,
+      hazards: this.hazardsAround(position),
     };
   }
 
@@ -488,6 +519,7 @@ export class MineflayerCombatAdapter {
       switch (action.kind) {
         case "DISENGAGE":
           this.movementAbortController?.abort();
+          bot.deactivateItem?.();
           bot.pathfinder?.stop?.();
           bot.clearControlStates?.();
           return { outcome: "executed", executedAtMs: this.clock() };
@@ -513,6 +545,26 @@ export class MineflayerCombatAdapter {
           await bot.attack(target);
           return { outcome: "executed", executedAtMs: this.clock() };
         }
+        case "DRAW_RANGED_WEAPON": {
+          const item = bot.inventory?.slots?.[action.weaponSlot];
+          if (!item || !bot.activateItem) {
+            return {
+              outcome: "unavailable",
+              reasonCode: "COMBAT_WEAPON_NOT_IN_INVENTORY",
+            };
+          }
+          bot.activateItem(false);
+          return { outcome: "executed", executedAtMs: this.clock() };
+        }
+        case "RELEASE_RANGED_WEAPON":
+          if (!bot.deactivateItem) {
+            return {
+              outcome: "unavailable",
+              reasonCode: "COMBAT_ACTION_ADAPTER_UNAVAILABLE",
+            };
+          }
+          bot.deactivateItem();
+          return { outcome: "executed", executedAtMs: this.clock() };
         case "ROTATE":
           if (!bot.look) return { outcome: "unavailable", reasonCode: "COMBAT_ROTATION_UNAVAILABLE" };
           await bot.look(
@@ -557,8 +609,56 @@ export class MineflayerCombatAdapter {
     this.explosionObservations = [];
     this.movementAbortController?.abort();
     this.movementAbortController = null;
+    bot.deactivateItem?.();
     bot.pathfinder?.stop?.();
     bot.clearControlStates?.();
+  }
+
+  /**
+   * MovementController needs an honest local hazard set. Mineflayer's blockAt
+   * is synchronous, so a small loaded-area scan is cheap and keeps ordinary
+   * weapon movement from being rejected simply because hazards were left
+   * permanently unknown. Any missing sample remains unknown and fails closed.
+   */
+  private hazardsAround(position: VecLike): readonly VecLike[] | null {
+    const bot = this.bot as unknown as CombatBotLike;
+    if (typeof bot.blockAt !== "function") return null;
+    const hazards: VecLike[] = [];
+    const baseX = Math.floor(position.x);
+    const baseY = Math.floor(position.y);
+    const baseZ = Math.floor(position.z);
+    for (
+      let dx = -COMBAT_HAZARD_SCAN_RADIUS;
+      dx <= COMBAT_HAZARD_SCAN_RADIUS;
+      dx += 1
+    ) {
+      for (
+        let dz = -COMBAT_HAZARD_SCAN_RADIUS;
+        dz <= COMBAT_HAZARD_SCAN_RADIUS;
+        dz += 1
+      ) {
+        for (const dy of [-1, 0, 1] as const) {
+          let block: Readonly<{ name?: unknown }> | null;
+          try {
+            block = bot.blockAt(
+              new Vec3(baseX + dx, baseY + dy, baseZ + dz),
+            );
+          } catch {
+            return null;
+          }
+          if (block === null || typeof block.name !== "string") return null;
+          const name = block.name.toLowerCase().replace(/^minecraft:/u, "");
+          if (COMBAT_HAZARD_BLOCKS.has(name)) {
+            hazards.push({
+              x: baseX + dx,
+              y: baseY + dy,
+              z: baseZ + dz,
+            });
+          }
+        }
+      }
+    }
+    return hazards;
   }
 
   private entityObservation(
@@ -777,14 +877,17 @@ export class MineflayerCombatAdapter {
     } as const;
   }
 
-  private weaponCandidate(item: ItemLike) {
+  private weaponCandidate(
+    item: ItemLike,
+    allowOther = false,
+  ): CombatWeaponCandidate | null {
     const name = typeof item.name === "string" ? item.name : null;
     if (!name) return null;
     const kindEntry = [...WEAPON_KINDS.entries()].find(([suffix]) => name.endsWith(`_${suffix}`) || name === suffix);
-    if (!kindEntry) return null;
+    if (!kindEntry && !allowOther) return null;
     const slot = Number.isSafeInteger(item.slot) ? Number(item.slot) : -1;
     if (slot < 0) return null;
-    const kind = kindEntry[1];
+    const kind = kindEntry?.[1] ?? "other";
     const ranged = kind === "bow" || kind === "crossbow";
     return {
       slot,
@@ -798,9 +901,17 @@ export class MineflayerCombatAdapter {
       enchantmentDamageBonus: 0,
       ...(ranged
         ? {
-            ammoRemaining: (this.bot as unknown as CombatBotLike).inventory?.items?.().filter(
-              (candidate) => candidate.name === "arrow",
-            ).length ?? 0,
+            ammoRemaining: (this.bot as unknown as CombatBotLike).inventory
+              ?.items?.()
+              .filter((candidate) => candidate.name === "arrow")
+              .reduce(
+                (sum, candidate) =>
+                  sum +
+                  (Number.isSafeInteger(candidate.count)
+                    ? Number(candidate.count)
+                    : 0),
+                0,
+              ) ?? 0,
             drawTimeMs: kind === "bow" ? 1_000 : 1_250,
             effectiveRange: kind === "bow" ? 32 : 32,
           }

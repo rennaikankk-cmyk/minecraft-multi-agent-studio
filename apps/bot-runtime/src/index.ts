@@ -141,6 +141,7 @@ export type {
   BotClientFactory,
   BotClientHandlers,
   BotClientSnapshot,
+  BotDamageInfo,
   BotDisconnectInfo,
 } from "./client.js";
 export {

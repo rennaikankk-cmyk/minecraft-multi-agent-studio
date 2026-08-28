@@ -203,6 +203,62 @@ test("creates and reloads a managed Bot through the loopback API", async (contex
   assert.equal(status.bots[0].processState, "running");
 });
 
+test("enables combat and isolates same-server Bot whitelists", async (context) => {
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "studio-manager-combat-test-"));
+  context.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  const options = {
+    repositoryRoot: process.cwd(),
+    runtimeRoot,
+    port: 0,
+    token: TOKEN,
+    slots: createLocalBotSlots(SECRET, 3),
+    aiStatus: unavailableStatus(),
+    environment: { STUDIO_SPARK_AUTO_DISCOVERY: "0" },
+    runtimeLinkPort: 3220,
+    packagedMode: false,
+  };
+  const manager = new StudioLocalManager(options);
+  manager.startBot = fakeStart(manager);
+  const address = await manager.start();
+  context.after(() => manager.stop());
+
+  const create = (username, serverPort = 25565) =>
+    fetch(`http://127.0.0.1:${address.port}/v1/bots`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        schemaVersion: "1.0",
+        username,
+        serverHost: "127.0.0.1",
+        serverPort,
+        minecraftVersion: "auto",
+      }),
+    });
+
+  assert.equal((await create("StudioBot1")).status, 201);
+  assert.equal((await create("StudioBot2")).status, 201);
+  assert.equal((await create("StudioBot3", 25566)).status, 201);
+
+  const profile = async (botId) => JSON.parse(
+    await readFile(
+      path.join(runtimeRoot, "bots", botId, "server-profile.json"),
+      "utf8",
+    ),
+  );
+  const first = await profile("studio-bot-01");
+  const second = await profile("studio-bot-02");
+  const third = await profile("studio-bot-03");
+  assert.equal(first.combat.enabled, true);
+  assert.deepEqual(first.combat.whitelist.usernames, ["StudioBot2"]);
+  assert.deepEqual(second.combat.whitelist.usernames, ["StudioBot1"]);
+  assert.deepEqual(third.combat.whitelist.usernames, []);
+  assert.deepEqual(third.combat.whitelist.uuids, []);
+  assert.equal(first.combat.whitelist.usernames.includes("davaidman"), false);
+});
+
 test("cleans up a forced Bot stop before a restart can reuse its slot", async () => {
   const manager = new StudioLocalManager({
     repositoryRoot: process.cwd(),

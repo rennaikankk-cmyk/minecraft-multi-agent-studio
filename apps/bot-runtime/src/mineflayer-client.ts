@@ -162,6 +162,7 @@ const ARMOR_ITEM_SLOT: Readonly<Record<string, "head" | "torso" | "legs" | "feet
 const SAFE_FOOD_NAMES = new Set([
   "apple",
   "baked_potato",
+  "beef",
   "beetroot",
   "beetroot_soup",
   "bread",
@@ -176,11 +177,55 @@ const SAFE_FOOD_NAMES = new Set([
   "dried_kelp",
   "glow_berries",
   "melon_slice",
+  "mutton",
   "mushroom_stew",
+  "porkchop",
   "pumpkin_pie",
+  "rabbit",
   "rabbit_stew",
+  "salmon",
   "sweet_berries",
 ]);
+
+const SAFE_FORAGE_ENTITY_NAMES = new Set([
+  "cow",
+  "pig",
+  "rabbit",
+  "sheep",
+]);
+const SAFE_FORAGE_BLOCK_NAMES = Object.freeze([
+  "sweet_berry_bush",
+  "cave_vines",
+  "cave_vines_plant",
+  "carrots",
+  "potatoes",
+  "beetroots",
+  "melon",
+] as const);
+const SAFE_FORAGE_EXPLORATION_DIRECTIONS = Object.freeze([
+  Object.freeze([1, 0] as const),
+  Object.freeze([0, 1] as const),
+  Object.freeze([-1, 0] as const),
+  Object.freeze([0, -1] as const),
+  Object.freeze([1, 1] as const),
+  Object.freeze([-1, 1] as const),
+  Object.freeze([-1, -1] as const),
+  Object.freeze([1, -1] as const),
+]);
+const SAFE_FORAGE_MAX_DISTANCE = 48;
+const SAFE_FORAGE_REACH_DISTANCE = 3.1;
+const SAFE_FORAGE_TOTAL_BUDGET_MS = 20_000;
+const SAFE_FORAGE_PATH_BUDGET_MS = 4_000;
+const SAFE_FORAGE_ATTACK_INTERVAL_MS = 650;
+const SAFE_FORAGE_PICKUP_BUDGET_MS = 2_500;
+const SAFE_FORAGE_EXPLORATION_DISTANCE = 12;
+const SAFE_FORAGE_MAX_CANDIDATES = 4;
+
+type SafeForageBlockInteraction = "activate" | "dig";
+type SafeForageBlockTarget = Readonly<{
+  block: NonNullable<ReturnType<Bot["blockAt"]>>;
+  interaction: SafeForageBlockInteraction;
+}>;
 
 const COLLECT_INVENTORY_SYNC_TIMEOUT_MS = 1_000;
 // Mineflayer emits `diggingCompleted` after its own local prediction — it writes
@@ -210,6 +255,57 @@ const BLOCK_DIG_STATUS_FINISH = 2;
 const MINE_PATH_THINK_TIMEOUT_MS = 8_000;
 const MINE_PATH_TICK_TIMEOUT_MS = 40;
 const MINE_TARGET_REACH_DISTANCE = 4.0;
+const STONE_STAIRCASE_MAX_DEPTH = 12;
+const STONE_STAIRCASE_STEP_PATH_BUDGET_MS = 4_000;
+const STONE_STAIRCASE_BREAKABLE = new Set([
+  "grass_block",
+  "dirt",
+  "coarse_dirt",
+  "rooted_dirt",
+  "podzol",
+  "mycelium",
+  "stone",
+  "andesite",
+  "diorite",
+  "granite",
+  "tuff",
+  "deepslate",
+  "coal_ore",
+  "deepslate_coal_ore",
+  "iron_ore",
+  "deepslate_iron_ore",
+  "copper_ore",
+  "deepslate_copper_ore",
+  "diamond_ore",
+  "deepslate_diamond_ore",
+]);
+const STONE_STAIRCASE_FALLING_BLOCKS = new Set([
+  "sand",
+  "red_sand",
+  "gravel",
+  "suspicious_sand",
+  "suspicious_gravel",
+]);
+const STONE_STAIRCASE_DIRECTIONS = [
+  { dx: 1, dz: 0 },
+  { dx: -1, dz: 0 },
+  { dx: 0, dz: 1 },
+  { dx: 0, dz: -1 },
+] as const;
+const RESOURCE_STAIRCASE_VERTICAL_STEPS = [-1, 1] as const;
+const STONE_COLLECTION_ITEMS = ["cobblestone", "stone"] as const;
+const STAIRCASE_RESOURCE_DROPS: Readonly<Record<string, readonly string[]>> =
+  Object.freeze({
+    stone: STONE_COLLECTION_ITEMS,
+    coal_ore: Object.freeze(["coal"]),
+    deepslate_coal_ore: Object.freeze(["coal"]),
+    iron_ore: Object.freeze(["raw_iron"]),
+    deepslate_iron_ore: Object.freeze(["raw_iron"]),
+    copper_ore: Object.freeze(["raw_copper"]),
+    deepslate_copper_ore: Object.freeze(["raw_copper"]),
+    diamond_ore: Object.freeze(["diamond"]),
+    deepslate_diamond_ore: Object.freeze(["diamond"]),
+  });
 const MINE_BACKFILL_ITEMS = [
   "cobblestone",
   "stone",
@@ -231,6 +327,33 @@ type MineflayerWireClient = {
 type InventorySyncWaiter = Readonly<{
   promise: Promise<void>;
   cancel: () => void;
+}>;
+
+type ResourceStaircasePlan = Readonly<{
+  origin: Vec3;
+  dx: number;
+  dy: -1 | 1;
+  dz: number;
+  safeDepth: number;
+  firstStoneDepth: number;
+  stoneBlocks: number;
+  closestTargetDistance: number;
+}>;
+
+type CollectBlockTargets = Readonly<{
+  getClosest?: () => unknown;
+  clear?: () => void;
+}>;
+
+type DirectCollectionTool = Readonly<{
+  equipForBlock: (
+    block: NonNullable<ReturnType<Bot["blockAt"]>>,
+    options: Readonly<{
+      requireHarvest: boolean;
+      getFromChest: boolean;
+      maxTools: number;
+    }>,
+  ) => Promise<void>;
 }>;
 
 type AuthoritativeBlockUpdate = Readonly<{
@@ -410,6 +533,13 @@ function safeDetail(value: unknown): string | undefined {
   return normalized ? normalized.slice(0, 500) : undefined;
 }
 
+function waitForDelay(durationMs: number): Promise<void> {
+  if (!Number.isFinite(durationMs) || durationMs <= 0) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => setTimeout(resolve, durationMs));
+}
+
 function normalizeDimension(value: string): string {
   if (value.includes(":")) return value.toLowerCase();
   const normalized = value.toLowerCase().replace(/[^a-z0-9_./-]/gu, "_");
@@ -571,6 +701,9 @@ const COLLECT_PATH_TICK_TIMEOUT_MS = 40;
 // 12-13 格深）。所以这个界不能小到误伤正常采集，只能用来兜住"永远不落定"：
 // 60s 合约减去最坏一次 travel+dig 后仍有余量，且留够时间把真实原因报上去。
 const COLLECT_SETTLE_BUDGET_MS = 25_000;
+const COLLECT_DIRECT_PATH_BUDGET_MS = 12_000;
+const COLLECT_DIRECT_PICKUP_PATH_BUDGET_MS = 6_000;
+const COLLECT_DIRECT_PICKUP_WAIT_MS = 2_000;
 
 const COLLECT_PRECHECK_BUDGET_MS = 1_500;
 
@@ -619,6 +752,8 @@ const COLLECT_LIVE_PATH_SUBSTITUTES = 1;
  */
 export type CollectReachability<TBlock> = Readonly<{
   reachable: TBlock[];
+  /** Candidates whose search timed out or did not run before the total budget. */
+  unproven: TBlock[];
   provenPathless: number;
   /**
    * 实际排过的候选数。它可以远小于 `targets.length`：逐候选 1500ms 配 6000ms
@@ -657,11 +792,13 @@ export function collectReachableTargets<TBlock extends { position: Vec3 }>(
   wanted: number = targets.length,
 ): CollectReachability<TBlock> {
   const reachable: TBlock[] = [];
+  const unproven: TBlock[] = [];
   let provenPathless = 0;
   let examined = 0;
   let stoppedOnTotalBudget = false;
   const deadline = Date.now() + COLLECT_PRECHECK_TOTAL_BUDGET_MS;
-  for (const target of targets) {
+  for (let index = 0; index < targets.length; index += 1) {
+    const target = targets[index]!;
     // 够数就停：池子放大是为了有替补，不是为了多采。攒到需求量就不再花钱，
     // 也顺手把交给 collect() 的目标数压在请求量之内。
     if (reachable.length >= wanted) break;
@@ -671,6 +808,7 @@ export function collectReachableTargets<TBlock extends { position: Vec3 }>(
     // 一个冒充定论的 UNREACHABLE。
     if (Date.now() >= deadline) {
       stoppedOnTotalBudget = true;
+      unproven.push(...targets.slice(index));
       break;
     }
     examined += 1;
@@ -693,9 +831,22 @@ export function collectReachableTargets<TBlock extends { position: Vec3 }>(
       reachable.push(target);
       continue;
     }
-    if (status === "noPath") provenPathless += 1;
+    if (status === "noPath") {
+      provenPathless += 1;
+    } else {
+      // Timeout is not proof that the live pathfinder cannot reach the block.
+      // Keep it as a bounded execution candidate instead of turning a 6-second
+      // read-only precheck into a permanent no-op loop.
+      unproven.push(target);
+    }
   }
-  return { reachable, provenPathless, examined, stoppedOnTotalBudget };
+  return {
+    reachable,
+    unproven,
+    provenPathless,
+    examined,
+    stoppedOnTotalBudget,
+  };
 }
 
 export function configurePathfinderMovements(
@@ -788,12 +939,14 @@ function mapDisconnectReason(
 
 export class MineflayerBotClient implements BotClient {
   private handlers: BotClientHandlers | null = null;
+  private lastObservedHealth: number | null = null;
   private requestedStop = false;
   private kickedDetail: string | undefined;
   private errorDetail: string | undefined;
   private versionUnsupportedReported = false;
   private inventoryListenerBound = false;
   private activePathInvocationId: string | null = null;
+  private safeForageExplorationCursor = 0;
   private readonly combatAdapter: MineflayerCombatAdapter;
 
   constructor(
@@ -808,10 +961,30 @@ export class MineflayerBotClient implements BotClient {
       combatEnabled,
     );
     bot.on("spawn", () => {
+      this.lastObservedHealth = finiteNumber(bot.health)
+        ? Number(bot.health)
+        : null;
       this.bindInventoryEvents();
       this.handlers?.onSpawn();
     });
-    bot.on("health", () => this.handlers?.onStateChanged());
+    bot.on("health", () => {
+      const currentHealth = finiteNumber(bot.health)
+        ? Number(bot.health)
+        : null;
+      const previousHealth = this.lastObservedHealth;
+      if (currentHealth !== null) this.lastObservedHealth = currentHealth;
+      if (
+        currentHealth !== null &&
+        previousHealth !== null &&
+        currentHealth < previousHealth
+      ) {
+        this.handlers?.onDamaged?.({
+          previousHealth,
+          currentHealth,
+        });
+      }
+      this.handlers?.onStateChanged();
+    });
     bot.on("breath", () => this.handlers?.onStateChanged());
     bot.on("move", () => this.handlers?.onStateChanged());
     bot.on("physicsTick", () => this.handlers?.onStateChanged());
@@ -862,6 +1035,20 @@ export class MineflayerBotClient implements BotClient {
       inventoryEnd >= inventoryStart
         ? this.bot.inventory.slots.slice(inventoryStart, inventoryEnd)
         : [];
+    const inventoryCounts = new Map<string, number>();
+    for (const item of this.bot.inventory.items()) {
+      if (
+        typeof item.name !== "string" ||
+        !Number.isSafeInteger(item.count) ||
+        item.count < 1
+      ) {
+        continue;
+      }
+      inventoryCounts.set(
+        item.name,
+        (inventoryCounts.get(item.name) ?? 0) + item.count,
+      );
+    }
     return {
       health: {
         current: this.bot.health,
@@ -872,6 +1059,9 @@ export class MineflayerBotClient implements BotClient {
         saturation: this.bot.foodSaturation,
       },
       armorPoints: readArmorPoints(this.bot),
+      inventory: [...inventoryCounts.entries()]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([itemName, count]) => ({ itemName, count })),
       position: {
         x: position.x,
         y: position.y,
@@ -913,7 +1103,7 @@ export class MineflayerBotClient implements BotClient {
       return { outcome: "skipped", errorCode: "RUNTIME_STOPPING" };
     }
     try {
-      this.stopPathfinder();
+      this.interruptNormalActions();
       if (
         action.kind === "PAUSE_NORMAL_TASKS" ||
         action.kind === "HALT_HORIZONTAL_MOVEMENT"
@@ -928,6 +1118,9 @@ export class MineflayerBotClient implements BotClient {
         await this.bot.equip(food.item, "hand");
         await this.bot.consume();
         return { outcome: "executed", errorCode: null };
+      }
+      if (action.kind === "FORAGE_SAFE_FOOD") {
+        return await this.forageSafeFood();
       }
       if (action.kind === "RETREAT_STEP") {
         await this.applyBoundedControls(action.durationMs, ["back", "sprint"]);
@@ -1424,6 +1617,12 @@ export class MineflayerBotClient implements BotClient {
     this.combatAdapter.setClock(clock);
   }
 
+  interruptNormalActions(): void {
+    this.releaseCollectBlockTask();
+    this.activePathInvocationId = null;
+    this.bot.clearControlStates();
+  }
+
   private async invokeMovementGoto(
     request: SkillCapabilityRequest,
   ): Promise<unknown> {
@@ -1700,6 +1899,89 @@ export class MineflayerBotClient implements BotClient {
   }
 
   /**
+   * Observe a real inventory increase without imposing a second travel timer.
+   * This is raced with collectblock because its dropped-entity GoalFollow can
+   * remain pending after the item has already entered the inventory.
+   */
+  private observeCollectedInventoryIncrease(
+    inventoryBefore: number,
+    signal: AbortSignal,
+  ): InventorySyncWaiter {
+    if (this.countInventoryTotal() > inventoryBefore) {
+      return { promise: Promise.resolve(), cancel: () => {} };
+    }
+    const inventory = this.bot.inventory;
+    if (
+      typeof inventory.on !== "function" ||
+      typeof inventory.off !== "function"
+    ) {
+      return { promise: new Promise<void>(() => {}), cancel: () => {} };
+    }
+
+    let cleanup = () => {};
+    const promise = new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        inventory.off("updateSlot", onUpdate);
+        signal.removeEventListener("abort", cleanup);
+        resolve();
+      };
+      const onUpdate = () => {
+        if (this.countInventoryTotal() > inventoryBefore) finish();
+      };
+      cleanup = () => {
+        if (settled) return;
+        settled = true;
+        inventory.off("updateSlot", onUpdate);
+        signal.removeEventListener("abort", cleanup);
+      };
+      inventory.on("updateSlot", onUpdate);
+      signal.addEventListener("abort", cleanup, { once: true });
+      onUpdate();
+    });
+    return { promise, cancel: cleanup };
+  }
+
+  /**
+   * Releases mineflayer-collectblock without awaiting its cancellation promise.
+   * The plugin can be stuck after pickup in GoalFollow(0), and cancelTask then
+   * waits for collectBlock_finished forever. Clearing its target queue and
+   * replaying the already-observed entity removal lets that loop unwind while
+   * keeping cancellation bounded for the Runtime.
+   */
+  private releaseCollectBlockTask(): void {
+    this.stopPathfinder();
+    const collectBlock = this.bot.collectBlock;
+    if (!collectBlock) return;
+    const targets = (collectBlock as unknown as { targets?: CollectBlockTargets })
+      .targets;
+    try {
+      const pending = targets?.getClosest?.();
+      if (
+        pending !== null &&
+        pending !== undefined &&
+        (pending as { constructor?: { name?: string } }).constructor?.name === "Entity"
+      ) {
+        this.bot.emit("entityGone", pending as never);
+      }
+    } catch {
+      // Plugin internals are best-effort cleanup; the pathfinder is already stopped.
+    }
+    try {
+      targets?.clear?.();
+    } catch {
+      // A plugin version without a mutable target queue still gets bounded cancellation.
+    }
+    try {
+      void collectBlock.cancelTask().catch(() => undefined);
+    } catch {
+      // Cancellation cannot change the observed inventory result.
+    }
+  }
+
+  /**
    * Mineflayer's dig promise resolves on a client-side prediction. Wrap it for
    * collectblock so the plugin only advances after a server block-change packet
    * confirms that the target became air. A bounded retry handles a finish packet
@@ -1831,6 +2113,715 @@ export class MineflayerBotClient implements BotClient {
     };
   }
 
+  private directCollectionAvailable(): boolean {
+    return (
+      typeof this.bot.pathfinder?.goto === "function" &&
+      typeof this.bot.pathfinder?.setMovements === "function" &&
+      this.directCollectionTool() !== null &&
+      typeof this.bot.dig === "function"
+    );
+  }
+
+  private directCollectionTool(): DirectCollectionTool | null {
+    const tool = (this.bot as Bot & { tool?: DirectCollectionTool }).tool;
+    return tool && typeof tool.equipForBlock === "function" ? tool : null;
+  }
+
+  private staircaseResourceDropNames(blockName: string): readonly string[] | null {
+    return STAIRCASE_RESOURCE_DROPS[blockName] ?? null;
+  }
+
+  private countStaircaseCollectionItems(blockName: string): number {
+    const itemNames = this.staircaseResourceDropNames(blockName);
+    if (!itemNames) return 0;
+    return itemNames.reduce(
+      (total, itemName) => total + this.countInventoryItem(itemName),
+      0,
+    );
+  }
+
+  private stoneStaircaseCarvePositionIsSafe(position: Vec3): boolean {
+    const block = this.bot.blockAt(position);
+    if (
+      !block ||
+      CANDIDATE_FACE_LIQUIDS.has(block.name) ||
+      STONE_STAIRCASE_FALLING_BLOCKS.has(block.name) ||
+      (block.boundingBox !== "empty" &&
+        !STONE_STAIRCASE_BREAKABLE.has(block.name))
+    ) {
+      return false;
+    }
+
+    return CANDIDATE_FACES.every(([dx, dy, dz]) => {
+      const neighbor = this.bot.blockAt(position.offset(dx, dy, dz));
+      return (
+        neighbor !== null &&
+        !CANDIDATE_FACE_LIQUIDS.has(neighbor.name) &&
+        !STONE_STAIRCASE_FALLING_BLOCKS.has(neighbor.name)
+      );
+    });
+  }
+
+  private stoneStaircaseStepIsSafe(
+    origin: Vec3,
+    dx: number,
+    dy: -1 | 1,
+    dz: number,
+    depth: number,
+  ): boolean {
+    const foot = origin.offset(dx * depth, dy * depth, dz * depth);
+    const carvePositions = this.resourceStaircaseCarvePositions(
+      origin,
+      dx,
+      dy,
+      dz,
+      depth,
+    );
+    const support = this.bot.blockAt(foot.offset(0, -1, 0));
+    return (
+      carvePositions.every((position) =>
+        this.stoneStaircaseCarvePositionIsSafe(position)
+      ) &&
+      support !== null &&
+      support.boundingBox !== "empty" &&
+      STONE_STAIRCASE_BREAKABLE.has(support.name) &&
+      !CANDIDATE_FACE_LIQUIDS.has(support.name) &&
+      !STONE_STAIRCASE_FALLING_BLOCKS.has(support.name)
+    );
+  }
+
+  private resourceStaircaseCarvePositions(
+    origin: Vec3,
+    dx: number,
+    dy: -1 | 1,
+    dz: number,
+    depth: number,
+  ): readonly Vec3[] {
+    const foot = origin.offset(dx * depth, dy * depth, dz * depth);
+    // A descending diagonal crosses the block two levels above the new foot
+    // before the entity drops. Leaving that transition block intact makes the
+    // pathfinder correctly report no path even when body and head are clear.
+    if (dy < 0) {
+      return [foot.offset(0, 2, 0), foot.offset(0, 1, 0), foot];
+    }
+
+    // Ascending requires jump clearance over the previous foothold as well as
+    // body and head clearance at the destination. These are different columns.
+    const previousFoot = origin.offset(
+      dx * (depth - 1),
+      dy * (depth - 1),
+      dz * (depth - 1),
+    );
+    return [previousFoot.offset(0, 2, 0), foot.offset(0, 1, 0), foot];
+  }
+
+  private planResourceStaircase(
+    blockName: string,
+    maxDistance: number,
+    wantedCount: number,
+    targetPositions: readonly Vec3[],
+  ): ResourceStaircasePlan | null {
+    const current = this.bot.entity?.position;
+    if (!current || (blockName !== "stone" && targetPositions.length === 0)) {
+      return null;
+    }
+    const origin = new Vec3(
+      Math.floor(current.x),
+      Math.floor(current.y),
+      Math.floor(current.z),
+    );
+    const maxDepth = Math.min(
+      STONE_STAIRCASE_MAX_DEPTH,
+      Math.floor(maxDistance / Math.SQRT2),
+    );
+    if (maxDepth < 1) return null;
+
+    const plans: ResourceStaircasePlan[] = [];
+    const verticalSteps: readonly (-1 | 1)[] =
+      blockName === "stone" ? [-1] : RESOURCE_STAIRCASE_VERTICAL_STEPS;
+    for (const dy of verticalSteps) {
+      for (const { dx, dz } of STONE_STAIRCASE_DIRECTIONS) {
+        let safeDepth = 0;
+        let firstStoneDepth = Number.POSITIVE_INFINITY;
+        let stoneBlocks = 0;
+        let closestTargetDistance = Number.POSITIVE_INFINITY;
+        let closestTargetDepth = 0;
+        for (let depth = 1; depth <= maxDepth; depth += 1) {
+          if (!this.stoneStaircaseStepIsSafe(origin, dx, dy, dz, depth)) break;
+          safeDepth = depth;
+          const foot = origin.offset(dx * depth, dy * depth, dz * depth);
+          const carvePositions = this.resourceStaircaseCarvePositions(
+            origin,
+            dx,
+            dy,
+            dz,
+            depth,
+          );
+          for (const position of carvePositions) {
+            const block = this.bot.blockAt(position);
+            if (block && this.matchesBlockName(block.name, "stone")) {
+              stoneBlocks += 1;
+              firstStoneDepth = Math.min(firstStoneDepth, depth);
+            }
+          }
+          for (const target of targetPositions) {
+            const distance = Math.min(
+              ...carvePositions.map((position) => position.distanceTo(target)),
+            );
+            if (distance < closestTargetDistance) {
+              closestTargetDistance = distance;
+              closestTargetDepth = depth;
+            }
+          }
+        }
+        const usableForStone = blockName === "stone" && stoneBlocks > 0;
+        const usableForTarget = blockName !== "stone" && closestTargetDepth > 0;
+        if (usableForStone || usableForTarget) {
+          plans.push({
+            origin,
+            dx,
+            dy,
+            dz,
+            safeDepth: usableForStone ? safeDepth : closestTargetDepth,
+            firstStoneDepth,
+            stoneBlocks,
+            closestTargetDistance,
+          });
+        }
+      }
+    }
+
+    if (blockName === "stone") {
+      plans.sort((left, right) => {
+        const leftEnough = left.stoneBlocks >= wantedCount ? 1 : 0;
+        const rightEnough = right.stoneBlocks >= wantedCount ? 1 : 0;
+        return (
+          rightEnough - leftEnough ||
+          left.firstStoneDepth - right.firstStoneDepth ||
+          right.safeDepth - left.safeDepth ||
+          right.stoneBlocks - left.stoneBlocks
+        );
+      });
+    } else {
+      plans.sort((left, right) =>
+        left.closestTargetDistance - right.closestTargetDistance ||
+        right.safeDepth - left.safeDepth
+      );
+    }
+    return plans[0] ?? null;
+  }
+
+  private async waitForStaircaseCollectionAtLeast(
+    blockName: string,
+    minimum: number,
+    signal: AbortSignal,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    if (this.countStaircaseCollectionItems(blockName) >= minimum) return true;
+    const inventory = this.bot.inventory;
+    if (
+      typeof inventory.on !== "function" ||
+      typeof inventory.off !== "function"
+    ) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, timeoutMs);
+        if (typeof timer.unref === "function") timer.unref();
+      });
+      if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      return this.countStaircaseCollectionItems(blockName) >= minimum;
+    }
+
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (timer !== null) clearTimeout(timer);
+        inventory.off("updateSlot", onUpdate);
+        signal.removeEventListener("abort", finish);
+        resolve();
+      };
+      const onUpdate = () => {
+        if (this.countStaircaseCollectionItems(blockName) >= minimum) finish();
+      };
+      inventory.on("updateSlot", onUpdate);
+      signal.addEventListener("abort", finish, { once: true });
+      timer = setTimeout(finish, timeoutMs);
+      if (typeof timer.unref === "function") timer.unref();
+      onUpdate();
+    });
+    if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+    return this.countStaircaseCollectionItems(blockName) >= minimum;
+  }
+
+  private async digResourceStaircaseBlock(
+    block: NonNullable<ReturnType<Bot["blockAt"]>>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const tool = this.directCollectionTool();
+    if (!tool) throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE");
+    const requiresHarvest =
+      typeof block.canHarvest === "function" &&
+      block.canHarvest(null) !== true;
+    if (requiresHarvest && !canHarvestWithInventory(this.bot, block)) {
+      throw new SkillRefusal(
+        "COLLECT_TOOL_MISSING",
+        `No inventory item can harvest ${block.name}.`,
+      );
+    }
+    try {
+      await tool.equipForBlock(block, {
+        requireHarvest: requiresHarvest,
+        getFromChest: false,
+        maxTools: 2,
+      });
+      await this.bot.dig(block);
+    } catch (error) {
+      if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      if (error instanceof SkillFault) throw error;
+      if (error instanceof Error && error.name === "NoItem") {
+        throw new SkillRefusal("COLLECT_TOOL_MISSING", error.message);
+      }
+      throw new SkillFault(
+        "COLLECT_BLOCKS_FAILED",
+        error instanceof Error && error.message.trim().length > 0
+          ? error.message.trim()
+          : undefined,
+      );
+    }
+    const liveBlock = this.bot.blockAt(block.position);
+    if (!liveBlock || liveBlock.boundingBox !== "empty") {
+      throw new SkillFault(
+        "COLLECT_BLOCKS_FAILED",
+        `The server did not expose the staircase block at ${blockPositionKey(block.position)}.`,
+      );
+    }
+  }
+
+  private async collectResourceByStaircase(
+    request: SkillCapabilityRequest,
+    blockName: string,
+    targets: readonly NonNullable<ReturnType<Bot["blockAt"]>>[],
+    maxCount: number,
+    maxDistance: number,
+  ): Promise<unknown | null> {
+    if (!this.staircaseResourceDropNames(blockName)) return null;
+    const plan = this.planResourceStaircase(
+      blockName,
+      maxDistance,
+      maxCount,
+      targets.map(({ position }) => position),
+    );
+    if (!plan) return null;
+
+    const inventoryBefore = this.countStaircaseCollectionItems(blockName);
+    let targetBlocksDug = 0;
+    const movements = configureSafePathfinderMovements(new Movements(this.bot));
+    this.bot.pathfinder.setMovements(movements);
+    this.bot.pathfinder.thinkTimeout = COLLECT_PATH_THINK_TIMEOUT_MS;
+    this.bot.pathfinder.tickTimeout = COLLECT_PATH_TICK_TIMEOUT_MS;
+    this.activePathInvocationId = request.invocationId;
+    const restoreServerConfirmedDigging =
+      this.installServerConfirmedDigging(request.signal);
+    const stopOnAbort = () => this.stopPathfinder();
+    request.signal.addEventListener("abort", stopOnAbort, { once: true });
+    try {
+      for (let depth = 1; depth <= plan.safeDepth; depth += 1) {
+        if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+        if (!this.stoneStaircaseStepIsSafe(
+          plan.origin,
+          plan.dx,
+          plan.dy,
+          plan.dz,
+          depth,
+        )) {
+          throw new SkillFault(
+            "COLLECT_TARGET_UNREACHABLE",
+            "The selected staircase became unsafe before the next step.",
+          );
+        }
+
+        const foot = plan.origin.offset(
+          plan.dx * depth,
+          plan.dy * depth,
+          plan.dz * depth,
+        );
+        for (const position of this.resourceStaircaseCarvePositions(
+          plan.origin,
+          plan.dx,
+          plan.dy,
+          plan.dz,
+          depth,
+        )) {
+          const block = this.bot.blockAt(position);
+          if (!block || block.boundingBox === "empty") continue;
+          const collectsTarget = this.matchesBlockName(block.name, blockName);
+          await this.digResourceStaircaseBlock(block, request.signal);
+          if (!collectsTarget) continue;
+          targetBlocksDug += 1;
+          await this.waitForStaircaseCollectionAtLeast(
+            blockName,
+            inventoryBefore + Math.min(targetBlocksDug, maxCount),
+            request.signal,
+            750,
+          );
+          const itemsCollected = Math.max(
+            0,
+            this.countStaircaseCollectionItems(blockName) - inventoryBefore,
+          );
+          if (itemsCollected >= maxCount) {
+            return collectBlockCapabilityOutputSchema.parse({
+              blockName,
+              targetsFound: Math.min(targetBlocksDug, maxCount),
+              itemsCollected,
+            });
+          }
+        }
+
+        this.bot.pathfinder.setMovements(movements);
+        await this.boundedCollectGoto(
+          new goals.GoalNear(foot.x, foot.y, foot.z, 0),
+          request.signal,
+          STONE_STAIRCASE_STEP_PATH_BUDGET_MS,
+        );
+        const reached = this.bot.entity.position;
+        if (
+          !Number.isFinite(reached.x) ||
+          !Number.isFinite(reached.y) ||
+          !Number.isFinite(reached.z) ||
+          Math.floor(reached.x) !== foot.x ||
+          Math.floor(reached.y) !== foot.y ||
+          Math.floor(reached.z) !== foot.z
+        ) {
+          throw new SkillFault("COLLECT_TARGET_UNREACHABLE");
+        }
+        await this.waitForStaircaseCollectionAtLeast(
+          blockName,
+          inventoryBefore + Math.min(targetBlocksDug, maxCount),
+          request.signal,
+          COLLECT_DIRECT_PICKUP_WAIT_MS,
+        );
+        const itemsCollected = Math.max(
+          0,
+          this.countStaircaseCollectionItems(blockName) - inventoryBefore,
+        );
+        if (itemsCollected >= maxCount) {
+          return collectBlockCapabilityOutputSchema.parse({
+            blockName,
+            targetsFound: Math.min(targetBlocksDug, maxCount),
+            itemsCollected,
+          });
+        }
+
+        const nearbyTargets = targets
+          .map(({ position }) => this.bot.blockAt(position))
+          .filter((target): target is NonNullable<typeof target> =>
+            target !== null &&
+            target.boundingBox !== "empty" &&
+            this.matchesBlockName(target.name, blockName) &&
+            this.bot.entity.position.distanceTo(target.position) <=
+              MINE_TARGET_REACH_DISTANCE + 2
+          );
+        if (
+          nearbyTargets.length > 0 &&
+          collectReachableTargets(
+            this.bot,
+            movements,
+            nearbyTargets,
+            maxCount,
+          ).reachable.length > 0
+        ) {
+          break;
+        }
+      }
+
+      const liveTargets = targets
+        .map(({ position }) => this.bot.blockAt(position))
+        .filter((target): target is NonNullable<typeof target> =>
+          target !== null &&
+          target.boundingBox !== "empty" &&
+          this.matchesBlockName(target.name, blockName)
+        );
+      const reachableAfterExcavation = collectReachableTargets(
+        this.bot,
+        movements,
+        liveTargets,
+        maxCount,
+      );
+      for (const target of reachableAfterExcavation.reachable) {
+        if (targetBlocksDug >= maxCount) break;
+        const totalBefore = this.countInventoryTotal();
+        const inventoryIncrease = this.observeCollectedInventoryIncrease(
+          totalBefore,
+          request.signal,
+        );
+        try {
+          await this.collectTargetDirectly(
+            target,
+            movements,
+            totalBefore,
+            inventoryIncrease,
+            request.signal,
+          );
+          targetBlocksDug += 1;
+        } finally {
+          inventoryIncrease.cancel();
+        }
+      }
+
+      await this.waitForStaircaseCollectionAtLeast(
+        blockName,
+        inventoryBefore + 1,
+        request.signal,
+        COLLECT_DIRECT_PICKUP_WAIT_MS,
+      );
+      const itemsCollected = Math.max(0,
+        this.countStaircaseCollectionItems(blockName) - inventoryBefore,
+      );
+      if (itemsCollected === 0) {
+        throw new SkillFault(
+          targetBlocksDug > 0
+            ? "COLLECT_PICKUP_NOT_SETTLED"
+            : "COLLECT_TARGET_UNREACHABLE",
+          `The bounded access staircase did not produce a collected ${blockName} item.`,
+        );
+      }
+      return collectBlockCapabilityOutputSchema.parse({
+        blockName,
+        targetsFound: Math.min(targetBlocksDug, maxCount),
+        itemsCollected,
+      });
+    } finally {
+      request.signal.removeEventListener("abort", stopOnAbort);
+      if (this.activePathInvocationId === request.invocationId) {
+        this.activePathInvocationId = null;
+      }
+      restoreServerConfirmedDigging();
+      this.bot.clearControlStates();
+      this.stopPathfinder();
+    }
+  }
+
+  private async boundedCollectGoto(
+    goal: Parameters<Bot["pathfinder"]["goto"]>[0],
+    signal: AbortSignal,
+    budgetMs: number,
+  ): Promise<void> {
+    if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let rejectAbort: (error: Error) => void = () => {};
+    const abortError = new Error("Collection path was cancelled.");
+    abortError.name = "AbortError";
+    const timeoutError = new Error(
+      `Collection path did not settle within ${budgetMs}ms.`,
+    );
+    timeoutError.name = "Timeout";
+    const onAbort = () => {
+      this.stopPathfinder();
+      rejectAbort(abortError);
+    };
+    const aborted = new Promise<never>((_resolve, reject) => {
+      rejectAbort = reject;
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    const timedOut = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        this.stopPathfinder();
+        reject(timeoutError);
+      }, budgetMs);
+      if (typeof timer.unref === "function") timer.unref();
+    });
+    try {
+      await Promise.race([
+        this.bot.pathfinder.goto(goal),
+        aborted,
+        timedOut,
+      ]);
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+    }
+  }
+
+  private async waitForCollectedInventoryIncrease(
+    waiter: InventorySyncWaiter,
+    inventoryBefore: number,
+    signal: AbortSignal,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    if (this.countInventoryTotal() > inventoryBefore) return true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let finishAbort: () => void = () => {};
+    const aborted = new Promise<"aborted">((resolve) => {
+      finishAbort = () => resolve("aborted");
+      signal.addEventListener("abort", finishAbort, { once: true });
+    });
+    const timedOut = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), timeoutMs);
+      if (typeof timer.unref === "function") timer.unref();
+    });
+    try {
+      const outcome = await Promise.race([
+        waiter.promise.then(() => "inventory" as const),
+        aborted,
+        timedOut,
+      ]);
+      if (outcome === "aborted" || signal.aborted) {
+        throw new SkillFault("SKILL_CANCELLED");
+      }
+      return this.countInventoryTotal() > inventoryBefore;
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+      signal.removeEventListener("abort", finishAbort);
+    }
+  }
+
+  private nearestDroppedItemPosition(target: Vec3): Vec3 | null {
+    const drops = Object.values(this.bot.entities ?? {})
+      .map((entity) => entity as unknown as {
+        name?: unknown;
+        displayName?: unknown;
+        isValid?: unknown;
+        position?: Vec3;
+      })
+      .filter((entity) => {
+        const name = String(entity.name ?? entity.displayName ?? "").toLowerCase();
+        return (
+          name === "item" &&
+          entity.isValid !== false &&
+          entity.position !== undefined &&
+          typeof entity.position.distanceTo === "function" &&
+          entity.position.distanceTo(target) <= 6
+        );
+      })
+      .sort((left, right) =>
+        this.bot.entity.position.distanceTo(left.position!) -
+        this.bot.entity.position.distanceTo(right.position!),
+      );
+    return drops[0]?.position ?? null;
+  }
+
+  /**
+   * Production collection path. The upstream plugin can wait forever after a
+   * pickup and can also spend the whole skill budget in a second path search.
+   * Keep its target filtering and safety movements, but own the live path,
+   * tool selection, server-confirmed dig, and bounded pickup here.
+   */
+  private async collectTargetDirectly(
+    target: NonNullable<ReturnType<Bot["blockAt"]>>,
+    movements: Movements,
+    inventoryBefore: number,
+    inventoryIncrease: InventorySyncWaiter,
+    signal: AbortSignal,
+  ): Promise<void> {
+    this.bot.pathfinder.setMovements(movements);
+    await this.boundedCollectGoto(
+      new goals.GoalLookAtBlock(target.position, this.bot.world),
+      signal,
+      COLLECT_DIRECT_PATH_BUDGET_MS,
+    );
+    const distance = this.bot.entity.position.distanceTo(target.position);
+    if (!Number.isFinite(distance) || distance > MINE_TARGET_REACH_DISTANCE) {
+      const error = new Error("Pathfinder stopped outside block reach.");
+      error.name = "NoPath";
+      throw error;
+    }
+
+    const liveTarget = this.bot.blockAt(target.position);
+    if (
+      !liveTarget ||
+      liveTarget.type !== target.type ||
+      liveTarget.boundingBox === "empty"
+    ) {
+      throw new SkillFault("COLLECT_TARGET_UNREACHABLE");
+    }
+    try {
+      const tool = this.directCollectionTool();
+      if (!tool) throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE");
+      await tool.equipForBlock(liveTarget, {
+        requireHarvest: true,
+        getFromChest: false,
+        maxTools: 2,
+      });
+      await this.bot.dig(liveTarget);
+    } catch (error) {
+      if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      if (error instanceof SkillFault) throw error;
+      if (error instanceof Error && error.name === "NoItem") {
+        throw new SkillFault("COLLECT_TOOL_MISSING", error.message);
+      }
+      throw new SkillFault(
+        "COLLECT_BLOCKS_FAILED",
+        error instanceof Error && error.message.trim().length > 0
+          ? error.message.trim()
+          : undefined,
+      );
+    }
+
+    if (
+      await this.waitForCollectedInventoryIncrease(
+        inventoryIncrease,
+        inventoryBefore,
+        signal,
+        750,
+      )
+    ) {
+      return;
+    }
+
+    const dropPosition = this.nearestDroppedItemPosition(target.position) ??
+      target.position;
+    // GoalNear(1) may stop on the neighboring path node, which is outside the
+    // pickup box when the item rests near the far edge of its block. Target the
+    // item's exact block node; entity coordinates are fractional, so floor them
+    // before using a zero-radius goal.
+    const pickupBlock = new Vec3(
+      Math.floor(dropPosition.x),
+      Math.floor(dropPosition.y),
+      Math.floor(dropPosition.z),
+    );
+    const pickupMovements = configureSafePathfinderMovements(
+      new Movements(this.bot),
+    );
+    this.bot.pathfinder.setMovements(pickupMovements);
+    try {
+      await this.boundedCollectGoto(
+        new goals.GoalNear(
+          pickupBlock.x,
+          pickupBlock.y,
+          pickupBlock.z,
+          0,
+        ),
+        signal,
+        COLLECT_DIRECT_PICKUP_PATH_BUDGET_MS,
+      );
+    } catch (error) {
+      if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      // The item can enter the inventory while Pathfinder is rejecting a stale
+      // item position, so inventory evidence gets the final say below.
+      if (this.countInventoryTotal() <= inventoryBefore) {
+        throw new SkillFault(
+          "COLLECT_PICKUP_NOT_SETTLED",
+          error instanceof Error ? error.message : undefined,
+        );
+      }
+    }
+    if (
+      !(await this.waitForCollectedInventoryIncrease(
+        inventoryIncrease,
+        inventoryBefore,
+        signal,
+        COLLECT_DIRECT_PICKUP_WAIT_MS,
+      ))
+    ) {
+      throw new SkillFault(
+        "COLLECT_PICKUP_NOT_SETTLED",
+        `No inventory increase was observed after collecting at ${target.position.x},${target.position.y},${target.position.z}.`,
+      );
+    }
+  }
+
   private assertDimensionMatch(requestedDimension: string): void {
     const current = normalizeDimension(String(this.bot.game.dimension));
     if (requestedDimension !== current) {
@@ -1884,6 +2875,36 @@ export class MineflayerBotClient implements BotClient {
       .map((position) => this.bot.blockAt(position))
       .filter((block): block is NonNullable<typeof block> => block !== null);
     if (targets.length === 0) {
+      if (
+        this.staircaseResourceDropNames(input.data.blockName) !== null &&
+        this.directCollectionAvailable()
+      ) {
+        // The first search deliberately admits only blocks with an exposed
+        // face. Ores are commonly fully enclosed, so locate buried candidates
+        // separately and let the bounded staircase prove a safe route to one.
+        // Stone remains targetless because its staircase is itself the source.
+        const buriedTargets = input.data.blockName === "stone"
+          ? targets
+          : this.bot.findBlocks({
+              matching: blockType.id,
+              maxDistance: input.data.maxDistance,
+              count: input.data.maxCount + COLLECT_CANDIDATE_POOL_SLACK,
+            })
+              .map((position) => this.bot.blockAt(position))
+              .filter((block): block is NonNullable<typeof block> =>
+                block !== null &&
+                block.boundingBox !== "empty" &&
+                this.matchesBlockName(block.name, input.data.blockName)
+              );
+        const staircaseResult = await this.collectResourceByStaircase(
+          request,
+          input.data.blockName,
+          buriedTargets,
+          input.data.maxCount,
+          input.data.maxDistance,
+        );
+        if (staircaseResult !== null) return staircaseResult;
+      }
       // No target is a proved no-op: findBlocks/blockAt only read the loaded
       // world, and collectBlock has not started. Report it as a refusal so a
       // multi-step planner can reobserve or explore instead of treating a
@@ -1960,55 +2981,34 @@ export class MineflayerBotClient implements BotClient {
       targets,
       input.data.maxCount + COLLECT_LIVE_PATH_SUBSTITUTES,
     );
-    const reachableTargets = reachability.reachable;
-    if (reachableTargets.length === 0) {
-      // 两个码，判据是"有没有证明"。主路径的 catch 已经这么分了（NoPath vs
-      // Timeout），前置检查这一层此前把两者合并成不可达，于是一个只是没算完的
-      // 搜索被当成定论上报，白丢一级 RETRY_SAME——failure-classifier.ts:180
-      // 明令这两件事不能合并：UNREACHABLE 是 STALE_WORLD（重新观察或放弃），
-      // SEARCH_EXHAUSTED 是 TRANSIENT（可以原样再试一次）。
-      // 码写成字面量而不是从 helper 返回：分类器测试靠正则扫
-      // `new SkillRefusal("...")` 发现新码（failure-classifier.test.ts:467）。
-      //
-      // 两处都是 SkillRefusal 而不是 SkillFault：走到这里一块都没挖、背包没动、
-      // collect() 还没被调用，getPathFromTo 只做搜索不移动机器人。这个事实
-      // 只有这里知道——同一个码在下面的 NoPath catch 里也会抛，但那时
-      // collect() 可能已经挖掉了几块，所以那一处必须留成普通 SkillFault。
-      // 协调器的非幂等屏蔽据此放行，这个步骤才能走到它该走的恢复阶梯
-      // 而不是被升级成人工工单。
-      if (reachability.provenPathless < targets.length) {
-        // 报"排了几个"和"是哪个预算截断的"，不只报"证明了几个"。
-        // 实测这条 reason 曾是 "Only 0 of 9 ... within the 1500ms pre-check
-        // budget."——九个候选里其实最多排得下 4 个（1500ms × 4 ≈ 6000ms 总预算），
-        // 而句子里唯一出现的数字是那个没绑住循环的 per-candidate 常量。运维照它
-        // 去调 1500ms 只会让能排下的候选更少。两个预算都写出来，再说明是哪一个
-        // 先到,这条失败才是可诊断的。
-        const boundBy = reachability.stoppedOnTotalBudget
-          ? `${COLLECT_PRECHECK_TOTAL_BUDGET_MS}ms total budget`
-          : `${COLLECT_PRECHECK_BUDGET_MS}ms per-candidate budget`;
-        throw new SkillRefusal(
-          "COLLECT_PATH_SEARCH_EXHAUSTED",
-          `Examined ${reachability.examined} of ${targets.length} exposed ${input.data.blockName} candidates and proved ${reachability.provenPathless} pathless before the ${boundBy} ran out; none was proven reachable.`,
-        );
-      }
+    if (
+      this.staircaseResourceDropNames(input.data.blockName) !== null &&
+      reachability.reachable.length === 0 &&
+      this.directCollectionAvailable()
+    ) {
+      const staircaseResult = await this.collectResourceByStaircase(
+        request,
+        input.data.blockName,
+        targets,
+        input.data.maxCount,
+        input.data.maxDistance,
+      );
+      if (staircaseResult !== null) return staircaseResult;
+    }
+    // A timeout in the read-only precheck is uncertainty, not a reason to keep
+    // the bot stationary forever. Prefer proven paths, then spend the bounded
+    // live budget on candidates the precheck could not decide. Only a fully
+    // exhausted A* open set removes a candidate.
+    const liveTargets = [
+      ...reachability.reachable,
+      ...reachability.unproven,
+    ].slice(0, input.data.maxCount + COLLECT_LIVE_PATH_SUBSTITUTES);
+    if (liveTargets.length === 0) {
       // 扫描说"有暴露面"，寻路把每一个都排空了开集——这是世界状态，不是缺陷，
       // 所以带着候选数报出去，让上层重新观察而不是原样重试。
       throw new SkillRefusal(
         "COLLECT_TARGET_UNREACHABLE",
         `All ${targets.length} exposed ${input.data.blockName} candidates were proven unreachable by the pre-check.`,
-      );
-    }
-
-    // 一轮只交请求量那么多，替补留到下一轮。批次数因此至多
-    // 1 + COLLECT_LIVE_PATH_SUBSTITUTES。
-    const attemptBatches: Array<typeof reachableTargets> = [];
-    for (
-      let offset = 0;
-      offset < reachableTargets.length;
-      offset += input.data.maxCount
-    ) {
-      attemptBatches.push(
-        reachableTargets.slice(offset, offset + input.data.maxCount),
       );
     }
 
@@ -2028,8 +3028,7 @@ export class MineflayerBotClient implements BotClient {
     const restoreServerConfirmedDigging =
       this.installServerConfirmedDigging(request.signal);
     const stopOnAbort = () => {
-      void this.bot.collectBlock.cancelTask().catch(() => {});
-      this.stopPathfinder();
+      this.releaseCollectBlockTask();
     };
     request.signal.addEventListener("abort", stopOnAbort, { once: true });
     try {
@@ -2046,33 +3045,66 @@ export class MineflayerBotClient implements BotClient {
       // 超时之后 cancelTask 会让 collect() 那条 Promise 迟到地抛，但不需要额外
       // 接一层：Promise.race 一进来就给每个入参都挂了反应，那次拒绝算已被处理，
       // 不会变成 unhandledRejection。
-      // 实跑被拒就换替补，而不是让一次坏抽样沉掉整步。只有寻路类拒绝
-      // （NoPath / Timeout）才换：别的错误换个坐标也一样会犯，换了只是白烧预算。
+      // Run one proven target at a time. collectblock can finish the block break
+      // and inventory pickup but remain stuck in its entity-follow branch. A
+      // per-target boundary lets an observed pickup close that one target and
+      // continue with the rest of the requested batch.
       let lastPathFailure: unknown = null;
-      for (const batch of attemptBatches) {
+      for (const target of liveTargets) {
+        if (collectedTargets >= input.data.maxCount) break;
         attemptsMade += 1;
+        const attemptInventoryBefore = this.countInventoryTotal();
+        const inventoryIncrease = this.observeCollectedInventoryIncrease(
+          attemptInventoryBefore,
+          request.signal,
+        );
+        let settleTimer: ReturnType<typeof setTimeout> | null = null;
         try {
+          if (this.directCollectionAvailable()) {
+            await this.collectTargetDirectly(
+              target,
+              movements,
+              attemptInventoryBefore,
+              inventoryIncrease,
+              request.signal,
+            );
+            collectedTargets += 1;
+            lastPathFailure = null;
+            continue;
+          }
           const settled = await Promise.race([
             this.bot.collectBlock
-              .collect(batch, { ignoreNoPath: false })
+              .collect([target], { ignoreNoPath: false })
               .then(() => "resolved" as const),
+            inventoryIncrease.promise.then(() => "inventory-increased" as const),
             new Promise<"stalled">((resolve) => {
-              const timer = setTimeout(() => resolve("stalled"), COLLECT_SETTLE_BUDGET_MS);
-              if (typeof timer.unref === "function") timer.unref();
+              settleTimer = setTimeout(
+                () => resolve("stalled"),
+                COLLECT_SETTLE_BUDGET_MS,
+              );
+              if (typeof settleTimer.unref === "function") settleTimer.unref();
             }),
           ]);
+          if (settled === "inventory-increased") {
+            // The inventory packet is stronger completion evidence than the
+            // plugin's still-pending GoalFollow. Stop that stale movement before
+            // starting the next target.
+            this.releaseCollectBlockTask();
+          }
           if (settled === "stalled") {
-            await this.bot.collectBlock.cancelTask().catch(() => {});
-            this.stopPathfinder();
+            this.releaseCollectBlockTask();
+            if (this.countInventoryTotal() > attemptInventoryBefore) {
+              collectedTargets += 1;
+              lastPathFailure = null;
+              continue;
+            }
             throw new SkillFault(
               "COLLECT_PICKUP_NOT_SETTLED",
               `collectBlock neither resolved nor rejected within ${COLLECT_SETTLE_BUDGET_MS}ms for ${input.data.blockName}.`,
             );
           }
-          collectedTargets = batch.length;
-          collectionSucceeded = true;
+          collectedTargets += 1;
           lastPathFailure = null;
-          break;
         } catch (error) {
           if (error instanceof SkillFault) throw error;
           if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
@@ -2080,14 +3112,22 @@ export class MineflayerBotClient implements BotClient {
           if (failure !== "NoPath" && failure !== "Timeout") throw error;
           // 已经挖到东西就不换候选：请求量是上限，换一轮会挖过量。挖到多少用
           // 背包读回判断，不靠插件的返回值猜。
-          if (this.countInventoryTotal() > inventoryBefore) throw error;
+          if (this.countInventoryTotal() > attemptInventoryBefore) throw error;
           lastPathFailure = error;
           // 插件的循环还带着这一批目标，不取消就会污染下一批。
-          await this.bot.collectBlock.cancelTask().catch(() => {});
-          this.stopPathfinder();
+          this.releaseCollectBlockTask();
+        } finally {
+          if (settleTimer !== null) clearTimeout(settleTimer);
+          inventoryIncrease.cancel();
         }
       }
-      if (lastPathFailure !== null) throw lastPathFailure;
+      if (
+        lastPathFailure !== null &&
+        collectedTargets < input.data.maxCount
+      ) {
+        throw lastPathFailure;
+      }
+      collectionSucceeded = true;
     } catch (error) {
       if (error instanceof SkillFault) throw error;
       if (request.signal.aborted) {
@@ -2109,7 +3149,7 @@ export class MineflayerBotClient implements BotClient {
       // 一个候选，替补席根本是空的"——两者的下一步完全相反：前者说明这一带
       // 确实走不通，后者说明预检查的总预算没给够替补。实测 15754ms 那次属于
       // 后者，但当时只能靠时长反推。
-      const reason = `${pluginReason} (attempted ${attemptsMade} of ${attemptBatches.length} proven-reachable batch(es))`;
+      const reason = `${pluginReason} (attempted ${attemptsMade} of ${liveTargets.length} live candidate(s))`;
       const failure = error instanceof Error ? error.name : "";
       // A* 搜完了，确实没有路：重新观察，别原样重试。
       if (failure === "NoPath") {
@@ -2341,6 +3381,17 @@ export class MineflayerBotClient implements BotClient {
     );
     const occupant = this.bot.blockAt(targetPosition);
     if (occupant && occupant.boundingBox !== "empty") {
+      if (occupant.name === input.data.itemName) {
+        return placeBlockCapabilityOutputSchema.parse({
+          placed: true,
+          placedBlockName: occupant.name,
+          position: {
+            x: targetPosition.x,
+            y: targetPosition.y,
+            z: targetPosition.z,
+          },
+        });
+      }
       throw new SkillFault("PLACE_TARGET_OCCUPIED");
     }
 
@@ -2546,8 +3597,7 @@ export class MineflayerBotClient implements BotClient {
   async close(gracePeriodMs: number): Promise<void> {
     if (this.requestedStop) return;
     this.requestedStop = true;
-    this.stopPathfinder();
-    this.bot.clearControlStates();
+    this.interruptNormalActions();
 
     await new Promise<void>((resolve) => {
       let settled = false;
@@ -2588,6 +3638,509 @@ export class MineflayerBotClient implements BotClient {
             (left.metadata.effectiveQuality ?? left.metadata.foodPoints) ||
           left.item.name.localeCompare(right.item.name),
       );
+  }
+
+  private async forageSafeFood(): Promise<L0SafetyActionResult> {
+    if (this.safeFoodItems().length > 0) {
+      return { outcome: "skipped", errorCode: "SAFE_FOOD_ALREADY_AVAILABLE" };
+    }
+    if (
+      !this.bot.pathfinder ||
+      typeof this.bot.pathfinder.goto !== "function" ||
+      typeof this.bot.pathfinder.setMovements !== "function"
+    ) {
+      return { outcome: "skipped", errorCode: "FORAGE_RUNTIME_UNAVAILABLE" };
+    }
+    const startedHealth = finiteNumber(this.bot.health)
+      ? Number(this.bot.health)
+      : null;
+    const deadline = Date.now() + SAFE_FORAGE_TOTAL_BUDGET_MS;
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      SAFE_FORAGE_TOTAL_BUDGET_MS,
+    );
+    timeout.unref?.();
+    try {
+      const movements = configureSafePathfinderMovements(
+        new Movements(this.bot),
+      );
+      this.bot.pathfinder.setMovements(movements);
+      this.bot.pathfinder.thinkTimeout = SAFE_FORAGE_PATH_BUDGET_MS;
+      this.bot.pathfinder.tickTimeout = 20;
+
+      let lastSkipped: L0SafetyActionResult = {
+        outcome: "skipped",
+        errorCode: "NO_SAFE_FOOD_SOURCE",
+      };
+      for (let pass = 0; pass < 2; pass += 1) {
+        const droppedFood = this.nearestSafeFoodDropPosition();
+        if (
+          droppedFood &&
+          await this.pickUpForagedFood(
+            droppedFood,
+            startedHealth,
+            controller.signal,
+            deadline,
+          )
+        ) {
+          return { outcome: "executed", errorCode: null };
+        }
+
+        for (const blockTarget of this.safeForageBlocks()) {
+          const result = await this.harvestSafeForageBlock(
+            blockTarget,
+            startedHealth,
+            controller.signal,
+            deadline,
+          );
+          if (result.outcome !== "skipped") return result;
+          lastSkipped = result;
+        }
+
+        for (const entityTarget of this.safeForageEntities()) {
+          const result = await this.foragePassiveEntity(
+            entityTarget,
+            startedHealth,
+            controller.signal,
+            deadline,
+          );
+          if (result.outcome !== "skipped") return result;
+          lastSkipped = result;
+        }
+
+        if (pass === 0 && Date.now() < deadline) {
+          await this.exploreForSafeFood(controller.signal, deadline);
+          if (this.safeFoodItems().length > 0) {
+            return { outcome: "executed", errorCode: null };
+          }
+          continue;
+        }
+        return lastSkipped;
+      }
+      return lastSkipped;
+    } finally {
+      clearTimeout(timeout);
+      controller.abort();
+      this.stopPathfinder();
+      this.bot.clearControlStates();
+    }
+  }
+
+  private safeForageEntities(): Array<
+    NonNullable<ReturnType<Bot["nearestEntity"]>>
+  > {
+    return Object.values(this.bot.entities ?? {}).filter((entity) => {
+      const name = typeof entity.name === "string"
+        ? entity.name.toLowerCase().replace(/^minecraft:/u, "")
+        : "";
+      const distance = this.bot.entity.position.distanceTo(entity.position);
+      return (
+        entity !== this.bot.entity &&
+        entity.isValid !== false &&
+        SAFE_FORAGE_ENTITY_NAMES.has(name) &&
+        Number.isFinite(distance) &&
+        distance <= SAFE_FORAGE_MAX_DISTANCE
+      );
+    }).sort(
+      (left, right) =>
+        this.bot.entity.position.distanceTo(left.position) -
+        this.bot.entity.position.distanceTo(right.position),
+    ).slice(0, SAFE_FORAGE_MAX_CANDIDATES);
+  }
+
+  private safeForageBlocks(): SafeForageBlockTarget[] {
+    if (typeof this.bot.findBlocks !== "function") return [];
+    const registry = this.bot.registry as unknown as {
+      blocksByName?: Record<string, { id?: unknown }>;
+    };
+    const matching = SAFE_FORAGE_BLOCK_NAMES
+      .map((name) => registry.blocksByName?.[name]?.id)
+      .filter((id): id is number => Number.isInteger(id));
+    if (matching.length === 0) return [];
+
+    let positions: Vec3[];
+    try {
+      positions = this.bot.findBlocks({
+        matching,
+        maxDistance: SAFE_FORAGE_MAX_DISTANCE,
+        count: 32,
+      });
+    } catch {
+      return [];
+    }
+    return positions
+      .map((position) => this.bot.blockAt(position))
+      .filter((block): block is NonNullable<typeof block> => block !== null)
+      .map((block) => ({
+        block,
+        interaction: this.safeForageBlockInteraction(block),
+      }))
+      .filter(
+        (target): target is SafeForageBlockTarget =>
+          target.interaction !== null,
+      )
+      .sort(
+        (left, right) =>
+          this.bot.entity.position.distanceTo(left.block.position) -
+          this.bot.entity.position.distanceTo(right.block.position),
+      )
+      .slice(0, SAFE_FORAGE_MAX_CANDIDATES);
+  }
+
+  private safeForageBlockInteraction(
+    block: NonNullable<ReturnType<Bot["blockAt"]>>,
+  ): SafeForageBlockInteraction | null {
+    let properties: Record<string, unknown> = {};
+    try {
+      properties = block.getProperties() as Record<string, unknown>;
+    } catch {
+      // A missing property table is safe only for an always-ripe melon block.
+    }
+    if (block.name === "melon") return "dig";
+    if (block.name === "sweet_berry_bush") {
+      return Number(properties.age) >= 3 ? "activate" : null;
+    }
+    if (block.name === "carrots" || block.name === "potatoes") {
+      return Number(properties.age) >= 7 ? "dig" : null;
+    }
+    if (block.name === "beetroots") {
+      return Number(properties.age) >= 3 ? "dig" : null;
+    }
+    if (block.name === "cave_vines" || block.name === "cave_vines_plant") {
+      return properties.berries === true || properties.berries === "true"
+        ? "activate"
+        : null;
+    }
+    return null;
+  }
+
+  private nearestSafeFoodDropPosition(): Vec3 | null {
+    const candidates = Object.values(this.bot.entities ?? {})
+      .map((entity) => entity as unknown as {
+        name?: unknown;
+        displayName?: unknown;
+        isValid?: unknown;
+        position?: Vec3;
+        getDroppedItem?: () => { name?: unknown } | null;
+      })
+      .filter((entity) => {
+        const entityName = String(
+          entity.name ?? entity.displayName ?? "",
+        ).toLowerCase();
+        if (
+          entityName !== "item" ||
+          entity.isValid === false ||
+          entity.position === undefined
+        ) {
+          return false;
+        }
+        let itemName = "";
+        try {
+          itemName = String(entity.getDroppedItem?.()?.name ?? "");
+        } catch {
+          return false;
+        }
+        const distance = this.bot.entity.position.distanceTo(entity.position);
+        return (
+          SAFE_FOOD_NAMES.has(itemName) &&
+          Number.isFinite(distance) &&
+          distance <= SAFE_FORAGE_MAX_DISTANCE
+        );
+      })
+      .sort(
+        (left, right) =>
+          this.bot.entity.position.distanceTo(left.position!) -
+          this.bot.entity.position.distanceTo(right.position!),
+      );
+    return candidates[0]?.position ?? null;
+  }
+
+  private async harvestSafeForageBlock(
+    target: SafeForageBlockTarget,
+    startedHealth: number | null,
+    signal: AbortSignal,
+    deadline: number,
+  ): Promise<L0SafetyActionResult> {
+    if (this.forageTookDamage(startedHealth)) {
+      return { outcome: "failed", errorCode: "FORAGE_ABORTED_ON_DAMAGE" };
+    }
+    let liveBlock = this.bot.blockAt(target.block.position);
+    if (
+      liveBlock === null ||
+      this.safeForageBlockInteraction(liveBlock) !== target.interaction
+    ) {
+      return { outcome: "skipped", errorCode: "SAFE_FOOD_SOURCE_STALE" };
+    }
+    if (
+      this.bot.entity.position.distanceTo(liveBlock.position) >
+      SAFE_FORAGE_REACH_DISTANCE
+    ) {
+      const reached = await this.trySafetyGoto(
+        new goals.GoalNear(
+          liveBlock.position.x,
+          liveBlock.position.y,
+          liveBlock.position.z,
+          2,
+        ),
+        signal,
+        Math.min(
+          SAFE_FORAGE_PATH_BUDGET_MS,
+          Math.max(100, deadline - Date.now()),
+        ),
+      );
+      if (!reached) {
+        return {
+          outcome: "skipped",
+          errorCode: "SAFE_FOOD_SOURCE_UNREACHABLE",
+        };
+      }
+      liveBlock = this.bot.blockAt(target.block.position);
+    }
+    if (
+      liveBlock === null ||
+      this.safeForageBlockInteraction(liveBlock) !== target.interaction ||
+      this.bot.entity.position.distanceTo(liveBlock.position) >
+        SAFE_FORAGE_REACH_DISTANCE
+    ) {
+      return { outcome: "skipped", errorCode: "SAFE_FOOD_SOURCE_STALE" };
+    }
+
+    this.stopPathfinder();
+    await this.bot.lookAt(liveBlock.position.offset(0.5, 0.5, 0.5), true);
+    if (this.forageTookDamage(startedHealth)) {
+      return { outcome: "failed", errorCode: "FORAGE_ABORTED_ON_DAMAGE" };
+    }
+    try {
+      if (target.interaction === "activate") {
+        if (typeof this.bot.activateBlock !== "function") {
+          return { outcome: "skipped", errorCode: "FORAGE_RUNTIME_UNAVAILABLE" };
+        }
+        await this.bot.activateBlock(liveBlock);
+      } else {
+        if (
+          typeof this.bot.dig !== "function" ||
+          (typeof this.bot.canDigBlock === "function" &&
+            !this.bot.canDigBlock(liveBlock))
+        ) {
+          return {
+            outcome: "skipped",
+            errorCode: "SAFE_FOOD_SOURCE_UNREACHABLE",
+          };
+        }
+        await this.bot.dig(liveBlock, true);
+      }
+    } catch {
+      return { outcome: "skipped", errorCode: "SAFE_FOOD_HARVEST_FAILED" };
+    }
+    if (this.safeFoodItems().length > 0) {
+      return { outcome: "executed", errorCode: null };
+    }
+    const drop = this.nearestSafeFoodDropPosition() ??
+      this.nearestDroppedItemPosition(liveBlock.position) ??
+      liveBlock.position;
+    return await this.pickUpForagedFood(drop, startedHealth, signal, deadline)
+      ? { outcome: "executed", errorCode: null }
+      : { outcome: "skipped", errorCode: "SAFE_FOOD_PICKUP_NOT_SETTLED" };
+  }
+
+  private async exploreForSafeFood(
+    signal: AbortSignal,
+    deadline: number,
+  ): Promise<boolean> {
+    const direction = SAFE_FORAGE_EXPLORATION_DIRECTIONS[
+      this.safeForageExplorationCursor % SAFE_FORAGE_EXPLORATION_DIRECTIONS.length
+    ]!;
+    this.safeForageExplorationCursor += 1;
+    const origin = this.bot.entity.position;
+    return this.trySafetyGoto(
+      new goals.GoalNear(
+        Math.floor(origin.x + direction[0] * SAFE_FORAGE_EXPLORATION_DISTANCE),
+        Math.floor(origin.y),
+        Math.floor(origin.z + direction[1] * SAFE_FORAGE_EXPLORATION_DISTANCE),
+        2,
+      ),
+      signal,
+      Math.min(
+        SAFE_FORAGE_PATH_BUDGET_MS,
+        Math.max(100, deadline - Date.now()),
+      ),
+    );
+  }
+
+  private async pickUpForagedFood(
+    position: Vec3,
+    startedHealth: number | null,
+    signal: AbortSignal,
+    deadline: number,
+  ): Promise<boolean> {
+    await this.trySafetyGoto(
+      new goals.GoalNear(
+        Math.floor(position.x),
+        Math.floor(position.y),
+        Math.floor(position.z),
+        0,
+      ),
+      signal,
+      Math.min(
+        SAFE_FORAGE_PATH_BUDGET_MS,
+        Math.max(100, deadline - Date.now()),
+      ),
+    );
+    const pickupDeadline = Math.min(
+      deadline,
+      Date.now() + SAFE_FORAGE_PICKUP_BUDGET_MS,
+    );
+    while (!signal.aborted && Date.now() < pickupDeadline) {
+      if (this.safeFoodItems().length > 0) return true;
+      if (this.forageTookDamage(startedHealth)) return false;
+      await waitForDelay(100);
+    }
+    return this.safeFoodItems().length > 0;
+  }
+
+  private forageTookDamage(startedHealth: number | null): boolean {
+    return (
+      startedHealth !== null &&
+      finiteNumber(this.bot.health) !== null &&
+      Number(this.bot.health) < startedHealth
+    );
+  }
+
+  private async foragePassiveEntity(
+    target: NonNullable<ReturnType<Bot["nearestEntity"]>>,
+    startedHealth: number | null,
+    signal: AbortSignal,
+    deadline: number,
+  ): Promise<L0SafetyActionResult> {
+    let lastTargetPosition = target.position.clone();
+    while (!signal.aborted && Date.now() < deadline) {
+        if (this.requestedStop) {
+          return { outcome: "skipped", errorCode: "RUNTIME_STOPPING" };
+        }
+        if (
+          startedHealth !== null &&
+          finiteNumber(this.bot.health) &&
+          Number(this.bot.health) < startedHealth
+        ) {
+          return { outcome: "failed", errorCode: "FORAGE_ABORTED_ON_DAMAGE" };
+        }
+        const liveTarget = Object.values(this.bot.entities ?? {}).find(
+          (entity) => entity.id === target.id && entity.isValid !== false,
+        );
+        if (!liveTarget) break;
+        lastTargetPosition = liveTarget.position.clone();
+        const distance = this.bot.entity.position.distanceTo(
+          liveTarget.position,
+        );
+        if (!Number.isFinite(distance)) {
+          return { outcome: "failed", errorCode: "FORAGE_TARGET_INVALID" };
+        }
+        if (distance > SAFE_FORAGE_REACH_DISTANCE) {
+          const pathBudget = Math.min(
+            SAFE_FORAGE_PATH_BUDGET_MS,
+            Math.max(100, deadline - Date.now()),
+          );
+          const reached = await this.trySafetyGoto(
+            new goals.GoalFollow(liveTarget, 2),
+            signal,
+            pathBudget,
+          );
+          if (!reached) {
+            return {
+              outcome: "skipped",
+              errorCode: "SAFE_FOOD_SOURCE_UNREACHABLE",
+            };
+          }
+          continue;
+        }
+
+        this.stopPathfinder();
+        await this.bot.lookAt(
+          liveTarget.position.offset(
+            0,
+            Math.max(0.5, Math.min(1.5, liveTarget.height ?? 1)),
+            0,
+          ),
+          true,
+        );
+        await this.bot.attack(liveTarget);
+        await waitForDelay(
+          Math.min(
+            SAFE_FORAGE_ATTACK_INTERVAL_MS,
+            Math.max(0, deadline - Date.now()),
+          ),
+        );
+      }
+
+    const targetStillAlive = Object.values(this.bot.entities ?? {}).some(
+        (entity) => entity.id === target.id && entity.isValid !== false,
+      );
+      if (targetStillAlive) {
+        return { outcome: "skipped", errorCode: "FORAGE_TARGET_NOT_DEFEATED" };
+      }
+      if (this.safeFoodItems().length > 0) {
+        return { outcome: "executed", errorCode: null };
+      }
+
+      await this.trySafetyGoto(
+        new goals.GoalNear(
+          Math.floor(lastTargetPosition.x),
+          Math.floor(lastTargetPosition.y),
+          Math.floor(lastTargetPosition.z),
+          1,
+        ),
+        signal,
+        Math.min(
+          SAFE_FORAGE_PATH_BUDGET_MS,
+          Math.max(100, deadline - Date.now()),
+        ),
+      );
+      const pickupDeadline = Math.min(
+        deadline,
+        Date.now() + SAFE_FORAGE_PICKUP_BUDGET_MS,
+      );
+      let approachedDrop = false;
+      while (!signal.aborted && Date.now() < pickupDeadline) {
+        if (this.safeFoodItems().length > 0) {
+          return { outcome: "executed", errorCode: null };
+        }
+        if (!approachedDrop) {
+          const drop = this.nearestDroppedItemPosition(lastTargetPosition);
+          if (drop) {
+            approachedDrop = true;
+            await this.trySafetyGoto(
+              new goals.GoalNear(
+                Math.floor(drop.x),
+                Math.floor(drop.y),
+                Math.floor(drop.z),
+                0,
+              ),
+              signal,
+              Math.min(
+                SAFE_FORAGE_PATH_BUDGET_MS,
+                Math.max(100, pickupDeadline - Date.now()),
+              ),
+            );
+          }
+        }
+        await waitForDelay(100);
+      }
+    return { outcome: "skipped", errorCode: "SAFE_FOOD_PICKUP_NOT_SETTLED" };
+  }
+
+  private async trySafetyGoto(
+    goal: Parameters<Bot["pathfinder"]["goto"]>[0],
+    signal: AbortSignal,
+    budgetMs: number,
+  ): Promise<boolean> {
+    if (signal.aborted || budgetMs < 100) return false;
+    try {
+      await this.boundedCollectGoto(goal, signal, budgetMs);
+      return !signal.aborted;
+    } catch {
+      return false;
+    }
   }
 
   private bindInventoryEvents(): void {

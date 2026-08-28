@@ -93,6 +93,44 @@ describe("AutonomousDirector", () => {
     expect(planAndDispatch).not.toHaveBeenCalled();
   });
 
+  it("skips autonomous milestones already present in the runtime inventory", async () => {
+    const record = readyRecord("studio-bot-01");
+    record.currentStatus!.inventory = [
+      { itemName: "oak_log", count: 4 },
+      { itemName: "crafting_table", count: 1 },
+      { itemName: "wooden_pickaxe", count: 1 },
+    ];
+    const registry = {
+      list: vi.fn(() => [record]),
+      get: vi.fn(() => record),
+      subscribe: vi.fn(() => () => undefined),
+    };
+    const planAndDispatch = vi.fn(async () => noopPlanResult());
+    const director = new AutonomousDirector({
+      registry,
+      planner: { planAndDispatch },
+      intervalMs: 60_000,
+      goalTimeoutMs: 60_000,
+      failureCooldownMs: 5_000,
+      terminalRetentionMs: 10_000,
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    director.start();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(planAndDispatch).toHaveBeenCalledTimes(1);
+    expect(planAndDispatch.mock.calls[0]?.[0].operatorGoal).toBe(
+      AUTONOMOUS_GOAL_SEQUENCE[3].operatorGoal,
+    );
+    expect(director.getCurrentTask(record.botId)).toMatchObject({
+      title: "自主任务: 采集圆石",
+    });
+    await director.stop();
+  });
+
   it("schedules a healthy Bot when max health is unknown in live telemetry", async () => {
     const record = readyRecord("studio-bot-01", null);
     const registry = {
@@ -202,7 +240,7 @@ describe("AutonomousDirector", () => {
         return completedPlanResult("world.scan", {
           blockName: "oak_log",
           dimension: "minecraft:overworld",
-          matches: [{ x: 10, y: 64, z: 0, distance: 10 }],
+          matches: [{ x: 10, y: 70, z: 0, distance: 10 }],
           targetsFound: 1,
           complete: true,
         });
@@ -237,7 +275,7 @@ describe("AutonomousDirector", () => {
     expect(plannerCalls.filter(({ botId }) => botId === "studio-bot-01").map(({ operatorGoal }) => operatorGoal)).toEqual([
       AUTONOMOUS_GOAL_SEQUENCE[0].operatorGoal,
       expect.stringContaining("oak_log 方块分布"),
-      expect.stringContaining("x=10 y=64 z=0"),
+      expect.stringContaining("x=10 y=70 z=0"),
       AUTONOMOUS_GOAL_SEQUENCE[0].operatorGoal,
     ]);
     expect(plannerCalls.filter(({ botId }) => botId === "studio-bot-02")).toHaveLength(1);
@@ -302,8 +340,9 @@ describe("AutonomousDirector", () => {
 
     expect(planAndDispatch).toHaveBeenCalledTimes(3);
     expect(planAndDispatch.mock.calls[2]?.[0].operatorGoal).toContain(
-      "x=32 y=64 z=0",
+      "x=12 y=64 z=0",
     );
+    expect(planAndDispatch.mock.calls[2]?.[0].operatorGoal).toContain("oak_log");
     expect(director.getCurrentTask("studio-bot-01")).toMatchObject({
       status: "failed",
       title: "自主任务: 收集基础木材",
@@ -319,7 +358,214 @@ describe("AutonomousDirector", () => {
     );
     await director.stop();
   });
+
+  it("continues directed coal mining without dispatching a surface movement", async () => {
+    const record = readyRecord("studio-bot-01");
+    record.currentStatus!.inventory = [
+      { itemName: "oak_log", count: 4 },
+      { itemName: "crafting_table", count: 1 },
+      { itemName: "wooden_pickaxe", count: 1 },
+      { itemName: "cobblestone", count: 8 },
+      { itemName: "stone_pickaxe", count: 1 },
+      { itemName: "furnace", count: 1 },
+    ];
+    let nowMs = NOW.getTime();
+    const registryListeners = new Set<(record: BotRegistryRecord) => void>();
+    const registry = {
+      list: vi.fn(() => [record]),
+      get: vi.fn(() => record),
+      subscribe: vi.fn((listener: (record: BotRegistryRecord) => void) => {
+        registryListeners.add(listener);
+        return () => registryListeners.delete(listener);
+      }),
+    };
+    const planAndDispatch = vi.fn(async () =>
+      failedPlanResult("COLLECT_TARGET_UNREACHABLE"),
+    );
+    const director = new AutonomousDirector({
+      registry,
+      planner: { planAndDispatch },
+      intervalMs: 60_000,
+      goalTimeoutMs: 60_000,
+      failureCooldownMs: 5_000,
+      terminalRetentionMs: 10_000,
+      now: () => new Date(nowMs),
+      randomId: uuidSequence(),
+    });
+
+    director.start();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(planAndDispatch).toHaveBeenCalledTimes(1);
+    expect(planAndDispatch.mock.calls[0]?.[0].operatorGoal).toBe(
+      AUTONOMOUS_GOAL_SEQUENCE[6].operatorGoal,
+    );
+    expect(
+      planAndDispatch.mock.calls.some(([request]) =>
+        request.operatorGoal.startsWith("移动到坐标"),
+      ),
+    ).toBe(false);
+    expect(director.getCurrentTask(record.botId)).toMatchObject({
+      status: "failed",
+      title: "自主恢复: 继续定向开掘 coal_ore",
+    });
+
+    nowMs += 11_000;
+    registryListeners.forEach((listener) => listener(record));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(planAndDispatch).toHaveBeenCalledTimes(2);
+    expect(planAndDispatch.mock.calls[1]?.[0].operatorGoal).toBe(
+      AUTONOMOUS_GOAL_SEQUENCE[6].operatorGoal,
+    );
+    await director.stop();
+  });
+
+  it("moves from a failed shelter to its missing material milestone", async () => {
+    const record = readyRecord("studio-bot-01");
+    record.currentStatus!.inventory = AUTONOMOUS_GOAL_SEQUENCE
+      .filter(({ key }) => key !== "shelter")
+      .map(({ key }) => ({ itemName: key, count: 1 }));
+    let nowMs = NOW.getTime();
+    const registryListeners = new Set<(record: BotRegistryRecord) => void>();
+    const registry = {
+      list: vi.fn(() => [record]),
+      get: vi.fn(() => record),
+      subscribe: vi.fn((listener: (record: BotRegistryRecord) => void) => {
+        registryListeners.add(listener);
+        return () => registryListeners.delete(listener);
+      }),
+    };
+    const planAndDispatch = vi.fn(async () =>
+      failedPlanResult("ITEM_NOT_IN_INVENTORY"),
+    );
+    const director = new AutonomousDirector({
+      registry,
+      planner: { planAndDispatch },
+      intervalMs: 60_000,
+      goalTimeoutMs: 60_000,
+      failureCooldownMs: 5_000,
+      terminalRetentionMs: 10_000,
+      now: () => new Date(nowMs),
+      randomId: uuidSequence(),
+    });
+
+    director.start();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(planAndDispatch.mock.calls[0]?.[0].operatorGoal).toBe(
+      AUTONOMOUS_GOAL_SEQUENCE.at(-1)?.operatorGoal,
+    );
+
+    record.currentStatus!.inventory = record.currentStatus!.inventory?.filter(
+      ({ itemName }) => itemName !== "dirt" && itemName !== "cobblestone",
+    );
+    nowMs += 11_000;
+    registryListeners.forEach((listener) => listener(record));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(planAndDispatch.mock.calls[1]?.[0].operatorGoal).toBe(
+      "获取 cobblestone",
+    );
+    expect(director.getCurrentTask(record.botId)).toMatchObject({
+      title: "自主任务: 采集圆石",
+    });
+    await director.stop();
+  });
+
+  it("uses carried cobblestone instead of searching for surface dirt", async () => {
+    const record = readyRecord("studio-bot-01");
+    record.currentStatus!.inventory = AUTONOMOUS_GOAL_SEQUENCE
+      .filter(({ key }) => key !== "dirt" && key !== "shelter")
+      .map(({ key }) => ({ itemName: key, count: 1 }));
+    const registry = {
+      list: vi.fn(() => [record]),
+      get: vi.fn(() => record),
+      subscribe: vi.fn(() => () => undefined),
+    };
+    const planAndDispatch = vi.fn(async () =>
+      failedPlanResult("SHELTER_STEP_BLOCKED"),
+    );
+    const director = new AutonomousDirector({
+      registry,
+      planner: { planAndDispatch },
+      intervalMs: 60_000,
+      goalTimeoutMs: 60_000,
+      failureCooldownMs: 5_000,
+      terminalRetentionMs: 10_000,
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    director.start();
+    await flushDirector();
+
+    expect(planAndDispatch).toHaveBeenCalledTimes(1);
+    expect(planAndDispatch.mock.calls[0]?.[0].operatorGoal).toBe(
+      "在当前维度向 north 挖一个 2 格深的安全避难所，并用 cobblestone 封口",
+    );
+    expect(director.getCurrentTask(record.botId)).toMatchObject({
+      title: "自主任务: 建立安全避难所",
+    });
+    await director.stop();
+  });
+
+  it("rotates autonomous shelter direction after a blocked attempt", async () => {
+    const record = readyRecord("studio-bot-01");
+    record.currentStatus!.inventory = AUTONOMOUS_GOAL_SEQUENCE
+      .filter(({ key }) => key !== "shelter")
+      .map(({ key }) => ({ itemName: key, count: 1 }));
+    let nowMs = NOW.getTime();
+    const registryListeners = new Set<(record: BotRegistryRecord) => void>();
+    const registry = {
+      list: vi.fn(() => [record]),
+      get: vi.fn(() => record),
+      subscribe: vi.fn((listener: (record: BotRegistryRecord) => void) => {
+        registryListeners.add(listener);
+        return () => registryListeners.delete(listener);
+      }),
+    };
+    const planAndDispatch = vi.fn(async () =>
+      failedPlanResult("SHELTER_STEP_BLOCKED"),
+    );
+    const director = new AutonomousDirector({
+      registry,
+      planner: { planAndDispatch },
+      intervalMs: 60_000,
+      goalTimeoutMs: 60_000,
+      failureCooldownMs: 5_000,
+      terminalRetentionMs: 10_000,
+      now: () => new Date(nowMs),
+      randomId: uuidSequence(),
+    });
+
+    director.start();
+    await flushDirector();
+    for (let attempt = 1; attempt < 4; attempt += 1) {
+      nowMs += 11_000;
+      registryListeners.forEach((listener) => listener(record));
+      await flushDirector();
+    }
+
+    expect(
+      planAndDispatch.mock.calls.map(([request]) => request.operatorGoal),
+    ).toEqual([
+      "在当前维度向 north 挖一个 2 格深的安全避难所，并用 dirt 封口",
+      "在当前维度向 east 挖一个 2 格深的安全避难所，并用 dirt 封口",
+      "在当前维度向 south 挖一个 2 格深的安全避难所，并用 dirt 封口",
+      "在当前维度向 west 挖一个 2 格深的安全避难所，并用 dirt 封口",
+    ]);
+    await director.stop();
+  });
 });
+
+async function flushDirector(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
 
 function noopPlanResult(): never {
   return {

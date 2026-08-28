@@ -98,6 +98,7 @@ describe("CoordinatorLocalPlanner", () => {
     expect(options.prompt).not.toContain("isolated-test");
     expect(options.prompt).toContain("$CURRENT_SERVER_PROFILE");
     expect(options.prompt).toContain('"health":20');
+    expect(JSON.parse(options.prompt).bot.inventory).toEqual([]);
     expect(options.systemPrompt).toBe(LOCAL_PLANNER_SYSTEM_PROMPT);
     expect(JSON.parse(options.prompt).promptVersion).toBe(LOCAL_PLANNER_PROMPT_VERSION);
     expect(options.temperature).toBe(0);
@@ -382,6 +383,114 @@ describe("CoordinatorLocalPlanner", () => {
     expect(retrySchema).not.toHaveProperty("anyOf");
     expect(retrySchema.properties?.action).toMatchObject({ const: "plan_items" });
     expect(JSON.parse(retryOptions.prompt).availableSkills).toEqual([]);
+  });
+
+  it("corrects an ungrounded plan_items choice to the one dirt item named by the goal", async () => {
+    const planning = planningRegistry();
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => skillResult(invocation, "completed"));
+    const generate = vi.fn(async (options) =>
+      aiResult(
+        JSON.stringify(
+          options.requestId.endsWith(":plan-items-retry")
+            ? {
+                action: "plan_items",
+                botId: BOT_ID,
+                taskId: "task-01",
+                goals: [{ itemName: "dirt", count: 1 }],
+                reasonCode: "ADVANCE_TASK",
+              }
+            : {
+                action: "plan_items",
+                botId: BOT_ID,
+                taskId: "task-01",
+                goals: [{ itemName: "diamond", count: 1 }],
+                reasonCode: "ADVANCE_TASK",
+              },
+        ),
+        options.requestId,
+      ),
+    );
+    const planner = new CoordinatorLocalPlanner({
+      ai: { generate },
+      registry: { get: () => planning.get(BOT_ID, NOW) },
+      transport: { sendSkillInvocation },
+      coordinatorInstanceId: "coordinator-01",
+      now: () => NOW,
+      randomId: uuidSequence(),
+    });
+
+    await expect(
+      planner.planAndDispatch({
+        ...resourcePlanRequest(),
+        operatorGoal: "获取 dirt",
+      }),
+    ).resolves.toMatchObject({
+      action: "skill_result",
+      reasonCode: "ADVANCE_TASK",
+      result: { payload: { outcome: "completed" } },
+    });
+    expect(generate).toHaveBeenCalledTimes(2);
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(1);
+    expect(sendSkillInvocation.mock.calls[0]?.[0].payload).toMatchObject({
+      skillId: "collect.block",
+      input: { blockName: "dirt", maxCount: 1 },
+    });
+    const retryOptions = generate.mock.calls[1]![0];
+    expect(z.toJSONSchema(retryOptions.schema).properties?.goals).toMatchObject({
+      maxItems: 1,
+      minItems: 1,
+    });
+    expect(JSON.parse(retryOptions.prompt).plannedItems).toEqual(["dirt"]);
+  });
+
+  it("continues from the runtime inventory instead of rebuilding the wooden tool chain", async () => {
+    const planning = planningRegistry();
+    const current = planning.get(BOT_ID, NOW)!.currentStatus!;
+    planning.ingest({
+      schemaVersion: "1.0",
+      messageId: uuid(40),
+      traceId: "trace-registry",
+      timestamp: NOW.toISOString(),
+      source: { service: "bot-runtime", instanceId: RUNTIME_ID },
+      botId: BOT_ID,
+      type: "bot.status.v1",
+      payload: {
+        ...current,
+        sequence: 4,
+        inventory: [
+          { itemName: "oak_log", count: 3 },
+          { itemName: "crafting_table", count: 1 },
+          { itemName: "wooden_pickaxe", count: 1 },
+        ],
+      },
+    }, NOW);
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => skillResult(invocation, "completed"));
+    const planner = resourcePlanner(
+      planning,
+      { sendSkillInvocation },
+      [{ itemName: "cobblestone", count: 1 }],
+    );
+
+    await expect(
+      planner.planAndDispatch({
+        ...planRequest(),
+        operatorGoal: "获取 cobblestone",
+      }),
+    ).resolves.toMatchObject({
+      action: "skill_result",
+      result: { payload: { outcome: "completed" } },
+    });
+    expect(sendSkillInvocation).toHaveBeenCalledTimes(1);
+    expect(sendSkillInvocation.mock.calls[0]?.[0]).toMatchObject({
+      payload: {
+        skillId: "collect.block",
+        input: expect.objectContaining({ blockName: "stone", maxCount: 1 }),
+      },
+    });
   });
 
   it("records the narrowed re-ask and the step ladder without leaking the goal or inputs", async () => {
@@ -779,7 +888,9 @@ describe("CoordinatorLocalPlanner", () => {
     expect(dispatched.lastIndexOf("craft.item")).toBeGreaterThan(placeIndex);
 
     const scan = sendSkillInvocation.mock.calls.find(
-      ([invocation]) => invocation.payload.skillId === "world.scan",
+      ([invocation]) =>
+        invocation.payload.skillId === "world.scan" &&
+        inputField(invocation.payload.input, "blockName") === "grass_block",
     )![0];
     expect(scan.payload.input).toMatchObject({
       blockName: "grass_block",
@@ -813,6 +924,50 @@ describe("CoordinatorLocalPlanner", () => {
     expect(stationCraft.payload.input).toMatchObject({
       itemName: "wooden_pickaxe",
       craftingTable: { x: 1_236, y: 64, z: -4_321 },
+    });
+  });
+
+  it("places only above a scanned ground block whose target is observed air", async () => {
+    const placement = placementRegistry();
+    const blockedReference = { x: 1_235, y: 63, z: -4_321, distance: 2 };
+    const openReference = { x: 1_236, y: 63, z: -4_321, distance: 3 };
+    const sendSkillInvocation = vi.fn<
+      SkillInvocationTransport["sendSkillInvocation"]
+    >(async (invocation) => {
+      if (invocation.payload.skillId !== "world.scan") {
+        return skillResult(invocation, "completed");
+      }
+      const blockName = inputField(invocation.payload.input, "blockName");
+      if (blockName === "air") {
+        return skillResult(invocation, "completed", undefined, 1, scanOutput(
+          invocation,
+          [{ x: openReference.x, y: openReference.y + 1, z: openReference.z, distance: 3 }],
+        ));
+      }
+      return skillResult(invocation, "completed", undefined, 1, scanOutput(
+        invocation,
+        blockName === "grass_block" ? [blockedReference, openReference] : [],
+      ));
+    });
+    const planner = resourcePlanner(
+      placement,
+      { sendSkillInvocation },
+      [{ itemName: "wooden_pickaxe", count: 1 }],
+    );
+
+    await expect(
+      planner.planAndDispatch({
+        ...planRequest(),
+        operatorGoal: "Craft one wooden_pickaxe from nearby resources.",
+      }),
+    ).resolves.toMatchObject({ action: "skill_result" });
+
+    const stationPlacement = sendSkillInvocation.mock.calls
+      .map(([invocation]) => invocation)
+      .find((invocation) => invocation.payload.skillId === "world.place-block")!;
+    expect(stationPlacement.payload.input).toMatchObject({
+      referenceBlock: { x: openReference.x, y: openReference.y, z: openReference.z },
+      face: { x: 0, y: 1, z: 0 },
     });
   });
 
@@ -934,7 +1089,7 @@ describe("CoordinatorLocalPlanner", () => {
         .filter(([invocation]) => invocation.payload.skillId === "world.scan")
         .map(([invocation]) => inputField(invocation.payload.input, "blockName")),
     );
-    expect(scanned.size).toBe(8);
+    expect(scanned.size).toBe(9);
     expect(
       sendSkillInvocation.mock.calls.some(
         ([invocation]) => invocation.payload.skillId === "world.place-block",
@@ -2986,7 +3141,16 @@ function completedOutputForInvocation(
     };
   }
   if (invocation.payload.skillId === "world.scan") {
-    return scanOutput(invocation, [TOO_CLOSE_MATCH, IN_WINDOW_MATCH]);
+    const blockName = inputField(invocation.payload.input, "blockName");
+    return scanOutput(
+      invocation,
+      blockName === "air"
+        ? [
+            { ...TOO_CLOSE_MATCH, y: TOO_CLOSE_MATCH.y + 1 },
+            { ...IN_WINDOW_MATCH, y: IN_WINDOW_MATCH.y + 1 },
+          ]
+        : [TOO_CLOSE_MATCH, IN_WINDOW_MATCH],
+    );
   }
   if (invocation.payload.skillId === "world.place-block") {
     return placeBlockOutput(invocation);

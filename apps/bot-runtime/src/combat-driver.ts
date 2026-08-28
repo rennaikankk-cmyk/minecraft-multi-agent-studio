@@ -49,6 +49,10 @@ import {
 
 const MOTION_HISTORY_LIMIT = 4;
 const MOVEMENT_ACTION_MS = 150;
+// A live attacker gets a lower defensive floor than an operator-requested
+// engagement. The Bot still retreats at critical health, but ordinary low
+// health must not make close-range self-defense look inert.
+const RETALIATION_CRITICAL_HEALTH = 6;
 // ECMAScript Date supports millisecond timestamps only in this bounded range.
 // Safe integers above it are valid arithmetic values but cannot be emitted in
 // the protocol's ISO-8601 audit fields without a RangeError.
@@ -64,7 +68,14 @@ const ARMOR_MATERIALS = new Set([
   "netherite",
 ]);
 const ENTITY_KINDS = new Set(["player", "monster", "animal", "object", "unknown"]);
-const WEAPON_KINDS = new Set(["sword", "axe", "trident", "bow", "crossbow"]);
+const WEAPON_KINDS = new Set([
+  "sword",
+  "axe",
+  "trident",
+  "bow",
+  "crossbow",
+  "other",
+]);
 
 export type CombatDriverEntityObservation = CombatEntityObservation &
   Readonly<{
@@ -92,6 +103,8 @@ export type CombatDriverObservation = Readonly<{
     gear: CombatGearSnapshot | null;
     orientation: CombatOrientation;
     heldItemSlot: number | null;
+    /** Mineflayer's authoritative use-item state for bow/crossbow charging. */
+    usingHeldItem?: boolean;
     onGround: boolean;
     fallDistance: number | null;
   }>;
@@ -126,6 +139,16 @@ export type CombatPrimitiveAction =
     }>
   | Readonly<{
       kind: "MELEE_ATTACK";
+      targetEntityId: number;
+      /** null means a retaliation-only unarmed strike. */
+      weaponSlot: number | null;
+    }>
+  | Readonly<{
+      kind: "DRAW_RANGED_WEAPON";
+      weaponSlot: number;
+    }>
+  | Readonly<{
+      kind: "RELEASE_RANGED_WEAPON";
       targetEntityId: number;
       weaponSlot: number;
     }>
@@ -211,6 +234,8 @@ type PolicyCheck =
   | Readonly<{ allowed: true; record: ExecutionRecord }>
   | Readonly<{ allowed: false; denial: PolicyDenialCode }>;
 
+type CombatEngagementMode = "active" | "retaliation";
+
 const TARGET_REFUSAL_CODES: Readonly<Record<CombatTargetRefusalCode, string>> = {
   NO_HOSTILE_IN_RANGE: "COMBAT_NO_HOSTILE_TARGET",
   HEALTH_BELOW_ENGAGE_FLOOR: "COMBAT_HEALTH_BELOW_ENGAGE_FLOOR",
@@ -224,11 +249,14 @@ export class CombatDriver {
   private readonly threatAnalyzer: ThreatAnalyzer;
   private readonly targetSelector: TargetSelector;
   private readonly retreatController: RetreatController;
+  private readonly retaliationTargetSelector: TargetSelector;
+  private readonly retaliationRetreatController: RetreatController;
   private readonly predictionEngine = new PredictionEngine();
   private readonly interactionSequencer = new ChainSequencer();
   private policyGate: ServerPolicyGate;
   private readonly motionHistory = new Map<number, CombatMotionSample[]>();
   private totemManager: TotemManager;
+  private retaliationTotemManager: TotemManager;
   private crystalEngine: CrystalEngine;
   private packetMineController: PacketMineController;
   private weaponManager: WeaponManager;
@@ -265,12 +293,26 @@ export class CombatDriver {
       ...DEFAULT_RETREAT_POLICY,
       stance: config.stance,
     });
+    this.retaliationTargetSelector = new TargetSelector({
+      ...DEFAULT_ENGAGEMENT_POLICY,
+      minimumEngageHealth: RETALIATION_CRITICAL_HEALTH,
+      stance: "expendable",
+      respectGearGap: false,
+    });
+    this.retaliationRetreatController = new RetreatController({
+      ...DEFAULT_RETREAT_POLICY,
+      emergencyHealth: RETALIATION_CRITICAL_HEALTH,
+      withdrawHealth: RETALIATION_CRITICAL_HEALTH,
+      stance: "expendable",
+      respectGearGap: false,
+    });
     this.reflexProbe = config.reflexProbe;
     this.reflexClearance = decideReflexClearance(
       this.reflexProbe,
       config.serverProfileId,
     );
     this.totemManager = this.newTotemManager();
+    this.retaliationTotemManager = this.newTotemManager("expendable");
     this.crystalEngine = new CrystalEngine();
     this.packetMineController = this.newPacketMineController();
     this.weaponManager = new WeaponManager();
@@ -356,6 +398,7 @@ export class CombatDriver {
     this.operationTail = Promise.resolve();
     this.policyGate.reset();
     this.totemManager.reset();
+    this.retaliationTotemManager.reset();
     this.crystalEngine.reset();
     this.packetMineController.reset();
     this.weaponManager.reset();
@@ -400,6 +443,40 @@ export class CombatDriver {
         execute,
         signal,
         operationGeneration,
+        "active",
+      );
+    });
+  }
+
+  /**
+   * Defensive combat entered only after a live damage event. It may fight
+   * without a totem and ignores a gear mismatch, while preserving health,
+   * hostile-count, crystal, and anchor retreat gates.
+   */
+  retaliate(
+    observation: CombatDriverObservation,
+    requestedAtMs: number,
+    execute: CombatActionExecutor,
+    signal: AbortSignal,
+  ): Promise<CombatDriverReceipt> {
+    const operationGeneration = this.connectionGeneration;
+    return this.enqueueOperation(() => {
+      if (operationGeneration !== this.connectionGeneration) {
+        this.validateRequestTime(requestedAtMs);
+        return Promise.resolve(this.refuse(
+          "ENGAGE",
+          requestedAtMs,
+          "SKILL_EXECUTION_INTERRUPTED",
+          null,
+        ));
+      }
+      return this.engageInternal(
+        observation,
+        requestedAtMs,
+        execute,
+        signal,
+        operationGeneration,
+        "retaliation",
       );
     });
   }
@@ -410,6 +487,7 @@ export class CombatDriver {
     execute: CombatActionExecutor,
     signal: AbortSignal,
     expectedGeneration: number,
+    mode: CombatEngagementMode,
   ): Promise<CombatDriverReceipt> {
     this.refreshPolicyGate();
     // Re-evaluate on every live-combat request. `decideReflexClearance` is
@@ -449,21 +527,30 @@ export class CombatDriver {
     // TotemManager is the highest preemption tier. It receives the smallest
     // validated self snapshot first; no target ranking, threat scoring, gear
     // comparison, or geometry may delay a live replacement/retreat.
+    const totemManager = mode === "retaliation"
+      ? this.retaliationTotemManager
+      : this.totemManager;
     let totemDecision;
     try {
-      totemDecision = this.totemManager.decideForLiveCombat(
-        {
-          nowMs: observation.observedAtMs,
-          offhandIsTotem: observation.self.offhandIsTotem,
-          ...(observation.self.totemPopObservedAtMs === undefined
-            ? {}
-            : { totemPopObservedAtMs: observation.self.totemPopObservedAtMs }),
-          inventoryTotemCount: observation.self.inventoryTotemCount,
-          selfHealth: observation.self.health,
-          engaged: true,
-        },
-        this.reflexClearance,
-      );
+      const totemSnapshot = {
+        nowMs: observation.observedAtMs,
+        offhandIsTotem: observation.self.offhandIsTotem,
+        ...(observation.self.totemPopObservedAtMs === undefined
+          ? {}
+          : { totemPopObservedAtMs: observation.self.totemPopObservedAtMs }),
+        inventoryTotemCount: observation.self.inventoryTotemCount,
+        selfHealth: observation.self.health,
+        engaged: true,
+      };
+      // A missing reflex probe blocks sub-50ms replacement, but it must not
+      // disable ordinary sword/bow combat. Totem replacement remains gated;
+      // the weapon path below is tactical and still passes policy/reach checks.
+      totemDecision = this.reflexClearance.cleared
+        ? totemManager.decideForLiveCombat(
+            totemSnapshot,
+            this.reflexClearance,
+          )
+        : totemManager.decide(totemSnapshot);
     } catch (error) {
       if (!(error instanceof CombatReflexNotClearedError)) throw error;
       return this.executeRetreat(
@@ -479,6 +566,18 @@ export class CombatDriver {
     }
 
     if (totemDecision.action === "REEQUIP_OFFHAND") {
+      if (!this.reflexClearance.cleared) {
+        return this.executeRetreat(
+          observation,
+          requestedAtMs,
+          execute,
+          signal,
+          expectedGeneration,
+          "COMBAT_REFLEX_NOT_CLEARED",
+          null,
+          this.fallbackRetreatDirection(observation),
+        );
+      }
       return this.executeAction(
         "ENGAGE",
         requestedAtMs,
@@ -494,13 +593,13 @@ export class CombatDriver {
           targetEntityId: null,
         },
         (executedAtMs) => {
-          this.totemManager.recordReequip(executedAtMs);
+          totemManager.recordReequip(executedAtMs);
           if (
             totemDecision.reason === "TOTEM_POP_OBSERVED" &&
             observation.self.totemPopObservedAtMs !== undefined &&
             observation.self.totemPopObservedAtMs !== null
           ) {
-            this.totemManager.recordTotemPopHandled(
+            totemManager.recordTotemPopHandled(
               observation.self.totemPopObservedAtMs,
             );
           }
@@ -516,7 +615,7 @@ export class CombatDriver {
         expectedGeneration,
         "COMBAT_NO_TOTEM_AVAILABLE",
         null,
-        null,
+        this.fallbackRetreatDirection(observation),
       );
     }
 
@@ -546,7 +645,13 @@ export class CombatDriver {
     }
 
     const gear = this.gearAssessment(observation, assessment.threats);
-    const targetDecision = this.targetSelector.select(
+    const targetSelector = mode === "retaliation"
+      ? this.retaliationTargetSelector
+      : this.targetSelector;
+    const retreatController = mode === "retaliation"
+      ? this.retaliationRetreatController
+      : this.retreatController;
+    const targetDecision = targetSelector.select(
       assessment,
       observation.self.health,
       totalTotems,
@@ -558,7 +663,7 @@ export class CombatDriver {
         entity.position,
       ] as const),
     );
-    const retreat = this.retreatController.evaluate(
+    const retreat = retreatController.evaluate(
       assessment,
       observation.self.health,
       observation.self.position,
@@ -624,16 +729,9 @@ export class CombatDriver {
         );
       } catch (error) {
         if (!(error instanceof CombatReflexNotClearedError)) throw error;
-        return this.executeRetreat(
-          observation,
-          requestedAtMs,
-          execute,
-          signal,
-          expectedGeneration,
-          "COMBAT_REFLEX_NOT_CLEARED",
-          targetDecision.target.entityId,
-          retreat.direction,
-        );
+        // Explosive tactics are optional. Without a measured reflex window,
+        // decline this candidate and continue with the safe weapon path.
+        crystalReceipt = null;
       }
     } else {
       crystalReceipt = null;
@@ -657,16 +755,9 @@ export class CombatDriver {
         );
       } catch (error) {
         if (!(error instanceof CombatReflexNotClearedError)) throw error;
-        return this.executeRetreat(
-          observation,
-          requestedAtMs,
-          execute,
-          signal,
-          expectedGeneration,
-          "COMBAT_REFLEX_NOT_CLEARED",
-          targetDecision.target.entityId,
-          retreat.direction,
-        );
+        // Packet mining is reflex-gated as well; do not turn its denial into
+        // a total loss of ordinary sword/bow response.
+        mineReceipt = null;
       }
     } else {
       mineReceipt = null;
@@ -682,6 +773,7 @@ export class CombatDriver {
       execute,
       signal,
       expectedGeneration,
+      mode === "retaliation",
     );
   }
 
@@ -856,13 +948,26 @@ export class CombatDriver {
     execute: CombatActionExecutor,
     signal: AbortSignal,
     expectedGeneration: number,
+    allowUnarmed: boolean,
   ): Promise<CombatDriverReceipt> {
     const selection = this.weaponManager.select(
       observation.weapons,
       target.distance,
     );
-    const weapon = selection.weapon;
-    if (!weapon) {
+    const unarmed = selection.weapon === null && allowUnarmed;
+    const weapon: CombatWeaponCandidate | null = selection.weapon ??
+      (unarmed
+        ? {
+            slot: 0,
+            itemName: "unarmed",
+            kind: "other",
+            baseDamage: 1,
+            fullCooldownMs: 625,
+            durabilityRemaining: null,
+            enchantmentDamageBonus: 0,
+          }
+        : null);
+    if (weapon === null) {
       return this.refuse(
         "ENGAGE",
         requestedAtMs,
@@ -871,8 +976,11 @@ export class CombatDriver {
       );
     }
 
-    const reach = this.policyGate.checkAttackReach(target.distance);
-    if (!reach.allowed) {
+    const ranged = selection.mode === "ranged";
+    const reach = ranged
+      ? null
+      : this.policyGate.checkAttackReach(target.distance);
+    if (reach !== null && !reach.allowed) {
       return this.moveTowardTarget(
         observation,
         targetObservation.position,
@@ -887,11 +995,13 @@ export class CombatDriver {
     // Check the shared combat policy before weapon-specific cooldown logic so
     // a request clipped by the global action window reports the policy denial
     // deterministically rather than exposing an internal weapon timer.
-    const attackRate = this.policyGate.checkActionRate(
-      "attack",
-      observation.observedAtMs,
-    );
-    if (!attackRate.allowed) {
+    const attackRate = ranged
+      ? null
+      : this.policyGate.checkActionRate(
+          "attack",
+          observation.observedAtMs,
+        );
+    if (attackRate !== null && !attackRate.allowed) {
       return this.refuse(
         "ENGAGE",
         requestedAtMs,
@@ -904,7 +1014,7 @@ export class CombatDriver {
       );
     }
 
-    if (observation.self.heldItemSlot !== weapon.slot) {
+    if (!unarmed && observation.self.heldItemSlot !== weapon.slot) {
       return this.executeAction(
         "ENGAGE",
         requestedAtMs,
@@ -958,6 +1068,70 @@ export class CombatDriver {
             : "COMBAT_ROTATION_IN_PROGRESS",
           targetEntityId: target.entityId,
         },
+      );
+    }
+
+    if (ranged) {
+      const rangedDecision = this.weaponManager.evaluateRanged(
+        weapon,
+        observation.observedAtMs,
+        target.distance,
+        observation.self.usingHeldItem ?? false,
+      );
+      if (rangedDecision.action === "DRAW") {
+        return this.executeAction(
+          "ENGAGE",
+          requestedAtMs,
+          { kind: "DRAW_RANGED_WEAPON", weaponSlot: weapon.slot },
+          observation,
+          execute,
+          signal,
+          expectedGeneration,
+          {
+            disposition: "modified",
+            action: "ENGAGE",
+            reasonCode: "COMBAT_RANGED_DRAW_STARTED",
+            targetEntityId: target.entityId,
+          },
+          (executedAtMs) => this.weaponManager.recordDrawStart(executedAtMs),
+        );
+      }
+      if (rangedDecision.action === "HOLD") {
+        return this.refuse(
+          "ENGAGE",
+          requestedAtMs,
+          "COMBAT_RANGED_DRAWING",
+          target.entityId,
+          "delayed",
+        );
+      }
+      if (rangedDecision.action === "RELEASE") {
+        return this.executeAction(
+          "ENGAGE",
+          requestedAtMs,
+          {
+            kind: "RELEASE_RANGED_WEAPON",
+            targetEntityId: target.entityId,
+            weaponSlot: weapon.slot,
+          },
+          observation,
+          execute,
+          signal,
+          expectedGeneration,
+          {
+            disposition: "executed",
+            action: "ENGAGE",
+            reasonCode: null,
+            targetEntityId: target.entityId,
+          },
+          () => this.weaponManager.recordRelease(),
+        );
+      }
+      return this.refuse(
+        "ENGAGE",
+        requestedAtMs,
+        `COMBAT_RANGED_${rangedDecision.reason}`,
+        target.entityId,
       );
     }
 
@@ -1030,7 +1204,7 @@ export class CombatDriver {
       {
         kind: "MELEE_ATTACK",
         targetEntityId: target.entityId,
-        weaponSlot: weapon.slot,
+        weaponSlot: unarmed ? null : weapon.slot,
       },
       observation,
       execute,
@@ -1388,7 +1562,11 @@ export class CombatDriver {
         : { allowed: false, denial: decision.errorCode };
     };
 
-    if (action.kind === "DISENGAGE" || action.kind === "ROTATE") {
+    if (
+      action.kind === "DISENGAGE" ||
+      action.kind === "ROTATE" ||
+      action.kind === "DRAW_RANGED_WEAPON"
+    ) {
       return allowed();
     }
     if (!observation) {
@@ -1410,6 +1588,25 @@ export class CombatDriver {
       );
       const reach = this.policyGate.checkAttackReach(distance);
       if (!reach.allowed) return { allowed: false, denial: reach.errorCode };
+      return rate("attack", observation.observedAtMs);
+    }
+    if (action.kind === "RELEASE_RANGED_WEAPON") {
+      const target = observation.entities.find(
+        ({ entity }) => entity.entityId === action.targetEntityId,
+      );
+      const weapon = observation.weapons.find(
+        ({ slot }) => slot === action.weaponSlot,
+      );
+      if (
+        !target ||
+        !weapon ||
+        (weapon.kind !== "bow" && weapon.kind !== "crossbow") ||
+        weapon.effectiveRange === undefined ||
+        distanceBetween(observation.self.position, target.position) >
+          weapon.effectiveRange
+      ) {
+        return { allowed: false, denial: "POLICY_ATTACK_REACH_EXCEEDED" };
+      }
       return rate("attack", observation.observedAtMs);
     }
     if (action.kind === "PLACE_CRYSTAL") {
@@ -1517,6 +1714,36 @@ export class CombatDriver {
     return prediction.position ?? target.position;
   }
 
+  private fallbackRetreatDirection(
+    observation: CombatDriverObservation,
+  ): CombatVector3 | null {
+    let weightSum = 0;
+    let x = 0;
+    let z = 0;
+    for (const entity of observation.entities) {
+      try {
+        if (!this.identity.isHostile(entity.entity, observation.serverProfileId)) {
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      const weight = 1 / Math.max(
+        1,
+        distanceBetween(observation.self.position, entity.position),
+      );
+      weightSum += weight;
+      x += entity.position.x * weight;
+      z += entity.position.z * weight;
+    }
+    if (weightSum === 0) return null;
+    const awayX = observation.self.position.x - x / weightSum;
+    const awayZ = observation.self.position.z - z / weightSum;
+    const magnitude = Math.hypot(awayX, awayZ);
+    if (magnitude < 1e-9) return null;
+    return { x: awayX / magnitude, y: 0, z: awayZ / magnitude };
+  }
+
   private publicTarget(
     threat: CombatThreat | null,
     observation: CombatDriverObservation,
@@ -1597,6 +1824,8 @@ export class CombatDriver {
       !Number.isInteger(observation.self.inventoryTotemCount) ||
       observation.self.inventoryTotemCount < 0 ||
       typeof observation.self.offhandIsTotem !== "boolean" ||
+      (observation.self.usingHeldItem !== undefined &&
+        typeof observation.self.usingHeldItem !== "boolean") ||
       typeof observation.self.onGround !== "boolean"
     ) {
       throw new TypeError("Combat observation is malformed.");
@@ -1743,10 +1972,12 @@ export class CombatDriver {
     }
   }
 
-  private newTotemManager(): TotemManager {
+  private newTotemManager(
+    stance: CombatSurvivalStance = this.config.stance,
+  ): TotemManager {
     return new TotemManager({
       ...DEFAULT_TOTEM_POLICY,
-      stance: this.config.stance,
+      stance,
     });
   }
 
@@ -1827,7 +2058,12 @@ function interactionClassForPrimitive(
   action: CombatPrimitiveAction,
 ): "use" | "attack" | null {
   if (action.kind === "PLACE_CRYSTAL") return "use";
-  if (action.kind === "MELEE_ATTACK") return "attack";
+  if (
+    action.kind === "MELEE_ATTACK" ||
+    action.kind === "RELEASE_RANGED_WEAPON"
+  ) {
+    return "attack";
+  }
   return null;
 }
 

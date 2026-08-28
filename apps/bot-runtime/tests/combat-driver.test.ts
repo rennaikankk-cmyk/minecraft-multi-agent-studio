@@ -126,6 +126,210 @@ describe("CombatDriver W0 deterministic wiring", () => {
     expect(actions[0]).toMatchObject({ kind: "MELEE_ATTACK", targetEntityId: 42 });
   });
 
+  it("keeps preserve-life retreat for active combat but retaliates without a totem", async () => {
+    const defenseless = observation({
+      self: {
+        ...observation().self,
+        offhandIsTotem: false,
+        inventoryTotemCount: 0,
+        gear: { ...selfGear, hasTotem: false },
+      },
+    });
+    const activeActions: CombatPrimitiveAction[] = [];
+    const active = await driver().engage(
+      defenseless,
+      1_000,
+      await ackExecutor(activeActions),
+      new AbortController().signal,
+    );
+    expect(active.actual).toMatchObject({
+      action: "RETREAT",
+      primitiveAction: "RETREAT_MOVE",
+      reasonCode: "COMBAT_NO_TOTEM_AVAILABLE",
+    });
+
+    const retaliationActions: CombatPrimitiveAction[] = [];
+    const retaliation = await driver().retaliate(
+      defenseless,
+      1_000,
+      await ackExecutor(retaliationActions),
+      new AbortController().signal,
+    );
+    expect(retaliation.actual).toMatchObject({
+      action: "ENGAGE",
+      primitiveAction: "MELEE_ATTACK",
+      targetEntityId: 42,
+    });
+    expect(retaliationActions).toEqual([
+      expect.objectContaining({ kind: "MELEE_ATTACK", targetEntityId: 42 }),
+    ]);
+  });
+
+  it("uses an unarmed strike as the final retaliation fallback", async () => {
+    const base = observation();
+    const actions: CombatPrimitiveAction[] = [];
+    const result = await driver().retaliate(
+      observation({
+        self: {
+          ...base.self,
+          offhandIsTotem: false,
+          inventoryTotemCount: 0,
+          heldItemSlot: null,
+          gear: { ...selfGear, weaponDamage: 0, hasTotem: false },
+        },
+        weapons: [],
+      }),
+      1_000,
+      await ackExecutor(actions),
+      new AbortController().signal,
+    );
+
+    expect(result.actual).toMatchObject({
+      action: "ENGAGE",
+      primitiveAction: "MELEE_ATTACK",
+      targetEntityId: 42,
+    });
+    expect(actions).toEqual([{
+      kind: "MELEE_ATTACK",
+      targetEntityId: 42,
+      weaponSlot: null,
+    }]);
+  });
+
+  it("retaliates while wounded but still retreats at critical health", async () => {
+    const base = observation();
+    const woundedActions: CombatPrimitiveAction[] = [];
+    const wounded = await driver().retaliate(
+      observation({
+        self: {
+          ...base.self,
+          health: 7,
+          gear: { ...selfGear, health: 7 },
+        },
+      }),
+      1_000,
+      await ackExecutor(woundedActions),
+      new AbortController().signal,
+    );
+
+    expect(wounded.actual).toMatchObject({
+      action: "ENGAGE",
+      primitiveAction: "MELEE_ATTACK",
+      targetEntityId: 42,
+    });
+    expect(woundedActions).toEqual([
+      expect.objectContaining({ kind: "MELEE_ATTACK", targetEntityId: 42 }),
+    ]);
+
+    const criticalActions: CombatPrimitiveAction[] = [];
+    const critical = await driver().retaliate(
+      observation({
+        self: {
+          ...base.self,
+          health: 5,
+          gear: { ...selfGear, health: 5 },
+        },
+      }),
+      1_000,
+      await ackExecutor(criticalActions),
+      new AbortController().signal,
+    );
+
+    expect(critical.actual).toMatchObject({
+      action: "RETREAT",
+      primitiveAction: "RETREAT_MOVE",
+      reasonCode: "COMBAT_HEALTH_CRITICAL",
+      targetEntityId: 42,
+    });
+  });
+
+  it("draws, holds, and releases a bow instead of applying melee reach", async () => {
+    const bow = {
+      slot: 1,
+      itemName: "bow",
+      kind: "bow" as const,
+      baseDamage: 1,
+      fullCooldownMs: 625,
+      durabilityRemaining: 300,
+      enchantmentDamageBonus: 0,
+      ammoRemaining: 8,
+      drawTimeMs: 1_000,
+      effectiveRange: 32,
+    };
+    const base = observation();
+    const distantEntity = {
+      ...base.entities[0]!,
+      position: { x: 10, y: 64, z: 0 },
+    };
+    const actions: CombatPrimitiveAction[] = [];
+    let acknowledgementAtMs = 1_005;
+    const execute = async (action: CombatPrimitiveAction) => {
+      actions.push(action);
+      return {
+        outcome: "executed" as const,
+        executedAtMs: acknowledgementAtMs,
+      };
+    };
+    const combat = driver();
+
+    const drawn = await combat.engage(
+      observation({
+        entities: [distantEntity],
+        weapons: [bow],
+        self: { ...base.self, heldItemSlot: 1, usingHeldItem: false },
+      }),
+      1_000,
+      execute,
+      new AbortController().signal,
+    );
+    expect(drawn.actual.primitiveAction).toBe("DRAW_RANGED_WEAPON");
+
+    const holding = await combat.engage(
+      observation({
+        observedAtMs: 1_400,
+        entities: [distantEntity],
+        weapons: [bow],
+        self: {
+          ...base.self,
+          heldItemSlot: 1,
+          usingHeldItem: true,
+        },
+      }),
+      1_400,
+      execute,
+      new AbortController().signal,
+    );
+    expect(holding.actual).toMatchObject({
+      primitiveAction: "NONE",
+      reasonCode: "COMBAT_RANGED_DRAWING",
+    });
+
+    acknowledgementAtMs = 1_905;
+    const released = await combat.engage(
+      observation({
+        observedAtMs: 1_900,
+        entities: [distantEntity],
+        weapons: [bow],
+        self: {
+          ...base.self,
+          heldItemSlot: 1,
+          usingHeldItem: true,
+        },
+      }),
+      1_900,
+      execute,
+      new AbortController().signal,
+    );
+    expect(released.actual).toMatchObject({
+      primitiveAction: "RELEASE_RANGED_WEAPON",
+      targetEntityId: 42,
+    });
+    expect(actions.map(({ kind }) => kind)).toEqual([
+      "DRAW_RANGED_WEAPON",
+      "RELEASE_RANGED_WEAPON",
+    ]);
+  });
+
   it("uses a self POP before a stale offhand snapshot and does not re-equip it twice", async () => {
     const actions: CombatPrimitiveAction[] = [];
     const execute = await ackExecutor(actions);
@@ -398,7 +602,7 @@ describe("CombatDriver W0 deterministic wiring", () => {
     expect(actions).toHaveLength(1);
   });
 
-  it("does not carry a cleared probe across reset until the new connection installs one", async () => {
+  it("keeps ordinary weapon combat available after a probe reset", async () => {
     const actions: CombatPrimitiveAction[] = [];
     const combat = driver();
     combat.reset();
@@ -408,7 +612,12 @@ describe("CombatDriver W0 deterministic wiring", () => {
       await ackExecutor(actions),
       new AbortController().signal,
     );
-    expect(blocked.actual.reasonCode).toBe("COMBAT_REFLEX_NOT_CLEARED");
+    expect(blocked.actual).toMatchObject({
+      action: "ENGAGE",
+      primitiveAction: "MELEE_ATTACK",
+      executedAtMs: 1_005,
+    });
+    expect(actions).toHaveLength(1);
 
     combat.setReflexProbe({
       p99LoopDelayMs: 20,

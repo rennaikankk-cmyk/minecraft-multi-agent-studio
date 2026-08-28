@@ -66,12 +66,14 @@ import type {
   BotClient,
   BotClientFactory,
   BotClientSnapshot,
+  BotDamageInfo,
   BotDisconnectInfo,
 } from "./client.js";
 import type { ServerProfile } from "./server-profile.js";
 import {
   CombatDriver,
   type CombatDriverReceipt,
+  type CombatPrimitiveAction,
 } from "./combat-driver.js";
 import type { CombatReflexProbeReport } from "@minecraft-studio/combat";
 import type {
@@ -87,6 +89,32 @@ type ActiveCoordinatorTask = Readonly<{
   task: RuntimeCurrentTask;
   order: number;
 }>;
+
+const COMBAT_REACTION_MAX_STEPS = 32;
+const COMBAT_REACTION_MAX_DURATION_MS = 8_000;
+const COMBAT_REACTION_TICK_MS = 100;
+const COMBAT_REACTION_TERMINAL_REASONS = new Set([
+  "COMBAT_NO_HOSTILE_TARGET",
+  "COMBAT_NO_USABLE_WEAPON",
+  "COMBAT_NO_TOTEM_AVAILABLE",
+  "COMBAT_HEALTH_BELOW_ENGAGE_FLOOR",
+  "COMBAT_TOTEM_RESERVE_INSUFFICIENT",
+  "COMBAT_OUTNUMBERED",
+  "COMBAT_GEAR_OUTCLASSED",
+  "COMBAT_OBSERVATION_UNAVAILABLE",
+  "COMBAT_TARGET_OBSERVATION_STALE",
+  "COMBAT_HAZARD_OBSERVATION_UNAVAILABLE",
+  "COMBAT_MOVEMENT_BLOCKED_BY_HAZARD",
+  "COMBAT_MOVEMENT_NOT_REQUIRED",
+  "COMBAT_REFLEX_NOT_CLEARED",
+  "COMBAT_ACTION_EXECUTION_FAILED",
+  "COMBAT_EXECUTION_ACK_INVALID",
+  "COMBAT_TARGET_NOT_FOUND",
+  "COMBAT_WEAPON_NOT_IN_INVENTORY",
+  "COMBAT_TOTEM_NOT_IN_INVENTORY",
+]);
+
+type CombatReactionOutcome = "completed" | "cancelled" | "failed";
 
 export type RuntimeDependencies = {
   createClient: BotClientFactory;
@@ -279,6 +307,12 @@ export class SingleBotRuntime {
     { fingerprint: string; result: Promise<BotStopResultV1> }
   >();
   private readonly activeSkillControllers = new Map<string, AbortController>();
+  private combatReaction: {
+    generation: number;
+    client: BotClient;
+    taskId: string;
+    controller: AbortController;
+  } | null = null;
   private readonly skillExecutions = new Map<
     string,
     { fingerprint: string; result: Promise<SkillExecutionResultV1> }
@@ -690,6 +724,8 @@ export class SingleBotRuntime {
   ): Promise<RuntimeStopOutcome> {
     this.stopping = true;
 
+    this.cancelCombatReaction();
+    this.client?.interruptNormalActions?.();
     if (this.cancelRunningCoordinatorTasks()) {
       this.emitStatus(this.generation, false);
     }
@@ -860,6 +896,7 @@ export class SingleBotRuntime {
       client.setHandlers({
         onSpawn: () => this.handleSpawn(activeGeneration),
         onStateChanged: () => this.requestStatus(activeGeneration),
+        onDamaged: (info) => this.handleDamaged(activeGeneration, info),
         onDisconnected: (info) =>
           this.handleDisconnected(activeGeneration, info),
         onError: () => {
@@ -962,6 +999,8 @@ export class SingleBotRuntime {
     info: BotDisconnectInfo,
   ): void {
     if (generation !== this.generation) return;
+    this.cancelCombatReaction();
+    this.client?.interruptNormalActions?.();
     if (this.cancelRunningCoordinatorTasks()) {
       this.emitStatus(generation, false);
     }
@@ -1087,6 +1126,7 @@ export class SingleBotRuntime {
           health: snapshot.health,
           food: snapshot.food,
           armorPoints: snapshot.armorPoints,
+          inventory: snapshot.inventory,
           position: snapshot.position,
           latencyMs: snapshot.latencyMs,
           currentTask: this.currentTask,
@@ -1137,6 +1177,7 @@ export class SingleBotRuntime {
     snapshot: BotClientSnapshot,
   ): void {
     if (generation !== this.generation || this.state !== "online") return;
+    const normalTasksWerePaused = this.safetyStatus.normalTasksPaused;
     const decision = this.safetyController.evaluate({
       observedAtMs: this.now().getTime(),
       health: snapshot.health.current,
@@ -1158,6 +1199,9 @@ export class SingleBotRuntime {
     const emergencyStopping = decision.actions.some(
       ({ kind }) => kind === "EMERGENCY_STOP",
     );
+    const defensiveCombatAllowed = decision.activeRisks.every(
+      (risk) => risk === "LOW_HEALTH" || risk === "HUNGER",
+    );
     this.safetyStatus = {
       mode: emergencyStopping
         ? "emergency_stopping"
@@ -1172,11 +1216,24 @@ export class SingleBotRuntime {
       lastAction: this.safetyStatus.lastAction,
     };
     if (decision.normalTasksPaused) {
+      if (!defensiveCombatAllowed) this.cancelCombatReaction();
       this.cancelActiveSkills();
-      // L0 pause is not a new server session; retain the current connection's
-      // probe report so combat can resume after safety clears.
-      this.combatDriver?.reset(false);
-      this.client?.resetCombat?.();
+      // A damage event is delivered before the matching health snapshot. If
+      // that hit crosses the low-health threshold, handleDamaged has already
+      // cancelled the ordinary task and started a defensive reaction. Do not
+      // immediately stop that reaction again; low health is exactly when its
+      // retreat decision matters most. Environmental/critical interventions
+      // still own the client and cancel combat above.
+      if (
+        !defensiveCombatAllowed ||
+        (!normalTasksWerePaused && this.combatReaction === null)
+      ) {
+        this.client?.interruptNormalActions?.();
+        // L0 pause is not a new server session; retain the current connection's
+        // probe report so combat can resume after safety clears.
+        this.combatDriver?.reset(false);
+        this.client?.resetCombat?.();
+      }
     }
 
     if (decision.changed || decision.actions.length > 0) {
@@ -1616,6 +1673,7 @@ export class SingleBotRuntime {
     requestedAtMs: number,
     activeClient: BotClient,
     signal: AbortSignal,
+    retaliation = false,
   ): Promise<CombatDriverReceipt> {
     let observation: ReturnType<NonNullable<BotClient["combatObservation"]>>;
     try {
@@ -1642,12 +1700,277 @@ export class SingleBotRuntime {
         "COMBAT_OBSERVATION_UNAVAILABLE",
       );
     }
-    return this.combatDriver!.engage(
-      observation,
-      requestedAtMs,
-      (action, actionSignal) =>
-        activeClient.executeCombatAction!(action, actionSignal),
-      signal,
+    const execute = (action: CombatPrimitiveAction, actionSignal: AbortSignal) =>
+      activeClient.executeCombatAction!(action, actionSignal);
+    return retaliation
+      ? this.combatDriver!.retaliate(
+          observation,
+          requestedAtMs,
+          execute,
+          signal,
+        )
+      : this.combatDriver!.engage(
+          observation,
+          requestedAtMs,
+          execute,
+          signal,
+        );
+  }
+
+  private handleDamaged(generation: number, info: BotDamageInfo): void {
+    if (
+      generation !== this.generation ||
+      this.stopping ||
+      this.state !== "online" ||
+      !this.client ||
+      this.combatReaction
+    ) {
+      return;
+    }
+    const activeClient = this.client;
+    if (
+      !this.combatDriver ||
+      !activeClient.combatObservation ||
+      !activeClient.executeCombatAction
+    ) {
+      this.dependencies.logger.info(
+        "bot_runtime_damage_reaction_unavailable",
+        this.logFields({
+          previousHealth: info.previousHealth,
+          currentHealth: info.currentHealth,
+          reasonCode: "COMBAT_DRIVER_UNAVAILABLE",
+        }),
+      );
+      return;
+    }
+    if (
+      this.safetyStatus.normalTasksPaused &&
+      !this.safetyAllowsDefensiveCombat()
+    ) {
+      this.dependencies.logger.info(
+        "bot_runtime_damage_reaction_suppressed",
+        this.logFields({
+          previousHealth: info.previousHealth,
+          currentHealth: info.currentHealth,
+          reasonCode: "NORMAL_ACTIONS_PAUSED",
+        }),
+      );
+      return;
+    }
+    if (!this.combatObservationAvailable()) {
+      this.combatDriver.recordUnavailable(
+        "COMBAT_OBSERVATION_UNAVAILABLE",
+        this.now().getTime(),
+      );
+      this.dependencies.logger.warn(
+        "bot_runtime_damage_reaction_unavailable",
+        this.logFields({
+          previousHealth: info.previousHealth,
+          currentHealth: info.currentHealth,
+          reasonCode: "COMBAT_OBSERVATION_UNAVAILABLE",
+        }),
+      );
+      return;
+    }
+
+    this.cancelRunningCoordinatorTasks();
+    this.cancelActiveSkills();
+    activeClient.interruptNormalActions?.();
+    // A live damage event starts a fresh deterministic combat epoch. This
+    // releases an in-flight movement/attack ACK without carrying stale target
+    // or rate-window state into the reaction.
+    this.combatDriver.reset(false);
+
+    const taskId = `combat-reaction-${this.randomId()}`;
+    const task: RuntimeCurrentTask = {
+      taskId,
+      title: "战斗反应: 受到攻击",
+      status: "running",
+      startedAt: this.now().toISOString(),
+    };
+    const controller = new AbortController();
+    this.currentTask = task;
+    const placeholder = {
+      generation,
+      client: activeClient,
+      taskId,
+      controller,
+    };
+    this.combatReaction = placeholder;
+    const promise = this.runCombatReaction(
+      generation,
+      activeClient,
+      taskId,
+      controller,
+    ).catch((error): CombatReactionOutcome => {
+      this.dependencies.logger.error(
+        "bot_runtime_damage_reaction_failed",
+        this.logFields({
+          previousHealth: info.previousHealth,
+          currentHealth: info.currentHealth,
+          error: error instanceof Error ? error.message : String(error),
+        }, this.traceId, taskId),
+      );
+      return "failed";
+    });
+    this.combatReaction = placeholder;
+    this.publishCurrentTaskState();
+    void promise.then((outcome) =>
+      this.finishCombatReaction(generation, activeClient, taskId, outcome),
+    );
+    this.dependencies.logger.warn(
+      "bot_runtime_damage_reaction_started",
+      this.logFields({
+        previousHealth: info.previousHealth,
+        currentHealth: info.currentHealth,
+        maxSteps: COMBAT_REACTION_MAX_STEPS,
+        maxDurationMs: COMBAT_REACTION_MAX_DURATION_MS,
+      }, this.traceId, taskId),
+    );
+  }
+
+  private async runCombatReaction(
+    generation: number,
+    activeClient: BotClient,
+    taskId: string,
+    controller: AbortController,
+  ): Promise<CombatReactionOutcome> {
+    const startedAtMs = this.now().getTime();
+    for (let step = 0; step < COMBAT_REACTION_MAX_STEPS; step += 1) {
+      if (
+        !this.combatReactionIsActive(
+          generation,
+          activeClient,
+          taskId,
+          controller.signal,
+        )
+      ) {
+        return "cancelled";
+      }
+      if (!this.safetyAllowsDefensiveCombat()) return "cancelled";
+      if (this.now().getTime() - startedAtMs >= COMBAT_REACTION_MAX_DURATION_MS) {
+        return "completed";
+      }
+
+      const requestedAtMs = this.now().getTime();
+      const receipt = await this.runCombatEngage(
+        requestedAtMs,
+        activeClient,
+        controller.signal,
+        true,
+      );
+      this.dependencies.logger.info(
+        "bot_runtime_damage_reaction_step",
+        this.logFields({
+          step: step + 1,
+          maxSteps: COMBAT_REACTION_MAX_STEPS,
+          requestedAtMs,
+          actualAction: receipt.actual.action,
+          primitiveAction: receipt.actual.primitiveAction,
+          disposition: receipt.actual.disposition,
+          reasonCode: receipt.actual.reasonCode,
+          targetEntityId: receipt.actual.targetEntityId,
+        }, this.traceId, taskId),
+      );
+      if (controller.signal.aborted) return "cancelled";
+      if (combatReactionShouldStop(receipt)) return "completed";
+      if (
+        this.now().getTime() - startedAtMs >= COMBAT_REACTION_MAX_DURATION_MS ||
+        step + 1 >= COMBAT_REACTION_MAX_STEPS
+      ) {
+        return "completed";
+      }
+      if (!(await this.waitForCombatReactionTick(controller.signal))) {
+        return "cancelled";
+      }
+    }
+    return "completed";
+  }
+
+  private combatReactionIsActive(
+    generation: number,
+    activeClient: BotClient,
+    taskId: string,
+    signal: AbortSignal,
+  ): boolean {
+    return (
+      !signal.aborted &&
+      generation === this.generation &&
+      this.state === "online" &&
+      this.client === activeClient &&
+      this.combatReaction?.taskId === taskId
+    );
+  }
+
+  private safetyAllowsDefensiveCombat(): boolean {
+    return this.safetyStatus.activeRisks.every(
+      (risk) => risk === "LOW_HEALTH" || risk === "HUNGER",
+    );
+  }
+
+  private waitForCombatReactionTick(signal: AbortSignal): Promise<boolean> {
+    if (signal.aborted) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (keepGoing: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        resolve(keepGoing);
+      };
+      const onAbort = () => finish(false);
+      const timer = setTimeout(
+        () => finish(!signal.aborted),
+        COMBAT_REACTION_TICK_MS,
+      );
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    });
+  }
+
+  private cancelCombatReaction(): void {
+    const reaction = this.combatReaction;
+    if (!reaction) return;
+    this.combatReaction = null;
+    reaction.controller.abort();
+    if (
+      this.currentTask?.taskId === reaction.taskId &&
+      this.currentTask.status === "running"
+    ) {
+      this.currentTask = { ...this.currentTask, status: "cancelled" };
+      this.publishCurrentTaskState(false);
+    }
+  }
+
+  private finishCombatReaction(
+    generation: number,
+    activeClient: BotClient,
+    taskId: string,
+    outcome: CombatReactionOutcome,
+  ): void {
+    const isCurrent = this.combatReaction?.taskId === taskId;
+    if (isCurrent) this.combatReaction = null;
+    if (
+      !isCurrent ||
+      generation !== this.generation ||
+      this.client !== activeClient ||
+      this.currentTask?.taskId !== taskId
+    ) {
+      return;
+    }
+    this.currentTask = {
+      ...this.currentTask,
+      status: outcome === "failed"
+        ? "failed"
+        : outcome === "cancelled"
+          ? "cancelled"
+          : "completed",
+    };
+    this.publishCurrentTaskState();
+    this.dependencies.logger.info(
+      "bot_runtime_damage_reaction_finished",
+      this.logFields({ outcome }, this.traceId, taskId),
     );
   }
 
@@ -1706,8 +2029,8 @@ export class SingleBotRuntime {
     return true;
   }
 
-  private publishCurrentTaskState(): void {
-    this.emitStatus(this.generation);
+  private publishCurrentTaskState(evaluateSafety = true): void {
+    this.emitStatus(this.generation, evaluateSafety);
     this.emitHeartbeat();
   }
 
@@ -1721,6 +2044,15 @@ export class SingleBotRuntime {
       this[key] = null;
     }
   }
+}
+
+function combatReactionShouldStop(receipt: CombatDriverReceipt): boolean {
+  if (receipt.actual.action === "RETREAT") return true;
+  if (receipt.actual.primitiveAction !== "NONE") return false;
+  return (
+    receipt.actual.reasonCode === null ||
+    COMBAT_REACTION_TERMINAL_REASONS.has(receipt.actual.reasonCode)
+  );
 }
 
 /**

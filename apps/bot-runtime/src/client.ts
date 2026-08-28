@@ -19,6 +19,7 @@ export type BotClientSnapshot = {
   health: { current: number; maximum: number | null };
   food: { level: number; saturation: number };
   armorPoints: number | null;
+  inventory: readonly Readonly<{ itemName: string; count: number }>[];
   position: BotPosition;
   latencyMs: number | null;
   safety: {
@@ -46,9 +47,15 @@ export type BotDisconnectInfo = {
   detail?: string;
 };
 
+export type BotDamageInfo = Readonly<{
+  previousHealth: number;
+  currentHealth: number;
+}>;
+
 export type BotClientHandlers = {
   onSpawn: () => void;
   onStateChanged: () => void;
+  onDamaged?: (info: BotDamageInfo) => void;
   onDisconnected: (info: BotDisconnectInfo) => void;
   onError: (error: Error) => void;
   onVersionUnsupported: () => void;
@@ -58,6 +65,8 @@ export interface BotClient {
   setHandlers(handlers: BotClientHandlers): void;
   snapshot(): BotClientSnapshot;
   executeSafetyAction(action: L0SafetyAction): Promise<L0SafetyActionResult>;
+  /** Stop ordinary gathering/pathfinding before a higher-priority reaction. */
+  interruptNormalActions?(): void;
   invokeSkillCapability?(request: SkillCapabilityRequest): Promise<unknown>;
   /** Narrow deterministic combat boundary; absent means this client cannot fight. */
   combatObservation?(nowMs: number): CombatDriverObservation | null;

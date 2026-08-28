@@ -18,6 +18,10 @@ import type {
   BotClientSnapshot,
   BotDisconnectInfo,
 } from "../src/client.js";
+import type {
+  CombatDriverObservation,
+  CombatPrimitiveAction,
+} from "../src/combat-driver.js";
 import { SingleBotRuntime } from "../src/runtime.js";
 import type { ServerProfile } from "../src/server-profile.js";
 import type { RuntimeLogger } from "../src/runtime-types.js";
@@ -50,6 +54,10 @@ const snapshot: BotClientSnapshot = {
   health: { current: 18, maximum: 20 },
   food: { level: 16, saturation: 4.5 },
   armorPoints: 7,
+  inventory: [
+    { itemName: "oak_log", count: 7 },
+    { itemName: "wooden_pickaxe", count: 1 },
+  ],
   position: { x: 10.25, y: 64, z: -20.5, dimension: "minecraft:overworld" },
   latencyMs: 45,
   safety: {
@@ -64,11 +72,82 @@ const snapshot: BotClientSnapshot = {
   },
 };
 
+const combatGear = {
+  armorMaterial: "iron" as const,
+  protectionLevel: 0,
+  blastProtectionLevel: 0,
+  armorPieceCount: 4,
+  weaponDamage: 6,
+  health: 20,
+  hasTotem: true,
+};
+
+function combatObservation(observedAtMs: number): CombatDriverObservation {
+  return {
+    observedAtMs,
+    serverProfileId: profile.id,
+    dimension: "minecraft:overworld",
+    latencyMs: 0,
+    explosionRuleSet: "java-1.21-release",
+    self: {
+      position: { x: 10, y: 64, z: -20 },
+      health: 18,
+      offhandIsTotem: true,
+      inventoryTotemCount: 1,
+      gear: combatGear,
+      orientation: { yaw: -90, pitch: 0 },
+      heldItemSlot: 0,
+      onGround: true,
+      fallDistance: 0,
+    },
+    entities: [{
+      entity: {
+        entityId: 42,
+        kind: "player",
+        username: "Enemy",
+        uuid: null,
+      },
+      position: { x: 12, y: 64, z: -20 },
+      velocity: null,
+      health: 20,
+      armorPoints: 7,
+      wieldingWeapon: true,
+      crystalNearby: false,
+      anchorNearby: false,
+      gear: combatGear,
+    }],
+    weapons: [{
+      slot: 0,
+      itemName: "iron_sword",
+      kind: "sword",
+      baseDamage: 6,
+      fullCooldownMs: 625,
+      durabilityRemaining: 100,
+      enchantmentDamageBonus: 0,
+    }],
+    crystalCandidates: null,
+    mineCandidates: null,
+    hazards: [],
+  };
+}
+
+const combatProfile: ServerProfile = {
+  ...profile,
+  combat: {
+    enabled: true,
+    stance: "preserve-life",
+    whitelist: { usernames: [], uuids: [] },
+  },
+};
+
 class FakeBotClient implements BotClient {
   private handlers: BotClientHandlers | null = null;
   closeCalls = 0;
   actionCalls: L0SafetyAction[] = [];
   capabilityCalls: SkillCapabilityRequest[] = [];
+  combatEnabled = false;
+  combatActions: CombatPrimitiveAction[] = [];
+  interruptNormalActionsCalls = 0;
 
   constructor(private currentSnapshot: BotClientSnapshot = structuredClone(snapshot)) {}
 
@@ -105,6 +184,23 @@ class FakeBotClient implements BotClient {
       finalPosition: input.target,
       distanceToTarget: 0,
     };
+  }
+
+  combatObservation(nowMs: number): CombatDriverObservation | null {
+    return this.combatEnabled ? combatObservation(nowMs) : null;
+  }
+
+  async executeCombatAction(
+    action: CombatPrimitiveAction,
+    signal: AbortSignal,
+  ) {
+    if (signal.aborted) return { outcome: "failed" as const, reasonCode: "SKILL_CANCELLED" };
+    this.combatActions.push(action);
+    return { outcome: "executed" as const, executedAtMs: Date.now() };
+  }
+
+  interruptNormalActions(): void {
+    this.interruptNormalActionsCalls += 1;
   }
 
   versionCompatibility() {
@@ -152,6 +248,10 @@ class FakeBotClient implements BotClient {
 
   disconnect(info: BotDisconnectInfo): void {
     this.handlers?.onDisconnected(info);
+  }
+
+  damage(info: { previousHealth: number; currentHealth: number }): void {
+    this.handlers?.onDamaged?.(info);
   }
 }
 
@@ -607,6 +707,7 @@ describe("SingleBotRuntime", () => {
     });
     expect(client.actionCalls.map(({ kind }) => kind)).toEqual([
       "PAUSE_NORMAL_TASKS",
+      "CONSUME_SAFE_FOOD",
       "RETREAT_STEP",
     ]);
     expect(messages).toContainEqual(
@@ -619,6 +720,35 @@ describe("SingleBotRuntime", () => {
         }),
       }),
     );
+    await runtime.stop("test_cleanup");
+  });
+
+  it("requests bounded food recovery when low health has no safe food", async () => {
+    const client = new FakeBotClient();
+    const runtime = new SingleBotRuntime(profile, {
+      createClient: () => client,
+      messageSink: () => undefined,
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+
+    runtime.start();
+    client.spawn();
+    client.setSnapshot({
+      ...snapshot,
+      health: { current: 8, maximum: 20 },
+      food: { level: 17, saturation: 0 },
+      safety: { ...snapshot.safety, hasSafeFood: false },
+    });
+    client.stateChanged();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(client.actionCalls.map(({ kind }) => kind)).toEqual([
+      "PAUSE_NORMAL_TASKS",
+      "FORAGE_SAFE_FOOD",
+      "RETREAT_STEP",
+    ]);
     await runtime.stop("test_cleanup");
   });
 
@@ -1119,6 +1249,138 @@ describe("SingleBotRuntime", () => {
     await expect(pending).resolves.toMatchObject({
       payload: { outcome: "cancelled", errorCode: "SKILL_CANCELLED" },
     });
+    await runtime.stop("test_cleanup");
+  });
+
+  it("preempts a normal task and starts a deterministic reaction when damaged", async () => {
+    const messages: BotTelemetryMessageV1[] = [];
+    const client = new FakeBotClient();
+    client.combatEnabled = true;
+    vi.spyOn(client, "invokeSkillCapability").mockImplementation(
+      (request) =>
+        new Promise((_resolve, reject) => {
+          request.signal.addEventListener(
+            "abort",
+            () => reject(new Error("cancelled by damage reaction")),
+            { once: true },
+          );
+        }),
+    );
+    const runtime = new SingleBotRuntime(combatProfile, {
+      createClient: () => client,
+      messageSink: (message) => messages.push(message),
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+    runtime.start();
+    client.spawn();
+
+    const invocation = movementInvocation();
+    const pending = runtime.handleCoordinatorSkillInvocation(
+      invocation,
+      invocation.source.instanceId,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    client.damage({ previousHealth: 20, currentHealth: 18 });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(client.interruptNormalActionsCalls).toBe(1);
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "bot.status.v1",
+        payload: expect.objectContaining({
+          currentTask: expect.objectContaining({
+            title: "战斗反应: 受到攻击",
+            status: "running",
+          }),
+        }),
+      }),
+    );
+    await expect(pending).resolves.toMatchObject({
+      payload: { outcome: "cancelled" },
+    });
+
+    await vi.advanceTimersByTimeAsync(250);
+    expect(client.combatActions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "MELEE_ATTACK", targetEntityId: 42 }),
+      ]),
+    );
+    expect(client.combatActions.every(({ kind }) =>
+      kind !== "PLACE_CRYSTAL" && kind !== "PACKET_MINE",
+    )).toBe(true);
+    await runtime.stop("test_cleanup");
+  });
+
+  it("keeps normal tasks paused but still reacts defensively when damaged at low health", async () => {
+    const messages: BotTelemetryMessageV1[] = [];
+    const client = new FakeBotClient();
+    client.combatEnabled = true;
+    const runtime = new SingleBotRuntime(combatProfile, {
+      createClient: () => client,
+      messageSink: (message) => messages.push(message),
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+    runtime.start();
+    client.spawn();
+    client.setSnapshot({
+      ...snapshot,
+      health: { current: 8, maximum: 20 },
+    });
+    client.stateChanged();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(runtime.canAcceptNormalActions()).toBe(false);
+
+    client.damage({ previousHealth: 8, currentHealth: 7 });
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(client.combatActions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "MELEE_ATTACK", targetEntityId: 42 }),
+      ]),
+    );
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        type: "bot.status.v1",
+        payload: expect.objectContaining({
+          safety: expect.objectContaining({ normalTasksPaused: true }),
+          currentTask: expect.objectContaining({
+            title: "战斗反应: 受到攻击",
+          }),
+        }),
+      }),
+    );
+    await runtime.stop("test_cleanup");
+  });
+
+  it("bounds an automatic damage reaction and publishes its terminal task state", async () => {
+    const messages: BotTelemetryMessageV1[] = [];
+    const client = new FakeBotClient();
+    client.combatEnabled = true;
+    const runtime = new SingleBotRuntime(combatProfile, {
+      createClient: () => client,
+      messageSink: (message) => messages.push(message),
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+    runtime.start();
+    client.spawn();
+    client.damage({ previousHealth: 20, currentHealth: 18 });
+
+    await vi.advanceTimersByTimeAsync(4_000);
+
+    const statuses = messages.filter(
+      (message): message is Extract<BotTelemetryMessageV1, { type: "bot.status.v1" }> =>
+        message.type === "bot.status.v1" &&
+        message.payload.currentTask?.title === "战斗反应: 受到攻击",
+    );
+    expect(statuses.at(-1)?.payload.currentTask?.status).toBe("completed");
+    expect(client.combatActions.length).toBeLessThanOrEqual(32);
     await runtime.stop("test_cleanup");
   });
 

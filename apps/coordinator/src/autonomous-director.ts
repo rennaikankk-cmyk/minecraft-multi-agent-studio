@@ -75,11 +75,22 @@ export const AUTONOMOUS_GOAL_SEQUENCE = Object.freeze([
     operatorGoal: "获取 iron_ingot",
   }),
   Object.freeze({
+    key: "dirt",
+    title: "准备避难所材料",
+    operatorGoal: "获取 dirt",
+  }),
+  Object.freeze({
     key: "shelter",
     title: "建立安全避难所",
     operatorGoal: "在当前维度向 north 挖一个 2 格深的安全避难所，并用 dirt 封口",
   }),
 ] as const);
+
+type AutonomousGoal = Readonly<{
+  key: (typeof AUTONOMOUS_GOAL_SEQUENCE)[number]["key"];
+  title: string;
+  operatorGoal: string;
+}>;
 
 export type AutonomousTaskView = PublicTask;
 
@@ -141,6 +152,7 @@ const RESOURCE_RECOVERY_FAILURE_CODES = new Set([
   "COLLECT_PATH_SEARCH_EXHAUSTED",
   "COLLECT_TARGET_UNREACHABLE",
   "COLLECT_BLOCKS_FAILED",
+  "COLLECT_PICKUP_NOT_SETTLED",
 ]);
 
 /** The first resource needed by each autonomous milestone. */
@@ -154,19 +166,37 @@ const AUTONOMOUS_RESOURCE_BLOCKS: Readonly<Record<string, string>> = Object.free
   coal: "coal_ore",
   raw_iron: "iron_ore",
   iron_ingot: "iron_ore",
+  dirt: "dirt",
   shelter: "dirt",
 });
 
+const AUTONOMOUS_DIRECTIONAL_MINING_GOALS = new Set([
+  "coal",
+  "raw_iron",
+  "iron_ingot",
+]);
+
 const AUTONOMOUS_EXPLORATION_OFFSETS = Object.freeze([
-  Object.freeze({ x: 32, z: 0 }),
-  Object.freeze({ x: 0, z: 32 }),
-  Object.freeze({ x: -32, z: 0 }),
-  Object.freeze({ x: 0, z: -32 }),
+  Object.freeze({ x: 12, z: 0 }),
+  Object.freeze({ x: 0, z: 12 }),
+  Object.freeze({ x: -12, z: 0 }),
+  Object.freeze({ x: 0, z: -12 }),
 ]);
 const AUTONOMOUS_SCAN_MAX_DISTANCE = 64;
 const AUTONOMOUS_SCAN_MAX_COUNT = 16;
 const AUTONOMOUS_RECOVERY_TIMEOUT_MS = 30_000;
 const AUTONOMOUS_MAX_RESOURCE_CANDIDATES = 4;
+const AUTONOMOUS_EXPLORATION_COOLDOWN_MS = 60_000;
+const AUTONOMOUS_SHELTER_DIRECTIONS = Object.freeze([
+  "north",
+  "east",
+  "south",
+  "west",
+] as const);
+const AUTONOMOUS_SHELTER_MATERIALS = Object.freeze([
+  "dirt",
+  "cobblestone",
+] as const);
 
 /**
  * Gives every idle, healthy Runtime a bounded survival task. The director
@@ -183,6 +213,8 @@ export class AutonomousDirector implements AutonomousTaskSource {
   private readonly nextGoalAt = new Map<string, number>();
   private readonly goalCursor = new Map<string, number>();
   private readonly explorationCursor = new Map<string, number>();
+  private readonly nextExplorationAt = new Map<string, number>();
+  private readonly shelterDirectionCursor = new Map<string, number>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private unsubscribeRegistry: (() => void) | null = null;
   private started = false;
@@ -300,8 +332,23 @@ export class AutonomousDirector implements AutonomousTaskSource {
     }
     if ((this.nextGoalAt.get(record.botId) ?? 0) > nowMs) return;
 
-    const goalIndex = this.goalCursor.get(record.botId) ?? 0;
-    const goal = AUTONOMOUS_GOAL_SEQUENCE[goalIndex % AUTONOMOUS_GOAL_SEQUENCE.length]!;
+    const goalIndex = nextAutonomousGoalIndex(
+      record,
+      this.goalCursor.get(record.botId) ?? 0,
+    );
+    this.goalCursor.set(record.botId, goalIndex);
+    const baseGoal = AUTONOMOUS_GOAL_SEQUENCE[
+      goalIndex % AUTONOMOUS_GOAL_SEQUENCE.length
+    ]!;
+    const goal = baseGoal.key === "shelter"
+      ? {
+          ...baseGoal,
+          operatorGoal: this.nextShelterGoal(
+            record.botId,
+            shelterMaterial(record) ?? "dirt",
+          ),
+        }
+      : baseGoal;
     const taskId = identifierSchema.parse(this.randomId());
     const controller = new AbortController();
     const placeholder: ActiveRun = {
@@ -323,7 +370,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
   private async runTask(
     record: BotRegistryRecord,
     taskId: string,
-    goal: (typeof AUTONOMOUS_GOAL_SEQUENCE)[number],
+    goal: AutonomousGoal,
     goalIndex: number,
     controller: AbortController,
   ): Promise<void> {
@@ -348,17 +395,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
         timeoutMs: this.options.goalTimeoutMs,
         signal: controller.signal,
       });
-      let status: TaskStatus = controller.signal.aborted
-        ? "cancelled"
-        : result.action === "noop"
-          ? "failed"
-          : result.result.payload.outcome === "completed"
-            ? "completed"
-            : result.result.payload.outcome === "cancelled"
-              ? "cancelled"
-              : result.result.payload.outcome === "timed_out"
-                ? "expired"
-                : "failed";
+      let status = taskStatusFromPlanResult(result, controller.signal);
       let keepGoal = false;
       const failureCode = autonomousFailureCode(result);
       if (status === "failed" && failureCode !== null && !controller.signal.aborted) {
@@ -382,7 +419,8 @@ export class AutonomousDirector implements AutonomousTaskSource {
         goal,
         goalIndex,
         status,
-        !keepGoal,
+        status === "completed" ||
+          (status !== "cancelled" && !keepGoal),
       );
       this.log("info", "coordinator_autonomous_goal_finished", {
         botId: record.botId,
@@ -413,7 +451,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
         goal,
         goalIndex,
         status,
-        !keepGoal,
+        status !== "cancelled" && !keepGoal,
       );
       this.log("warn", "coordinator_autonomous_goal_failed", {
         botId: record.botId,
@@ -435,7 +473,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
   private async recoverResourceGoal(
     record: BotRegistryRecord,
     taskId: string,
-    goal: (typeof AUTONOMOUS_GOAL_SEQUENCE)[number],
+    goal: AutonomousGoal,
     taskTitle: string,
     failureCode: string,
     controller: AbortController,
@@ -443,8 +481,39 @@ export class AutonomousDirector implements AutonomousTaskSource {
     if (!RESOURCE_RECOVERY_FAILURE_CODES.has(failureCode)) {
       return { retry: null, keepGoal: false };
     }
+    // This code means the block may already have been broken while the plugin
+    // failed to close its dropped-entity wait. Moving to a new area would add
+    // noise and can duplicate collection, so retain the milestone and let the
+    // next inventory-aware plan re-observe it.
+    if (failureCode === "COLLECT_PICKUP_NOT_SETTLED") {
+      this.setRecoveryTask(record.botId, taskId, "自主恢复: 核对采集结果");
+      return { retry: null, keepGoal: true };
+    }
     const blockName = AUTONOMOUS_RESOURCE_BLOCKS[goal.key];
     if (!blockName || controller.signal.aborted) {
+      return { retry: null, keepGoal: true };
+    }
+
+    // collect.block opens one bounded staircase toward the observed ore on
+    // every attempt. A generic horizontal exploration move abandons that
+    // progress and can strand the Bot underground, so keep mining from the
+    // current endpoint on the next autonomous round.
+    if (
+      failureCode === "COLLECT_TARGET_UNREACHABLE" &&
+      AUTONOMOUS_DIRECTIONAL_MINING_GOALS.has(goal.key)
+    ) {
+      this.setRecoveryTask(
+        record.botId,
+        taskId,
+        `自主恢复: 继续定向开掘 ${blockName}`,
+      );
+      this.log("info", "coordinator_autonomous_recovery_mining_continues", {
+        botId: record.botId,
+        taskId,
+        goalKey: goal.key,
+        blockName,
+        failureCode,
+      });
       return { retry: null, keepGoal: true };
     }
 
@@ -513,7 +582,25 @@ export class AutonomousDirector implements AutonomousTaskSource {
       }
     }
 
-    this.setRecoveryTask(record.botId, taskId, "自主恢复: 探索新区域");
+    const nowMs = validDate(this.now()).getTime();
+    const nextExplorationAt = this.nextExplorationAt.get(record.botId) ?? 0;
+    if (nextExplorationAt > nowMs) {
+      this.setRecoveryTask(record.botId, taskId, "自主恢复: 等待下一次资源扫描");
+      this.log("info", "coordinator_autonomous_recovery_exploration_cooldown", {
+        botId: record.botId,
+        taskId,
+        goalKey: goal.key,
+        blockName,
+        retryAtMs: nextExplorationAt,
+      });
+      return { retry: null, keepGoal: true };
+    }
+
+    this.setRecoveryTask(record.botId, taskId, `自主恢复: 探索 ${blockName}`);
+    this.nextExplorationAt.set(
+      record.botId,
+      nowMs + AUTONOMOUS_EXPLORATION_COOLDOWN_MS,
+    );
     const moved = await this.dispatchInternal(
       record.botId,
       taskId,
@@ -573,6 +660,18 @@ export class AutonomousDirector implements AutonomousTaskSource {
     return `移动到坐标 x=${x} y=${y} z=${z} 附近，继续观察 ${blockName} 方块`;
   }
 
+  private nextShelterGoal(botId: string, sealItemName: string): string {
+    const index = this.shelterDirectionCursor.get(botId) ?? 0;
+    this.shelterDirectionCursor.set(
+      botId,
+      (index + 1) % AUTONOMOUS_SHELTER_DIRECTIONS.length,
+    );
+    const direction = AUTONOMOUS_SHELTER_DIRECTIONS[
+      index % AUTONOMOUS_SHELTER_DIRECTIONS.length
+    ]!;
+    return `在当前维度向 ${direction} 挖一个 2 格深的安全避难所，并用 ${sealItemName} 封口`;
+  }
+
   private setRecoveryTask(botId: string, taskId: string, title: string): void {
     const current = this.tasks.get(botId);
     if (!current || current.taskId !== taskId || current.status !== "running") return;
@@ -596,7 +695,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
   private finishTask(
     botId: string,
     taskId: string,
-    goal: (typeof AUTONOMOUS_GOAL_SEQUENCE)[number],
+    goal: AutonomousGoal,
     goalIndex: number,
     status: TaskStatus,
     advanceGoal = true,
@@ -725,7 +824,9 @@ function taskStatusFromPlanResult(
   signal: AbortSignal,
 ): TaskStatus {
   if (signal.aborted) return "cancelled";
-  if (result.action === "noop") return "failed";
+  if (result.action === "noop") {
+    return result.reasonCode === "ADVANCE_TASK" ? "completed" : "failed";
+  }
   return result.result.payload.outcome === "completed"
     ? "completed"
     : result.result.payload.outcome === "cancelled"
@@ -733,6 +834,32 @@ function taskStatusFromPlanResult(
       : result.result.payload.outcome === "timed_out"
         ? "expired"
         : "failed";
+}
+
+function nextAutonomousGoalIndex(
+  record: BotRegistryRecord,
+  cursor: number,
+): number {
+  const inventory = new Map(
+    (record.currentStatus?.inventory ?? []).map(({ itemName, count }) => [
+      itemName,
+      count,
+    ] as const),
+  );
+  for (let offset = 0; offset < AUTONOMOUS_GOAL_SEQUENCE.length; offset += 1) {
+    const index = cursor + offset;
+    const goal = AUTONOMOUS_GOAL_SEQUENCE[index % AUTONOMOUS_GOAL_SEQUENCE.length]!;
+    // Cobblestone is already guaranteed by the earlier tool/furnace loop and
+    // is a valid shelter seal. Do not strand an underground Bot trying to
+    // reach surface dirt when it already carries a safer building block.
+    if (goal.key === "dirt" && shelterMaterialFromInventory(inventory) !== null) {
+      continue;
+    }
+    if (goal.key === "shelter" || (inventory.get(goal.key) ?? 0) < 1) {
+      return index;
+    }
+  }
+  return cursor;
 }
 
 function planCompleted(result: AutonomousPlanResult | null): boolean {
@@ -762,6 +889,24 @@ function movementGoal(
   blockName: string,
 ): string {
   return `移动到坐标 x=${match.x} y=${match.y} z=${match.z} 附近，继续观察 ${blockName} 方块`;
+}
+
+function shelterMaterial(record: BotRegistryRecord): string | null {
+  const inventory = new Map(
+    (record.currentStatus?.inventory ?? []).map(({ itemName, count }) => [
+      itemName,
+      count,
+    ] as const),
+  );
+  return shelterMaterialFromInventory(inventory);
+}
+
+function shelterMaterialFromInventory(
+  inventory: ReadonlyMap<string, number>,
+): string | null {
+  return AUTONOMOUS_SHELTER_MATERIALS.find(
+    (itemName) => (inventory.get(itemName) ?? 0) > 0,
+  ) ?? null;
 }
 
 function distanceTo(

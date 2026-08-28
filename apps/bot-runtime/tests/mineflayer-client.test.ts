@@ -28,16 +28,36 @@ vi.mock("mineflayer-pathfinder", () => {
     // 不可互换。
     default: {
       goals: {
-        GoalNear: class {},
+        GoalNear: class {
+          constructor(
+            public x: number,
+            public y: number,
+            public z: number,
+            public range: number,
+          ) {}
+        },
         GoalLookAtBlock: class {
           constructor(public pos: unknown) {}
+        },
+        GoalFollow: class {
+          constructor(public entity: unknown, public range: number) {}
         },
       },
     },
     goals: {
-      GoalNear: class {},
+      GoalNear: class {
+        constructor(
+          public x: number,
+          public y: number,
+          public z: number,
+          public range: number,
+        ) {}
+      },
       GoalLookAtBlock: class {
         constructor(public pos: unknown) {}
+      },
+      GoalFollow: class {
+        constructor(public entity: unknown, public range: number) {}
       },
     },
     Movements: TestMovements,
@@ -72,6 +92,257 @@ describe("MineflayerBotClient lifecycle", () => {
 
     expect(onSpawn).toHaveBeenCalledTimes(1);
     expect(onStateChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports health decreases and interrupts ordinary movement actions", () => {
+    const emitter = new EventEmitter();
+    const pathfinder = { stop: vi.fn() };
+    const collectBlock = { cancelTask: vi.fn(async () => undefined) };
+    const bot = emitter as unknown as Bot;
+    Object.assign(bot, {
+      health: 20,
+      inventory: new EventEmitter(),
+      pathfinder,
+      collectBlock,
+      clearControlStates: vi.fn(),
+    });
+    const client = new MineflayerBotClient(bot, "auto");
+    const onDamaged = vi.fn();
+    const onStateChanged = vi.fn();
+    client.setHandlers(handlers({ onDamaged, onStateChanged }));
+
+    emitter.emit("spawn");
+    emitter.emit("health");
+    expect(onDamaged).not.toHaveBeenCalled();
+
+    (bot as unknown as { health: number }).health = 18;
+    emitter.emit("health");
+    expect(onDamaged).toHaveBeenCalledTimes(1);
+    expect(onDamaged).toHaveBeenCalledWith({
+      previousHealth: 20,
+      currentHealth: 18,
+    });
+
+    (bot as unknown as { health: number }).health = 20;
+    emitter.emit("health");
+    expect(onDamaged).toHaveBeenCalledTimes(1);
+
+    client.interruptNormalActions();
+    expect(collectBlock.cancelTask).toHaveBeenCalledTimes(1);
+    expect(pathfinder.stop).toHaveBeenCalledTimes(1);
+    expect(bot.clearControlStates).toHaveBeenCalledTimes(1);
+  });
+
+  it("forages one bounded passive target when low health has no safe food", async () => {
+    vi.useFakeTimers();
+    try {
+      const emitter = new EventEmitter();
+      const items: Array<{ name: string; type: number; count: number }> = [];
+      const inventory = new EventEmitter() as EventEmitter & {
+        items: () => typeof items;
+      };
+      inventory.items = () => items;
+      const cow = {
+        id: 2,
+        name: "cow",
+        type: "mob",
+        isValid: true,
+        height: 1.4,
+        position: new Vec3(2, 64, 0),
+      };
+      const entities: Record<string, typeof cow> = { "2": cow };
+      const pathfinder = collectPathfinder();
+      const attack = vi.fn(async () => {
+        cow.isValid = false;
+        delete entities["2"];
+        items.push({ name: "beef", type: 900, count: 1 });
+      });
+      const bot = emitter as unknown as Bot;
+      Object.assign(bot, {
+        health: 8,
+        inventory,
+        registry: {
+          foodsByName: {
+            beef: { foodPoints: 3, effectiveQuality: 3 },
+          },
+        },
+        entity: { id: 1, position: new Vec3(0, 64, 0) },
+        entities,
+        pathfinder,
+        nearestEntity: vi.fn((filter: (entity: typeof cow) => boolean) =>
+          filter(cow) ? cow : null,
+        ),
+        clearControlStates: vi.fn(),
+        lookAt: vi.fn(async () => undefined),
+        attack,
+      });
+      const client = new MineflayerBotClient(bot, "auto");
+
+      const result = client.executeSafetyAction({
+        kind: "FORAGE_SAFE_FOOD",
+        risk: "LOW_HEALTH",
+      });
+      await vi.advanceTimersByTimeAsync(700);
+
+      await expect(result).resolves.toEqual({
+        outcome: "executed",
+        errorCode: null,
+      });
+      expect(attack).toHaveBeenCalledTimes(1);
+      expect(pathfinder.setMovements).toHaveBeenCalledTimes(1);
+      expect(items).toContainEqual({ name: "beef", type: 900, count: 1 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("harvests a mature berry bush before hunting or exploring", async () => {
+    const emitter = new EventEmitter();
+    const items: Array<{ name: string; type: number; count: number }> = [];
+    const inventory = new EventEmitter() as EventEmitter & {
+      items: () => typeof items;
+    };
+    inventory.items = () => items;
+    const berryPosition = new Vec3(2, 64, 0);
+    const berryBush = {
+      name: "sweet_berry_bush",
+      position: berryPosition,
+      getProperties: () => ({ age: 3 }),
+    };
+    const activateBlock = vi.fn(async () => {
+      items.push({ name: "sweet_berries", type: 901, count: 2 });
+    });
+    const nearestEntity = vi.fn(() => null);
+    const bot = emitter as unknown as Bot;
+    Object.assign(bot, {
+      health: 8,
+      inventory,
+      registry: {
+        blocksByName: { sweet_berry_bush: { id: 7 } },
+        foodsByName: {
+          sweet_berries: { foodPoints: 2, effectiveQuality: 2 },
+        },
+      },
+      entity: { id: 1, position: new Vec3(0, 64, 0) },
+      entities: {},
+      pathfinder: collectPathfinder(),
+      findBlocks: vi.fn(() => [berryPosition]),
+      blockAt: vi.fn(() => berryBush),
+      nearestEntity,
+      clearControlStates: vi.fn(),
+      lookAt: vi.fn(async () => undefined),
+      activateBlock,
+    });
+    const client = new MineflayerBotClient(bot, "auto");
+
+    await expect(
+      client.executeSafetyAction({
+        kind: "FORAGE_SAFE_FOOD",
+        risk: "LOW_HEALTH",
+      }),
+    ).resolves.toEqual({ outcome: "executed", errorCode: null });
+    expect(activateBlock).toHaveBeenCalledWith(berryBush);
+    expect(nearestEntity).not.toHaveBeenCalled();
+    expect(items).toContainEqual({ name: "sweet_berries", type: 901, count: 2 });
+  });
+
+  it("tries another ripe food block when the nearest candidate is unreachable", async () => {
+    const emitter = new EventEmitter();
+    const items: Array<{ name: string; type: number; count: number }> = [];
+    const inventory = new EventEmitter() as EventEmitter & {
+      items: () => typeof items;
+    };
+    inventory.items = () => items;
+    const blockedPosition = new Vec3(4, 64, 0);
+    const reachablePosition = new Vec3(5, 64, 0);
+    const entity = { id: 1, position: new Vec3(0, 64, 0) };
+    const blockAt = vi.fn((position: Vec3) => ({
+      name: "sweet_berry_bush",
+      position,
+      getProperties: () => ({ age: 3 }),
+    }));
+    const pathfinder = collectPathfinder();
+    pathfinder.goto.mockImplementation(async (goal: unknown) => {
+      const target = goal as { x?: number };
+      if (target.x === blockedPosition.x) throw new Error("NoPath");
+      entity.position = new Vec3(4, 64, 0);
+    });
+    const activateBlock = vi.fn(async (block: { position: Vec3 }) => {
+      if (block.position.equals(reachablePosition)) {
+        items.push({ name: "sweet_berries", type: 901, count: 2 });
+      }
+    });
+    const bot = emitter as unknown as Bot;
+    Object.assign(bot, {
+      health: 8,
+      inventory,
+      registry: {
+        blocksByName: { sweet_berry_bush: { id: 7 } },
+        foodsByName: {
+          sweet_berries: { foodPoints: 2, effectiveQuality: 2 },
+        },
+      },
+      entity,
+      entities: {},
+      pathfinder,
+      findBlocks: vi.fn(() => [blockedPosition, reachablePosition]),
+      blockAt,
+      clearControlStates: vi.fn(),
+      lookAt: vi.fn(async () => undefined),
+      activateBlock,
+    });
+    const client = new MineflayerBotClient(bot, "auto");
+
+    await expect(
+      client.executeSafetyAction({
+        kind: "FORAGE_SAFE_FOOD",
+        risk: "LOW_HEALTH",
+      }),
+    ).resolves.toEqual({ outcome: "executed", errorCode: null });
+    expect(pathfinder.goto).toHaveBeenCalledTimes(2);
+    expect(activateBlock).toHaveBeenCalledTimes(1);
+    expect(activateBlock.mock.calls[0]?.[0].position).toEqual(reachablePosition);
+  });
+
+  it("uses a bounded directional waypoint before reporting no food source", async () => {
+    const emitter = new EventEmitter();
+    const inventory = new EventEmitter() as EventEmitter & {
+      items: () => Array<{ name: string; type: number; count: number }>;
+    };
+    inventory.items = () => [];
+    const pathfinder = collectPathfinder();
+    const nearestEntity = vi.fn(() => null);
+    const bot = emitter as unknown as Bot;
+    Object.assign(bot, {
+      health: 8,
+      inventory,
+      registry: { blocksByName: {}, foodsByName: {} },
+      entity: { id: 1, position: new Vec3(10, 64, 20) },
+      entities: {},
+      pathfinder,
+      findBlocks: vi.fn(() => []),
+      nearestEntity,
+      clearControlStates: vi.fn(),
+    });
+    const client = new MineflayerBotClient(bot, "auto");
+
+    await expect(
+      client.executeSafetyAction({
+        kind: "FORAGE_SAFE_FOOD",
+        risk: "LOW_HEALTH",
+      }),
+    ).resolves.toEqual({
+      outcome: "skipped",
+      errorCode: "NO_SAFE_FOOD_SOURCE",
+    });
+    expect(pathfinder.goto).toHaveBeenCalledTimes(1);
+    expect(pathfinder.goto.mock.calls[0]?.[0]).toMatchObject({
+      x: 22,
+      y: 64,
+      z: 20,
+      range: 2,
+    });
+    expect(nearestEntity).not.toHaveBeenCalled();
   });
 
   it("disables every Pathfinder block-changing and high-risk movement mode", () => {
@@ -176,6 +447,517 @@ describe("MineflayerBotClient lifecycle", () => {
     (movements as unknown as Record<string, boolean>).dontCreateFlow = false;
     expect(movements?.dontMineUnderFallingBlock).toBe(true);
     expect(movements?.dontCreateFlow).toBe(true);
+  });
+
+  it("uses the bounded direct path, dig, and pickup flow on a real tool-capable client", async () => {
+    const emitter = new EventEmitter();
+    const inventory = new EventEmitter() as EventEmitter & {
+      items: () => Array<{ name: string; type: number; count: number }>;
+    };
+    const bot = emitter as unknown as Bot;
+    const targetPosition = new Vec3(2, 64, 0);
+    const targetBlock = harvestableBlock(targetPosition, 1);
+    let collected = 0;
+    inventory.items = () => [
+      { name: "wooden_pickaxe", type: 800, count: 1 },
+      ...(collected > 0
+        ? [{ name: "cobblestone", type: 4, count: collected }]
+        : []),
+    ];
+    const pathfinder = collectPathfinder();
+    const equipForBlock = vi.fn(async () => undefined);
+    const dig = vi.fn(async () => {
+      collected += 1;
+      inventory.emit("updateSlot");
+    });
+    const collect = vi.fn(async () => undefined);
+    Object.assign(bot, {
+      game: { dimension: "overworld" },
+      registry: { blocksByName: { stone: { id: 1 } } },
+      inventory,
+      entity: { position: new Vec3(0, 64, 0) },
+      entities: {},
+      world: {},
+      pathfinder,
+      tool: { equipForBlock },
+      dig,
+      findBlocks: vi.fn(() => [targetPosition]),
+      blockAt: vi.fn(() => targetBlock),
+      collectBlock: {
+        chestLocations: [] as Vec3[],
+        movements: null as Movements | null,
+        collect,
+        cancelTask: vi.fn(async () => undefined),
+      },
+    });
+    const client = new MineflayerBotClient(bot, "auto", "isolated-test-profile");
+
+    await expect(
+      client.invokeSkillCapability({
+        ...collectRequest("invocation-collect-direct"),
+        input: {
+          blockName: "stone",
+          maxCount: 1,
+          maxDistance: 8,
+          dimension: "minecraft:overworld",
+          serverProfileId: "isolated-test-profile",
+        },
+      }),
+    ).resolves.toMatchObject({ targetsFound: 1, itemsCollected: 1 });
+    expect(pathfinder.goto).toHaveBeenCalledTimes(1);
+    expect(equipForBlock).toHaveBeenCalledWith(targetBlock, {
+      requireHarvest: true,
+      getFromChest: false,
+      maxTools: 2,
+    });
+    expect(dig).toHaveBeenCalledWith(targetBlock);
+    expect(collect).not.toHaveBeenCalled();
+  });
+
+  it("walks onto the exact dropped-item block before declaring pickup failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const emitter = new EventEmitter();
+      const inventory = new EventEmitter() as EventEmitter & {
+        items: () => Array<{ name: string; type: number; count: number }>;
+      };
+      const bot = emitter as unknown as Bot;
+      const targetPosition = new Vec3(2, 64, 0);
+      const targetBlock = harvestableBlock(targetPosition, 1);
+      const entities: Record<string, unknown> = {};
+      let collected = 0;
+      inventory.items = () => [
+        { name: "wooden_pickaxe", type: 800, count: 1 },
+        ...(collected > 0
+          ? [{ name: "cobblestone", type: 4, count: collected }]
+          : []),
+      ];
+      const pathfinder = collectPathfinder();
+      pathfinder.goto.mockImplementation(async (goal: unknown) => {
+        const pickupGoal = goal as {
+          x?: number;
+          y?: number;
+          z?: number;
+          range?: number;
+        };
+        if (
+          pickupGoal.x === 2 &&
+          pickupGoal.y === 64 &&
+          pickupGoal.z === 0 &&
+          pickupGoal.range === 0
+        ) {
+          collected = 1;
+          inventory.emit("updateSlot");
+        }
+      });
+      const equipForBlock = vi.fn(async () => undefined);
+      const dig = vi.fn(async () => {
+        entities.drop = {
+          name: "item",
+          isValid: true,
+          position: new Vec3(2.8, 64.25, 0.7),
+        };
+      });
+      const collect = vi.fn(async () => undefined);
+      Object.assign(bot, {
+        game: { dimension: "overworld" },
+        registry: { blocksByName: { stone: { id: 1 } } },
+        inventory,
+        entity: { position: new Vec3(0, 64, 0) },
+        entities,
+        world: {},
+        pathfinder,
+        tool: { equipForBlock },
+        dig,
+        findBlocks: vi.fn(() => [targetPosition]),
+        blockAt: vi.fn(() => targetBlock),
+        collectBlock: {
+          chestLocations: [] as Vec3[],
+          movements: null as Movements | null,
+          collect,
+          cancelTask: vi.fn(async () => undefined),
+        },
+      });
+      const client = new MineflayerBotClient(
+        bot,
+        "auto",
+        "isolated-test-profile",
+      );
+
+      const pending = client.invokeSkillCapability({
+        ...collectRequest("invocation-collect-exact-pickup"),
+        input: {
+          blockName: "stone",
+          maxCount: 1,
+          maxDistance: 8,
+          dimension: "minecraft:overworld",
+          serverProfileId: "isolated-test-profile",
+        },
+      });
+      const assertion = expect(pending).resolves.toMatchObject({
+        targetsFound: 1,
+        itemsCollected: 1,
+      });
+      await vi.advanceTimersByTimeAsync(800);
+      await assertion;
+      expect(pathfinder.goto).toHaveBeenCalledTimes(2);
+      expect(pathfinder.goto.mock.calls[1]?.[0]).toMatchObject({
+        x: 2,
+        y: 64,
+        z: 0,
+        range: 0,
+      });
+      expect(collect).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("opens a safe staircase when exposed stone has no proven path", async () => {
+    const emitter = new EventEmitter();
+    const inventory = new EventEmitter() as EventEmitter & {
+      items: () => Array<{ name: string; type: number; count: number }>;
+    };
+    const bot = emitter as unknown as Bot;
+    const entity = { position: new Vec3(0, 64, 0) };
+    const removed = new Set<string>();
+    let dirtCollected = 0;
+    let stoneCollected = 0;
+    inventory.items = () => [
+      { name: "wooden_pickaxe", type: 800, count: 1 },
+      ...(dirtCollected > 0
+        ? [{ name: "dirt", type: 3, count: dirtCollected }]
+        : []),
+      ...(stoneCollected > 0
+        ? [{ name: "cobblestone", type: 4, count: stoneCollected }]
+        : []),
+    ];
+    const blockAt = vi.fn((position: Vec3) => {
+      const key = `${position.x},${position.y},${position.z}`;
+      const name = removed.has(key)
+        ? "air"
+        : position.y >= 64
+          ? "air"
+          : position.y === 63
+            ? "dirt"
+            : "stone";
+      return {
+        position,
+        type: name === "stone" ? 1 : name === "dirt" ? 2 : 0,
+        name,
+        boundingBox: name === "air" ? "empty" : "block",
+        canHarvest: (itemType: number | null) =>
+          name !== "stone" || itemType !== null,
+      };
+    });
+    const pathfinder = collectPathfinder("noPath");
+    pathfinder.goto.mockImplementation(async () => {
+      const step = pathfinder.goto.mock.calls.length;
+      entity.position = new Vec3(step, 64 - step, 0);
+    });
+    const equipForBlock = vi.fn(async () => undefined);
+    const dig = vi.fn(async (block: { name: string; position: Vec3 }) => {
+      removed.add(`${block.position.x},${block.position.y},${block.position.z}`);
+      if (block.name === "stone") stoneCollected += 1;
+      if (block.name === "dirt") dirtCollected += 1;
+      inventory.emit("updateSlot");
+    });
+    const collect = vi.fn(async () => undefined);
+    Object.assign(bot, {
+      game: { dimension: "overworld" },
+      registry: { blocksByName: { stone: { id: 1 } } },
+      inventory,
+      entity,
+      entities: {},
+      world: {},
+      pathfinder,
+      tool: { equipForBlock },
+      dig,
+      findBlocks: vi.fn(() => [new Vec3(9, 60, 0)]),
+      blockAt,
+      clearControlStates: vi.fn(),
+      collectBlock: {
+        chestLocations: [] as Vec3[],
+        movements: null as Movements | null,
+        collect,
+        cancelTask: vi.fn(async () => undefined),
+      },
+    });
+    const client = new MineflayerBotClient(bot, "auto", "isolated-test-profile");
+
+    await expect(
+      client.invokeSkillCapability({
+        ...collectRequest("invocation-collect-staircase"),
+        input: {
+          blockName: "stone",
+          maxCount: 1,
+          maxDistance: 8,
+          dimension: "minecraft:overworld",
+          serverProfileId: "isolated-test-profile",
+        },
+      }),
+    ).resolves.toMatchObject({
+      blockName: "stone",
+      targetsFound: 1,
+      itemsCollected: 1,
+    });
+    expect(dirtCollected).toBeGreaterThan(0);
+    expect(stoneCollected).toBe(1);
+    expect(pathfinder.goto).toHaveBeenCalled();
+    expect(dig).toHaveBeenCalled();
+    expect(collect).not.toHaveBeenCalled();
+  });
+
+  it("aims an access staircase toward an unreachable underground resource", async () => {
+    const emitter = new EventEmitter();
+    const inventory = new EventEmitter() as EventEmitter & {
+      items: () => Array<{ name: string; type: number; count: number }>;
+    };
+    const bot = emitter as unknown as Bot;
+    const entity = { position: new Vec3(0, 64, 0) };
+    const targetPosition = new Vec3(0, 60, 0);
+    const removed = new Set<string>();
+    let dirtCollected = 0;
+    let cobblestoneCollected = 0;
+    let coalCollected = 0;
+    inventory.items = () => [
+      { name: "stone_pickaxe", type: 801, count: 1 },
+      ...(dirtCollected > 0
+        ? [{ name: "dirt", type: 3, count: dirtCollected }]
+        : []),
+      ...(cobblestoneCollected > 0
+        ? [{ name: "cobblestone", type: 4, count: cobblestoneCollected }]
+        : []),
+      ...(coalCollected > 0
+        ? [{ name: "coal", type: 263, count: coalCollected }]
+        : []),
+    ];
+    const blockAt = vi.fn((position: Vec3) => {
+      const key = `${position.x},${position.y},${position.z}`;
+      const target = position.equals(targetPosition);
+      const name = removed.has(key)
+        ? "air"
+        : target
+          ? "coal_ore"
+          : position.y >= 66 ||
+              (position.x === 0 &&
+                position.z === 0 &&
+                position.y >= 64)
+            ? "air"
+            : position.y === 63
+              ? "dirt"
+              : "stone";
+      return {
+        position,
+        type: name === "coal_ore" ? 5 : name === "stone" ? 1 : name === "dirt" ? 2 : 0,
+        name,
+        boundingBox: name === "air" ? "empty" : "block",
+        canHarvest: (itemType: number | null) =>
+          name === "air" || name === "dirt" || itemType !== null,
+      };
+    });
+    const pathfinder = collectPathfinder();
+    pathfinder.getPathFromTo.mockImplementation(function* () {
+      const status = entity.position.y <= 62 ? "success" : "noPath";
+      yield { result: { status, path: [], time: 1, visitedNodes: 1 } };
+    });
+    pathfinder.goto.mockImplementation(async (goal: unknown) => {
+      const exact = goal as {
+        x?: number;
+        y?: number;
+        z?: number;
+        range?: number;
+        pos?: Vec3;
+      };
+      if (
+        exact.range === 0 &&
+        exact.x !== undefined &&
+        exact.y !== undefined &&
+        exact.z !== undefined
+      ) {
+        if (!removed.has(`${exact.x},${exact.y + 2},${exact.z}`)) return;
+        entity.position = new Vec3(exact.x, exact.y, exact.z);
+      } else if (exact.pos?.equals(targetPosition)) {
+        entity.position = targetPosition.offset(0, 1, 0);
+      }
+    });
+    const equipForBlock = vi.fn(async () => undefined);
+    const dig = vi.fn(async (block: { name: string; position: Vec3 }) => {
+      removed.add(`${block.position.x},${block.position.y},${block.position.z}`);
+      if (block.name === "dirt") dirtCollected += 1;
+      if (block.name === "stone") cobblestoneCollected += 1;
+      if (block.name === "coal_ore") coalCollected += 1;
+      inventory.emit("updateSlot");
+    });
+    const collect = vi.fn(async () => undefined);
+    Object.assign(bot, {
+      game: { dimension: "overworld" },
+      registry: { blocksByName: { coal_ore: { id: 5 } } },
+      inventory,
+      entity,
+      entities: {},
+      world: {},
+      pathfinder,
+      tool: { equipForBlock },
+      dig,
+      findBlocks: vi.fn((options: { useExtraInfo?: unknown }) =>
+        options.useExtraInfo ? [] : [targetPosition],
+      ),
+      blockAt,
+      clearControlStates: vi.fn(),
+      collectBlock: {
+        chestLocations: [] as Vec3[],
+        movements: null as Movements | null,
+        collect,
+        cancelTask: vi.fn(async () => undefined),
+      },
+    });
+    const client = new MineflayerBotClient(bot, "auto", "isolated-test-profile");
+
+    await expect(
+      client.invokeSkillCapability({
+        ...collectRequest("invocation-collect-directed-staircase"),
+        input: {
+          blockName: "coal_ore",
+          maxCount: 1,
+          maxDistance: 8,
+          dimension: "minecraft:overworld",
+          serverProfileId: "isolated-test-profile",
+        },
+      }),
+    ).resolves.toMatchObject({
+      blockName: "coal_ore",
+      targetsFound: 1,
+      itemsCollected: 1,
+    });
+    expect(pathfinder.goto.mock.calls[0]?.[0]).toMatchObject({
+      x: 1,
+      y: 63,
+      z: 0,
+      range: 0,
+    });
+    expect(removed).toContain("1,65,0");
+    expect(coalCollected).toBe(1);
+    expect(dirtCollected + cobblestoneCollected).toBeGreaterThan(0);
+    expect(bot.findBlocks).toHaveBeenCalledTimes(2);
+    expect(bot.findBlocks).toHaveBeenLastCalledWith(
+      expect.not.objectContaining({ useExtraInfo: expect.anything() }),
+    );
+    expect(collect).not.toHaveBeenCalled();
+  });
+
+  it("opens an ascending staircase toward a resource above the current endpoint", async () => {
+    const emitter = new EventEmitter();
+    const inventory = new EventEmitter() as EventEmitter & {
+      items: () => Array<{ name: string; type: number; count: number }>;
+    };
+    const bot = emitter as unknown as Bot;
+    const entity = { position: new Vec3(0, 64, 0) };
+    const targetPosition = new Vec3(2, 66, 0);
+    const removed = new Set<string>();
+    let coalCollected = 0;
+    inventory.items = () => [
+      { name: "stone_pickaxe", type: 801, count: 1 },
+      ...(coalCollected > 0
+        ? [{ name: "coal", type: 263, count: coalCollected }]
+        : []),
+    ];
+    const blockAt = vi.fn((position: Vec3) => {
+      const key = `${position.x},${position.y},${position.z}`;
+      const target = position.equals(targetPosition);
+      const initialCavity =
+        position.x === 0 &&
+        position.z === 0 &&
+        (position.y === 64 || position.y === 65);
+      const name = removed.has(key)
+        ? "air"
+        : target
+          ? "coal_ore"
+          : initialCavity || position.y >= 68
+            ? "air"
+            : "stone";
+      return {
+        position,
+        type: name === "coal_ore" ? 5 : name === "stone" ? 1 : 0,
+        name,
+        boundingBox: name === "air" ? "empty" : "block",
+        canHarvest: (itemType: number | null) =>
+          name === "air" || itemType !== null,
+      };
+    });
+    const pathfinder = collectPathfinder("noPath");
+    pathfinder.goto.mockImplementation(async (goal: unknown) => {
+      const exact = goal as {
+        x?: number;
+        y?: number;
+        z?: number;
+        range?: number;
+      };
+      if (
+        exact.range === 0 &&
+        exact.x !== undefined &&
+        exact.y !== undefined &&
+        exact.z !== undefined &&
+        removed.has("0,66,0") &&
+        removed.has(`${exact.x},${exact.y},${exact.z}`) &&
+        removed.has(`${exact.x},${exact.y + 1},${exact.z}`)
+      ) {
+        entity.position = new Vec3(exact.x, exact.y, exact.z);
+      }
+    });
+    const dig = vi.fn(async (block: { name: string; position: Vec3 }) => {
+      removed.add(`${block.position.x},${block.position.y},${block.position.z}`);
+      if (block.name === "coal_ore") coalCollected += 1;
+      inventory.emit("updateSlot");
+    });
+    const collect = vi.fn(async () => undefined);
+    Object.assign(bot, {
+      game: { dimension: "overworld" },
+      registry: { blocksByName: { coal_ore: { id: 5 } } },
+      inventory,
+      entity,
+      entities: {},
+      world: {},
+      pathfinder,
+      tool: { equipForBlock: vi.fn(async () => undefined) },
+      dig,
+      findBlocks: vi.fn(() => [targetPosition]),
+      blockAt,
+      clearControlStates: vi.fn(),
+      collectBlock: {
+        chestLocations: [] as Vec3[],
+        movements: null as Movements | null,
+        collect,
+        cancelTask: vi.fn(async () => undefined),
+      },
+    });
+    const client = new MineflayerBotClient(bot, "auto", "isolated-test-profile");
+
+    await expect(
+      client.invokeSkillCapability({
+        ...collectRequest("invocation-collect-ascending-staircase"),
+        input: {
+          blockName: "coal_ore",
+          maxCount: 1,
+          maxDistance: 8,
+          dimension: "minecraft:overworld",
+          serverProfileId: "isolated-test-profile",
+        },
+      }),
+    ).resolves.toMatchObject({
+      blockName: "coal_ore",
+      targetsFound: 1,
+      itemsCollected: 1,
+    });
+    expect(pathfinder.goto.mock.calls[0]?.[0]).toMatchObject({
+      x: 1,
+      y: 65,
+      z: 0,
+      range: 0,
+    });
+    expect(removed).toContain("0,66,0");
+    expect(coalCollected).toBe(1);
+    expect(collect).not.toHaveBeenCalled();
   });
 
   it("sets its own pathfinder budget instead of inheriting movement.goto's", async () => {
@@ -550,6 +1332,73 @@ describe("MineflayerBotClient lifecycle", () => {
     });
   });
 
+  it("uses observed pickups to finish a stuck entity-follow and continues the batch", async () => {
+    const emitter = new EventEmitter();
+    const inventory = new EventEmitter() as EventEmitter & {
+      items: () => Array<{ name: string; type?: number; count: number }>;
+    };
+    const bot = emitter as unknown as Bot;
+    const positions = [new Vec3(2, 64, 0), new Vec3(3, 64, 0)];
+    let itemCount = 0;
+    inventory.items = () => [
+      { name: "wooden_axe", type: 800, count: 1 },
+      ...(itemCount > 0 ? [{ name: "oak_log", count: itemCount }] : []),
+    ];
+    const collect = vi.fn((_targets: unknown[]) => {
+      setTimeout(() => {
+        itemCount += 1;
+        inventory.emit("updateSlot");
+      }, 0);
+      return new Promise<void>(() => {});
+    });
+    // The real plugin can wait forever for collectBlock_finished after the item
+    // is already in inventory. Runtime completion must not await this promise.
+    const cancelTask = vi.fn(() => new Promise<void>(() => {}));
+    Object.assign(bot, {
+      game: { dimension: "overworld" },
+      registry: { blocksByName: { oak_log: { id: 1 } } },
+      inventory,
+      entity: { position: new Vec3(0, 64, 0) },
+      world: {},
+      pathfinder: collectPathfinder(),
+      findBlocks: vi.fn(() => positions),
+      blockAt: vi.fn((position: Vec3) => ({
+        position,
+        type: 1,
+        name: "oak_log",
+        boundingBox: "block",
+        canHarvest: () => true,
+      })),
+      collectBlock: {
+        chestLocations: [] as Vec3[],
+        movements: null as Movements | null,
+        collect,
+        cancelTask,
+      },
+    });
+    const client = new MineflayerBotClient(bot, "auto", "isolated-test-profile");
+
+    await expect(
+      client.invokeSkillCapability({
+        ...collectRequest("invocation-collect-observed-pickups"),
+        input: {
+          blockName: "oak_log",
+          maxCount: 2,
+          maxDistance: 8,
+          dimension: "minecraft:overworld",
+          serverProfileId: "isolated-test-profile",
+        },
+      }),
+    ).resolves.toMatchObject({
+      blockName: "oak_log",
+      targetsFound: 2,
+      itemsCollected: 2,
+    });
+    expect(collect).toHaveBeenCalledTimes(2);
+    expect(collect.mock.calls.every(([targets]) => targets.length === 1)).toBe(true);
+    expect(cancelTask).toHaveBeenCalledTimes(2);
+  });
+
   it.each([
     ["NoPath", "COLLECT_TARGET_UNREACHABLE"],
     ["Timeout", "COLLECT_PATH_SEARCH_EXHAUSTED"],
@@ -642,7 +1491,7 @@ describe("MineflayerBotClient lifecycle", () => {
     await expect(
       client.invokeSkillCapability(collectRequest("invocation-collect-batches")),
     ).rejects.toMatchObject({
-      message: expect.stringContaining("attempted 1 of 1 proven-reachable batch"),
+      message: expect.stringContaining("attempted 1 of 1 live candidate"),
     });
   });
 
@@ -1035,7 +1884,7 @@ describe("MineflayerBotClient lifecycle", () => {
     expect(collect).not.toHaveBeenCalled();
   });
 
-  it("reports a pre-check that ran out of budget as exhausted, not as proven unreachable", async () => {
+  it("spends a bounded live attempt on a candidate the pre-check could not decide", async () => {
     // astar.js 的 compute() 只有四个状态，只有 noPath 是"这里确实没有路"的证明；
     // timeout 只是总预算耗尽（tickTimeout == timeout 时第一片返回 partial，
     // getPathFromTo 再驱动一次就报 timeout，index.js:96-100）。两者合并会让一个
@@ -1074,8 +1923,8 @@ describe("MineflayerBotClient lifecycle", () => {
           serverProfileId: "isolated-test-profile",
         },
       }),
-    ).rejects.toMatchObject({ code: "COLLECT_PATH_SEARCH_EXHAUSTED" });
-    expect(collect).not.toHaveBeenCalled();
+    ).resolves.toMatchObject({ targetsFound: 1 });
+    expect(collect).toHaveBeenCalledTimes(1);
   });
 
   it("bounds a collect that neither resolves nor rejects, and cancels the plugin task", async () => {
@@ -1203,6 +2052,62 @@ describe("MineflayerBotClient lifecycle", () => {
       process.off("unhandledRejection", onUnhandled);
       vi.useRealTimers();
     }
+  });
+
+  it("reuses an already-present station instead of placing into its occupied block", async () => {
+    const emitter = new EventEmitter();
+    const bot = emitter as unknown as Bot;
+    const referencePosition = new Vec3(2, 63, 0);
+    const targetPosition = referencePosition.offset(0, 1, 0);
+    const equip = vi.fn(async () => undefined);
+    const placeBlock = vi.fn(async () => undefined);
+    Object.assign(bot, {
+      game: { dimension: "overworld" },
+      inventory: { items: () => [] },
+      blockAt: vi.fn((position: Vec3) =>
+        position.equals(targetPosition)
+          ? { name: "crafting_table", boundingBox: "block" }
+          : { name: "stone", boundingBox: "block" },
+      ),
+      equip,
+      placeBlock,
+    });
+    const client = new MineflayerBotClient(bot, "auto", "isolated-test-profile");
+
+    await expect(
+      client.invokeSkillCapability({
+        invocationId: "invocation-reuse-station",
+        traceId: "trace-reuse-station",
+        taskId: "task-reuse-station",
+        botId: "bot-reuse-station",
+        skillId: "world.place-block",
+        skillVersion: "1.0.0",
+        capability: "world.interact",
+        operation: "block.place-safe",
+        input: {
+          itemName: "crafting_table",
+          referenceBlock: {
+            x: referencePosition.x,
+            y: referencePosition.y,
+            z: referencePosition.z,
+          },
+          face: { x: 0, y: 1, z: 0 },
+          dimension: "minecraft:overworld",
+          serverProfileId: "isolated-test-profile",
+        },
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toEqual({
+      placed: true,
+      placedBlockName: "crafting_table",
+      position: {
+        x: targetPosition.x,
+        y: targetPosition.y,
+        z: targetPosition.z,
+      },
+    });
+    expect(equip).not.toHaveBeenCalled();
+    expect(placeBlock).not.toHaveBeenCalled();
   });
 
   it("exposes negotiated protocol, feature, and registry facts to skills", () => {
@@ -1684,6 +2589,7 @@ describe("collectReachableTargets", () => {
     const result = collectReachableTargets(bot, movements, targetsAt(3), 3);
 
     expect(result.reachable).toHaveLength(0);
+    expect(result.unproven).toHaveLength(1);
     // timeout 是预算耗尽,不是"这里没有路"的证明——合并两者会让一个没算完的
     // 搜索冒充定论,白丢一级 RETRY_SAME。
     expect(result.provenPathless).toBe(2);
@@ -1712,6 +2618,7 @@ describe("collectReachableTargets", () => {
       const result = collectReachableTargets(bot, movements, targetsAt(9), 9);
 
       expect(result.reachable).toHaveLength(0);
+      expect(result.unproven).toHaveLength(9);
       expect(result.provenPathless).toBe(0);
       // 九个候选里只排得下三个。没有这个数,上层的 reason 就在暗示九个都试过。
       expect(result.examined).toBe(3);

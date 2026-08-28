@@ -591,6 +591,7 @@ const COORDINATOR_PLACEMENT_GROUND_BLOCKS = Object.freeze([
 ]);
 const COORDINATOR_PLACEMENT_SCAN_MAX_COUNT = 16;
 const COORDINATOR_PLACEMENT_SCAN_MAX_DISTANCE = 6;
+const COORDINATOR_PLACEMENT_OPEN_BLOCK = "air";
 /**
  * A reference must be far enough not to be the block under the bot's own feet
  * and near enough to stay inside placement reach. Outside this window the
@@ -598,7 +599,11 @@ const COORDINATOR_PLACEMENT_SCAN_MAX_DISTANCE = 6;
  * would refuse.
  */
 const COORDINATOR_PLACEMENT_MIN_DISTANCE = 2;
-const COORDINATOR_PLACEMENT_MAX_DISTANCE = 4.5;
+// The Runtime defaults unknown servers to STRICT (3.8 block reach). The scan
+// distance is measured to the reference block corner while crafting checks the
+// placed station center one block higher, so 3.0 keeps the resulting station in
+// reach instead of merely keeping its supporting block in reach.
+const COORDINATOR_PLACEMENT_MAX_DISTANCE = 3.0;
 
 type PlacementPosition = Readonly<{ x: number; y: number; z: number }>;
 
@@ -657,6 +662,7 @@ function placementSupportReason(advertised: ReadonlySet<string>): string | null 
 const PLANNED_ITEM_GOAL_ALIASES: Readonly<Record<string, readonly string[]>> =
   Object.freeze({
     oak_log: Object.freeze(["oak log", "oak_log", "橡木原木", "原木", "木头"]),
+    dirt: Object.freeze(["dirt", "泥土"]),
     oak_planks: Object.freeze([
       "oak planks",
       "oak_planks",
@@ -847,6 +853,17 @@ export class CoordinatorLocalPlanner {
       return { action: "noop", reasonCode: decision.reasonCode, ai };
     }
     if (decision.action === "plan_items") {
+      if (!planGoalsAreGrounded(decision.goals, operatorGoal)) {
+        const retried = await this.retryDeclinedAcquisitionGoal({
+          request,
+          operatorGoal,
+          plannedItemNames,
+          record,
+          availableSkills,
+          deadlineMs,
+        });
+        if (retried) return retried;
+      }
       return this.planItemsAndDispatch(
         request,
         decision,
@@ -1193,14 +1210,16 @@ export class CoordinatorLocalPlanner {
         "The requested resource is outside the trusted planning graph.",
       );
     }
-    const plan = this.goalPlanner.plan(goals, {} satisfies PlannerInventory);
-    if (!plan.planned || plan.steps.length === 0) {
+    const inventory = plannerInventoryFromRecord(initialRecord);
+    const plan = this.goalPlanner.plan(goals, inventory);
+    if (!plan.planned) {
       throw new LocalPlannerError(
         "PLANNER_GOAL_UNSUPPORTED",
-        plan.planned
-          ? "The requested goal requires no dispatchable steps."
-          : `The trusted planner could not derive ${plan.blockedOn}.`,
+        `The trusted planner could not derive ${plan.blockedOn}.`,
       );
+    }
+    if (plan.steps.length === 0) {
+      return { action: "noop", reasonCode: "ADVANCE_TASK", ai };
     }
     const availableSkillIds = new Set(
       availableSkills.map(({ skillId }) => skillId),
@@ -1597,6 +1616,23 @@ export class CoordinatorLocalPlanner {
   ): Promise<PlacementPosition | null> {
     const dimension = initialRecord.currentStatus?.position?.dimension;
     if (!dimension) return null;
+    this.assertWithinDeadline(deadlineMs, request.signal);
+    const openOutput = await this.dispatchObservation(
+      request,
+      initialRecord,
+      availableSkills,
+      "world.scan",
+      {
+        blockName: COORDINATOR_PLACEMENT_OPEN_BLOCK,
+        maxCount: COORDINATOR_PLACEMENT_SCAN_MAX_COUNT,
+        maxDistance: COORDINATOR_PLACEMENT_SCAN_MAX_DISTANCE,
+        dimension,
+        serverProfileId: initialRecord.serverProfileId,
+      },
+      deadlineMs,
+    );
+    const openPositions = scannedPositionKeys(openOutput);
+    if (openPositions.size === 0) return null;
     for (const blockName of COORDINATOR_PLACEMENT_GROUND_BLOCKS) {
       this.assertWithinDeadline(deadlineMs, request.signal);
       const output = await this.dispatchObservation(
@@ -1613,7 +1649,7 @@ export class CoordinatorLocalPlanner {
         },
         deadlineMs,
       );
-      const reference = nearestPlacementReference(output);
+      const reference = nearestPlacementReference(output, openPositions);
       if (reference !== null) {
         this.logPlacementSite(request, blockName);
         return reference;
@@ -2147,6 +2183,15 @@ function assertPlanGoalsGrounded(
   }
 }
 
+function planGoalsAreGrounded(
+  goals: readonly GoalRequest[],
+  operatorGoal: string,
+): boolean {
+  return goals.every((goal) =>
+    goalNamesPlannedItem(operatorGoal, goal.itemName),
+  );
+}
+
 type SmeltStepInputs = Readonly<{
   inputItemName: string;
   fuelItemName: string;
@@ -2290,6 +2335,7 @@ function placedStationPosition(
  */
 function nearestPlacementReference(
   output: SkillJsonValue | null,
+  openPositions: ReadonlySet<string>,
 ): PlacementPosition | null {
   if (!output || typeof output !== "object" || Array.isArray(output)) return null;
   const matches = (output as Record<string, SkillJsonValue>).matches;
@@ -2310,10 +2356,33 @@ function nearestPlacementReference(
     }
     const position = readPosition(match);
     if (position === null) continue;
+    if (!openPositions.has(positionKey({
+      x: position.x,
+      y: position.y + COORDINATOR_PLACEMENT_FACE.y,
+      z: position.z,
+    }))) {
+      continue;
+    }
     best = position;
     bestDistance = distance;
   }
   return best;
+}
+
+function scannedPositionKeys(output: SkillJsonValue | null): ReadonlySet<string> {
+  const positions = new Set<string>();
+  if (!output || typeof output !== "object" || Array.isArray(output)) return positions;
+  const matches = (output as Record<string, SkillJsonValue>).matches;
+  if (!Array.isArray(matches)) return positions;
+  for (const match of matches) {
+    const position = readPosition(match);
+    if (position !== null) positions.add(positionKey(position));
+  }
+  return positions;
+}
+
+function positionKey(position: PlacementPosition): string {
+  return `${position.x},${position.y},${position.z}`;
 }
 
 function transportFailureCode(cause: unknown): string {
@@ -2340,11 +2409,28 @@ function safeBotContext(record: BotRegistryRecord, taskId: string) {
     health: status.health.current,
     food: status.food.level,
     armorPoints: status.armorPoints,
+    inventory: (status.inventory ?? []).map(({ itemName, count }) => ({
+      itemName,
+      count,
+    })),
     safetyMode: status.safety?.mode ?? null,
     activeRiskCodes: status.safety?.activeRisks ?? ["SAFETY_STATUS_UNAVAILABLE"],
     minecraftVersion: record.minecraftVersion?.resolvedVersion ?? null,
     currentDimension: status.position?.dimension ?? null,
   };
+}
+
+function plannerInventoryFromRecord(
+  record: BotRegistryRecord,
+): PlannerInventory {
+  const items = record.currentStatus?.inventory;
+  if (!items) return {};
+  const inventory: Record<string, number> = {};
+  for (const { itemName, count } of items) {
+    if (!Number.isSafeInteger(count) || count < 1) continue;
+    inventory[itemName] = count;
+  }
+  return inventory;
 }
 
 function plannerInputSchema(schema: SkillJsonValue, depth = 0): SkillJsonValue {

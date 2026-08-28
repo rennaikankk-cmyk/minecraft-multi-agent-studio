@@ -646,6 +646,30 @@ const healthSchema = z
     }
   });
 
+const botInventorySchema = z
+  .array(
+    z
+      .object({
+        itemName: skillIdentifierSchema,
+        count: z.number().int().positive().max(1_000_000),
+      })
+      .strict(),
+  )
+  .max(256)
+  .superRefine((items, context) => {
+    const seen = new Set<string>();
+    for (const [index, item] of items.entries()) {
+      if (seen.has(item.itemName)) {
+        context.addIssue({
+          code: "custom",
+          path: [index, "itemName"],
+          message: "Inventory item names must be unique.",
+        });
+      }
+      seen.add(item.itemName);
+    }
+  });
+
 const currentTaskSchema = z
   .object({
     taskId: identifierSchema,
@@ -669,6 +693,7 @@ export const l0SafetyRiskSchema = z.enum([
 export const l0SafetyActionKindSchema = z.enum([
   "PAUSE_NORMAL_TASKS",
   "CONSUME_SAFE_FOOD",
+  "FORAGE_SAFE_FOOD",
   "RETREAT_STEP",
   "ASCEND",
   "ESCAPE_LAVA",
@@ -762,6 +787,9 @@ export const botStatusV1Schema = z
           })
           .strict(),
         armorPoints: z.number().int().min(0).max(20).nullable(),
+        // Authenticated Runtime-to-Coordinator fact used by deterministic goal
+        // planning. Public bot projections deliberately omit this field.
+        inventory: botInventorySchema.optional(),
         position: botPositionSchema,
         latencyMs: z.number().int().nonnegative().max(120_000).nullable(),
         currentTask: currentTaskSchema.nullable(),

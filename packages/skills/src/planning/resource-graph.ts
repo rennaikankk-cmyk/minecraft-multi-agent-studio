@@ -129,6 +129,7 @@ const need = (itemName: string, count: number): ResourceInput => ({ itemName, co
 export const vanillaResourceRecipes: readonly ResourceRecipe[] = Object.freeze([
   // ---- 采集源（不消耗任何东西，只需要档位） ----
   recipe({ itemName: "oak_log", kind: "mine", sourceBlock: "oak_log" }),
+  recipe({ itemName: "dirt", kind: "mine", sourceBlock: "dirt" }),
   recipe({ itemName: "cobblestone", kind: "mine", sourceBlock: "stone", toolTier: "wooden" }),
   recipe({ itemName: "coal", kind: "mine", sourceBlock: "coal_ore", toolTier: "wooden" }),
   recipe({

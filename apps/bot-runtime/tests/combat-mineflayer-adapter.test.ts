@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 
 import type { Bot } from "mineflayer";
+import { Vec3 } from "vec3";
 import { describe, expect, it, vi } from "vitest";
 
 import { MineflayerCombatAdapter } from "../src/combat-mineflayer-adapter.js";
@@ -85,6 +86,115 @@ describe("MineflayerCombatAdapter", () => {
       weaponDamage: 6,
       health: 20,
     });
+  });
+
+  it("exposes the held non-weapon tool as a last-resort melee candidate", () => {
+    const pickaxe = {
+      name: "wooden_pickaxe",
+      slot: 0,
+      maxDurability: 59,
+      durabilityUsed: 0,
+    };
+    const bot = fakeBot({
+      inventory: {
+        items: () => [pickaxe],
+        slots: [pickaxe],
+      },
+      getEquipmentDestSlot: (destination: string) =>
+        destination === "hand" ? 0 : 45,
+    });
+
+    expect(
+      new MineflayerCombatAdapter(bot, SERVER, true).observation(1_000)
+        ?.weapons,
+    ).toContainEqual(
+      expect.objectContaining({
+        slot: 0,
+        itemName: "wooden_pickaxe",
+        kind: "other",
+        baseDamage: 1,
+      }),
+    );
+  });
+
+  it("reports ranged-use state and executes bow draw and release primitives", async () => {
+    const bow = {
+      name: "bow",
+      slot: 1,
+      count: 1,
+      maxDurability: 384,
+      durabilityUsed: 0,
+    };
+    const activateItem = vi.fn();
+    const deactivateItem = vi.fn();
+    const bot = fakeBot({
+      usingHeldItem: true,
+      inventory: {
+        items: () => [bow, { name: "arrow", slot: 2, count: 12 }],
+        slots: [null, bow, { name: "arrow", slot: 2, count: 12 }],
+      },
+      getEquipmentDestSlot: (destination: string) =>
+        destination === "hand" ? 1 : 45,
+      activateItem,
+      deactivateItem,
+    });
+    const adapter = new MineflayerCombatAdapter(bot, SERVER, true);
+    adapter.setClock(() => 1_234);
+
+    expect(adapter.observation(1_000)).toMatchObject({
+      self: { heldItemSlot: 1, usingHeldItem: true },
+      weapons: [expect.objectContaining({
+        kind: "bow",
+        ammoRemaining: 12,
+      })],
+    });
+    await expect(
+      adapter.execute(
+        { kind: "DRAW_RANGED_WEAPON", weaponSlot: 1 },
+        new AbortController().signal,
+      ),
+    ).resolves.toEqual({ outcome: "executed", executedAtMs: 1_234 });
+    await expect(
+      adapter.execute(
+        {
+          kind: "RELEASE_RANGED_WEAPON",
+          targetEntityId: 42,
+          weaponSlot: 1,
+        },
+        new AbortController().signal,
+      ),
+    ).resolves.toEqual({ outcome: "executed", executedAtMs: 1_234 });
+    expect(activateItem).toHaveBeenCalledWith(false);
+    expect(deactivateItem).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports an empty hazard set when the loaded-area scan is clear", () => {
+    const blockAt = vi.fn(() => ({ name: "stone" }));
+    const bot = fakeBot({ blockAt });
+    const snapshot = new MineflayerCombatAdapter(bot, SERVER, true).observation(1_000);
+    expect(snapshot?.hazards).toEqual([]);
+    expect(blockAt.mock.calls[0]?.[0]).toBeInstanceOf(Vec3);
+  });
+
+  it("reports lava and fire positions from the local hazard scan", () => {
+    const bot = fakeBot({
+      blockAt: (position: { x: number; y: number; z: number }) =>
+        position.x === 1 && position.y === 64 && position.z === 0
+          ? { name: "minecraft:lava" }
+          : position.x === -1 && position.y === 64 && position.z === 0
+            ? { name: "fire" }
+            : { name: "stone" },
+    });
+    const snapshot = new MineflayerCombatAdapter(bot, SERVER, true).observation(1_000);
+    expect(snapshot?.hazards).toEqual(expect.arrayContaining([
+      { x: 1, y: 64, z: 0 },
+      { x: -1, y: 64, z: 0 },
+    ]));
+  });
+
+  it("keeps hazards unknown when block geometry is unavailable", () => {
+    const snapshot = new MineflayerCombatAdapter(fakeBot(), SERVER, true).observation(1_000);
+    expect(snapshot?.hazards).toBeNull();
   });
 
   it("drops a malformed entity without invalidating the remaining snapshot", () => {

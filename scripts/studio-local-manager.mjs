@@ -387,10 +387,21 @@ export class StudioLocalManager {
       processState: "stopped",
       lastError: null,
     };
-    await this.writeProfile(config);
+    const runningPeers = [...this.configs.values()].filter(
+      (candidate) =>
+        this.sameServer(candidate, config) &&
+        this.processes.get(candidate.botId)?.child.exitCode === null,
+    );
     this.configs.set(config.botId, config);
     try {
+      await this.refreshCombatProfilesForServer(config);
       await this.writeManifest();
+      // A running Runtime has already loaded its profile. Restart same-server
+      // peers after adding a Bot so their new whitelist is effective now.
+      for (const peer of runningPeers) {
+        await this.stopBot(peer.botId);
+        await this.startBot(peer.botId);
+      }
       await this.startBot(config.botId);
     } catch (cause) {
       config.processState = "error";
@@ -400,6 +411,37 @@ export class StudioLocalManager {
       throw managedError("BOT_START_FAILED", "Bot 配置已保存，但 Runtime 启动失败。", 502);
     }
     return this.publicBot(config);
+  }
+
+  sameServer(left, right) {
+    return (
+      left.serverHost.toLowerCase() === right.serverHost.toLowerCase() &&
+      left.serverPort === right.serverPort
+    );
+  }
+
+  async refreshCombatProfilesForServer(config) {
+    const matching = [...this.configs.values()].filter((candidate) =>
+      this.sameServer(candidate, config),
+    );
+    await Promise.all(matching.map((candidate) => this.writeProfile(candidate)));
+  }
+
+  combatWhitelistFor(config) {
+    const usernames = new Map();
+    for (const candidate of this.configs.values()) {
+      if (
+        candidate.botId === config.botId ||
+        !this.sameServer(candidate, config)
+      ) {
+        continue;
+      }
+      const key = candidate.username.toLowerCase();
+      if (!usernames.has(key)) usernames.set(key, candidate.username);
+    }
+    return [...usernames.values()].sort((left, right) =>
+      left.localeCompare(right),
+    );
   }
 
   async startBot(botId) {
@@ -681,6 +723,14 @@ export class StudioLocalManager {
       minecraftVersion: config.minecraftVersion,
       username: config.username,
       auth: "offline",
+      combat: {
+        enabled: true,
+        stance: "preserve-life",
+        whitelist: {
+          usernames: this.combatWhitelistFor(config),
+          uuids: [],
+        },
+      },
       statusIntervalMs: 1_000,
       heartbeatIntervalMs: 5_000,
       stopGracePeriodMs: 5_000,

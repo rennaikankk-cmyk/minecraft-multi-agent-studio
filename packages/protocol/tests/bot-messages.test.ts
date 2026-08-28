@@ -42,6 +42,10 @@ const validStatus = {
     health: { current: 18, maximum: 20 },
     food: { level: 17, saturation: 4.5 },
     armorPoints: 12,
+    inventory: [
+      { itemName: "iron_sword", count: 1 },
+      { itemName: "oak_log", count: 7 },
+    ],
     position: { x: 12.5, y: 64, z: -30.25, dimension: "minecraft:overworld" },
     latencyMs: 53,
     currentTask: {
@@ -105,6 +109,24 @@ describe("BotStatusV1", () => {
     const input = structuredClone(validStatus);
     input.payload.health.current = 21;
     expect(botStatusV1Schema.safeParse(input).success).toBe(false);
+  });
+
+  it("accepts bounded inventory counts and rejects duplicate item names", () => {
+    expect(botStatusV1Schema.parse(validStatus).payload.inventory).toEqual(
+      validStatus.payload.inventory,
+    );
+    expect(
+      botStatusV1Schema.safeParse({
+        ...validStatus,
+        payload: {
+          ...validStatus.payload,
+          inventory: [
+            { itemName: "oak_log", count: 1 },
+            { itemName: "oak_log", count: 2 },
+          ],
+        },
+      }).success,
+    ).toBe(false);
   });
 
   it("rejects non-finite coordinates and extra fields", () => {

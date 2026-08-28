@@ -52,7 +52,7 @@ describe("L0SafetyController", () => {
       new L0SafetyController().evaluate(
         snapshot({ foodLevel: 10, hasSafeFood: false }),
       ).actions,
-    ).not.toContainEqual(expect.objectContaining({ kind: "CONSUME_SAFE_FOOD" }));
+    ).toContainEqual({ kind: "FORAGE_SAFE_FOOD", risk: "HUNGER" });
   });
 
   it("preempts normal work for low and critical health", () => {
@@ -68,6 +68,65 @@ describe("L0SafetyController", () => {
     expect(critical.actions.map(({ kind }) => kind)).toEqual([
       "PAUSE_NORMAL_TASKS",
       "EMERGENCY_STOP",
+    ]);
+  });
+
+  it("bounds low-health retreat steps and eats when recovery food is usable", () => {
+    const controller = new L0SafetyController();
+    const first = controller.evaluate(snapshot({
+      health: 8,
+      foodLevel: 17,
+    }));
+    expect(first.actions).toEqual([
+      { kind: "PAUSE_NORMAL_TASKS", risk: "LOW_HEALTH" },
+      { kind: "CONSUME_SAFE_FOOD", risk: "LOW_HEALTH" },
+      { kind: "RETREAT_STEP", risk: "LOW_HEALTH", durationMs: 700 },
+    ]);
+
+    const second = controller.evaluate(snapshot({
+      observedAtMs: 3_100,
+      health: 8,
+      foodLevel: 17,
+    }));
+    expect(second.actions).toContainEqual({
+      kind: "RETREAT_STEP",
+      risk: "LOW_HEALTH",
+      durationMs: 700,
+    });
+
+    const bounded = controller.evaluate(snapshot({
+      observedAtMs: 6_200,
+      health: 8,
+      foodLevel: 17,
+    }));
+    expect(bounded.actions).not.toContainEqual(
+      expect.objectContaining({ kind: "RETREAT_STEP" }),
+    );
+
+    controller.evaluate(snapshot({ observedAtMs: 7_000, health: 9 }));
+    const newEpisode = controller.evaluate(snapshot({
+      observedAtMs: 9_000,
+      health: 8,
+      foodLevel: 20,
+    }));
+    expect(newEpisode.actions).toContainEqual({
+      kind: "RETREAT_STEP",
+      risk: "LOW_HEALTH",
+      durationMs: 700,
+    });
+  });
+
+  it("forages instead of deadlocking when low health has no safe food", () => {
+    const decision = new L0SafetyController().evaluate(snapshot({
+      health: 8,
+      foodLevel: 17,
+      hasSafeFood: false,
+    }));
+    expect(decision.normalTasksPaused).toBe(true);
+    expect(decision.actions).toEqual([
+      { kind: "PAUSE_NORMAL_TASKS", risk: "LOW_HEALTH" },
+      { kind: "FORAGE_SAFE_FOOD", risk: "LOW_HEALTH" },
+      { kind: "RETREAT_STEP", risk: "LOW_HEALTH", durationMs: 700 },
     ]);
   });
 
