@@ -85,21 +85,47 @@ describe("CrystalEngine.plan self-preservation red line", () => {
       selfDamageCeiling: 100,
       minimumNetGain: 0.01,
     });
-    // 候选贴目标、离自己 5 格：自伤 2，正好用来卡红线两侧。
+    // 候选贴目标、离自己 5 格：统一爆炸模型下自伤约 39.8，正好用图腾
+    // 余量卡在红线两侧。
     const spot = [candidate({ position: { x: 2, y: 64, z: 0 } })];
     const at = { x: 7, y: 64, z: 0 };
     const low = engine.plan(
       spot,
       TARGET,
-      self({ position: at, health: 1, totemMarginHealth: 0 }),
+      self({ position: at, health: 20, totemMarginHealth: 0 }),
     );
     const withTotem = engine.plan(
       spot,
       TARGET,
-      self({ position: at, health: 1, totemMarginHealth: 20 }),
+      self({ position: at, health: 20, totemMarginHealth: 20 }),
     );
     expect(low.refusal).toBe("SELF_DAMAGE_RED_LINE");
     expect(withTotem.chosen).not.toBeNull();
+  });
+
+  it("uses only explicitly supplied explosion mitigation for self damage", () => {
+    const engine = new CrystalEngine({
+      ...DEFAULT_CRYSTAL_POLICY,
+      selfDamageCeiling: 100,
+    });
+    const spot = [candidate({ position: { x: 2, y: 64, z: 0 } })];
+    const unverified = engine.plan(
+      spot,
+      TARGET,
+      self({ position: { x: 7, y: 64, z: 0 } }),
+    );
+    const verified = engine.plan(
+      spot,
+      TARGET,
+      self({
+        position: { x: 7, y: 64, z: 0 },
+        explosionMitigation01: 0.5,
+      }),
+    );
+    expect(verified.chosen?.selfDamage).toBeCloseTo(
+      (unverified.chosen?.selfDamage ?? 0) / 2,
+      10,
+    );
   });
 
   it("still enforces the absolute ceiling below the red line", () => {
@@ -110,7 +136,7 @@ describe("CrystalEngine.plan self-preservation red line", () => {
     const plan = engine.plan(
       [candidate({ position: { x: 8, y: 64, z: 0 } })],
       TARGET,
-      self({ health: 20, totemMarginHealth: 20 }),
+      self({ health: 20, totemMarginHealth: 100 }),
     );
     expect(plan.chosen).toBeNull();
     expect(plan.refusal).toBe("SELF_DAMAGE_ABOVE_CEILING");
@@ -120,7 +146,10 @@ describe("CrystalEngine.plan self-preservation red line", () => {
 
 describe("CrystalEngine.plan scoring", () => {
   it("picks the highest net gain rather than the highest raw damage", () => {
-    const engine = new CrystalEngine();
+    const engine = new CrystalEngine({
+      ...DEFAULT_CRYSTAL_POLICY,
+      selfDamageCeiling: 100,
+    });
     const plan = engine.plan(
       [
         // 正踩目标：对敌伤害最高（12），但自己也吃 4，净收益 6。
@@ -129,12 +158,12 @@ describe("CrystalEngine.plan scoring", () => {
         candidate({ position: { x: -1, y: 64, z: 0 } }),
       ],
       TARGET,
-      self({ position: { x: 5, y: 64, z: 0 } }),
+      self({ position: { x: 5, y: 64, z: 0 }, totemMarginHealth: 100 }),
     );
     expect(plan.chosen?.candidate.position.x).toBe(-1);
     // 选中的那个原始伤害更低，证明排序看的是净收益而不是伤害。
-    expect(plan.chosen?.targetDamage).toBe(8);
-    expect(plan.chosen?.netGain).toBe(8);
+    expect(plan.chosen?.targetDamage).toBeCloseTo(391 / 6, 10);
+    expect(plan.chosen?.netGain).toBeCloseTo(197 / 12, 10);
     expect(plan.viableCount).toBe(2);
   });
 
@@ -161,7 +190,11 @@ describe("CrystalEngine.plan scoring", () => {
   });
 
   it("attenuates damage by occlusion", () => {
-    const engine = new CrystalEngine();
+    const engine = new CrystalEngine({
+      ...DEFAULT_CRYSTAL_POLICY,
+      selfDamageCeiling: 100,
+      selfDamageWeight: 1,
+    });
     const clear = engine.plan(
       [candidate({ position: { x: 1.5, y: 64, z: 0 } })],
       TARGET,
@@ -192,6 +225,7 @@ describe("CrystalEngine.plan scoring", () => {
     const engine = new CrystalEngine({
       ...DEFAULT_CRYSTAL_POLICY,
       minimumNetGain: 100,
+      selfDamageCeiling: 100,
     });
     expect(
       engine.plan([candidate({ position: { x: 1.5, y: 64, z: 0 } })], TARGET, self())

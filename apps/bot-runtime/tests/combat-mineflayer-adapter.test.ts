@@ -1,3 +1,5 @@
+import { EventEmitter } from "node:events";
+
 import type { Bot } from "mineflayer";
 import { describe, expect, it, vi } from "vitest";
 
@@ -18,10 +20,10 @@ function fakeBot(overrides: Record<string, unknown> = {}): Bot {
     pitch: 0,
     onGround: true,
     equipment: [
-      { name: "iron_helmet", slot: 5 },
-      { name: "iron_chestplate", slot: 6 },
-      { name: "iron_leggings", slot: 7 },
-      { name: "iron_boots", slot: 8 },
+      { name: "iron_helmet", slot: 5, enchants: [] },
+      { name: "iron_chestplate", slot: 6, enchants: [] },
+      { name: "iron_leggings", slot: 7, enchants: [] },
+      { name: "iron_boots", slot: 8, enchants: [] },
     ],
   };
   const enemy = {
@@ -33,10 +35,10 @@ function fakeBot(overrides: Record<string, unknown> = {}): Bot {
     velocity: { x: 0, y: 0, z: 0 },
     health: 20,
     equipment: [
-      { name: "diamond_helmet" },
-      { name: "diamond_chestplate" },
-      { name: "diamond_leggings" },
-      { name: "diamond_boots" },
+      { name: "diamond_helmet", enchants: [] },
+      { name: "diamond_chestplate", enchants: [] },
+      { name: "diamond_leggings", enchants: [] },
+      { name: "diamond_boots", enchants: [] },
       { name: "diamond_sword" },
     ],
   };
@@ -44,6 +46,7 @@ function fakeBot(overrides: Record<string, unknown> = {}): Bot {
   const bot = {
     entity: self,
     health: 20,
+    version: "1.21.8",
     entities: { "1": self, "42": enemy },
     game: { dimension: "overworld" },
     player: { ping: 25 },
@@ -73,6 +76,10 @@ describe("MineflayerCombatAdapter", () => {
     expect(snapshot?.dimension).toBe("minecraft:overworld");
     expect(snapshot?.entities).toHaveLength(1);
     expect(snapshot?.entities[0]?.entity.kind).toBe("player");
+    expect(snapshot?.entities[0]).toMatchObject({
+      crystalNearby: false,
+      anchorNearby: false,
+    });
     expect(snapshot?.entities[0]?.gear).toMatchObject({
       armorMaterial: "diamond",
       weaponDamage: 6,
@@ -120,6 +127,134 @@ describe("MineflayerCombatAdapter", () => {
     const angry = new MineflayerCombatAdapter(bot, SERVER, true).observation(1_001);
     expect(angry?.entities[0]?.entity.kind).toBe("monster");
     expect(angry?.entities[0]?.entity.endermanState).toBe("angry");
+  });
+
+  it("uses the server totem POP event to prioritize a target only during punish", () => {
+    const wire = new EventEmitter();
+    const bot = fakeBot({ _client: wire });
+    const adapter = new MineflayerCombatAdapter(bot, SERVER, true);
+    let nowMs = 10_000;
+    adapter.setClock(() => nowMs);
+
+    wire.emit("entity_status", { entityId: 42, entityStatus: 35 });
+    const punish = adapter.observation(nowMs);
+    expect(punish?.entities[0]?.recentlyPopped).toBe(true);
+
+    nowMs += 5_000;
+    const regen = adapter.observation(nowMs);
+    expect(regen?.entities[0]).not.toHaveProperty("recentlyPopped");
+
+    wire.emit("entity_status", { entityId: 42, entityStatus: 34 });
+    nowMs += 1;
+    const ignoredStatus = adapter.observation(nowMs);
+    expect(ignoredStatus?.entities[0]).not.toHaveProperty("recentlyPopped");
+  });
+
+  it("forwards its own POP before equipment sync and does not let a foreign POP stop drawing", () => {
+    const wire = new EventEmitter();
+    const bot = fakeBot({ _client: wire, usingHeldItem: true });
+    const mutableBot = bot as unknown as { usingHeldItem: boolean };
+    // Simulate Mineflayer's inventory listener. The adapter must preserve this
+    // library behavior for self events while repairing it for foreign events.
+    wire.on("entity_status", () => {
+      mutableBot.usingHeldItem = false;
+    });
+    const adapter = new MineflayerCombatAdapter(bot, SERVER, true);
+    let nowMs = 30_000;
+    adapter.setClock(() => nowMs);
+
+    wire.emit("entity_status", { entityId: 1, entityStatus: 35 });
+    expect(adapter.observation(nowMs)?.self.totemPopObservedAtMs).toBe(nowMs);
+    expect(mutableBot.usingHeldItem).toBe(false);
+
+    mutableBot.usingHeldItem = true;
+    nowMs += 1;
+    wire.emit("entity_status", { entityId: 42, entityStatus: 35 });
+    expect(mutableBot.usingHeldItem).toBe(true);
+  });
+
+  it("does not reuse a POP record after a dimension change or adapter reset", () => {
+    const wire = new EventEmitter();
+    const bot = fakeBot({ _client: wire });
+    const adapter = new MineflayerCombatAdapter(bot, SERVER, true);
+    let nowMs = 20_000;
+    adapter.setClock(() => nowMs);
+
+    wire.emit("entity_status", { entityId: 42, entityStatus: 35 });
+    expect(adapter.observation(nowMs)?.entities[0]?.recentlyPopped).toBe(true);
+
+    const view = bot as unknown as { game: { dimension: string } };
+    view.game.dimension = "the_nether";
+    nowMs += 1;
+    expect(adapter.observation(nowMs)?.entities[0]).not.toHaveProperty("recentlyPopped");
+
+    adapter.reset();
+    view.game.dimension = "overworld";
+    nowMs += 1;
+    expect(adapter.observation(nowMs)?.entities[0]).not.toHaveProperty("recentlyPopped");
+  });
+
+  it("tracks target hurt and swing windows from server wire events", () => {
+    const wire = new EventEmitter();
+    const bot = fakeBot({ _client: wire });
+    const adapter = new MineflayerCombatAdapter(bot, SERVER, true);
+    let nowMs = 40_000;
+    adapter.setClock(() => nowMs);
+
+    wire.emit("entity_status", { entityId: 42, entityStatus: 2 });
+    expect(adapter.observation(nowMs)?.entities[0]).toMatchObject({
+      invulnerableRemainingMs: 500,
+      targetCooldownRatio01: 1,
+    });
+    nowMs += 250;
+    expect(adapter.observation(nowMs)?.entities[0]?.invulnerableRemainingMs).toBe(250);
+
+    wire.emit("animation", { entityId: 42, animation: 0 });
+    expect(adapter.observation(nowMs)?.entities[0]?.targetCooldownRatio01).toBe(0);
+    nowMs += 625;
+    expect(adapter.observation(nowMs)?.entities[0]).toMatchObject({
+      invulnerableRemainingMs: 0,
+      targetCooldownRatio01: 1,
+    });
+
+    wire.emit("damage_event", { entityId: 42 });
+    expect(adapter.observation(nowMs)?.entities[0]?.invulnerableRemainingMs).toBe(500);
+  });
+
+  it("normalizes explosion packets through the negotiated schema", () => {
+    const wire = new EventEmitter();
+    const adapter = new MineflayerCombatAdapter(
+      fakeBot({ _client: wire, version: "1.21.8" }),
+      SERVER,
+      true,
+    );
+    adapter.setClock(() => 50_000);
+    wire.emit("explosion", {
+      x: 1,
+      y: 65,
+      z: 2,
+      playerKnockback: { x: 0.1, y: 0.2, z: -0.1 },
+    });
+    expect(adapter.drainExplosionObservations()).toEqual([{
+      center: { x: 1, y: 65, z: 2 },
+      knockback: { x: 0.1, y: 0.2, z: -0.1 },
+      radiusIfPresent: null,
+      blockCountIfPresent: null,
+      observedAtMs: 50_000,
+      serverProfileId: SERVER,
+      dimension: "minecraft:overworld",
+    }]);
+    expect(adapter.drainExplosionObservations()).toEqual([]);
+  });
+
+  it("rejects an unsupported explosion schema before combat starts", () => {
+    expect(() => new MineflayerCombatAdapter(
+      fakeBot({ version: "1.19.4" }),
+      SERVER,
+      true,
+    )).toThrowError(expect.objectContaining({
+      code: "EXPLOSION_PACKET_SCHEMA_UNSUPPORTED",
+    }));
   });
 
   it.each(["breeze", "bogged", "piglin", "zombified_piglin", "creaking"])(

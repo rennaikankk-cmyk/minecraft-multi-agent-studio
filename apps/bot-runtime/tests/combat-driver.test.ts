@@ -10,6 +10,8 @@ const SERVER = "local-isolated-test";
 const selfGear = {
   armorMaterial: "iron" as const,
   protectionLevel: 0,
+  blastProtectionLevel: 0,
+  armorPieceCount: 4,
   weaponDamage: 6,
   health: 20,
   hasTotem: true,
@@ -40,9 +42,12 @@ function observation(
     armorPoints: 15,
     wieldingWeapon: true,
     crystalNearby: false,
+    anchorNearby: false,
     gear: {
       armorMaterial: "iron" as const,
       protectionLevel: 0,
+      blastProtectionLevel: 0,
+      armorPieceCount: 4,
       weaponDamage: 6,
       health: 20,
       hasTotem: true,
@@ -53,6 +58,7 @@ function observation(
     serverProfileId: SERVER,
     dimension: "minecraft:overworld",
     latencyMs: 0,
+    explosionRuleSet: "java-1.21-release",
     self: {
       position: { x: 0, y: 64, z: 0 },
       health: 20,
@@ -118,6 +124,170 @@ describe("CombatDriver W0 deterministic wiring", () => {
     });
     expect(actions).toHaveLength(1);
     expect(actions[0]).toMatchObject({ kind: "MELEE_ATTACK", targetEntityId: 42 });
+  });
+
+  it("uses a self POP before a stale offhand snapshot and does not re-equip it twice", async () => {
+    const actions: CombatPrimitiveAction[] = [];
+    const execute = await ackExecutor(actions);
+    const combat = driver();
+    const popped = observation({
+      self: {
+        ...observation().self,
+        offhandIsTotem: true,
+        totemPopObservedAtMs: 1_000,
+      },
+    });
+
+    await expect(
+      combat.engage(popped, 1_000, execute, new AbortController().signal),
+    ).resolves.toMatchObject({
+      actual: {
+        primitiveAction: "REEQUIP_TOTEM",
+        reasonCode: "COMBAT_TOTEM_REEQUIPPED",
+      },
+    });
+    expect(actions).toHaveLength(1);
+
+    const stale = observation({
+      observedAtMs: 1_010,
+      self: {
+        ...observation().self,
+        offhandIsTotem: false,
+        totemPopObservedAtMs: 1_000,
+      },
+    });
+    await combat.engage(stale, 1_010, execute, new AbortController().signal);
+    expect(actions.filter((action) => action.kind === "REEQUIP_TOTEM")).toHaveLength(1);
+  });
+
+  it("records use ACKs and throttles repeated placement without blocking attack", async () => {
+    const actions: CombatPrimitiveAction[] = [];
+    const combat = driver();
+    const crystalCandidate = {
+      position: { x: 2, y: 64, z: 0 },
+      hasValidBase: true,
+      spaceObstructed: false,
+      targetOcclusion: 0,
+      selfOcclusion: 1,
+    } as const;
+    const first = await combat.engage(
+      observation({ crystalCandidates: [crystalCandidate] }),
+      1_000,
+      async (action) => {
+        actions.push(action);
+        return { outcome: "executed" as const, executedAtMs: 1_005 };
+      },
+      new AbortController().signal,
+    );
+    expect(first.actual.primitiveAction).toBe("PLACE_CRYSTAL");
+    expect(combat.interactionAudit()[0]).toMatchObject({
+      interactionClass: "use",
+      requestedAtMs: 1_000,
+      executedAtMs: 1_005,
+      ackRttMs: 5,
+    });
+
+    const repeated = await combat.engage(
+      observation({
+        observedAtMs: 1_150,
+        crystalCandidates: [crystalCandidate],
+      }),
+      1_150,
+      async (action) => {
+        actions.push(action);
+        return { outcome: "executed" as const, executedAtMs: 1_155 };
+      },
+      new AbortController().signal,
+    );
+    expect(repeated.actual).toMatchObject({
+      disposition: "delayed",
+      primitiveAction: "NONE",
+      reasonCode: "COMBAT_INTERACTION_THROTTLED",
+    });
+    expect(actions).toHaveLength(1);
+
+    const attack = await combat.engage(
+      observation({ observedAtMs: 1_150, crystalCandidates: null }),
+      1_150,
+      async (action) => {
+        actions.push(action);
+        return { outcome: "executed" as const, executedAtMs: 1_155 };
+      },
+      new AbortController().signal,
+    );
+    expect(attack.actual.primitiveAction).toBe("MELEE_ATTACK");
+    expect(actions).toHaveLength(2);
+  });
+
+  it("repositions during an observed i-frame instead of wasting a melee swing", async () => {
+    const actions: CombatPrimitiveAction[] = [];
+    const execute = await ackExecutor(actions);
+    const base = observation();
+    const entity = base.entities[0]!;
+    const result = await driver().engage(
+      observation({
+        entities: [{ ...entity, invulnerableRemainingMs: 300 }],
+      }),
+      1_000,
+      execute,
+      new AbortController().signal,
+    );
+
+    expect(result.actual).toMatchObject({
+      primitiveAction: "MOVE",
+      reasonCode: "COMBAT_HIT_WINDOW_SPACING",
+    });
+    expect(actions).toHaveLength(1);
+    expect(actions[0]?.kind).toBe("MOVE");
+  });
+
+  it("withdraws from an independently observed hostile anchor", async () => {
+    const actions: CombatPrimitiveAction[] = [];
+    const execute = await ackExecutor(actions);
+    const base = observation();
+    const result = await driver().engage(
+      observation({
+        entities: [{ ...base.entities[0]!, anchorNearby: true }],
+      }),
+      1_000,
+      execute,
+      new AbortController().signal,
+    );
+
+    expect(result.actual).toMatchObject({
+      action: "RETREAT",
+      primitiveAction: "RETREAT_MOVE",
+      reasonCode: "COMBAT_ANCHOR_THREAT",
+    });
+    expect(actions[0]?.kind).toBe("RETREAT_MOVE");
+  });
+
+  it("reports an exact i-frame delay once already inside the spacing band", async () => {
+    const execute = vi.fn(async () => ({
+      outcome: "executed" as const,
+      executedAtMs: 1_005,
+    }));
+    const base = observation();
+    const entity = base.entities[0]!;
+    const result = await driver().engage(
+      observation({
+        entities: [{
+          ...entity,
+          position: { x: 3, y: 64, z: 0 },
+          invulnerableRemainingMs: 250,
+        }],
+      }),
+      1_000,
+      execute,
+      new AbortController().signal,
+    );
+
+    expect(result.actual).toMatchObject({
+      disposition: "delayed",
+      primitiveAction: "NONE",
+      reasonCode: "COMBAT_TARGET_INVULNERABLE",
+    });
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it("keeps whitelisted players and animals out of the hostile target set", async () => {

@@ -14,6 +14,7 @@ import {
   type CombatEntity,
   type CombatIdentityRegistry,
 } from "./identity.js";
+import { BLAST_POWER, entityRangeFor } from "./blast-model.js";
 
 export type CombatVector3 = Readonly<{ x: number; y: number; z: number }>;
 
@@ -30,6 +31,10 @@ export type CombatEntityObservation = Readonly<{
   wieldingWeapon: boolean;
   /** 视线内是否已有敌方放置的末影水晶。 */
   crystalNearby: boolean;
+  /** 视线内是否已有敌方放置的重生锚；未知必须显式填 false。 */
+  anchorNearby: boolean;
+  /** 该实体是否刚触发图腾；只由服务端 entity_status 事件产生。 */
+  recentlyPopped?: boolean;
 }>;
 
 export type CombatThreatSnapshot = Readonly<{
@@ -61,8 +66,10 @@ export type CombatThreatReason =
   | "WITHIN_MELEE_RANGE"
   | "CLOSING_FAST"
   | "CRYSTAL_PLACED"
+  | "ANCHOR_PLACED"
   | "ARMED"
   | "HEAVILY_ARMORED"
+  | "TARGET_RECENTLY_POPPED"
   | "IDENTITY_UNKNOWN";
 
 export type CombatThreatAssessment = Readonly<{
@@ -75,19 +82,27 @@ export type CombatThreatAssessment = Readonly<{
   totemDepleted: boolean;
 }>;
 
-/** 水晶爆炸有效半径约 6 格；进入这个圈就已经在危险区。 */
-const CRYSTAL_RANGE = 6;
+/** Keep threat range tied to the shared explosion power instead of a second magic number. */
+const CRYSTAL_RANGE = entityRangeFor(BLAST_POWER.crystal);
+const ANCHOR_RANGE = entityRangeFor(BLAST_POWER.anchor);
 /** 近战可达距离，按原版 3 格判定（本模块只做威胁评估，不做 reach 校验）。 */
 const MELEE_RANGE = 3;
 const CLOSING_FAST_BLOCKS_PER_SECOND = 4;
 const HEAVY_ARMOR_POINTS = 15;
 
-const SCORE_WITHIN_CRYSTAL_RANGE = 30;
+// The entity range is now the real 12 blocks rather than the old 6-block
+// approximation. Range alone is context, not an immediate retreat trigger;
+// a placed crystal/weapon/closing speed must compound it into elevation.
+const SCORE_WITHIN_CRYSTAL_RANGE = 15;
 const SCORE_WITHIN_MELEE_RANGE = 25;
 const SCORE_CLOSING_FAST = 15;
 const SCORE_CRYSTAL_PLACED = 25;
+const SCORE_ANCHOR_PLACED = 25;
 const SCORE_ARMED = 10;
 const SCORE_HEAVILY_ARMORED = 5;
+// Large enough to reorder comparable targets, but an immediate crystal/melee
+// threat can still outrank a distant POP target.
+const SCORE_TARGET_RECENTLY_POPPED = 35;
 const SCORE_IDENTITY_UNKNOWN = 5;
 
 const CRITICAL_SCORE = 70;
@@ -165,6 +180,10 @@ export class ThreatAnalyzer {
         reasons.push("CRYSTAL_PLACED");
         score += SCORE_CRYSTAL_PLACED;
       }
+      if (distance <= ANCHOR_RANGE && observation.anchorNearby) {
+        reasons.push("ANCHOR_PLACED");
+        score += SCORE_ANCHOR_PLACED;
+      }
       if (observation.wieldingWeapon) {
         reasons.push("ARMED");
         score += SCORE_ARMED;
@@ -175,6 +194,10 @@ export class ThreatAnalyzer {
       ) {
         reasons.push("HEAVILY_ARMORED");
         score += SCORE_HEAVILY_ARMORED;
+      }
+      if (observation.recentlyPopped === true) {
+        reasons.push("TARGET_RECENTLY_POPPED");
+        score += SCORE_TARGET_RECENTLY_POPPED;
       }
       // 认不出身份不是"没威胁"，是"信息缺失"，按略高处理。
       if (observation.entity.username === null && observation.entity.uuid === null) {
@@ -233,6 +256,13 @@ function validateThreatSnapshot(snapshot: CombatThreatSnapshot): void {
     }
     if (observation.armorPoints !== null) {
       finiteNumber(observation.armorPoints, "entity.armorPoints");
+    }
+    if (
+      typeof observation.anchorNearby !== "boolean" ||
+      observation.recentlyPopped !== undefined &&
+      typeof observation.recentlyPopped !== "boolean"
+    ) {
+      throw new TypeError("entity.recentlyPopped 必须是布尔值。");
     }
   }
 }

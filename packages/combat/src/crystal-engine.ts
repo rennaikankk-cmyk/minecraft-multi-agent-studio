@@ -12,9 +12,8 @@
  *   1. **未过时序探针不得上真实对抗**（AGENTS.md §0.6）。`plan()` 可在探针之前
  *      实现并单测，`planForLiveCombat()` 未放行直接抛。本模块是 M3 时序测试的
  *      主要负载。
- *   2. **伤害公式是自研近似，不是原版精确复刻**。§0.6 只学打法不搬代码，所以这里
- *      用公开的距离衰减模型算相对分，只保证"越近越疼、有遮挡更轻"的单调性，
- *      不声称等于服务器的精确扣血。调用方不得把它当伤害保证。
+ *   2. 伤害计算统一走 `blast-model`。暴露度、难度与减伤由调用方注入；输出仍是
+ *      估算，不是服务器承诺，调用方不得把它当伤害保证。
  *   3. **不读时钟**。`nowMs` 由调用方注入，引爆窗口逐帧可测。
  */
 
@@ -22,6 +21,12 @@ import {
   CombatReflexNotClearedError,
   type CombatReflexDecision,
 } from "./reflex-clearance.js";
+import {
+  BLAST_POWER,
+  blastDamage,
+  entityRangeFor,
+  redLineBreached,
+} from "./blast-model.js";
 import type { CombatVector3 } from "./threat-analyzer.js";
 
 export type CombatCrystalCandidate = Readonly<{
@@ -41,9 +46,9 @@ export type CombatCrystalCandidate = Readonly<{
 }>;
 
 export type CombatCrystalPolicy = Readonly<{
-  /** 爆炸最大作用半径（格）。超出即视为零伤害。 */
+  /** 爆炸最大作用半径（格），由水晶 power 派生，保留字段以兼容旧策略。 */
   blastRadius: number;
-  /** 满距离下的基准伤害（半心为 1），用于相对评分。 */
+  /** 爆心处的基准伤害，由水晶 power 派生，保留字段以兼容旧策略。 */
   maxDamage: number;
   /** 自伤权重：净收益 = 对敌伤害 − 自伤 × 权重。 */
   selfDamageWeight: number;
@@ -56,8 +61,8 @@ export type CombatCrystalPolicy = Readonly<{
 }>;
 
 export const DEFAULT_CRYSTAL_POLICY: CombatCrystalPolicy = {
-  blastRadius: 6,
-  maxDamage: 12,
+  blastRadius: entityRangeFor(BLAST_POWER.crystal),
+  maxDamage: 14 * BLAST_POWER.crystal + 1,
   // 自伤比对敌伤害更贵：存活即金钱（AGENTS.md §0.4）。
   selfDamageWeight: 1.5,
   selfDamageCeiling: 6,
@@ -101,6 +106,8 @@ export type CombatCrystalSelfState = Readonly<{
    * 由调用方按 TotemManager 的余量给，本模块不猜。
    */
   totemMarginHealth: number;
+  /** Verified mitigation only; missing is fail-closed zero. */
+  explosionMitigation01?: number;
 }>;
 
 export type CombatCrystalDetonateDecision = Readonly<{
@@ -119,6 +126,8 @@ export class CrystalEngine {
       policy.blastRadius <= 0 ||
       !Number.isFinite(policy.maxDamage) ||
       policy.maxDamage <= 0 ||
+      policy.blastRadius !== entityRangeFor(BLAST_POWER.crystal) ||
+      policy.maxDamage !== 14 * BLAST_POWER.crystal + 1 ||
       !Number.isFinite(policy.selfDamageWeight) ||
       policy.selfDamageWeight < 1 ||
       !Number.isFinite(policy.selfDamageCeiling) ||
@@ -148,6 +157,7 @@ export class CrystalEngine {
     self: CombatCrystalSelfState,
   ): CombatCrystalPlan {
     validateSelfState(self);
+    assertFinitePosition(targetPosition, "targetPosition");
 
     // 红线：击穿这个值就是自杀，任何权重都不能把它换掉。
     const survivalMargin = self.health + self.totemMarginHealth;
@@ -170,15 +180,17 @@ export class CrystalEngine {
         candidate.position,
         targetPosition,
         candidate.targetOcclusion,
+        0,
       );
       const selfDamage = this.estimateDamage(
         candidate.position,
         self.position,
         candidate.selfOcclusion,
+        self.explosionMitigation01 ?? 0,
       );
 
       // 红线先判，早于任何评分比较。
-      if (selfDamage >= survivalMargin) {
+      if (redLineBreached(selfDamage, self.health, self.totemMarginHealth)) {
         redLineRejections += 1;
         continue;
       }
@@ -273,22 +285,24 @@ export class CrystalEngine {
   }
 
   /**
-   * 自研距离衰减近似：满伤在爆心，线性衰减到半径边界为 0，再按遮挡折减。
-   * 只保证单调性，**不等于原版精确伤害**（§0.6：只学打法不搬代码）。
+   * `targetOcclusion`/`selfOcclusion` are the legacy adapter contract. Convert
+   * them to exposure and keep all explosion arithmetic in blast-model.
    */
   private estimateDamage(
     blastPosition: CombatVector3,
     victimPosition: CombatVector3,
     occlusion: number,
+    mitigation01: number,
   ): number {
-    const distance = Math.hypot(
-      victimPosition.x - blastPosition.x,
-      victimPosition.y - blastPosition.y,
-      victimPosition.z - blastPosition.z,
-    );
-    if (distance >= this.policy.blastRadius) return 0;
-    const falloff = 1 - distance / this.policy.blastRadius;
-    return this.policy.maxDamage * falloff * (1 - occlusion);
+    return blastDamage({
+      power: BLAST_POWER.crystal,
+      blastCenter: blastPosition,
+      victimPosition,
+      victimEyeHeight: 0,
+      exposure01: 1 - occlusion,
+      difficulty: "normal",
+      mitigation01,
+    }).mitigatedDamage;
   }
 }
 
@@ -332,6 +346,14 @@ function validateSelfState(self: CombatCrystalSelfState): void {
     throw new TypeError("self.totemMarginHealth 必须是非负有限数。");
   }
   assertFinitePosition(self.position, "self.position");
+  if (
+    self.explosionMitigation01 !== undefined &&
+    (!Number.isFinite(self.explosionMitigation01) ||
+      self.explosionMitigation01 < 0 ||
+      self.explosionMitigation01 > 1)
+  ) {
+    throw new TypeError("self.explosionMitigation01 必须落在 [0, 1]。");
+  }
 }
 
 function validateCandidate(candidate: CombatCrystalCandidate): void {

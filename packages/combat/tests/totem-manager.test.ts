@@ -46,6 +46,64 @@ describe("TotemManager.decide", () => {
     });
   });
 
+  it("prioritizes a self POP over a stale offhand snapshot and deduplicates after ACK", () => {
+    const manager = new TotemManager();
+    const popped = snapshot({
+      nowMs: 1_000,
+      offhandIsTotem: true,
+      inventoryTotemCount: 2,
+      totemPopObservedAtMs: 1_000,
+    });
+
+    expect(manager.decide(popped)).toMatchObject({
+      action: "REEQUIP_OFFHAND",
+      reason: "TOTEM_POP_OBSERVED",
+      preempts: true,
+      totemsRemainingAfter: 1,
+    });
+    manager.recordReequip(1_005);
+    manager.recordTotemPopHandled(1_000);
+
+    expect(
+      manager.decide({
+        ...popped,
+        nowMs: 1_010,
+        offhandIsTotem: false,
+      }),
+    ).toMatchObject({
+      action: "NONE",
+      reason: "TOTEM_POP_HANDLED",
+      preempts: false,
+    });
+
+    // The adapter stops forwarding the POP after its short action window. A
+    // later, genuinely empty slot is therefore eligible for a new replacement.
+    expect(
+      manager.decide({
+        ...popped,
+        nowMs: 6_000,
+        offhandIsTotem: false,
+        totemPopObservedAtMs: null,
+      }),
+    ).toMatchObject({ action: "REEQUIP_OFFHAND", reason: "OFFHAND_EMPTY" });
+  });
+
+  it("retreats on a self POP when preserve-life has no spare totem", () => {
+    expect(
+      new TotemManager().decide(
+        snapshot({
+          offhandIsTotem: true,
+          inventoryTotemCount: 0,
+          totemPopObservedAtMs: 1_000,
+        }),
+      ),
+    ).toMatchObject({
+      action: "RETREAT",
+      reason: "NO_TOTEM_AVAILABLE",
+      preempts: true,
+    });
+  });
+
   it("retreats rather than fighting on with no totem anywhere", () => {
     const decision = new TotemManager().decide(
       snapshot({ offhandIsTotem: false, inventoryTotemCount: 0 }),
@@ -127,6 +185,14 @@ describe("TotemManager.decide", () => {
     const manager = new TotemManager();
     manager.recordReequip(5_000);
     expect(() => manager.recordReequip(4_999)).toThrowError(RangeError);
+  });
+
+  it("rejects a POP timestamp that is after the current snapshot", () => {
+    expect(() =>
+      new TotemManager().decide(
+        snapshot({ totemPopObservedAtMs: 1_001 }),
+      ),
+    ).toThrowError(TypeError);
   });
 
   it("rejects malformed snapshot data", () => {

@@ -2483,6 +2483,10 @@ export class MineflayerBotClient implements BotClient {
   }
 
   versionCompatibility() {
+    // Auto-version sessions only know the concrete protocol after negotiation.
+    // Validate the combat explosion schema in the same startup compatibility
+    // phase so an unknown shape closes the session before Runtime goes online.
+    this.combatAdapter.initializeExplosionProtocol();
     const protocolVersion = Number(this.bot.protocolVersion);
     return resolvedVersionCompatibility(
       this.configuredVersion,

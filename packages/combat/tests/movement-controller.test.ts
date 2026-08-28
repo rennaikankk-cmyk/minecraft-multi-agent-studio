@@ -60,6 +60,34 @@ describe("MovementController.plan", () => {
     expect(plan.distance).toBeCloseTo(1, 6);
   });
 
+  it("uses the 2.4-3.8 spacing band while the target is invulnerable", () => {
+    const controller = new MovementController();
+    expect(
+      controller.plan(
+        snapshot({
+          targetPosition: { x: 2, y: 64, z: 0 },
+          targetInvulnerableRemainingMs: 300,
+        }),
+      ).intent,
+    ).toBe("BACK_OFF");
+    expect(
+      controller.plan(
+        snapshot({
+          targetPosition: { x: 3, y: 64, z: 0 },
+          targetInvulnerableRemainingMs: 300,
+        }),
+      ).intent,
+    ).toBe("STRAFE");
+    expect(
+      controller.plan(
+        snapshot({
+          targetPosition: { x: 4, y: 64, z: 0 },
+          targetInvulnerableRemainingMs: 300,
+        }),
+      ).intent,
+    ).toBe("CLOSE_IN");
+  });
+
   it("lets retreat override every other positioning choice", () => {
     const plan = new MovementController().plan(
       snapshot({
@@ -266,6 +294,9 @@ describe("MovementController.plan", () => {
     ).toThrowError(TypeError);
     expect(() =>
       controller.plan(snapshot({ hazards: [{ x: Number.NaN, y: 0, z: 0 }] })),
+    ).toThrowError(TypeError);
+    expect(() =>
+      controller.plan(snapshot({ targetInvulnerableRemainingMs: -1 })),
     ).toThrowError(TypeError);
   });
 });

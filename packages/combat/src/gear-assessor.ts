@@ -55,12 +55,37 @@ export type CombatGearSnapshot = Readonly<{
   armorMaterial: CombatArmorMaterial;
   /** 保护类附魔的等效等级，[0, 4]。混搭时取平均，由调用方折算。 */
   protectionLevel: number;
+  /** 防爆保护的平均等级，[0, 4]；观测不完整时必须为 0。 */
+  blastProtectionLevel: number;
+  /** 实际穿戴的护甲件数，[0, 4]，用于把平均附魔等级还原为总等级。 */
+  armorPieceCount: number;
   /** 手持武器的有效伤害（基础 + 附魔），与 WeaponManager 同一口径。 */
   weaponDamage: number;
   /** 当前生命，[0, 20]。 */
   health: number;
   /** 是否持有图腾。持有相当于多一条命，计入耐久度。 */
   hasTotem: boolean;
+}>;
+
+export const JAVA_1_21_EXPLOSION_RULES = Object.freeze({
+  id: "java-1.21-release",
+  minimumMinecraftVersion: "1.21",
+  protectionReductionPerLevel: 0.04,
+  blastProtectionReductionPerLevel: 0.08,
+  blastKnockbackResistancePerLevel: 0.15,
+  maximumEnchantmentReduction: 0.8,
+} as const);
+
+export type CombatExplosionRuleSet = typeof JAVA_1_21_EXPLOSION_RULES.id;
+
+export type CombatExplosionProtectionAssessment = Readonly<{
+  /** null means this version has no verified local rules and all effects are 0. */
+  ruleSet: CombatExplosionRuleSet | null;
+  verified: boolean;
+  totalProtectionLevel: number;
+  totalBlastProtectionLevel: number;
+  mitigation01: number;
+  knockbackResistance01: number;
 }>;
 
 export type CombatGearVerdict =
@@ -100,7 +125,77 @@ export type CombatGearAssessment = Readonly<{
   opponentAdvantage: number | null;
   /** 该结论是否应当阻止交战。调用方直接消费这个布尔，不必重算比值。 */
   shouldAvoid: boolean;
+  /** 独立爆炸轴；不折进通用装备胜负结论。 */
+  selfExplosionProtection: CombatExplosionProtectionAssessment;
+  /** 对手装备不可见时为 null。 */
+  opponentExplosionProtection: CombatExplosionProtectionAssessment | null;
 }>;
+
+/**
+ * This is an explicit version guard, not a semver range guess. The constants
+ * above were verified for stable Java 1.21.x rules only. Snapshots and future
+ * releases remain unknown until separately verified.
+ */
+export function explosionRuleSetForMinecraftVersion(
+  minecraftVersion: string,
+): CombatExplosionRuleSet | null {
+  return /^1\.21(?:\.\d+)?$/u.test(minecraftVersion)
+    ? JAVA_1_21_EXPLOSION_RULES.id
+    : null;
+}
+
+export function assessExplosionProtection(
+  gear: CombatGearSnapshot,
+  ruleSet: CombatExplosionRuleSet | null,
+): CombatExplosionProtectionAssessment {
+  validateGear(gear);
+  const totalProtectionLevel = gear.protectionLevel * gear.armorPieceCount;
+  const totalBlastProtectionLevel =
+    gear.blastProtectionLevel * gear.armorPieceCount;
+  if (ruleSet !== JAVA_1_21_EXPLOSION_RULES.id) {
+    return {
+      ruleSet: null,
+      verified: false,
+      totalProtectionLevel,
+      totalBlastProtectionLevel,
+      mitigation01: 0,
+      knockbackResistance01: 0,
+    };
+  }
+
+  return {
+    ruleSet,
+    verified: true,
+    totalProtectionLevel,
+    totalBlastProtectionLevel,
+    mitigation01: Math.min(
+      JAVA_1_21_EXPLOSION_RULES.maximumEnchantmentReduction,
+      totalProtectionLevel *
+        JAVA_1_21_EXPLOSION_RULES.protectionReductionPerLevel +
+        totalBlastProtectionLevel *
+          JAVA_1_21_EXPLOSION_RULES.blastProtectionReductionPerLevel,
+    ),
+    knockbackResistance01: Math.min(
+      1,
+      totalBlastProtectionLevel *
+        JAVA_1_21_EXPLOSION_RULES.blastKnockbackResistancePerLevel,
+    ),
+  };
+}
+
+export function explosionMitigation01(
+  gear: CombatGearSnapshot,
+  ruleSet: CombatExplosionRuleSet | null,
+): number {
+  return assessExplosionProtection(gear, ruleSet).mitigation01;
+}
+
+export function explosionKnockbackResistance01(
+  gear: CombatGearSnapshot,
+  ruleSet: CombatExplosionRuleSet | null,
+): number {
+  return assessExplosionProtection(gear, ruleSet).knockbackResistance01;
+}
 
 /**
  * 战力评分：耐久度 × 输出。两者都乘进去，因为只有一项高不构成优势——
@@ -121,9 +216,14 @@ export function assessGearMatchup(
   self: CombatGearSnapshot,
   opponent: CombatGearSnapshot | null,
   policy: CombatGearPolicy = DEFAULT_GEAR_POLICY,
+  explosionRuleSet: CombatExplosionRuleSet | null = null,
 ): CombatGearAssessment {
   validateGearPolicy(policy);
   const selfPower = gearPower(self);
+  const selfExplosionProtection = assessExplosionProtection(
+    self,
+    explosionRuleSet,
+  );
 
   if (opponent === null) {
     // 看不见就是看不见：不从缺失数据推出"打得过"。
@@ -133,10 +233,16 @@ export function assessGearMatchup(
       opponentPower: null,
       opponentAdvantage: null,
       shouldAvoid: policy.treatUnknownAsOutclassed,
+      selfExplosionProtection,
+      opponentExplosionProtection: null,
     };
   }
 
   const opponentPower = gearPower(opponent);
+  const opponentExplosionProtection = assessExplosionProtection(
+    opponent,
+    explosionRuleSet,
+  );
   // 自己战力为 0（血量为 0）时对面无条件占优，避免除零。
   const advantage =
     selfPower === 0 ? Number.POSITIVE_INFINITY : opponentPower / selfPower;
@@ -156,6 +262,8 @@ export function assessGearMatchup(
     opponentPower,
     opponentAdvantage: advantage,
     shouldAvoid: verdict === "outclassed",
+    selfExplosionProtection,
+    opponentExplosionProtection,
   };
 }
 
@@ -164,17 +272,23 @@ export function assessWorstMatchup(
   self: CombatGearSnapshot,
   opponents: readonly (CombatGearSnapshot | null)[],
   policy: CombatGearPolicy = DEFAULT_GEAR_POLICY,
+  explosionRuleSet: CombatExplosionRuleSet | null = null,
 ): CombatGearAssessment {
   if (opponents.length === 0) {
-    return assessGearMatchup(self, null, policy);
+    return assessGearMatchup(self, null, policy, explosionRuleSet);
   }
   let worst: CombatGearAssessment | null = null;
   for (const opponent of opponents) {
-    const assessment = assessGearMatchup(self, opponent, policy);
+    const assessment = assessGearMatchup(
+      self,
+      opponent,
+      policy,
+      explosionRuleSet,
+    );
     if (worst === null || rank(assessment) > rank(worst)) worst = assessment;
   }
   // opponents 非空，循环必然赋值；这里只为满足类型收窄。
-  return worst ?? assessGearMatchup(self, null, policy);
+  return worst ?? assessGearMatchup(self, null, policy, explosionRuleSet);
 }
 
 /** 严重度排序：outclassed > unknown > even > favorable。 */
@@ -202,11 +316,30 @@ function validateGear(gear: CombatGearSnapshot): void {
   ) {
     throw new TypeError("protectionLevel 必须落在 [0, 4]。");
   }
+  if (
+    !Number.isFinite(gear.blastProtectionLevel) ||
+    gear.blastProtectionLevel < 0 ||
+    gear.blastProtectionLevel > 4
+  ) {
+    throw new TypeError("blastProtectionLevel 必须落在 [0, 4]。");
+  }
+  if (
+    !Number.isInteger(gear.armorPieceCount) ||
+    gear.armorPieceCount < 0 ||
+    gear.armorPieceCount > 4 ||
+    (gear.armorPieceCount === 0 &&
+      (gear.protectionLevel !== 0 || gear.blastProtectionLevel !== 0))
+  ) {
+    throw new TypeError("armorPieceCount 必须落在 [0, 4] 且与附魔观测一致。");
+  }
   if (!Number.isFinite(gear.weaponDamage) || gear.weaponDamage < 0) {
     throw new TypeError("weaponDamage 必须是非负有限数。");
   }
   if (!Number.isFinite(gear.health) || gear.health < 0 || gear.health > 20) {
     throw new TypeError("health 必须落在 [0, 20]。");
+  }
+  if (typeof gear.hasTotem !== "boolean") {
+    throw new TypeError("hasTotem 必须是布尔值。");
   }
 }
 

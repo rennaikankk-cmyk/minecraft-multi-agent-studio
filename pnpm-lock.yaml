@@ -49,6 +49,9 @@ importers:
       '@minecraft-studio/skills':
         specifier: workspace:*
         version: link:../../packages/skills
+      minecraft-data:
+        specifier: 3.111.0
+        version: 3.111.0
       mineflayer:
         specifier: 4.37.1
         version: 4.37.1

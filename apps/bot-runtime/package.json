@@ -25,6 +25,7 @@
     "mineflayer-collectblock": "1.6.0",
     "mineflayer-pathfinder": "2.4.5",
     "mineflayer-tool": "1.2.0",
+    "minecraft-data": "3.111.0",
     "vec3": "0.1.10",
     "ws": "8.21.1",
     "zod": "4.4.3"

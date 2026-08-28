@@ -72,6 +72,14 @@ export {
 } from "./combat-driver.js";
 export { MineflayerCombatAdapter } from "./combat-mineflayer-adapter.js";
 export {
+  ExplosionPacketAdapter,
+  ExplosionPacketAdapterError,
+  type CombatExplosionObservation,
+  type CombatExplosionVector,
+  type ExplosionPacketAdapterErrorCode,
+  type ExplosionPacketSchemaKind,
+} from "./explosion-packet-adapter.js";
+export {
   BotRuntimeHost,
   type BotRuntimeHostOptions,
 } from "./runtime-host.js";

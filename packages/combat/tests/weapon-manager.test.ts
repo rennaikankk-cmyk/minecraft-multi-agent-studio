@@ -133,6 +133,30 @@ describe("WeaponManager.evaluateSwing", () => {
     });
   });
 
+  it("waits out an observed target i-frame before checking own cooldown", () => {
+    const manager = new WeaponManager();
+    const sword = weapon();
+    manager.recordSwing(sword, 1_000);
+    expect(manager.evaluateSwing(sword, 1_010, true, 275.2)).toMatchObject({
+      shouldAttack: false,
+      reason: "TARGET_INVULNERABLE",
+      waitMs: 276,
+    });
+    expect(manager.evaluateSwing(sword, 1_010, false, 275).reason).toBe(
+      "OUT_OF_RANGE",
+    );
+  });
+
+  it("treats unknown i-frame data as zero so missing events cannot silence combat", () => {
+    expect(new WeaponManager().evaluateSwing(weapon(), 0, true, 0)).toMatchObject({
+      shouldAttack: true,
+      reason: "READY",
+    });
+    expect(() =>
+      new WeaponManager().evaluateSwing(weapon(), 0, true, -1),
+    ).toThrowError(TypeError);
+  });
+
   it("refuses to attack with no weapon", () => {
     expect(new WeaponManager().evaluateSwing(null, 0, true)).toMatchObject({
       shouldAttack: false,

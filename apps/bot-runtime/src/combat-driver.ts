@@ -1,4 +1,5 @@
 import {
+  ChainSequencer,
   CombatIdentityRegistry,
   CombatReflexNotClearedError,
   CrystalEngine,
@@ -18,10 +19,13 @@ import {
   WeaponManager,
   assessWorstMatchup,
   decideReflexClearance,
+  explosionMitigation01,
   eyePosition,
   orientationToward,
+  type CombatChainStepRecord,
   type CombatCrystalCandidate,
   type CombatEntityObservation,
+  type CombatExplosionRuleSet,
   type CombatGearAssessment,
   type CombatGearSnapshot,
   type CombatMineAssignment,
@@ -66,6 +70,10 @@ export type CombatDriverEntityObservation = CombatEntityObservation &
   Readonly<{
     /** null means the equipment observation was incomplete. */
     gear: CombatGearSnapshot | null;
+    /** Missing means no hurt observation; callers must allow the swing. */
+    invulnerableRemainingMs?: number;
+    /** Opponent swing cooldown estimate; observation-only for spacing telemetry. */
+    targetCooldownRatio01?: number;
   }>;
 
 export type CombatDriverObservation = Readonly<{
@@ -73,10 +81,13 @@ export type CombatDriverObservation = Readonly<{
   serverProfileId: string;
   dimension: string;
   latencyMs: number | null;
+  /** null means this Minecraft version has no verified explosion rules. */
+  explosionRuleSet: CombatExplosionRuleSet | null;
   self: Readonly<{
     position: CombatVector3;
     health: number;
     offhandIsTotem: boolean;
+    totemPopObservedAtMs?: number | null;
     inventoryTotemCount: number;
     gear: CombatGearSnapshot | null;
     orientation: CombatOrientation;
@@ -214,6 +225,7 @@ export class CombatDriver {
   private readonly targetSelector: TargetSelector;
   private readonly retreatController: RetreatController;
   private readonly predictionEngine = new PredictionEngine();
+  private readonly interactionSequencer = new ChainSequencer();
   private policyGate: ServerPolicyGate;
   private readonly motionHistory = new Map<number, CombatMotionSample[]>();
   private totemManager: TotemManager;
@@ -305,6 +317,10 @@ export class CombatDriver {
     };
   }
 
+  interactionAudit(): readonly CombatChainStepRecord[] {
+    return this.interactionSequencer.records();
+  }
+
   /**
    * Install the probe report for the current connection. The runtime calls
    * this after spawn; a report is never implicitly carried across a reset.
@@ -343,6 +359,7 @@ export class CombatDriver {
     this.crystalEngine.reset();
     this.packetMineController.reset();
     this.weaponManager.reset();
+    this.interactionSequencer.reset();
     // These controllers contain deterministic PRNG state, so recreating them
     // is required for a true reconnect reset; clearing only their timestamps
     // would carry the previous connection's phase into the next one.
@@ -438,6 +455,9 @@ export class CombatDriver {
         {
           nowMs: observation.observedAtMs,
           offhandIsTotem: observation.self.offhandIsTotem,
+          ...(observation.self.totemPopObservedAtMs === undefined
+            ? {}
+            : { totemPopObservedAtMs: observation.self.totemPopObservedAtMs }),
           inventoryTotemCount: observation.self.inventoryTotemCount,
           selfHealth: observation.self.health,
           engaged: true,
@@ -473,7 +493,18 @@ export class CombatDriver {
           reasonCode: "COMBAT_TOTEM_REEQUIPPED",
           targetEntityId: null,
         },
-        (executedAtMs) => this.totemManager.recordReequip(executedAtMs),
+        (executedAtMs) => {
+          this.totemManager.recordReequip(executedAtMs);
+          if (
+            totemDecision.reason === "TOTEM_POP_OBSERVED" &&
+            observation.self.totemPopObservedAtMs !== undefined &&
+            observation.self.totemPopObservedAtMs !== null
+          ) {
+            this.totemManager.recordTotemPopHandled(
+              observation.self.totemPopObservedAtMs,
+            );
+          }
+        },
       );
     }
     if (totemDecision.action === "RETREAT") {
@@ -742,6 +773,12 @@ export class CombatDriver {
         position: observation.self.position,
         health: observation.self.health,
         totemMarginHealth: observation.self.offhandIsTotem ? 20 : 0,
+        explosionMitigation01: observation.self.gear === null
+          ? 0
+          : explosionMitigation01(
+              observation.self.gear,
+              observation.explosionRuleSet,
+            ),
       },
       this.reflexClearance,
     );
@@ -924,10 +961,55 @@ export class CombatDriver {
       );
     }
 
+    const targetInvulnerableRemainingMs =
+      targetObservation.invulnerableRemainingMs ?? 0;
+    if (
+      targetInvulnerableRemainingMs > 0 &&
+      observation.hazards !== null
+    ) {
+      const spacing = this.movementController.plan({
+        nowMs: observation.observedAtMs,
+        selfPosition: observation.self.position,
+        targetPosition: targetObservation.position,
+        hazards: observation.hazards,
+        retreatDirection: null,
+        targetInvulnerableRemainingMs,
+      });
+      if (
+        spacing.direction !== null &&
+        (spacing.intent === "BACK_OFF" || spacing.intent === "CLOSE_IN")
+      ) {
+        return this.executeAction(
+          "ENGAGE",
+          requestedAtMs,
+          {
+            kind: "MOVE",
+            direction: spacing.direction,
+            sprint: false,
+            durationMs: Math.max(
+              100,
+              Math.min(MOVEMENT_ACTION_MS, targetInvulnerableRemainingMs),
+            ),
+          },
+          observation,
+          execute,
+          signal,
+          expectedGeneration,
+          {
+            disposition: "modified",
+            action: "ENGAGE",
+            reasonCode: "COMBAT_HIT_WINDOW_SPACING",
+            targetEntityId: target.entityId,
+          },
+        );
+      }
+    }
+
     const swing = this.weaponManager.evaluateSwing(
       weapon,
       observation.observedAtMs,
       true,
+      targetInvulnerableRemainingMs,
     );
     if (!swing.shouldAttack) {
       return this.refuse(
@@ -935,6 +1017,8 @@ export class CombatDriver {
         requestedAtMs,
         swing.reason === "COOLDOWN"
           ? "COMBAT_WEAPON_COOLDOWN"
+          : swing.reason === "TARGET_INVULNERABLE"
+            ? "COMBAT_TARGET_INVULNERABLE"
           : `COMBAT_${swing.reason}`,
         target.entityId,
         "delayed",
@@ -985,6 +1069,9 @@ export class CombatDriver {
       targetPosition,
       hazards: observation.hazards,
       retreatDirection: null,
+      targetInvulnerableRemainingMs: observation.entities.find(
+        ({ entity }) => entity.entityId === target.entityId,
+      )?.invulnerableRemainingMs ?? 0,
     });
     if (!movement.direction || movement.intent === "HOLD") {
       return this.refuse(
@@ -1129,6 +1216,35 @@ export class CombatDriver {
       );
     }
 
+    const interactionClass = interactionClassForPrimitive(primitive);
+    const interactionLabel = interactionClass === null
+      ? null
+      : `${actionGeneration}:${requestedAtMs}:${primitive.kind}`;
+    if (interactionClass !== null && interactionLabel !== null) {
+      const sequence = this.interactionSequencer.beginChain(
+        [{ label: interactionLabel, interactionClass }],
+        requestedAtMs,
+        {
+          retreatInProgress: false,
+          clearance: this.reflexClearance,
+        },
+      );
+      if (sequence.state !== "STEP_READY") {
+        return this.refuse(
+          requestedAction,
+          requestedAtMs,
+          sequence.refusal === "THROTTLED"
+            ? "COMBAT_INTERACTION_THROTTLED"
+            : `COMBAT_CHAIN_${sequence.refusal ?? "NOT_READY"}`,
+          success.targetEntityId,
+          sequence.refusal === "THROTTLED" ? "delayed" : "dropped",
+        );
+      }
+    }
+    const abandonInteraction = (): void => {
+      if (interactionLabel !== null) this.interactionSequencer.abandonChain();
+    };
+
     const epochSignal = this.connectionAbortController.signal;
     const actionController = new AbortController();
     const abortAction = () => actionController.abort();
@@ -1140,6 +1256,7 @@ export class CombatDriver {
     try {
       rawAcknowledgement = await execute(primitive, actionController.signal);
     } catch {
+      abandonInteraction();
       if (actionGeneration !== this.connectionGeneration) {
         return this.refuse(
           requestedAction,
@@ -1170,6 +1287,7 @@ export class CombatDriver {
     // acknowledgement. The old ACK must not mutate the newly reset managers
     // or policy window, even if the underlying packet was already sent.
     if (actionGeneration !== this.connectionGeneration) {
+      abandonInteraction();
       return this.refuse(
         requestedAction,
         requestedAtMs,
@@ -1181,6 +1299,7 @@ export class CombatDriver {
     // Report the request as cancelled and do not record it as an executed
     // combat action in the new audit/rate state.
     if (signal.aborted || epochSignal.aborted) {
+      abandonInteraction();
       return this.refuse(
         requestedAction,
         requestedAtMs,
@@ -1190,6 +1309,7 @@ export class CombatDriver {
     }
     const acknowledgement = parseCombatActionAcknowledgement(rawAcknowledgement);
     if (acknowledgement === null) {
+      abandonInteraction();
       return this.refuse(
         requestedAction,
         requestedAtMs,
@@ -1198,6 +1318,7 @@ export class CombatDriver {
       );
     }
     if (acknowledgement.outcome !== "executed") {
+      abandonInteraction();
       return this.refuse(
         requestedAction,
         requestedAtMs,
@@ -1211,6 +1332,7 @@ export class CombatDriver {
       !validCombatTimestamp(acknowledgement.executedAtMs) ||
       acknowledgement.executedAtMs < requestedAtMs
     ) {
+      abandonInteraction();
       return this.refuse(
         requestedAction,
         requestedAtMs,
@@ -1222,16 +1344,26 @@ export class CombatDriver {
     for (const kind of policy.record.actionKinds) {
       this.policyGate.recordAction(kind, acknowledgement.executedAtMs);
     }
+    const interactionRecord = interactionLabel === null
+      ? null
+      : this.interactionSequencer.recordStepAcked(
+          interactionLabel,
+          acknowledgement.executedAtMs,
+        );
     policy.record.afterAck?.(acknowledgement.executedAtMs);
     afterAck?.(acknowledgement.executedAtMs);
+    const interactionAckLate =
+      interactionRecord?.acknowledgedWithinBudget === false;
     const receipt: CombatDriverReceipt = {
       requested: { action: requestedAction, requestedAtMs },
       actual: {
-        disposition: success.disposition,
+        disposition: interactionAckLate ? "delayed" : success.disposition,
         action: success.action,
         primitiveAction: primitive.kind,
         executedAtMs: acknowledgement.executedAtMs,
-        reasonCode: success.reasonCode,
+        reasonCode: interactionAckLate
+          ? "COMBAT_CHAIN_STEP_UNACKED"
+          : success.reasonCode,
         targetEntityId: success.targetEntityId,
       },
     };
@@ -1329,6 +1461,8 @@ export class CombatDriver {
       : {
           armorMaterial: "none",
           protectionLevel: 0,
+          blastProtectionLevel: 0,
+          armorPieceCount: 0,
           weaponDamage: strongestWeapon,
           health: Math.min(20, observation.self.health),
           hasTotem: observation.self.offhandIsTotem,
@@ -1337,10 +1471,15 @@ export class CombatDriver {
     const opponents = observation.entities
       .filter(({ entity }) => hostileIds.has(entity.entityId))
       .map(({ gear }) => gear);
-    return assessWorstMatchup(selfGear, opponents, {
-      ...DEFAULT_GEAR_POLICY,
-      treatUnknownAsOutclassed: this.config.stance === "preserve-life",
-    });
+    return assessWorstMatchup(
+      selfGear,
+      opponents,
+      {
+        ...DEFAULT_GEAR_POLICY,
+        treatUnknownAsOutclassed: this.config.stance === "preserve-life",
+      },
+      observation.explosionRuleSet,
+    );
   }
 
   private ingestMotion(observation: CombatDriverObservation): void {
@@ -1449,6 +1588,8 @@ export class CombatDriver {
       !validCombatTimestamp(observation.observedAtMs) ||
       typeof observation.dimension !== "string" ||
       observation.dimension.trim().length === 0 ||
+      (observation.explosionRuleSet !== null &&
+        observation.explosionRuleSet !== "java-1.21-release") ||
       (observation.latencyMs !== null &&
         (!Number.isFinite(observation.latencyMs) || observation.latencyMs < 0)) ||
       !Number.isFinite(observation.self.health) ||
@@ -1459,6 +1600,15 @@ export class CombatDriver {
       typeof observation.self.onGround !== "boolean"
     ) {
       throw new TypeError("Combat observation is malformed.");
+    }
+    if (
+      observation.self.totemPopObservedAtMs !== undefined &&
+      observation.self.totemPopObservedAtMs !== null &&
+      (!Number.isSafeInteger(observation.self.totemPopObservedAtMs) ||
+        observation.self.totemPopObservedAtMs < 0 ||
+        observation.self.totemPopObservedAtMs > observation.observedAtMs)
+    ) {
+      throw new TypeError("Combat observation totem POP time is malformed.");
     }
     validateCombatVector(observation.self.position, "self.position");
     validateCombatOrientation(observation.self.orientation);
@@ -1504,7 +1654,17 @@ export class CombatDriver {
           entity.entity.endermanState !== "angry" &&
           entity.entity.endermanState !== "unknown") ||
         typeof entity.wieldingWeapon !== "boolean" ||
-        typeof entity.crystalNearby !== "boolean"
+        typeof entity.crystalNearby !== "boolean" ||
+        typeof entity.anchorNearby !== "boolean" ||
+        (entity.recentlyPopped !== undefined &&
+          typeof entity.recentlyPopped !== "boolean") ||
+        (entity.invulnerableRemainingMs !== undefined &&
+          (!Number.isFinite(entity.invulnerableRemainingMs) ||
+            entity.invulnerableRemainingMs < 0)) ||
+        (entity.targetCooldownRatio01 !== undefined &&
+          (!Number.isFinite(entity.targetCooldownRatio01) ||
+            entity.targetCooldownRatio01 < 0 ||
+            entity.targetCooldownRatio01 > 1))
       ) {
         throw new TypeError("Combat observation entity facts are malformed.");
       }
@@ -1663,6 +1823,14 @@ function parseCombatActionAcknowledgement(
     : null;
 }
 
+function interactionClassForPrimitive(
+  action: CombatPrimitiveAction,
+): "use" | "attack" | null {
+  if (action.kind === "PLACE_CRYSTAL") return "use";
+  if (action.kind === "MELEE_ATTACK") return "attack";
+  return null;
+}
+
 function validateCombatVector(
   vector: CombatVector3,
   name: string,
@@ -1696,6 +1864,14 @@ function validateCombatGear(
     !Number.isFinite(gear.protectionLevel) ||
     gear.protectionLevel < 0 ||
     gear.protectionLevel > 4 ||
+    !Number.isFinite(gear.blastProtectionLevel) ||
+    gear.blastProtectionLevel < 0 ||
+    gear.blastProtectionLevel > 4 ||
+    !Number.isInteger(gear.armorPieceCount) ||
+    gear.armorPieceCount < 0 ||
+    gear.armorPieceCount > 4 ||
+    (gear.armorPieceCount === 0 &&
+      (gear.protectionLevel !== 0 || gear.blastProtectionLevel !== 0)) ||
     !Number.isFinite(gear.weaponDamage) ||
     gear.weaponDamage < 0 ||
     !Number.isFinite(gear.health) ||

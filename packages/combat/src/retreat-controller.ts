@@ -34,6 +34,7 @@ export type CombatRetreatReason =
   | "HEALTH_LOW"
   | "OUTNUMBERED"
   | "CRYSTAL_THREAT"
+  | "ANCHOR_THREAT"
   | "GEAR_OUTCLASSED";
 
 export type CombatRetreatAction =
@@ -89,6 +90,7 @@ const REASON_ORDER: readonly CombatRetreatReason[] = [
   "HEALTH_CRITICAL",
   "OUTNUMBERED",
   "CRYSTAL_THREAT",
+  "ANCHOR_THREAT",
   "GEAR_OUTCLASSED",
   "HEALTH_LOW",
 ];
@@ -150,6 +152,11 @@ export class RetreatController {
       assessment.threats.some(({ reasons }) => reasons.includes("CRYSTAL_PLACED"))
     ) {
       detected.add("CRYSTAL_THREAT");
+    }
+    if (
+      assessment.threats.some(({ reasons }) => reasons.includes("ANCHOR_PLACED"))
+    ) {
+      detected.add("ANCHOR_THREAT");
     }
     // 装备被压制：普通撤退原因，不是 emergency —— 装备差是"这架不该打"，
     // 不是"下一击会死"。两者混同会让每次遇到满配玩家都触发断线。
