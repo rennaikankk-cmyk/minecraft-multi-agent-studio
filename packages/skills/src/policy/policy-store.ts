@@ -5,6 +5,7 @@ import {
   DEFAULT_UNKNOWN_SERVER_PROFILE,
   isAtLeastAsConservative,
   serverPolicySchema,
+  type BaselineAntiCheatProfile,
   type ServerPolicy,
 } from "./server-policy.js";
 
@@ -48,8 +49,17 @@ function frozenPolicy(policy: ServerPolicy): ServerPolicy {
 export class ServerPolicyStore {
   private readonly policies = new Map<string, ServerPolicy>();
 
+  constructor(
+    /**
+     * 未知服的兜底档。默认 STRICT；无规则服（purpose=anarchy）的运行时
+     * 用 ANARCHY 构造——那里没有反作弊，STRICT 的禁疾跑/低速率只会
+     * 削弱自己。显式 upsert 的实测记录仍然优先于兜底档。
+     */
+    private readonly fallbackProfile: BaselineAntiCheatProfile = DEFAULT_UNKNOWN_SERVER_PROFILE,
+  ) {}
+
   /**
-   * 当前生效策略。未知服返回 STRICT baseline（不写入缓存——未知就是未知，
+   * 当前生效策略。未知服返回兜底 baseline（不写入缓存——未知就是未知，
    * 不因为查过一次就变成"已知记录"）。
    */
   resolve(serverProfileId: string): ServerPolicy {
@@ -57,15 +67,13 @@ export class ServerPolicyStore {
     if (!parsed.success) {
       // 连 ID 都不合法时不能猜，返回一个不绑定任何真实服的最保守策略。
       return frozenPolicy(
-        baselineServerPolicy("unknown-server", DEFAULT_UNKNOWN_SERVER_PROFILE),
+        baselineServerPolicy("unknown-server", this.fallbackProfile),
       );
     }
     const stored = this.policies.get(parsed.data);
     return (
       stored ??
-      frozenPolicy(
-        baselineServerPolicy(parsed.data, DEFAULT_UNKNOWN_SERVER_PROFILE),
-      )
+      frozenPolicy(baselineServerPolicy(parsed.data, this.fallbackProfile))
     );
   }
 

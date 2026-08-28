@@ -208,6 +208,12 @@ export type CombatDriverConfig = Readonly<{
   serverProfileId: string;
   selfUsername: string;
   stance: CombatSurvivalStance;
+  /**
+   * 无规则服强度档：交战/撤退/装备阈值全面放宽、未知装备不判劣势、
+   * 无反射探针时图腾补位照做（不再降级为撤退）。默认 standard 保持
+   * 既有行为，隔离测试零变化。
+   */
+  combatIntensity?: "standard" | "anarchy";
   whitelist: Readonly<{
     usernames: readonly string[];
     uuids: readonly string[];
@@ -243,6 +249,27 @@ const TARGET_REFUSAL_CODES: Readonly<Record<CombatTargetRefusalCode, string>> = 
   OUTNUMBERED: "COMBAT_OUTNUMBERED",
   GEAR_OUTCLASSED: "COMBAT_GEAR_OUTCLASSED",
 };
+
+/**
+ * 无规则服交战/撤退策略：低血才撤（8/4），敌人多才避（8），交战距离 48，
+ * 不看装备差（respectGearGap=false），图腾零储备也打（先活下来再补）。
+ */
+const ANARCHY_ENGAGEMENT_POLICY = Object.freeze({
+  ...DEFAULT_ENGAGEMENT_POLICY,
+  minimumEngageHealth: 8,
+  minimumTotemCount: 0,
+  maximumHostileCount: 8,
+  maximumEngageDistance: 48,
+  respectGearGap: false,
+});
+
+const ANARCHY_RETREAT_POLICY = Object.freeze({
+  ...DEFAULT_RETREAT_POLICY,
+  emergencyHealth: 4,
+  withdrawHealth: 8,
+  outnumberedAbove: 8,
+  respectGearGap: false,
+});
 
 export class CombatDriver {
   private readonly identity: CombatIdentityRegistry;
@@ -284,13 +311,14 @@ export class CombatDriver {
       usernames: config.whitelist.usernames,
       uuids: config.whitelist.uuids,
     });
+    const anarchy = config.combatIntensity === "anarchy";
     this.threatAnalyzer = new ThreatAnalyzer(this.identity);
     this.targetSelector = new TargetSelector({
-      ...DEFAULT_ENGAGEMENT_POLICY,
+      ...(anarchy ? ANARCHY_ENGAGEMENT_POLICY : DEFAULT_ENGAGEMENT_POLICY),
       stance: config.stance,
     });
     this.retreatController = new RetreatController({
-      ...DEFAULT_RETREAT_POLICY,
+      ...(anarchy ? ANARCHY_RETREAT_POLICY : DEFAULT_RETREAT_POLICY),
       stance: config.stance,
     });
     this.retaliationTargetSelector = new TargetSelector({
@@ -553,20 +581,34 @@ export class CombatDriver {
         : totemManager.decide(totemSnapshot);
     } catch (error) {
       if (!(error instanceof CombatReflexNotClearedError)) throw error;
-      return this.executeRetreat(
-        observation,
-        requestedAtMs,
-        execute,
-        signal,
-        expectedGeneration,
-        "COMBAT_REFLEX_NOT_CLEARED",
-        null,
-        null,
-      );
+      // 无规则档：没有探针也要补图腾（50ms 时序对抗的是外挂对手，不是
+      // 自己人的反射精度）；standard 档维持"不确定就撤"的既有立场。
+      if (this.config.combatIntensity === "anarchy") {
+        totemDecision = {
+          action: "REEQUIP_OFFHAND",
+          reason: "TOTEM_MISSING",
+          preempts: true,
+          totemsRemainingAfter: 0,
+        };
+      } else {
+        return this.executeRetreat(
+          observation,
+          requestedAtMs,
+          execute,
+          signal,
+          expectedGeneration,
+          "COMBAT_REFLEX_NOT_CLEARED",
+          null,
+          null,
+        );
+      }
     }
 
     if (totemDecision.action === "REEQUIP_OFFHAND") {
-      if (!this.reflexClearance.cleared) {
+      if (
+        !this.reflexClearance.cleared &&
+        this.config.combatIntensity !== "anarchy"
+      ) {
         return this.executeRetreat(
           observation,
           requestedAtMs,

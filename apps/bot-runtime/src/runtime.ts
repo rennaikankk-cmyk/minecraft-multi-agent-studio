@@ -107,6 +107,11 @@ type ActiveCoordinatorTask = Readonly<{
 const COMBAT_REACTION_MAX_STEPS = 32;
 const COMBAT_REACTION_MAX_DURATION_MS = 8_000;
 const COMBAT_REACTION_TICK_MS = 100;
+// 无规则档：反击循环贴近 tick 节奏（50ms），封顶拉长——对面是外挂，
+// 8 秒的窗口不够打出一场完整的遭遇战。
+const ANARCHY_COMBAT_REACTION_MAX_STEPS = 200;
+const ANARCHY_COMBAT_REACTION_MAX_DURATION_MS = 30_000;
+const ANARCHY_COMBAT_REACTION_TICK_MS = 50;
 const COMBAT_REACTION_TERMINAL_REASONS = new Set([
   "COMBAT_NO_HOSTILE_TARGET",
   "COMBAT_NO_USABLE_WEAPON",
@@ -367,13 +372,19 @@ export class SingleBotRuntime {
     }
     this.skillRegistry = skillRegistry;
     this.serverPolicyStore =
-      dependencies.serverPolicyStore ?? new ServerPolicyStore();
+      // 无规则服：未知服兜底档直接用 ANARCHY（那里没有反作弊，STRICT 的
+      // 禁疾跑/6CPS 只会削弱自己）；实测 upsert 的记录仍然优先。
+      dependencies.serverPolicyStore ??
+      new ServerPolicyStore(
+        profile.purpose === "anarchy" ? "ANARCHY" : undefined,
+      );
     this.combatDriver = profile.combat?.enabled === true
       ? new CombatDriver({
           serverProfileId: profile.id,
           selfUsername: profile.username,
           stance: profile.combat.stance,
           whitelist: profile.combat.whitelist,
+          combatIntensity: profile.purpose === "anarchy" ? "anarchy" : "standard",
           policyGate: new ServerPolicyGate(
             this.serverPolicyStore.resolve(profile.id),
           ),
@@ -2181,7 +2192,14 @@ export class SingleBotRuntime {
     controller: AbortController,
   ): Promise<CombatReactionOutcome> {
     const startedAtMs = this.now().getTime();
-    for (let step = 0; step < COMBAT_REACTION_MAX_STEPS; step += 1) {
+    const anarchy = this.profile.purpose === "anarchy";
+    const maxSteps = anarchy
+      ? ANARCHY_COMBAT_REACTION_MAX_STEPS
+      : COMBAT_REACTION_MAX_STEPS;
+    const maxDurationMs = anarchy
+      ? ANARCHY_COMBAT_REACTION_MAX_DURATION_MS
+      : COMBAT_REACTION_MAX_DURATION_MS;
+    for (let step = 0; step < maxSteps; step += 1) {
       if (
         !this.combatReactionIsActive(
           generation,
@@ -2193,7 +2211,7 @@ export class SingleBotRuntime {
         return "cancelled";
       }
       if (!this.safetyAllowsDefensiveCombat()) return "cancelled";
-      if (this.now().getTime() - startedAtMs >= COMBAT_REACTION_MAX_DURATION_MS) {
+      if (this.now().getTime() - startedAtMs >= maxDurationMs) {
         return "completed";
       }
 
@@ -2218,14 +2236,19 @@ export class SingleBotRuntime {
         }, this.traceId, taskId),
       );
       if (controller.signal.aborted) return "cancelled";
-      if (combatReactionShouldStop(receipt)) return "completed";
+      if (combatReactionShouldStop(receipt, anarchy)) return "completed";
       if (
-        this.now().getTime() - startedAtMs >= COMBAT_REACTION_MAX_DURATION_MS ||
-        step + 1 >= COMBAT_REACTION_MAX_STEPS
+        this.now().getTime() - startedAtMs >= maxDurationMs ||
+        step + 1 >= maxSteps
       ) {
         return "completed";
       }
-      if (!(await this.waitForCombatReactionTick(controller.signal))) {
+      if (
+        !(await this.waitForCombatReactionTick(
+          controller.signal,
+          anarchy ? ANARCHY_COMBAT_REACTION_TICK_MS : COMBAT_REACTION_TICK_MS,
+        ))
+      ) {
         return "cancelled";
       }
     }
@@ -2253,7 +2276,10 @@ export class SingleBotRuntime {
     );
   }
 
-  private waitForCombatReactionTick(signal: AbortSignal): Promise<boolean> {
+  private waitForCombatReactionTick(
+    signal: AbortSignal,
+    intervalMs = COMBAT_REACTION_TICK_MS,
+  ): Promise<boolean> {
     if (signal.aborted) return Promise.resolve(false);
     return new Promise((resolve) => {
       let settled = false;
@@ -2265,10 +2291,7 @@ export class SingleBotRuntime {
         resolve(keepGoing);
       };
       const onAbort = () => finish(false);
-      const timer = setTimeout(
-        () => finish(!signal.aborted),
-        COMBAT_REACTION_TICK_MS,
-      );
+      const timer = setTimeout(() => finish(!signal.aborted), intervalMs);
       signal.addEventListener("abort", onAbort, { once: true });
       if (signal.aborted) onAbort();
     });
@@ -2391,8 +2414,13 @@ export class SingleBotRuntime {
   }
 }
 
-function combatReactionShouldStop(receipt: CombatDriverReceipt): boolean {
-  if (receipt.actual.action === "RETREAT") return true;
+function combatReactionShouldStop(
+  receipt: CombatDriverReceipt,
+  anarchy = false,
+): boolean {
+  // 无规则档：撤退是走位不是缴械——RETREAT_MOVE 之后继续打，
+  // 只有终态理由（没有目标/没有武器）才结束整场。
+  if (receipt.actual.action === "RETREAT" && !anarchy) return true;
   if (receipt.actual.primitiveAction !== "NONE") return false;
   return (
     receipt.actual.reasonCode === null ||

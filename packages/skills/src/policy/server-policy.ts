@@ -39,6 +39,11 @@ export const antiCheatCompatibilityProfiles = [
   "VANILLA_COMPATIBLE",
   /** 已确认宽容的服，仍不超过原版机制。 */
   "NORMAL",
+  /**
+   * 无规则服：没有反作弊也没有封号风险，强度优先。全部速率贴原版
+   * 每tick包上限（20/s），转头瞬时，移动全开。射程贴服务端容忍值。
+   */
+  "ANARCHY",
   /** 只能由该服实测证据生成，不得手写放宽。 */
   "CUSTOM_VERIFIED",
 ] as const;
@@ -66,6 +71,7 @@ const PROFILE_CONSERVATISM_ORDER: readonly BaselineAntiCheatProfile[] = [
   "STRICT",
   "VANILLA_COMPATIBLE",
   "NORMAL",
+  "ANARCHY",
 ];
 
 /** 未知服务器的默认档：最保守，fail-closed，禁止自动探测放宽。 */
@@ -80,11 +86,13 @@ export const serverPolicyLimitsSchema = z
       .finite()
       .min(1)
       .max(VANILLA_BLOCK_INTERACTION_REACH),
+    // 上限按服务端真实容忍度（历史 ~6 格、1.20.5+ 属性+1）而非客户端属性：
+    // 无规则服需要顶到服务端会接受的最大值。
     entityAttackReach: z
       .number()
       .finite()
       .min(1)
-      .max(VANILLA_ENTITY_ATTACK_REACH),
+      .max(6),
 
     // --- 旋转：原版无上限，以下为本项目自定保守假设 ---
     maxYawDeltaPerTick: z.number().finite().min(1).max(180),
@@ -211,6 +219,26 @@ const BASELINE_LIMITS: Readonly<
     allowSprintJumpCombo: true,
     allowAirStrafe: false,
     maxFallBlocks: 3,
+  }),
+  // 无规则档：唯一保留的"上限"都是原版服务端每 tick 包上限（越界直接丢包，
+  // 与反作弊无关）。转头 smoothing 关闭（瞬时），攻击/放置/挖掘/快捷栏全 20/s，
+  // 移动（疾跑/跳/连跳/空中横移）全开，下落 8 格（摔落伤害自负，强度优先）。
+  ANARCHY: Object.freeze({
+    blockInteractionReach: VANILLA_BLOCK_INTERACTION_REACH,
+    entityAttackReach: 4,
+    maxYawDeltaPerTick: 180,
+    maxPitchDeltaPerTick: 90,
+    requireRotationSmoothing: false,
+    maxAttacksPerSecond: 20,
+    maxPlacementsPerSecond: 20,
+    maxDigStartsPerSecond: 20,
+    maxHotbarSwitchesPerSecond: 20,
+    minActionIntervalMs: 0,
+    allowSprint: true,
+    allowJump: true,
+    allowSprintJumpCombo: true,
+    allowAirStrafe: true,
+    maxFallBlocks: 8,
   }),
 });
 

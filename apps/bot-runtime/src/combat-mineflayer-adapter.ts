@@ -717,10 +717,11 @@ export class MineflayerCombatAdapter {
       health: finiteNumber(entity.health) ? Number(entity.health) : null,
       armorPoints: this.entityArmorPoints(entity),
       wieldingWeapon: this.entityWieldsWeapon(entity),
-      crystalNearby: false,
-      // Mineflayer does not expose a trustworthy bounded block enumeration at
-      // this boundary. Unknown anchor presence must not become a fabricated
-      // threat fact; a future world scanner can replace this explicit false.
+      // 真实观测：已加载实体里有没有贴脸的末影水晶（敌人放的水雷）。
+      // 此前硬编码 false 让 CRYSTAL_PLACED 威胁加分与 CRYSTAL_THREAT 撤退
+      // 信号永远死置。anchor 仍显式 false：重生锚需要方块枚举确认，
+      // 不能从实体表推断，留待世界扫描接线。
+      crystalNearby: this.hasLoadedEndCrystalNearby(entity.position),
       anchorNearby: false,
       invulnerableRemainingMs: hitWindow.invulnerableRemainingMs,
       targetCooldownRatio01: hitWindow.cooldownRatio01,
@@ -932,6 +933,30 @@ export class MineflayerCombatAdapter {
   private heldItemSlot(bot: CombatBotLike): number | null {
     const item = this.equipmentItem(bot, "hand");
     return item && Number.isSafeInteger(item.slot) ? Number(item.slot) : null;
+  }
+
+  /**
+   * 已加载实体中是否存在距离给定位置 16 格内的末影水晶。这是敌人
+   * crystal PvP 的直接信号（放置的水雷）；16 格覆盖典型引爆半径外的
+   * 部署圈。实体表没有水晶就是没有——不存在"未知"态。
+   */
+  private hasLoadedEndCrystalNearby(position: { x: number; y: number; z: number }): boolean {
+    const bot = this.bot;
+    if (!bot.entities || typeof bot.entities !== "object") return false;
+    return Object.values(bot.entities).some((candidate) => {
+      const name =
+        typeof candidate.name === "string" ? candidate.name.toLowerCase() : "";
+      if (name !== "end_crystal" || !candidate.isValid || candidate.position === undefined) {
+        return false;
+      }
+      return (
+        Math.hypot(
+          candidate.position.x - position.x,
+          candidate.position.y - position.y,
+          candidate.position.z - position.z,
+        ) <= 16
+      );
+    });
   }
 
   private entityArmorPoints(entity: EntityLike): number | null {
