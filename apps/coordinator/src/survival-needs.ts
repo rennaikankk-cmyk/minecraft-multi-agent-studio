@@ -216,11 +216,19 @@ export function assessSurvivalNeeds(
   }
 
   // ---- 避难所：一次性行为，靠记忆去重，不靠背包推断。
-  if (!input.shelterBuilt && pickaxeTier >= 1) {
+  // 受伤时（实测：首个夜晚无甲无剑被压到 2 血触发 L0 断线保号）避难所
+  // 紧急度提到工具之上——徒手挖土就能成型的地洞不需要任何工具档位，
+  // 所以受伤分支同时放开 pickaxeTier 门槛。
+  const healthMaximum = status?.health.maximum ?? 20;
+  const healthCurrent = status?.health.current ?? healthMaximum;
+  const takingDamage = healthCurrent < healthMaximum * 0.7;
+  if (!input.shelterBuilt && (pickaxeTier >= 1 || takingDamage)) {
     needs.push({
       key: "SHELTER",
-      score: 28,
-      reason: "stone age reached without a dug shelter",
+      score: takingDamage ? 72 : 28,
+      reason: takingDamage
+        ? `health ${healthCurrent.toFixed(1)}/${healthMaximum} — dig in before the next hit`
+        : "stone age reached without a dug shelter",
       title: "建立安全避难所",
       operatorGoal: "在当前维度向 north 挖一个 2 格深的安全避难所，并用 dirt 封口",
       sourceBlock: null,

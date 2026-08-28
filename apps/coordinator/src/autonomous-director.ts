@@ -562,7 +562,6 @@ export class AutonomousDirector implements AutonomousTaskSource {
     try {
       scan = await this.dispatchInternal(
         record.botId,
-        taskId,
         `读取当前区域的 ${blockName} 方块分布并给出扫描结果，只读`,
         controller,
       );
@@ -584,7 +583,6 @@ export class AutonomousDirector implements AutonomousTaskSource {
       }
       const moved = await this.dispatchInternal(
         record.botId,
-        taskId,
         `移动到坐标 x=${match.x} y=${match.y} z=${match.z} 附近，继续观察 ${blockName} 方块`,
         controller,
       ).catch((cause) => {
@@ -596,7 +594,6 @@ export class AutonomousDirector implements AutonomousTaskSource {
       this.setRecoveryTask(record.botId, taskId, taskTitle);
       const retry = await this.dispatchInternal(
         record.botId,
-        taskId,
         goal.operatorGoal,
         controller,
       ).catch((cause) => {
@@ -638,7 +635,6 @@ export class AutonomousDirector implements AutonomousTaskSource {
       : `移动到坐标 x=${target.x} y=${target.y} z=${target.z} 附近，继续观察 ${blockName} 方块`;
     const moved = await this.dispatchInternal(
       record.botId,
-      taskId,
       explorationGoal,
       controller,
     ).catch((cause) => {
@@ -656,9 +652,15 @@ export class AutonomousDirector implements AutonomousTaskSource {
     return { retry: null, keepGoal: true };
   }
 
+  /**
+   * 恢复子派发（scan/move/retry）永远用**独立的 taskId**：持久化执行按
+   * taskId+goal 做身份匹配，主目标一旦 ABORT，同一个 taskId 就再也带不
+   * 上新的 goal 文本（实测在真实服上，恢复 scan 立即被
+   * "Goal task identity does not match the persisted execution" 拒绝）。
+   * 视图层仍由 setRecoveryTask 显示父任务标题，这里的新 id 只属于执行账本。
+   */
   private async dispatchInternal(
     botId: string,
-    taskId: string,
     operatorGoal: string,
     controller: AbortController,
   ): Promise<AutonomousPlanResult> {
@@ -666,7 +668,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
     return this.options.planner.planAndDispatch({
       requestId,
       traceId: requestId,
-      taskId,
+      taskId: requestId,
       botId,
       operatorGoal,
       timeoutMs: Math.min(

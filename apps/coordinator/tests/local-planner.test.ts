@@ -3000,7 +3000,7 @@ describe("CoordinatorLocalPlanner", () => {
     expect(sendSkillInvocation.mock.calls[0]![0].payload.input).toMatchObject({
       blockName: "oak_log",
       maxCount: 1,
-      maxDistance: 16,
+      maxDistance: 32,
       dimension: "minecraft:overworld",
       serverProfileId: "isolated-test",
     });
@@ -4193,7 +4193,7 @@ function emptyDispatchGenerate(): (
               input: {
                 blockName: "oak_log",
                 maxCount: 4,
-                maxDistance: 16,
+                maxDistance: 32,
                 dimension: "minecraft:overworld",
                 serverProfileId: "$CURRENT_SERVER_PROFILE",
               },

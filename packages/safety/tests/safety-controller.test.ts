@@ -63,9 +63,29 @@ describe("L0SafetyController", () => {
       "RETREAT_STEP",
     ]);
 
-    const critical = new L0SafetyController().evaluate(snapshot({ health: 4 }));
-    expect(critical.severity).toBe("critical");
-    expect(critical.actions.map(({ kind }) => kind)).toEqual([
+    // 断线保号要求"血正在掉"：稳定低血不再直接断线（否则低血重连变成
+    // 断线死循环），改为吃食物回血；随后一次仍在下降的观测才触发断线。
+    const controller = new L0SafetyController();
+    // 满腹时无法进食：稳定危急血量只暂停，等自然回血。
+    const stableCriticalFullBelly = controller.evaluate(snapshot({ health: 4 }));
+    expect(stableCriticalFullBelly.severity).toBe("critical");
+    expect(stableCriticalFullBelly.actions.map(({ kind }) => kind)).toEqual([
+      "PAUSE_NORMAL_TASKS",
+    ]);
+
+    const stableCriticalHungry = new L0SafetyController().evaluate(
+      snapshot({ health: 4, foodLevel: 17 }),
+    );
+    expect(stableCriticalHungry.actions.map(({ kind }) => kind)).toEqual([
+      "PAUSE_NORMAL_TASKS",
+      "CONSUME_SAFE_FOOD",
+    ]);
+
+    const fallingCritical = controller.evaluate(snapshot({
+      observedAtMs: 10_000,
+      health: 2,
+    }));
+    expect(fallingCritical.actions.map(({ kind }) => kind)).toEqual([
       "PAUSE_NORMAL_TASKS",
       "EMERGENCY_STOP",
     ]);

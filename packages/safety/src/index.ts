@@ -86,6 +86,8 @@ export class L0SafetyController {
   private movementAnchorAt = 0;
   private lastFingerprint = "";
   private lowHealthRetreatSteps = 0;
+  /** 上一次观测的绝对血量；None = 本连接还没有基线。 */
+  private previousHealth: number | null = null;
 
   reset(): void {
     this.sequence = 0;
@@ -94,12 +96,16 @@ export class L0SafetyController {
     this.movementAnchorAt = 0;
     this.lastFingerprint = "";
     this.lowHealthRetreatSteps = 0;
+    this.previousHealth = null;
   }
 
   evaluate(snapshot: L0SafetySnapshot): L0SafetyDecision {
     validateSnapshot(snapshot);
     const risks = this.detectRisks(snapshot);
     if (!risks.includes("LOW_HEALTH")) this.lowHealthRetreatSteps = 0;
+    const healthStillFalling =
+      this.previousHealth !== null && snapshot.health < this.previousHealth;
+    this.previousHealth = snapshot.health;
     const normalTasksPaused = risks.length > 0;
     const fingerprint = `${risks.join(",")}|${normalTasksPaused}`;
     const changed = fingerprint !== this.lastFingerprint;
@@ -120,7 +126,17 @@ export class L0SafetyController {
 
     if (risks.includes("CRITICAL_HEALTH")) {
       pushAction("PAUSE_NORMAL_TASKS", "CRITICAL_HEALTH");
-      pushAction("EMERGENCY_STOP", "CRITICAL_HEALTH");
+      // 断线保号的语义是"正在被杀"——血还在掉。实测痛点：上次 2 血断线
+      // 后重连，血量原样保留，"只要处于危急血量就断线"把 Bot 变成
+      // 重连→再断线的死循环。稳定低血+有食物的正确反射是吃食物回血；
+      // 没有基线（刚连上）或血量未在下降时不再触发断线。
+      if (healthStillFalling) {
+        pushAction("EMERGENCY_STOP", "CRITICAL_HEALTH");
+      } else if (snapshot.hasSafeFood && snapshot.foodLevel < 20) {
+        pushAction("CONSUME_SAFE_FOOD", "CRITICAL_HEALTH");
+      } else if (!snapshot.hasSafeFood) {
+        pushAction("FORAGE_SAFE_FOOD", "CRITICAL_HEALTH");
+      }
     } else {
       if (risks.includes("LAVA")) {
         pushAction("PAUSE_NORMAL_TASKS", "LAVA");

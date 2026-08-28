@@ -511,6 +511,10 @@ void main().catch((cause: unknown) => {
       cause instanceof AutonomousConfigError
       ? cause.code
       : "COORDINATOR_START_FAILED";
-  logger.error("coordinator_start_failed", { code });
+  logger.error("coordinator_start_failed", {
+    code,
+    // 通用失败码此前不带原因，现场只能猜。原始消息有界截断进日志。
+    detail: (cause instanceof Error ? cause.message : String(cause)).slice(0, 300),
+  });
   process.exitCode = 1;
 });
