@@ -376,9 +376,9 @@ Dashboard 的 Bot 卡片显示真实 L0 状态。旧 Runtime 未上报该字段�
 
 `@minecraft-studio/task-system` 提供任务 Schema、状态机、重试预算、创建幂等、操作重放、租约、参数化 PostgreSQL 仓库、`pg` 连接适配器、BullMQ 队列和 Worker。迁移文件位于 `packages/task-system/migrations`，不会由普通启动命令自动执行。
 
-Coordinator 可把 `/v1/goals` 的完整生命周期写入 PostgreSQL，并通过已认证的 Control Link 向 Control API 提供受 `task.read` 保护的分页列表与详情。Dashboard 的任务页从该读路径恢复刷新前的历史；列表只返回任务摘要，详情只额外返回经授权的 operator goal，不返回 `target`、原始输入、证据或任意结果对象。未配置数据库、连接失败或 schema 未应用到 `0005_task_goal_input.sql` 时，历史明确显示不可用；开启 Local AI 目标执行却没有配置永久事实源时，Coordinator 拒绝启动。
+Coordinator 可把 `/v1/goals` 的完整生命周期写入 PostgreSQL，并通过已认证的 Control Link 向 Control API 提供受 `task.read` 保护的分页列表与详情。Dashboard 的任务页从该读路径恢复刷新前的历史；列表只返回任务摘要，详情只额外返回经授权的 operator goal，不返回 `target`、原始输入、证据或任意结果对象。未配置数据库、连接失败或 schema 未应用到 `0006_task_execution_fsm.sql` 时，历史明确显示不可用；开启 Local AI 目标执行却没有配置永久事实源时，Coordinator 拒绝启动。
 
-启用前由人工或受控迁移流程依次应用 `0001` 至 `0005`，然后配置：
+启用前由人工或受控迁移流程依次应用 `0001` 至 `0006`，然后配置：
 
 ```dotenv
 COORDINATOR_TASK_POSTGRES_URL=postgresql://<user>:<password>@<approved-host>:5432/<database>

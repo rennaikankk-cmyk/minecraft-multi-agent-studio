@@ -89,6 +89,13 @@ const migrationFiles = [
     sha256:
       "dd273906f80d672dde5f01ecf4b075fac5ebc385070e65be557b7bd46d99f472",
   },
+  {
+    path: fileURLToPath(
+      new URL("../migrations/0006_task_execution_fsm.sql", import.meta.url),
+    ),
+    sha256:
+      "a31a75eacc054473e0d10c5a766eadc32064ae80b6145eb0217843ab9bc636ff",
+  },
 ] as const;
 
 function isolatedNamespace(input: string | undefined): string {

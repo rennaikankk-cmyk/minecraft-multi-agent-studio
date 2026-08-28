@@ -91,6 +91,7 @@ packages/task-system/migrations/0002_task_lease_invariants.sql
 packages/task-system/migrations/0003_task_delivery.sql
 packages/task-system/migrations/0004_task_delivery_hardening.sql
 packages/task-system/migrations/0005_task_goal_input.sql
+packages/task-system/migrations/0006_task_execution_fsm.sql
 ```
 
 Record migration filenames, checksums, operator, UTC time, and transaction result. Do not run migrations automatically from compose startup.
