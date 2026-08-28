@@ -23,6 +23,15 @@ import {
   substitutionAllowlist,
 } from "./replan-oracle.js";
 import {
+  askStrategyReview,
+  buildStrategyReviewPrompt,
+  FOCUS_NEED_BOOSTS,
+  sanitizeStrategyReviewDecision,
+  STRATEGY_REVIEW_INTERVAL_MS,
+  strategyReviewRequestId,
+  type StrategyFocus,
+} from "./strategy-review.js";
+import {
   assessSurvivalNeeds,
   SAFE_FOOD_ITEM_NAMES,
   type SurvivalNeed,
@@ -66,6 +75,11 @@ export type AutonomousDirectorOptions = Readonly<{
    * 完全确定性运转。模型只能从白名单菜单选择，见 replan-oracle.ts。
    */
   replanAI?: { generate: ScheduledAIRouter["generate"] };
+  /**
+   * 游戏内聊天指挥入口：白名单玩家的话由 runtime 上报、registry 分发到
+   * 这里。返回 true 表示被接单。未注入时聊天指挥不可用（生存不受影响）。
+   */
+  onChatGoal?: (botId: string, speaker: string, message: string) => boolean;
 }>;
 
 type InternalTask = PublicTask & {
@@ -164,6 +178,14 @@ export class AutonomousDirector implements AutonomousTaskSource {
   private readonly explorationRadiusStep = new Map<string, number>();
   private readonly nextExplorationAt = new Map<string, number>();
   private readonly shelterDirectionCursor = new Map<string, number>();
+  /** 战略评审：每 bot 下轮评审时间 / 当前重心 / 近期需求与失败轨迹。 */
+  private readonly nextStrategyReviewAt = new Map<string, number>();
+  private readonly currentFocus = new Map<string, StrategyFocus>();
+  private readonly focusBlocks = new Map<string, string>();
+  private readonly recentNeedKeys = new Map<string, string[]>();
+  private readonly recentFailureKeys = new Map<string, string[]>();
+  /** 聊天指挥队列：一次一条，作为自由目标下发（走模型分支）。 */
+  private readonly chatQueue = new Map<string, Readonly<{ speaker: string; message: string; receivedAtMs: number }>>();
   /** 已完成回收的死亡时间戳（diedAt），防止反复回同一个死点。 */
   private readonly recoveredDeaths = new Map<string, Set<string>>();
   /** 神谕给出的一次性立场切换，下一次调度前消费（优先于普通需求）。 */
@@ -174,6 +196,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
     Readonly<{ needKey: SurvivalNeedKey; itemName: string }>
   >();
   private timer: ReturnType<typeof setInterval> | null = null;
+  private strategyTimer: ReturnType<typeof setInterval> | null = null;
   private unsubscribeRegistry: (() => void) | null = null;
   private started = false;
 
@@ -194,6 +217,14 @@ export class AutonomousDirector implements AutonomousTaskSource {
     });
     this.timer = setInterval(() => void this.tick(), this.options.intervalMs);
     this.timer.unref?.();
+    // 战略评审节拍：每 bot 每 5 分钟一次；模型未配置时整条路径不激活。
+    if (this.options.replanAI) {
+      this.strategyTimer = setInterval(
+        () => void this.runStrategyReviews(),
+        STRATEGY_REVIEW_INTERVAL_MS,
+      );
+      this.strategyTimer.unref?.();
+    }
     void this.tick();
     this.log("info", "coordinator_autonomous_director_started", {
       intervalMs: this.options.intervalMs,
@@ -206,6 +237,8 @@ export class AutonomousDirector implements AutonomousTaskSource {
     this.started = false;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    if (this.strategyTimer) clearInterval(this.strategyTimer);
+    this.strategyTimer = null;
     this.unsubscribeRegistry?.();
     this.unsubscribeRegistry = null;
     const active = [...this.active.values()];
@@ -263,6 +296,46 @@ export class AutonomousDirector implements AutonomousTaskSource {
       return;
     }
     for (const record of records) this.maybeStart(record);
+    this.drainChatQueue(records);
+  }
+
+  /** 白名单聊天 → 自由目标（模型分支解析意图，确定性层执行）。 */
+  handleChatMessage(botId: string, speaker: string, message: string): boolean {
+    if (!this.started) return false;
+    const clean = message.trim().slice(0, 512);
+    if (!clean) return true;
+    // 同一 bot 的旧指令被新指令顶替：指挥天然只关心最新意图。
+    this.chatQueue.set(botId, {
+      speaker: speaker.slice(0, 32),
+      message: clean,
+      receivedAtMs: validDate(this.now()).getTime(),
+    });
+    this.log("info", "coordinator_autonomous_chat_command", {
+      botId,
+      speaker,
+      length: clean.length,
+    });
+    return true;
+  }
+
+  private drainChatQueue(records: readonly BotRegistryRecord[]): void {
+    if (this.chatQueue.size === 0) return;
+    for (const record of records) {
+      const chat = this.chatQueue.get(record.botId);
+      if (!chat) continue;
+      if (this.active.has(record.botId)) continue; // 等当前目标让位
+      if (!eligibleForAutonomy(record)) continue;
+      this.chatQueue.delete(record.botId);
+      this.dispatchSingleGoal(record, {
+        needKey: "EQUIP_ARMOR",
+        key: "chat-command",
+        title: "执行聊天指令",
+        operatorGoal: chat.message,
+        reason: "chat command from whitelisted operator",
+        blockName: null,
+        directionalMining: false,
+      });
+    }
   }
 
   private async kick(botId: string): Promise<void> {
@@ -332,6 +405,114 @@ export class AutonomousDirector implements AutonomousTaskSource {
    * selects the same need; state changes (task success, inventory delta,
    * respawn) re-assess on the next tick.
    */
+  /**
+   * 战略评审主循环（战略层=分钟级、大模型）：对每个空闲在线 bot 周期性
+   * 咨询一次重心，结果写入 currentFocus（需求加权）与可选立场/探索焦点。
+   * 全部 best-effort，任何失败保持既有重心。
+   */
+  private async runStrategyReviews(): Promise<void> {
+    if (!this.started) return;
+    const ai = this.options.replanAI;
+    if (!ai) return;
+    const nowMs = validDate(this.now()).getTime();
+    let records: readonly BotRegistryRecord[];
+    try {
+      records = this.options.registry.list(validDate(this.now()));
+    } catch {
+      return;
+    }
+    for (const record of records) {
+      if (!eligibleForAutonomy(record)) continue;
+      if ((this.nextStrategyReviewAt.get(record.botId) ?? 0) > nowMs) continue;
+      if (this.active.has(record.botId)) continue;
+      this.nextStrategyReviewAt.set(
+        record.botId,
+        nowMs + STRATEGY_REVIEW_INTERVAL_MS,
+      );
+      void this.reviewStrategyFor(record, ai);
+    }
+  }
+
+  private async reviewStrategyFor(
+    record: BotRegistryRecord,
+    ai: NonNullable<AutonomousDirectorOptions["replanAI"]>,
+  ): Promise<void> {
+    if (!this.started) return;
+    const inventory = new Map(
+      (record.currentStatus?.inventory ?? []).map((item) => [
+        item.itemName,
+        item.count,
+      ] as const),
+    );
+    let safeFoodCount = 0;
+    for (const [name, count] of inventory) {
+      if (SAFE_FOOD_ITEM_NAMES.has(name)) safeFoodCount += count;
+    }
+    const pickaxeTier =
+      ["diamond_pickaxe", "iron_pickaxe", "stone_pickaxe", "wooden_pickaxe"].find(
+        (name) => (inventory.get(name) ?? 0) > 0,
+      ) ?? "none";
+    const hasSword = ["diamond_sword", "iron_sword", "stone_sword", "wooden_sword"].some(
+      (name) => (inventory.get(name) ?? 0) > 0,
+    );
+    const decision = await askStrategyReview({
+      ai,
+      requestId: strategyReviewRequestId(record.botId),
+      botId: record.botId,
+      traceId: `strategy-${record.botId}`,
+      prompt: buildStrategyReviewPrompt({
+        botId: record.botId,
+        focusWindowMinutes: Math.round(STRATEGY_REVIEW_INTERVAL_MS / 60_000),
+        safeFoodCount,
+        pickaxeTier,
+        hasSword,
+        armorPoints: record.currentStatus?.armorPoints ?? 0,
+        woodUnits:
+          (inventory.get("oak_log") ?? 0) +
+          Math.floor((inventory.get("oak_planks") ?? 0) / 4),
+        coalUnits:
+          (inventory.get("coal") ?? 0) + (inventory.get("charcoal") ?? 0),
+        ironUnits:
+          (inventory.get("raw_iron") ?? 0) +
+          (inventory.get("iron_ingot") ?? 0),
+        recentNeeds: this.recentNeedKeys.get(record.botId) ?? [],
+        recentFailures: this.recentFailureKeys.get(record.botId) ?? [],
+        deaths: 0,
+      }),
+    });
+    if (!this.started || decision === null) return;
+    const sanitized = sanitizeStrategyReviewDecision(decision);
+    this.currentFocus.set(record.botId, sanitized.focus);
+    if (sanitized.explorationBlock) {
+      this.focusBlocks.set(record.botId, sanitized.explorationBlock);
+    }
+    if (sanitized.stance) {
+      this.pendingStanceSwitches.set(record.botId, sanitized.stance);
+    }
+    this.log("info", "coordinator_autonomous_strategy_review", {
+      botId: record.botId,
+      focus: sanitized.focus,
+      explorationBlock: sanitized.explorationBlock,
+      stance: sanitized.stance,
+      rationale: sanitized.rationale,
+    });
+  }
+
+  /** 需求/失败轨迹（战略评审提示词的"最近发生了什么"输入）。 */
+  private recordNeedTrail(botId: string, needKey: SurvivalNeedKey): void {
+    const trail = this.recentNeedKeys.get(botId) ?? [];
+    trail.push(needKey);
+    if (trail.length > 24) trail.shift();
+    this.recentNeedKeys.set(botId, trail);
+  }
+
+  private recordFailureTrail(botId: string, needKey: SurvivalNeedKey): void {
+    const trail = this.recentFailureKeys.get(botId) ?? [];
+    trail.push(needKey);
+    if (trail.length > 16) trail.shift();
+    this.recentFailureKeys.set(botId, trail);
+  }
+
   private dispatchSingleGoal(
     record: BotRegistryRecord,
     goal: AutonomousGoal,
@@ -357,12 +538,16 @@ export class AutonomousDirector implements AutonomousTaskSource {
     record: BotRegistryRecord,
     nowMs: number,
   ): AutonomousGoal | null {
+    const focus = this.currentFocus.get(record.botId);
     const needs = assessSurvivalNeeds({
       record,
       shelterBuilt: this.shelterBuilt.has(record.botId),
       recoveredDeaths: [
         ...(this.recoveredDeaths.get(record.botId) ?? []),
       ],
+      // 战略评审给出的重心只做加权（score 上限钳到 95，不越过饿肚子级的
+      // 硬需求），确保模型最多改变"先做什么"，永远改不掉"必须活着"。
+      focusBoosts: focus ? FOCUS_NEED_BOOSTS[focus] : undefined,
     });
     const eligible = needs.filter(
       (need) =>
@@ -371,6 +556,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
     );
     const chosen = eligible[0];
     if (chosen === undefined) return null;
+    this.recordNeedTrail(record.botId, chosen.key);
     const bound = this.bindGoal(record, chosen, nowMs);
     if (bound === null) return null;
     const substitute = this.pendingSubstitutes.get(record.botId);
@@ -897,6 +1083,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
     } else if (status === "failed") {
       const failures = (this.consecutiveNeedFailures.get(failureKey) ?? 0) + 1;
       this.consecutiveNeedFailures.set(failureKey, failures);
+      this.recordFailureTrail(botId, goal.needKey);
       if (failures >= AUTONOMOUS_NEED_FAILURE_LIMIT) {
         this.needSuppressedUntil.set(
           failureKey,

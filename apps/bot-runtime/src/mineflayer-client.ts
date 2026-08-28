@@ -1099,6 +1099,8 @@ export class MineflayerBotClient implements BotClient {
   private inventoryListenerBound = false;
   /** Single owner for Pathfinder, collectblock, combat and recovery motion. */
   private readonly anarchyNavigation: boolean = false;
+  /** chat 监听只绑一次（多次 spawn 不重复叠加）。 */
+  private chatBound = false;
   /** 最近一次熔炉掠夺的物品名（诊断留痕，不参与计数）。 */
   private lastFurnaceLoot: string[] = [];
   readonly movementController: MovementController;
@@ -1160,6 +1162,17 @@ export class MineflayerBotClient implements BotClient {
         ? Number(bot.health)
         : null;
       this.bindInventoryEvents();
+      if (!this.chatBound) {
+        this.chatBound = true;
+        // 只上报玩家聊天（第二参为玩家名时）；服务器广播/系统消息不进指挥通道。
+        bot.on("chat", (_username: string, message: string) => {
+          if (typeof message !== "string" || message.length === 0) return;
+          this.handlers?.onChat?.({
+            speaker: _username,
+            message: message.slice(0, 512),
+          });
+        });
+      }
       this.handlers?.onSpawn();
     });
     bot.on("health", () => {

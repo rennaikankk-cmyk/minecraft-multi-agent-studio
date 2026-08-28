@@ -88,6 +88,11 @@ export type SurvivalAssessmentInput = Readonly<{
   shelterBuilt: boolean;
   /** 已完成回收的死亡时间戳（diedAt ISO 串），避免反复回同一个死点。 */
   recoveredDeaths?: readonly string[];
+  /**
+   * 战略评审重心对需求键的加权表（strategy-review 的 FOCUS_NEED_BOOSTS）。
+   * 只加不减、加权后钳到 95：重心改变"先做什么"，改不掉硬性生存需求。
+   */
+  focusBoosts?: Readonly<Record<string, number>> | undefined;
 }>;
 
 /**
@@ -366,6 +371,15 @@ export function assessSurvivalNeeds(
     });
   }
 
+  if (input.focusBoosts) {
+    for (let index = 0; index < needs.length; index += 1) {
+      const need = needs[index]!;
+      const boost = input.focusBoosts[need.key];
+      if (boost && boost > 0) {
+        needs[index] = { ...need, score: Math.min(95, need.score + boost) };
+      }
+    }
+  }
   return needs.sort((left, right) => {
     if (right.score !== left.score) return right.score - left.score;
     return PRIORITY_ORDER.indexOf(left.key) - PRIORITY_ORDER.indexOf(right.key);

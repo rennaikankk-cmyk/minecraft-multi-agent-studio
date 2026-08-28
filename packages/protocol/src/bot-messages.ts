@@ -954,6 +954,24 @@ export const botStatusV1Schema = z
   })
   .strict();
 
+/** 游戏内聊天上行：白名单玩家对 bot 说的话（指挥通道）。 */
+export const botChatReceivedV1Schema = z
+  .object({
+    ...botMessageEnvelopeShape,
+    type: z.literal("bot.chat-received.v1"),
+    payload: z
+      .object({
+        serverProfileId: identifierSchema,
+        runtimeInstanceId: identifierSchema,
+        /** 说话玩家名（已过白名单）。 */
+        speaker: z.string().min(1).max(32),
+        /** 原文（截断到 512）。 */
+        message: z.string().min(1).max(512),
+      })
+      .strict(),
+  })
+  .strict();
+
 export const botHeartbeatV1Schema = z
   .object({
     ...botMessageEnvelopeShape,
@@ -1246,6 +1264,7 @@ export const botStopResultV1Schema = z
 
 export const botTelemetryMessageV1Schema = z.discriminatedUnion("type", [
   botStatusV1Schema,
+  botChatReceivedV1Schema,
   botHeartbeatV1Schema,
   botDisconnectedV1Schema,
   botVersionV1Schema,

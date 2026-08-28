@@ -51,7 +51,16 @@ export type TelemetryIngestResult = Readonly<{
   record: BotRegistryRecord;
 }>;
 
-export type BotRegistryListener = (record: BotRegistryRecord) => void;
+export type BotRegistryChatEvent = Readonly<{
+  kind: "chat";
+  speaker: string;
+  message: string;
+}>;
+
+export type BotRegistryListener = (
+  record: BotRegistryRecord,
+  event?: BotRegistryChatEvent,
+) => void;
 
 export type CoordinatorTelemetryErrorCode =
   | "MESSAGE_INVALID"
@@ -178,6 +187,29 @@ export class BotRegistry {
         "SOURCE_INSTANCE_MISMATCH",
         "Telemetry source and runtime instance do not match.",
       );
+    }
+
+    // 聊天上行是事件不是状态：无 observedAt/sequence，走独立轻路径——
+    // 只做时钟偏移校验与白名单分发，不触碰连接状态机与序列号。
+    if (message.type === "bot.chat-received.v1") {
+      const chatEnvelopeMs = Date.parse(message.timestamp);
+      if (chatEnvelopeMs > receivedMs + this.maxClockSkewMs) {
+        throw new CoordinatorTelemetryError(
+          "MESSAGE_FROM_FUTURE",
+          "Coordinator rejected chat outside the allowed clock skew.",
+        );
+      }
+      const chatRecord = this.records.get(message.botId);
+      if (!chatRecord) {
+        // 未知 bot 的聊天：没有可归属的记录，按 ignored 处理而不是抛错。
+        return {
+          accepted: false,
+          reason: "out_of_order",
+          record: this.fallbackRecord(message.botId, message, receivedMs),
+        };
+      }
+      this.notifyChat(chatRecord, message.payload.speaker, message.payload.message);
+      return { accepted: true, reason: "accepted", record: snapshot(chatRecord) };
     }
 
     const observedMs = Date.parse(message.payload.observedAt);
@@ -456,6 +488,35 @@ export class BotRegistry {
     while (record.retiredRuntimeOrder.length > this.maxRetiredRuntimeIds) {
       const oldest = record.retiredRuntimeOrder.shift();
       if (oldest) record.retiredRuntimeIds.delete(oldest);
+    }
+  }
+
+  private fallbackRecord(
+    botId: string,
+    message: BotTelemetryMessageV1,
+    receivedMs: number,
+  ): BotRegistryRecord {
+    // 聊天来自未注册 bot：构造最小只读记录供结果类型对齐，状态全部 unknown。
+    void botId;
+    void message;
+    void receivedMs;
+    throw new CoordinatorTelemetryError(
+      "MESSAGE_INVALID",
+      "Chat arrived for an unregistered bot.",
+    );
+  }
+
+  private notifyChat(
+    record: InternalRecord,
+    speaker: string,
+    message: string,
+  ): void {
+    for (const listener of this.listeners) {
+      try {
+        listener(snapshot(record), { kind: "chat", speaker, message });
+      } catch {
+        // A presentation subscriber cannot break the authoritative registry.
+      }
     }
   }
 

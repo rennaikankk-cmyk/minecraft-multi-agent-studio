@@ -88,6 +88,13 @@ async function main(): Promise<void> {
   const registry = new BotRegistry({
     staleAfterMs: runtimeConfig.botStaleAfterMs,
   });
+  // 聊天指挥扇入：director 构造完成后才存在，用闭包变量转接。
+  let chatGoalHandler: ((botId: string, speaker: string, message: string) => boolean) | null = null;
+  registry.subscribe((record, event) => {
+    if (event?.kind === "chat") {
+      chatGoalHandler?.(record.botId, event.speaker, event.message);
+    }
+  });
   const assignment = new BotAssignmentService({
     registry,
     onEvent: (event) => {
@@ -228,7 +235,11 @@ async function main(): Promise<void> {
       // 配置了 Local AI 时把调度路由交给重规划神谕；确定性模式不注入，
       // 神谕路径完全不激活。12 路并发预算见 LOCAL_AI_MAX_CONCURRENCY。
       ...(aiScheduler ? { replanAI: new ScheduledAIRouter(aiRouter!, aiScheduler) } : {}),
+      onChatGoal: (botId, speaker, message) =>
+        autonomousDirector?.handleChatMessage(botId, speaker, message) ?? false,
     });
+    chatGoalHandler = (botId, speaker, message) =>
+      autonomousDirector?.handleChatMessage(botId, speaker, message) ?? false;
   }
   if (goalPersistenceConfig) {
     taskPool = new PgTaskPoolAdapter({

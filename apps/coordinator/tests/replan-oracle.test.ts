@@ -107,3 +107,76 @@ describe("replan oracle", () => {
     }
   });
 });
+
+
+import {
+  askStrategyReview,
+  buildStrategyReviewPrompt,
+  sanitizeStrategyReviewDecision,
+  FOCUS_NEED_BOOSTS,
+} from "../src/strategy-review.js";
+
+describe("strategy review", () => {
+  it("builds a prompt with situation facts but no coordinates or identity", () => {
+    const prompt = buildStrategyReviewPrompt({
+      botId: "studio-bot-01",
+      focusWindowMinutes: 5,
+      safeFoodCount: 4,
+      pickaxeTier: "stone_pickaxe",
+      hasSword: false,
+      armorPoints: 0,
+      woodUnits: 3,
+      coalUnits: 0,
+      ironUnits: 0,
+      recentNeeds: ["FOOD_SECURITY", "TOOL_PROGRESSION"],
+      recentFailures: ["WOOD_RESERVE"],
+      deaths: 1,
+    });
+    const parsed = JSON.parse(prompt);
+    expect(parsed.bot.bestPickaxe).toBe("stone_pickaxe");
+    expect(parsed.menu).toContain("defense");
+    expect(prompt).not.toMatch(/x=d+/u);
+    expect(prompt).not.toContain("serverProfile");
+  });
+
+  it("sanitizes off-menu exploration blocks", () => {
+    expect(
+      sanitizeStrategyReviewDecision({
+        focus: "exploration",
+        explorationBlock: "bedrock",
+        stance: null,
+        rationale: null,
+      }),
+    ).toMatchObject({ focus: "exploration", explorationBlock: null });
+    // 非探索重心时方块参数被丢弃
+    expect(
+      sanitizeStrategyReviewDecision({
+        focus: "defense",
+        explorationBlock: "diamond_ore",
+        stance: null,
+        rationale: null,
+      }),
+    ).toMatchObject({ focus: "defense", explorationBlock: null });
+  });
+
+  it("returns null when the model is down", async () => {
+    const generate = vi.fn(async () => {
+      throw new Error("spark down");
+    });
+    const decision = await askStrategyReview({
+      ai: { generate },
+      requestId: "00000000-0000-4000-8000-000000000003",
+      botId: "studio-bot-01",
+      traceId: "t",
+      prompt: "{}",
+    });
+    expect(decision).toBeNull();
+  });
+
+  it("keeps focus boosts additive and capped", () => {
+    // EXPLORATION 基线 5 分 +25 加权后也不超过 95
+    expect(5 + (FOCUS_NEED_BOOSTS.exploration.EXPLORATION ?? 0)).toBeLessThanOrEqual(95);
+    // 防御重心不加持食物（模型改不了硬性生存优先级）
+    expect(FOCUS_NEED_BOOSTS.defense.FOOD_SECURITY).toBeUndefined();
+  });
+});

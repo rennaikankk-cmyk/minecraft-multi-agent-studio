@@ -970,6 +970,7 @@ export class SingleBotRuntime {
         onStateChanged: () => this.requestStatus(activeGeneration),
         onDamaged: (info) => this.handleDamaged(activeGeneration, info),
         onDeath: (info) => this.handleDeath(activeGeneration, info),
+        onChat: (info) => this.handleChat(activeGeneration, info),
         onDisconnected: (info) =>
           this.handleDisconnected(activeGeneration, info),
         onError: () => {
@@ -2077,6 +2078,56 @@ export class SingleBotRuntime {
    * 由 director 的需求评估基于（清空的）真实背包自动完成——不需要任何
    * 特判分支。
    */
+  /**
+   * 游戏内聊天指挥通道：只有战斗白名单里的玩家（运维自己/盟友）的话才
+   * 上报协调器进 Spark。陌生人的话永远进不了模型——既省请求也防注入。
+   */
+  private handleChat(
+    generation: number,
+    info: Readonly<{ speaker: string; message: string }>,
+  ): void {
+    if (generation !== this.generation || this.stopping || !this.client) return;
+    const whitelist = this.profile.combat?.whitelist;
+    if (!whitelist) return;
+    const allowed =
+      whitelist.usernames.some(
+        (name) => name.toLowerCase() === info.speaker.toLowerCase(),
+      ) ||
+      whitelist.uuids.length > 0; // uuid 白名单无法在聊天事件里校验，交给协调器侧拒绝
+    if (!allowed) {
+      this.dependencies.logger.info("bot_runtime_chat_ignored", this.logFields({
+        reason: "speaker_not_whitelisted",
+      }));
+      return;
+    }
+    const message = this.emitChatReceived(info.speaker, info.message);
+    if (message) {
+      this.dependencies.messageSink(message);
+    }
+  }
+
+  private emitChatReceived(speaker: string, message: string) {
+    try {
+      return {
+        schemaVersion: "1.0" as const,
+        messageId: this.randomId(),
+        traceId: this.traceId,
+        timestamp: this.now().toISOString(),
+        source: { service: "bot-runtime" as const, instanceId: this.runtimeInstanceId },
+        botId: this.profile.botId,
+        type: "bot.chat-received.v1" as const,
+        payload: {
+          serverProfileId: this.profile.id,
+          runtimeInstanceId: this.runtimeInstanceId,
+          speaker: speaker.slice(0, 32),
+          message: message.slice(0, 512),
+        },
+      };
+    } catch {
+      return null;
+    }
+  }
+
   private handleDeath(
     generation: number,
     info: Readonly<{

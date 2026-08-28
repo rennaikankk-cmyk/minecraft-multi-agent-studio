@@ -60,6 +60,11 @@ export type BotDamageInfo = Readonly<{
 }>;
 
 /** 死亡事实：世界侧最后已知位置与时间。恢复决策由 runtime/director 做。 */
+export type BotChatMessage = Readonly<{
+  speaker: string;
+  message: string;
+}>;
+
 export type BotDeathInfo = Readonly<{
   position: Readonly<{ x: number; y: number; z: number }> | null;
   dimension: string | null;
@@ -83,6 +88,7 @@ export type BotClientHandlers = {
   onStateChanged: () => void;
   onDamaged?: (info: BotDamageInfo) => void;
   onDeath?: (info: BotDeathInfo) => void;
+  onChat?: (info: BotChatMessage) => void;
   onDisconnected: (info: BotDisconnectInfo) => void;
   onError: (error: Error) => void;
   onVersionUnsupported: () => void;
