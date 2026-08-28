@@ -622,6 +622,9 @@ export const botPositionSchema = z
     x: z.number().finite(),
     y: z.number().finite(),
     z: z.number().finite(),
+    /** 视角（弧度）。Dashboard 的 bot 视角指示器消费；缺省不显示。 */
+    yaw: z.number().finite().optional(),
+    pitch: z.number().finite().optional(),
     dimension: z
       .string()
       .min(3)

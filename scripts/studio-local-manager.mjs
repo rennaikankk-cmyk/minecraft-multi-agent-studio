@@ -335,12 +335,21 @@ export class StudioLocalManager {
         return;
       }
       const action = url.pathname.match(
-        /^\/v1\/bots\/(studio-bot-[0-9]{2})\/(start|restart)$/u,
+        /^\/v1\/bots\/(studio-bot-[0-9]{2})\/(start|stop|restart)$/u,
       );
       if (request.method === "POST" && action) {
         const [, botId, operation] = action;
         if (!this.configs.has(botId)) {
           this.writeError(response, 404, "BOT_NOT_FOUND", "未找到该本地 Bot 配置。");
+          return;
+        }
+        if (operation === "stop") {
+          await this.stopBot(botId);
+          this.writeJson(response, 200, {
+            schemaVersion: "1.0",
+            generatedAt: new Date().toISOString(),
+            bot: this.publicBot(this.configs.get(botId)),
+          });
           return;
         }
         if (operation === "restart") await this.stopBot(botId);

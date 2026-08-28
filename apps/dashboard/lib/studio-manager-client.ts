@@ -96,6 +96,31 @@ export async function createStudioManagedBot(
   return parsed.data;
 }
 
+export async function stopStudioManagedBot(
+  config: StudioManagerConfig,
+  botId: string,
+  fetchImplementation: typeof fetch = fetch,
+): Promise<StudioManagedBotResponseV1> {
+  if (!/^studio-bot-[0-9]{2}$/u.test(botId)) {
+    throw new StudioManagerClientError(
+      "INVALID_REQUEST",
+      "本地 Bot 标识无效。",
+      400,
+    );
+  }
+  const value = await requestJson(
+    config,
+    `/v1/bots/${encodeURIComponent(botId)}/stop`,
+    { method: "POST" },
+    fetchImplementation,
+  );
+  const parsed = studioManagedBotResponseV1Schema.safeParse(value);
+  if (!parsed.success || parsed.data.bot.botId !== botId) {
+    throw invalidManagerResponse();
+  }
+  return parsed.data;
+}
+
 export async function restartStudioManagedBot(
   config: StudioManagerConfig,
   botId: string,

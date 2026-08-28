@@ -223,3 +223,26 @@ export {
   type CombatTotemPopWindow,
   type CombatTotemPopWindowReason,
 } from "./totem-pop-tracker.js";
+
+
+// ---------------------------------------------------------------------------
+// Critical Hit Engine + Melee Controller（本轮参考项目学习产物）
+// ---------------------------------------------------------------------------
+export {
+  CRITICAL_STRATEGIES,
+  inCriticalWindow,
+  primeCritical,
+  releaseCriticalPriming,
+  selectCriticalStrategy,
+  type CriticalContext,
+  type CriticalOutcome,
+  type CriticalStrategy,
+} from "./critical-engine.js";
+export {
+  applyMeleeControlFrame,
+  IDLE_CONTROL_FRAME,
+  meleeControlFrame,
+  MELEE_CONTROL_FRAME_MS,
+  type MeleeControlFrame,
+  type MeleeMovementContext,
+} from "./melee-controller.js";

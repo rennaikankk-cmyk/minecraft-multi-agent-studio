@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 
 import { BotDashboard } from "@/components/bot-dashboard";
 import { StudioBotManager } from "@/components/studio-bot-manager";
+import { TacView } from "@/components/tac-view";
 
 export const metadata: Metadata = {
   title: "机器人 · Minecraft Multi-Agent Studio",
@@ -19,6 +20,7 @@ export default function BotsPage() {
         </p>
       </header>
       <StudioBotManager />
+      <TacView />
       <BotDashboard />
     </main>
   );

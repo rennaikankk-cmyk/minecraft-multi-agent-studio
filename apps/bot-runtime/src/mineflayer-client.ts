@@ -1153,6 +1153,8 @@ export class MineflayerBotClient implements BotClient {
       serverProfileId ?? "",
       combatEnabled,
     );
+    // 无规则档放开 PACKET_CRIT（微上移双包暴击）；反作弊档保持物理跳。
+    this.combatAdapter.setCriticalPacketAllowed(this.anarchyNavigation);
     this.movementController = new MovementController({
       onPreempt: () => this.stopMovementPrimitives(),
       onRelease: () => this.stopMovementPrimitives(),
@@ -1327,6 +1329,14 @@ export class MineflayerBotClient implements BotClient {
         x: position.x,
         y: position.y,
         z: position.z,
+        // mineflayer 用弧度；yaw 与 Minecraft 内部一致（顺时针），Dashboard
+        // 直接消费。读不到时省略，前端按"无视角数据"处理。
+        ...(Number.isFinite(this.bot.entity.yaw)
+          ? { yaw: this.bot.entity.yaw }
+          : {}),
+        ...(Number.isFinite(this.bot.entity.pitch)
+          ? { pitch: this.bot.entity.pitch }
+          : {}),
         dimension: normalizeDimension(String(this.bot.game.dimension)),
       },
       latencyMs:

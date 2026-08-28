@@ -9,6 +9,10 @@ import {
   HitWindowTracker,
   TotemPopTracker,
   explosionRuleSetForMinecraftVersion,
+  inCriticalWindow,
+  primeCritical,
+  releaseCriticalPriming,
+  selectCriticalStrategy,
   type CombatGearSnapshot,
   type CombatWeaponCandidate,
 } from "@minecraft-studio/combat";
@@ -341,6 +345,9 @@ export class MineflayerCombatAdapter {
     }
   };
 
+  /** PACKET_CRIT 只在无反作弊档启用（构造后由 runtime 注入）。 */
+  private criticalPacketAllowed = false;
+
   constructor(
     private readonly bot: Bot,
     private readonly serverProfileId: string,
@@ -358,6 +365,33 @@ export class MineflayerCombatAdapter {
 
   setClock(clock: () => number): void {
     this.clock = clock;
+  }
+
+  setCriticalPacketAllowed(allowed: boolean): void {
+    this.criticalPacketAllowed = allowed;
+  }
+
+  /** 真实 ping（来自 bot.player 或 telemetry 采集）。 */
+  private latencyMs(): number {
+    const ping = (this.bot as unknown as { player?: { ping?: number } }).player?.ping;
+    return Number.isFinite(ping) && ping !== undefined && ping >= 0 ? ping : 80;
+  }
+
+  /**
+   * 轮询等待物理下落窗口（50ms 步进）。用真实墙钟而不是注入时钟：
+   * 注入时钟可能被冻结用于断言（实测把 deadline 卡成永不到达），
+   * 而这是物理等待不是被测事件的时间戳。
+   */
+  private waitForCriticalWindow(budgetMs: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const deadline = Date.now() + budgetMs;
+      const poll = () => {
+        if (inCriticalWindow(this.bot)) return resolve(true);
+        if (Date.now() >= deadline) return resolve(false);
+        setTimeout(poll, 50);
+      };
+      poll();
+    });
   }
 
   /** Called again after auto-version negotiation; unknown schemas throw. */
@@ -542,7 +576,82 @@ export class MineflayerCombatAdapter {
             (entity) => entity.id === action.targetEntityId,
           );
           if (!target || !bot.attack) return { outcome: "unavailable", reasonCode: "COMBAT_TARGET_NOT_FOUND" };
+          // ---- Critical Hit Engine（参考项目学习的产物，本轮接入）----
+          // 策略选择：物理不可靠/高延迟/追击/贴脸/天花板各走各的路径；
+          // PACKET_CRIT 只在 anarchy 档（无反作弊）启用。
+          const self = bot.entity;
+          const targetSpeed = Math.hypot(
+            target.velocity?.x ?? 0,
+            target.velocity?.z ?? 0,
+          );
+          const selfSpeed = Math.hypot(
+            self?.velocity?.x ?? 0,
+            self?.velocity?.z ?? 0,
+          );
+          const selfPosition = self?.position;
+          const targetPosition = target.position;
+          const distance = selfPosition && targetPosition
+            ? Math.hypot(
+                targetPosition.x - selfPosition.x,
+                targetPosition.y - selfPosition.y,
+                targetPosition.z - selfPosition.z,
+              )
+            : 99;
+          const blockAbove = (() => {
+            if (!selfPosition) return false;
+            try {
+              const block = this.bot.blockAt(
+                new Vec3(selfPosition.x, selfPosition.y + 2, selfPosition.z),
+              );
+              return (block as { boundingBox?: string } | null)?.boundingBox === "solid";
+            } catch {
+              return false;
+            }
+          })();
+          const selfEntity = self as
+            | { isInWater?: boolean; isInLava?: boolean; isClimbing?: boolean }
+            | undefined;
+          const inWater = selfEntity?.isInWater === true;
+          const inLava = selfEntity?.isInLava === true;
+          const onLadder = selfEntity?.isClimbing === true;
+          const critical = selectCriticalStrategy({
+            pingMs: this.latencyMs(),
+            selfSpeed,
+            targetDistance: distance,
+            inCompromisedPhysics: inWater || inLava || onLadder,
+            targetMoving: targetSpeed > 0.15,
+            ceilingAbove: blockAbove,
+            allowPacketCrit: this.criticalPacketAllowed,
+          });
+          const critBotView = {
+            entity: self
+              ? {
+                  position: { x: self.position!.x, y: self.position!.y, z: self.position!.z },
+                  velocity: { x: self.velocity?.x ?? 0, y: self.velocity?.y ?? 0, z: self.velocity?.z ?? 0 },
+                  onGround: self.onGround ?? false,
+                }
+              : null,
+            setControlState: (name: string, state: boolean) =>
+              this.bot.setControlState(name as never, state),
+          } as Parameters<typeof primeCritical>[0];
+          if (
+            critical.awaitFallWindow &&
+            self &&
+            !inCriticalWindow(this.bot) &&
+            self.onGround
+          ) {
+            primeCritical(critBotView, critical.strategy);
+            // 等待下落窗口（物理跳起后 ~150-300ms 到达攻击判定段）。
+            const windowOpened = await this.waitForCriticalWindow(400);
+            releaseCriticalPriming(critBotView);
+            if (!windowOpened) {
+              return { outcome: "executed", executedAtMs: this.clock() };
+            }
+          } else if (critical.strategy === "PACKET_CRIT") {
+            primeCritical(critBotView, "PACKET_CRIT");
+          }
           await bot.attack(target);
+          releaseCriticalPriming(critBotView);
           return { outcome: "executed", executedAtMs: this.clock() };
         }
         case "DRAW_RANGED_WEAPON": {
