@@ -44,6 +44,8 @@ import {
   tradeVillagerCapabilityOutputSchema,
   scanBlocksCapabilityInputSchema,
   scanBlocksCapabilityOutputSchema,
+  secureFoodCapabilityInputSchema,
+  secureFoodCapabilityOutputSchema,
   siteObserveCapabilityInputSchema,
   siteObserveCapabilityOutputSchema,
   shelterDigCapabilityInputSchema,
@@ -54,8 +56,6 @@ import {
   mineVeinCapabilityOutputSchema,
   buildBlueprintCapabilityInputSchema,
   buildBlueprintCapabilityOutputSchema,
-  storeSortCapabilityInputSchema,
-  storeSortCapabilityOutputSchema,
   type SkillCapabilityRequest,
   type SkillCompatibilityEnvironment,
   type SkillResourceKind,
@@ -269,6 +269,36 @@ const SAFE_FORAGE_EXPLORATION_DIRECTIONS = Object.freeze([
 const SAFE_FORAGE_MAX_DISTANCE = 48;
 const SAFE_FORAGE_REACH_DISTANCE = 3.1;
 const SAFE_FORAGE_TOTAL_BUDGET_MS = 20_000;
+/** food.secure 的总预算：略低于技能超时（120s），给读回与收尾留余量。 */
+const SECURE_FOOD_TOTAL_BUDGET_MS = 110_000;
+/**
+ * 背包满时的确定性丢垃圾表：物品 → 保留阈值。**只丢表内物品、只丢超出
+ * 阈值的部分**——工具、食物、矿、装备永不入表，因此这次清理在结构上
+ * 不可能丢掉任何生存必需品。腐肉保留 0（有毒食物，占格无益）。
+ */
+const INVENTORY_TIDY_KEEP_THRESHOLDS: Readonly<Record<string, number>> = Object.freeze({
+  dirt: 32,
+  coarse_dirt: 16,
+  cobblestone: 64,
+  granite: 16,
+  diorite: 16,
+  andesite: 16,
+  gravel: 16,
+  sand: 16,
+  flint: 8,
+  stick: 64,
+  wheat_seeds: 16,
+  beetroot_seeds: 8,
+  pumpkin_seeds: 8,
+  melon_seeds: 8,
+  oak_sapling: 8,
+  rotten_flesh: 0,
+  bone: 16,
+  string: 16,
+  spider_eye: 0,
+  rotten_flesh_block: 0,
+});
+const INVENTORY_TIDY_TIMEOUT_MS = 15_000;
 const SAFE_FORAGE_PATH_BUDGET_MS = 4_000;
 const SAFE_FORAGE_ATTACK_INTERVAL_MS = 650;
 const SAFE_FORAGE_PICKUP_BUDGET_MS = 2_500;
@@ -1079,6 +1109,27 @@ export class MineflayerBotClient implements BotClient {
     bot.on("breath", () => this.handlers?.onStateChanged());
     bot.on("move", () => this.handlers?.onStateChanged());
     bot.on("physicsTick", () => this.handlers?.onStateChanged());
+    // 死亡不是断线：连接保持，但背包清空、位置漂移到重生点。先上报事实
+    // （runtime 取消进行中的技能并失效世界状态），再自动写重生包——
+    // mineflayer 不会自动 respawn，不写这条包 Bot 会停在死亡屏上直到
+    // 服务器踢人。
+    bot.on("death", () => {
+      const entity = bot.entity as typeof bot.entity & { position?: Vec3 };
+      this.handlers?.onDeath?.({
+        position: entity?.position
+          ? { x: entity.position.x, y: entity.position.y, z: entity.position.z }
+          : null,
+        dimension: normalizeDimension(String(this.bot.game?.dimension ?? "minecraft:overworld")),
+      });
+      try {
+        (bot as unknown as { _client: { write: (channel: string, payload: unknown) => void } })._client.write(
+          "client_command",
+          { action: "respawn" },
+        );
+      } catch {
+        // 服务器若已断开，"end" 事件路径会接管重连；这里不重复处理。
+      }
+    });
     bot.on("path_reset", () => {
       this.pathResetCount += 1;
       this.currentPathLength = null;
@@ -1428,6 +1479,9 @@ export class MineflayerBotClient implements BotClient {
         movementLease.assertCurrent();
         return { outcome: "executed", errorCode: null };
       }
+      if (action.kind === "TIDY_DROP_JUNK") {
+        return await this.tidyDropJunk();
+      }
       return { outcome: "skipped", errorCode: "RUNTIME_ACTION_REQUIRED" };
     } catch {
       if (movementLease.isCurrent()) this.bot.clearControlStates();
@@ -1623,6 +1677,14 @@ export class MineflayerBotClient implements BotClient {
       request.operation === "shelter.dig-safe"
     ) {
       return this.invokeShelterDig(request);
+    }
+    if (
+      request.capability === "world.interact" &&
+      request.operation === "food.forage-safe"
+    ) {
+      return this.withActionLocks(request, ["blockInteraction", "inventory"], () =>
+        this.invokeSecureFood(request),
+      );
     }
     if (
       request.capability === "world.interact" &&
@@ -4593,6 +4655,119 @@ export class MineflayerBotClient implements BotClient {
     if (this.safeFoodItems().length > 0) {
       return { outcome: "skipped", errorCode: "SAFE_FOOD_ALREADY_AVAILABLE" };
     }
+    return this.forageRound();
+  }
+
+  private safeFoodCount(): number {
+    return this.safeFoodItems().reduce((total, entry) => total + entry.item.count, 0);
+  }
+
+  /** food.secure 的能力入口：校验输入 → 复用觅食轮次 → 按输出 schema 读回。 */
+  private async invokeSecureFood(request: SkillCapabilityRequest): Promise<unknown> {
+    const input = secureFoodCapabilityInputSchema.safeParse(request.input);
+    if (!input.success) {
+      throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    }
+    const output = await this.secureSafeFood(
+      { targetCount: input.data.targetCount },
+      request.signal,
+    );
+    return secureFoodCapabilityOutputSchema.parse(output);
+  }
+
+  /**
+   * L0 INVENTORY_FULL 的自愈动作：按白名单阈值丢弃多余的低价值物品。
+   * 丢成功（背包有新空位）→ executed，下一轮 L0 评估解除风险；无任何
+   * 可丢项 → skipped（如实报告"全是必需品"，暂停保持——这是上层该建
+   * 箱子存东西的信号，不是这里该硬丢装备的理由）。
+   */
+  private async tidyDropJunk(): Promise<L0SafetyActionResult> {
+    const droppable = this.bot.inventory
+      .items()
+      .map((item) => ({
+        item,
+        keep: INVENTORY_TIDY_KEEP_THRESHOLDS[item.name],
+      }))
+      .filter(
+        (entry): entry is typeof entry & { keep: number } =>
+          entry.keep !== undefined && entry.item.count > entry.keep,
+      )
+      .sort((left, right) => right.item.count - left.item.count);
+    if (droppable.length === 0) {
+      return { outcome: "skipped", errorCode: "INVENTORY_TIDY_NOTHING_DROPPABLE" };
+    }
+    const deadline = Date.now() + INVENTORY_TIDY_TIMEOUT_MS;
+    try {
+      await this.actionLocks.withLock(
+        "inventory",
+        { owner: "safety:TIDY_DROP_JUNK", ttlMs: ACTION_LOCK_TTL_MS },
+        async () => {
+          for (const { item, keep } of droppable) {
+            if (Date.now() >= deadline) break;
+            await this.bot.toss(item.type, null, item.count - keep);
+          }
+        },
+      );
+    } catch {
+      return { outcome: "failed", errorCode: "INVENTORY_TIDY_FAILED" };
+    }
+    return { outcome: "executed", errorCode: null };
+  }
+
+  /**
+   * 主动食物储备（food.secure 技能的能力实现）：重复有界觅食轮次直到安全
+   * 食物达到 targetCount 或预算耗尽。每轮复用 L0 的同一套确定性机器
+   * （掉落物 → 成熟作物 → 被动生物 → 短探索），L0 只要求"任意 1 份"，
+   * 这里把水位抬高到储备目标。结果如实读回：未达标不是失败。
+   */
+  async secureSafeFood(
+    input: Readonly<{ targetCount: number }>,
+    signal?: AbortSignal,
+  ): Promise<{
+    safeFoodCount: number;
+    targetCount: number;
+    targetReached: boolean;
+    secured: number;
+    reasonCode: "TARGET_REACHED" | "NO_SAFE_FOOD_SOURCE" | "BUDGET_EXHAUSTED";
+  }> {
+    const target = Math.max(1, Math.min(32, Math.floor(input.targetCount)));
+    const before = this.safeFoodCount();
+    if (before >= target) {
+      return { safeFoodCount: before, targetCount: target, targetReached: true, secured: 0, reasonCode: "TARGET_REACHED" };
+    }
+    const deadline = Date.now() + SECURE_FOOD_TOTAL_BUDGET_MS;
+    let sawSource = false;
+    while (this.safeFoodCount() < target && !signal?.aborted && Date.now() < deadline) {
+      const result = await this.forageRound();
+      if (result.outcome === "executed") {
+        sawSource = true;
+        continue;
+      }
+      // skipped：这一轮在掉落物/作物/生物/短探索后仍无进账。NO_SAFE_FOOD_SOURCE
+      // 说明附近确实没有食物来源；其余 skipped 码（如受伤中止）同样不再硬转。
+      break;
+    }
+    const after = this.safeFoodCount();
+    const targetReached = after >= target;
+    return {
+      safeFoodCount: after,
+      targetCount: target,
+      targetReached,
+      secured: Math.max(0, after - before),
+      reasonCode: targetReached
+        ? "TARGET_REACHED"
+        : sawSource || after > before
+          ? "BUDGET_EXHAUSTED"
+          : "NO_SAFE_FOOD_SOURCE",
+    };
+  }
+
+  /**
+   * One bounded forage round: dropped food → mature crops → passive entities →
+   * a short exploration hop, all inside the round budget. Shared by the L0
+   * reaction (any single food item counts) and the proactive food.secure skill.
+   */
+  private async forageRound(budgetMs: number = SAFE_FORAGE_TOTAL_BUDGET_MS): Promise<L0SafetyActionResult> {
     if (
       !this.bot.pathfinder ||
       typeof this.bot.pathfinder.goto !== "function" ||
@@ -4603,7 +4778,7 @@ export class MineflayerBotClient implements BotClient {
     const startedHealth = finiteNumber(this.bot.health)
       ? Number(this.bot.health)
       : null;
-    const deadline = Date.now() + SAFE_FORAGE_TOTAL_BUDGET_MS;
+    const deadline = Date.now() + budgetMs;
     const controller = new AbortController();
     const timeout = setTimeout(
       () => controller.abort(),

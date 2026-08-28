@@ -26,7 +26,7 @@
 - 自相矛盾的证据组合**拒绝装载**，例如"真实服跑过但运行时没接线"。
 - 只有四道闸全绿才允许对外称"已验证"（`evidenceSupportsVerifiedClaim`）。
 
-当前注册表包含 21 个技能；已接入 Runtime 的条目保持 **Partial**，其余规划/策略条目标为 **Experimental**。所有技能仍缺 `isolated-server-scenarios` 与 `cross-version-matrix` 两道真实环境闸。
+当前注册表包含 22 个技能；已接入 Runtime 的条目保持 **Partial**，其余规划/策略条目标为 **Experimental**。所有技能仍缺 `isolated-server-scenarios` 与 `cross-version-matrix` 两道真实环境闸。
 真实隔离服六类场景与 1.21.8 跨版本矩阵一次没跑过。这与编译产物里的
 `verification=unverified` 是同一个事实的两种表述（AGENTS.md §8：无隔离测试服时不得声称联机测试通过）。
 
@@ -34,7 +34,7 @@
 
 - Skill ID 后的 SemVer 表示技能输入、输出和行为契约，不表示 Minecraft 服务器版本。
 - 每个 Skill 另有有序 `compatibility.variants`。Runtime 只使用连接后真实协商出的版本/协议，以及当前 registry 的 feature、物品、方块、实体和显式服务端能力探针解析变体；不以 `minVersion/maxVersion` 一刀切。
-- 当前目录中的 21 个 Skill 都声明无额外资源要求的 `portable` 变体；只有证据中的 `runtime-wiring=true` 条目可由 Runtime 执行，其余条目保持 `Experimental`。跨版本真实场景矩阵尚未执行，所以目录上报 `availability=available`、`verification=unverified`，不冒充实机已验证。
+- 当前目录中的 22 个 Skill 都声明无额外资源要求的 `portable` 变体；只有证据中的 `runtime-wiring=true` 条目可由 Runtime 执行，其余条目保持 `Experimental`。跨版本真实场景矩阵尚未执行，所以目录上报 `availability=available`、`verification=unverified`，不冒充实机已验证。
 - 新版本特色 Skill 必须声明它实际依赖的 feature/资源；如果还依赖服务器插件、数据包或规则，则必须等待显式探针。能力为 `unknown` 时 fail-closed，不从版本号猜测。
 - `collect.block`、`craft.item`、`world.place-block` 和 `container.transfer` 当前仍接收目标版本 registry 的原生资源名。兼容变体可以表达旧/新 ID 的替代顺序，但规划器使用的语义资源别名尚未接入。
 
@@ -315,6 +315,31 @@
 - 一次也没取到产物报 `SMELT_OUTPUT_NOT_CONFIRMED`——不伪造成功。
 - 等待产出是 250ms 一轮的 `update` 事件轮询，总时长由 60 秒技能超时兜住；超时与外部取消都会关炉退出。
 - L0 暂停、Runtime 停止、超时或外部取消都会中断，且 `finally` 关炉不吞掉失败。
+
+## `food.secure@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`world.interact`
+- 风险：R1
+- 适配器操作：`food.forage-safe`
+- 超时：120 秒
+- 自动重试：无（幂等：达标即成功，未达标如实报告）
+- 底层：复用 L0 觅食机器（掉落食物 → 成熟作物 → 被动生物 cow/pig/rabbit/sheep → 八方向短探索），每轮 20 秒预算，总预算 110 秒
+
+输入：
+
+```json
+{ "targetCount": 12, "dimension": "minecraft:overworld", "serverProfileId": "isolated-local" }
+```
+
+输出遥测：`safeFoodCount`（结束时的安全食物读回总数）、`secured`（本轮新增份数）、`targetReached`、`reasonCode`（`TARGET_REACHED` / `NO_SAFE_FOOD_SOURCE` / `BUDGET_EXHAUSTED`）。
+
+约束：
+
+- 只在 L0 允许普通动作时执行；觅食途中受伤即中止该轮（受伤中止优先于进食目标）。
+- 只采集白名单安全食物（与 L0 `SAFE_FOOD_NAMES` 同源）；腐肉等有害食物永不采集。
+- 只攻击被动生物白名单（cow/pig/rabbit/sheep），敌对生物交由战斗子系统。
+- 预算耗尽而未达标是 **completed + targetReached=false** 的诚实结果，水位重估由上层需求评估负责。
 
 ## `travel.route@1.0.0`
 

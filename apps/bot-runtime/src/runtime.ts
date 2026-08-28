@@ -940,6 +940,7 @@ export class SingleBotRuntime {
         onSpawn: () => this.handleSpawn(activeGeneration),
         onStateChanged: () => this.requestStatus(activeGeneration),
         onDamaged: (info) => this.handleDamaged(activeGeneration, info),
+        onDeath: (info) => this.handleDeath(activeGeneration, info),
         onDisconnected: (info) =>
           this.handleDisconnected(activeGeneration, info),
         onError: () => {
@@ -2015,8 +2016,48 @@ export class SingleBotRuntime {
         );
   }
 
-  private handleDamaged(generation: number, info: BotDamageInfo): void {
-    if (
+  /**
+   * 死亡 ≠ 断线：连接还在，但一切进行中的工作都建立在已失效的世界状态
+   * 上。取消全部活动技能（采集/移动/熔炼对着空背包与旧坐标继续跑只会
+   * 产生噪声）、重置 L0 状态机，然后把死亡事实留痕。重生由 client 写
+   * client_command 触发，spawn 事件走既有路径重建状态；自主生存的重建
+   * 由 director 的需求评估基于（清空的）真实背包自动完成——不需要任何
+   * 特判分支。
+   */
+  private handleDeath(
+    generation: number,
+    info: Readonly<{
+      position: Readonly<{ x: number; y: number; z: number }> | null;
+      dimension: string | null;
+    }>,
+  ): void {
+    if (generation !== this.generation || this.stopping) return;
+    this.cancelActiveSkills();
+    this.cancelRunningCoordinatorTasks();
+    this.safetyController.reset();
+    this.safetyStatus = {
+      mode: "monitoring",
+      activeRisks: [],
+      normalTasksPaused: false,
+      lastDecisionId: null,
+      lastAction: null,
+    };
+    this.metrics.increment("bot_deaths_total", {
+      bot_id: this.profile.botId,
+    });
+    this.dependencies.logger.warn(
+      "bot_runtime_death",
+      this.logFields({
+        dimension: info.dimension,
+        deathPosition: info.position
+          ? `x=${Math.floor(info.position.x)} y=${Math.floor(info.position.y)} z=${Math.floor(info.position.z)}`
+          : null,
+      }),
+    );
+    this.emitStatus(this.generation, false);
+  }
+
+  private handleDamaged(generation: number, info: BotDamageInfo): void {    if (
       generation !== this.generation ||
       this.stopping ||
       this.state !== "online" ||

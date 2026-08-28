@@ -91,6 +91,16 @@ export {
   scanBlocksStateSchema,
 } from "./builtin/scan-blocks.js";
 export {
+  SECURE_FOOD_MAX_TARGET,
+  SECURE_FOOD_TIMEOUT_MS,
+  secureFoodCapabilityInputSchema,
+  secureFoodCapabilityOutputSchema,
+  secureFoodInputSchema,
+  secureFoodOutputSchema,
+  secureFoodSkill,
+  secureFoodStateSchema,
+} from "./builtin/secure-food.js";
+export {
   blockCenterDistance,
   blockWithinPolicyReach,
   type BlockCoordinate,

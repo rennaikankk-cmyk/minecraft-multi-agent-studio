@@ -57,6 +57,7 @@ const ACTION_COOLDOWN_MS: Readonly<Record<L0SafetyActionKind, number>> = {
   ESCAPE_LAVA: 750,
   HALT_HORIZONTAL_MOVEMENT: 1_000,
   UNSTICK: 2_000,
+  TIDY_DROP_JUNK: 10_000,
   EMERGENCY_STOP: 60_000,
 };
 
@@ -152,6 +153,10 @@ export class L0SafetyController {
         this.movementAnchorAt = snapshot.observedAtMs;
       } else if (risks.includes("INVENTORY_FULL")) {
         pushAction("PAUSE_NORMAL_TASKS", "INVENTORY_FULL");
+        // 背包满在此前的处置只有暂停——那是一个必然的死锁：没有任何上层
+        // 会在暂停期间清背包。先做一次确定性丢垃圾（白名单+保留阈值），
+        // 丢得动下一轮评估就解除风险；确实全是必需品时保持暂停（如实）。
+        pushAction("TIDY_DROP_JUNK", "INVENTORY_FULL");
       } else if (risks.includes("HUNGER")) {
         pushAction(
           snapshot.hasSafeFood ? "CONSUME_SAFE_FOOD" : "FORAGE_SAFE_FOOD",

@@ -812,6 +812,7 @@ export const l0SafetyActionKindSchema = z.enum([
   "ESCAPE_LAVA",
   "HALT_HORIZONTAL_MOVEMENT",
   "UNSTICK",
+  "TIDY_DROP_JUNK",
   "EMERGENCY_STOP",
 ]);
 

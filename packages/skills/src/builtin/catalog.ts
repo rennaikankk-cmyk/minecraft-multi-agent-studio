@@ -9,6 +9,7 @@ import { ensureItemSkill } from "./ensure-item.js";
 import { movementGotoSkill } from "./movement-goto.js";
 import { placeBlockSkill } from "./place-block.js";
 import { scanBlocksSkill } from "./scan-blocks.js";
+import { secureFoodSkill } from "./secure-food.js";
 import { smeltItemSkill } from "./smelt-item.js";
 import { travelRouteSkill } from "./travel-route.js";
 import { tradeVillagerSkill } from "./trade-villager.js";
@@ -45,6 +46,7 @@ export const builtinSkills: readonly AnySkillDefinition[] = Object.freeze([
   placeBlockSkill,
   containerTransferSkill,
   smeltItemSkill,
+  secureFoodSkill,
   tradeVillagerSkill,
   mineBranchSkill,
   mineVeinSkill,

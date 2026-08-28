@@ -141,6 +141,7 @@ const baseInputs: Readonly<Record<string, z.infer<typeof skillJsonValueSchema>>>
   "world.place-block": { itemName: "cobblestone", referenceBlock: { x: 1, y: 63, z: 0 }, face: { x: 0, y: 1, z: 0 }, dimension, serverProfileId: server },
   "container.transfer": { direction: "deposit", itemName: "cobblestone", count: 4, container: { x: 3, y: 64, z: 0 }, dimension, serverProfileId: server },
   "inventory.equip-armor": { serverProfileId: server },
+  "food.secure": { targetCount: 6, dimension, serverProfileId: server },
   "smelt.item": { inputItemName: "raw_iron", fuelItemName: "coal", fuelCount: 1, count: 5, furnace: { x: 2, y: 64, z: 0 }, dimension, serverProfileId: server },
 
   "build.blueprint": { blueprint: { anchor: { x: 100, y: 64, z: 100 }, dimension, serverProfileId: server, cells: [{ offset: { x: 0, y: 0, z: 0 }, itemName: "cobblestone", blockClass: "foundation", order: 0 }] }, startIndex: 0, maxPlacements: 1, availableMaterials: [{ itemName: "cobblestone", count: 1 }] },

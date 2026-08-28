@@ -218,6 +218,21 @@ describe("L0SafetyController", () => {
     ).toThrowError(/Inventory/u);
   });
 
+  it("self-heals a full inventory with a deterministic junk drop before pausing", () => {
+    // 只暂停是必然死锁：没有任何上层会在暂停期间清背包。现在先丢垃圾，
+    // 丢得动下一轮评估就解除风险；全是必需品时才维持暂停。
+    const controller = new L0SafetyController();
+    const decision = controller.evaluate(snapshot({
+      inventory: { usedSlots: 36, totalSlots: 36 },
+    }));
+    expect(decision.activeRisks).toEqual(["INVENTORY_FULL"]);
+    expect(decision.actions.map(({ kind }) => kind)).toEqual([
+      "PAUSE_NORMAL_TASKS",
+      "TIDY_DROP_JUNK",
+    ]);
+    expect(decision.actions[1]).toMatchObject({ risk: "INVENTORY_FULL" });
+  });
+
   it("resets cooldown and movement history for a new Bot connection", () => {
     const controller = new L0SafetyController();
     controller.evaluate(snapshot({ foodLevel: 10 }));
