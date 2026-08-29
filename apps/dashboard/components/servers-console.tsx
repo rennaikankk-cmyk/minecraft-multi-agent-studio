@@ -58,8 +58,9 @@ export function ServersConsole() {
       "/api/studio/bots",
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-Studio-Action": "create-bot" },
         body: JSON.stringify({
+          schemaVersion: "1.0",
           username: form.username.trim(),
           serverHost: form.host.trim(),
           serverPort: Number.parseInt(form.port, 10),
@@ -140,12 +141,12 @@ export function ServersConsole() {
                       <td className="muted">{bot.lastError ?? "—"}</td>
                       <td>
                         <button type="button" disabled={action.pending !== null}
-                          onClick={() => confirm(`重启 ${bot.username}？`) && void runAction(`restart ${bot.botId}`, `/api/studio/bots/${bot.botId}/restart`, { method: "POST" })}>
+                          onClick={() => confirm(`重启 ${bot.username}？`) && void runAction(`restart ${bot.botId}`, `/api/studio/bots/${bot.botId}/restart`, { method: "POST", headers: { "X-Studio-Action": "restart-bot" } })}>
                           重启
                         </button>
                         {" "}
                         <button type="button" disabled={action.pending !== null} className="danger"
-                          onClick={() => confirm(`停止 ${bot.username}？`) && void runAction(`stop ${bot.botId}`, `/api/studio/bots/${bot.botId}/stop`, { method: "POST" })}>
+                          onClick={() => confirm(`停止 ${bot.username}？`) && void runAction(`stop ${bot.botId}`, `/api/studio/bots/${bot.botId}/stop`, { method: "POST", headers: { "X-Studio-Action": "stop-bot" } })}>
                           停止
                         </button>
                       </td>
