@@ -15,15 +15,21 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { AddressInfo } from "node:net";
 
 import {
+  BaseRegistry,
   captureSharedStateSnapshot,
   createSharedStateDispatcher,
   dispatchSharedState,
+  DurableStateStore,
+  durableSnapshotFrom,
   restoreSharedStateSnapshot,
+  stripEphemeralState,
+  type DurableStateSnapshot,
   type SharedStateResponse,
   type SharedStateSnapshot,
 } from "@minecraft-studio/skills";
 import { FacilityRegistry } from "@minecraft-studio/skills";
 import { InMemoryWorkstationRegistry } from "@minecraft-studio/skills";
+import { registriesFromDurableSnapshot } from "@minecraft-studio/skills";
 
 const MAX_BODY_BYTES = 256 * 1024;
 
@@ -34,6 +40,14 @@ export interface SharedStateServerOptions {
   readonly token?: string;
   readonly workstations?: InMemoryWorkstationRegistry;
   readonly facilities?: FacilityRegistry;
+  readonly bases?: BaseRegistry;
+  /**
+   * 持久化文件路径（Phase 6 durable world-memory）。
+   * 设置后：启动时加载（durable 恢复，ephemeral 丢弃）、定时落盘、stop 时落盘。
+   */
+  readonly persistPath?: string;
+  /** 定时落盘间隔；默认 60s；<=0 表示只在 stop 时落盘。 */
+  readonly persistIntervalMs?: number;
   readonly logger?: { info(message: string, meta?: unknown): void; warn(message: string, meta?: unknown): void };
 }
 
@@ -47,17 +61,24 @@ export class SharedStateServer {
   private readonly dispatcher: ReturnType<typeof createSharedStateDispatcher>;
   private readonly token: string | undefined;
   private readonly logger: SharedStateServerOptions["logger"];
+  private readonly persistStore: DurableStateStore | null;
+  private readonly persistIntervalMs: number;
+  private persistTimer: NodeJS.Timeout | null = null;
   readonly workstations: InMemoryWorkstationRegistry;
   readonly facilities: FacilityRegistry;
+  readonly bases: BaseRegistry;
   private started = false;
   private stopped = false;
 
   constructor(private readonly options: SharedStateServerOptions = {}) {
     this.workstations = options.workstations ?? new InMemoryWorkstationRegistry();
     this.facilities = options.facilities ?? new FacilityRegistry();
+    this.bases = options.bases ?? new BaseRegistry();
     this.dispatcher = createSharedStateDispatcher(this.workstations, this.facilities);
     this.token = options.token;
     this.logger = options.logger;
+    this.persistStore = options.persistPath ? new DurableStateStore(options.persistPath) : null;
+    this.persistIntervalMs = options.persistIntervalMs ?? 60_000;
     this.httpServer = createServer(
       { maxHeaderSize: 16_384, requestTimeout: 15_000, headersTimeout: 15_000 },
       (request, response) => {
@@ -67,6 +88,26 @@ export class SharedStateServer {
     this.httpServer.on("clientError", (_error, socket) => {
       if (socket.writable) socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
     });
+  }
+
+  /** durable 快照（含 bases；GET /snapshot 也用它）。 */
+  private currentDurableSnapshot(): DurableStateSnapshot {
+    return stripEphemeralState(
+      durableSnapshotFrom(this.workstations, this.facilities, this.bases),
+    );
+  }
+
+  private persist(reason: string): void {
+    if (!this.persistStore) return;
+    try {
+      this.persistStore.save(durableSnapshotFrom(this.workstations, this.facilities, this.bases));
+    } catch (error) {
+      // 持久化失败不阻塞服务，但必须可见
+      this.logger?.warn("shared_state_persist_failed", {
+        reason,
+        code: error instanceof Error ? error.name : "Unknown",
+      });
+    }
   }
 
   private writeJson(response: ServerResponse, status: number, body: unknown): void {
@@ -93,7 +134,7 @@ export class SharedStateServer {
           this.writeJson(response, 403, { ok: false, error: "unauthorized" });
           return;
         }
-        this.writeJson(response, 200, captureSharedStateSnapshot(this.workstations, this.facilities));
+        this.writeJson(response, 200, this.currentDurableSnapshot());
         return;
       }
       if (request.method === "PUT" && url.pathname === "/snapshot") {
@@ -151,6 +192,21 @@ export class SharedStateServer {
 
   async start(): Promise<SharedStateAddress> {
     if (this.started || this.stopped) throw new Error("SharedStateServer cannot be started more than once.");
+    // Phase 6：启动时先恢复 durable 状态（ephemeral lease/reservation 天然丢弃）
+    if (this.persistStore) {
+      const persisted = this.persistStore.load();
+      if (persisted) {
+        const restored = registriesFromDurableSnapshot(persisted);
+        this.workstations.absorb(restored.workstations);
+        this.facilities.absorb(restored.facilities);
+        this.bases.absorb(restored.bases);
+        this.logger?.info("shared_state_durable_restored", {
+          workstations: this.workstations.size,
+          facilities: this.facilities.size,
+          bases: this.bases.size,
+        });
+      }
+    }
     const host = this.options.host ?? "127.0.0.1";
     const port = this.options.port ?? 0;
     await new Promise<void>((resolve, reject) => {
@@ -162,6 +218,10 @@ export class SharedStateServer {
       });
     });
     this.started = true;
+    if (this.persistStore && this.persistIntervalMs > 0) {
+      this.persistTimer = setInterval(() => this.persist("interval"), this.persistIntervalMs);
+      this.persistTimer.unref?.();
+    }
     const address = this.httpServer.address() as AddressInfo;
     this.logger?.info("shared_state_server_started", { host: address.address, port: address.port });
     return { host: address.address, port: address.port };
@@ -170,6 +230,11 @@ export class SharedStateServer {
   async stop(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
+    if (this.persistTimer) {
+      clearInterval(this.persistTimer);
+      this.persistTimer = null;
+    }
+    this.persist("shutdown");
     await new Promise<void>((resolve) => this.httpServer.close(() => resolve()));
   }
 }
@@ -182,6 +247,7 @@ export interface SharedStateConfig {
   readonly host: string;
   readonly port: number;
   readonly token: string | undefined;
+  readonly persistPath: string | undefined;
 }
 
 /** 从环境变量读取；全部字段缺省 → undefined（不启动）。 */
@@ -196,5 +262,6 @@ export function loadSharedStateConfig(env: NodeJS.ProcessEnv = process.env): Sha
     host: env.STUDIO_SHARED_STATE_HOST ?? "127.0.0.1",
     port: parsedPort,
     token: env.STUDIO_SHARED_STATE_TOKEN,
+    persistPath: env.STUDIO_SHARED_STATE_PERSIST_PATH,
   };
 }

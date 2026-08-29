@@ -373,6 +373,18 @@ export class BaseRegistry {
     return reg;
   }
 
+  /** 合并快照：同 id 以 incoming 为准（服务端恢复用）。cell 预约不恢复（ephemeral）。 */
+  absorb(other: { serialize(): { bases: BaseRecord[] } }): number {
+    let merged = 0;
+    for (const base of other.serialize().bases) {
+      if (!base || typeof base.id !== "string") continue;
+      this.bases.set(base.id, base);
+      this.cellReservations.delete(base.id); // ephemeral：绝不恢复别人的预约
+      merged += 1;
+    }
+    return merged;
+  }
+
   get size(): number {
     return this.bases.size;
   }

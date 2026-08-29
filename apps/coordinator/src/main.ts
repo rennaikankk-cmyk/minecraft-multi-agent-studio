@@ -341,6 +341,7 @@ async function main(): Promise<void> {
         host: sharedStateConfig.host,
         port: sharedStateConfig.port,
         ...(sharedStateConfig.token ? { token: sharedStateConfig.token } : {}),
+        ...(sharedStateConfig.persistPath ? { persistPath: sharedStateConfig.persistPath } : {}),
         logger,
       });
       const sharedStateAddress = await sharedStateServer.start();

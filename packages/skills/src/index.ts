@@ -572,3 +572,10 @@ export {
   type ReconciledCell,
   type StarterBaseParams,
 } from "./base-registry.js";
+export {
+  DurableStateStore,
+  durableSnapshotFrom,
+  registriesFromDurableSnapshot,
+  stripEphemeralState,
+  type DurableStateSnapshot,
+} from "./durable-state-store.js";

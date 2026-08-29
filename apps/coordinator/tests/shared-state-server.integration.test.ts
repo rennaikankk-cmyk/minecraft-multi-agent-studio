@@ -174,11 +174,84 @@ describe("loadSharedStateConfig", () => {
       STUDIO_SHARED_STATE_HOST: "0.0.0.0",
       STUDIO_SHARED_STATE_TOKEN: "t0ken",
     });
-    expect(config).toEqual({ host: "0.0.0.0", port: 8791, token: "t0ken" });
+    expect(config).toEqual({ host: "0.0.0.0", port: 8791, token: "t0ken", persistPath: undefined });
   });
 
   it("rejects invalid port", () => {
     expect(() => loadSharedStateConfig({ STUDIO_SHARED_STATE_PORT: "not-a-port" })).toThrow();
     expect(() => loadSharedStateConfig({ STUDIO_SHARED_STATE_PORT: "70000" })).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 6：durable persistence —— coordinator 重启后记得 Base/Facility/Workstation，
+// 丢弃 lease/reservation（ephemeral）。这是四十三节 restart gate 的持久化前提。
+// ---------------------------------------------------------------------------
+describe("SharedStateServer durable persistence across restart", () => {
+  let persistPath: string;
+  let firstClient: SharedStateClient;
+  let firstServer: SharedStateServer;
+
+  beforeAll(async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    persistPath = join(mkdtempSync(join(tmpdir(), "studio-shared-state-")), "state.json");
+    firstServer = new SharedStateServer({ host: "127.0.0.1", port: 0, persistPath });
+    const address = await firstServer.start();
+    firstClient = new SharedStateClient({ baseUrl: `http://127.0.0.1:${address.port}` });
+  });
+
+  afterAll(async () => {
+    await firstServer.stop();
+  });
+
+  it("builds state, persists on stop, and a fresh server remembers durable knowledge", async () => {
+    // Workstation + 观测 + lease（lease 是 ephemeral）
+    await firstClient.workstations.register(SERVER, DIM, "furnace", { x: 9, y: 64, z: 9 });
+    await firstClient.workstations.claim(SERVER, DIM, { x: 9, y: 64, z: 9 }, "studio-bot-01");
+
+    // Facility + slot 生命周期
+    const facility = await firstClient.facilities.create({
+      facilityType: "smelting_zone",
+      serverProfileId: SERVER,
+      dimension: DIM,
+      anchor: { x: 50, y: 64, z: 50 },
+      orientation: "north",
+      layoutVersion: "smelting_basic_v1",
+      patternSlots: smeltingLinePattern(4),
+      baseId: "base-restart-test",
+    });
+    await firstClient.facilities.reserveSlot(facility.id, 0, "studio-bot-01");
+    await firstClient.facilities.markSlotOccupied(facility.id, 0, "ws-durable-1");
+    // slot 1 预约但不完工（reservation 应被持久化剥离）
+    await firstClient.facilities.reserveSlot(facility.id, 1, "studio-bot-01");
+
+    // “进程重启”：stop（触发落盘）→ 同一路径新 server
+    await firstServer.stop();
+    const secondServer = new SharedStateServer({ host: "127.0.0.1", port: 0, persistPath });
+    const secondAddress = await secondServer.start();
+    try {
+      const secondClient = new SharedStateClient({ baseUrl: `http://127.0.0.1:${secondAddress.port}` });
+
+      // durable：workstation 观测还在，lease 没了
+      const ws = await secondClient.workstations.get(SERVER, DIM, { x: 9, y: 64, z: 9 });
+      expect(ws).not.toBeNull();
+      expect(ws!.lease).toBeNull();
+
+      // durable：facility slot 语义状态保留
+      const f = await secondClient.facilities.get(facility.id);
+      expect(f).not.toBeNull();
+      expect(f!.slots[0]!.status).toBe("occupied");
+      expect(f!.slots[0]!.workstationEntryKey).toBe("ws-durable-1");
+      // ephemeral：placement reservation 被剥离 → planned，任何人可重新预约
+      expect(f!.slots[1]!.status).toBe("planned");
+      expect(await secondClient.facilities.reserveSlot(facility.id, 1, "studio-bot-02")).toBe(true);
+      // baseId 绑定保留
+      const byBase = await secondClient.facilities.findByBase("base-restart-test");
+      expect(byBase.map((x) => x.id)).toContain(facility.id);
+    } finally {
+      await secondServer.stop();
+    }
   });
 });
