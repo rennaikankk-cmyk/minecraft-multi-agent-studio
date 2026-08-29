@@ -19,7 +19,7 @@ const BOT_A = "studio-bot-01";
 const BOT_B = "studio-bot-02";
 
 // ---------------------------------------------------------------------------
-// FacilityRegistry
+// FacilityRegistry（7-state 语义下的 smelting 场景）
 // ---------------------------------------------------------------------------
 
 describe("FacilityRegistry", () => {
@@ -41,10 +41,10 @@ describe("FacilityRegistry", () => {
     });
   }
 
-  it("creates smelting_zone with all slots initially available", () => {
+  it("creates smelting_zone with all slots initially planned", () => {
     const f = createZone();
     expect(f.slots).toHaveLength(6);
-    expect(f.slots[0]!.status).toBe("available");
+    expect(f.slots[0]!.status).toBe("planned");
   });
 
   it("north orientation: local +x maps to world +x", () => {
@@ -66,47 +66,48 @@ describe("FacilityRegistry", () => {
     expect(f.slots[1]!.worldPosition).toEqual({ x: 100, y: 64, z: 199 });
   });
 
-  it("nextAvailableSlot returns first available", () => {
+  it("nextPlannableSlot returns first planned", () => {
     const f = createZone({ x: 100, y: 64, z: 200 }, 3);
-    expect(fr.nextAvailableSlot(f)).not.toBeNull();
+    expect(fr.nextPlannableSlot(f.id)).not.toBeNull();
   });
 
-  it("reserve → markOccupied → next available is different", () => {
+  it("reserve → markSlotOccupied → next plannable is different", () => {
     const f = createZone({ x: 100, y: 64, z: 200 }, 3);
-    const s1 = fr.nextAvailableSlot(f)!;
-    fr.reserveSlot(f, s1, BOT_A);
-    fr.markOccupied(f, s1, "ws-1");
+    const s1 = fr.nextPlannableSlot(f.id)!;
+    fr.reserveSlot(f.id, s1.index, BOT_A);
+    fr.markSlotOccupied(f.id, s1.index, "ws-1");
     expect(s1.status).toBe("occupied");
-    expect(fr.nextAvailableSlot(f)).not.toBe(s1);
+    expect(fr.nextPlannableSlot(f.id)).not.toBe(s1);
   });
 
   it("double reserve same slot fails", () => {
     const f = createZone({ x: 100, y: 64, z: 200 }, 1);
-    const slot = fr.nextAvailableSlot(f)!;
-    expect(fr.reserveSlot(f, slot, BOT_A)).toBe(true);
-    expect(fr.reserveSlot(f, slot, BOT_B)).toBe(false);
+    const slot = fr.nextPlannableSlot(f.id)!;
+    expect(fr.reserveSlot(f.id, slot.index, BOT_A)).toBe(true);
+    expect(fr.reserveSlot(f.id, slot.index, BOT_B)).toBe(false);
   });
 
-  it("reservation expires → available again", () => {
+  it("reservation expires → planned again (explicit expire)", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-29T12:00:00Z"));
     const f = createZone({ x: 100, y: 64, z: 200 }, 1);
-    const slot = fr.nextAvailableSlot(f)!;
-    fr.reserveSlot(f, slot, BOT_A, 5_000);
+    const slot = fr.nextPlannableSlot(f.id)!;
+    fr.reserveSlot(f.id, slot.index, BOT_A, 5_000);
     vi.advanceTimersByTime(6_000);
-    expect(fr.nextAvailableSlot(f)!.status).toBe("available");
+    expect(fr.expireReservations(f.id)).toBe(1);
+    expect(fr.nextPlannableSlot(f.id)!.status).toBe("planned");
     vi.useRealTimers();
   });
 
-  it("markSlotAvailable after destruction", () => {
+  it("destroyed furnace → missing → replan → available again", () => {
     const f = createZone({ x: 100, y: 64, z: 200 }, 3);
-    const slot = fr.nextAvailableSlot(f)!;
-    fr.markOccupied(f, slot, "ws-1");
-    console.error("[DBG] slot:", JSON.stringify(slot));
-    console.error("[DBG] allSlots:", JSON.stringify(f.slots.map(s => ({pos: s.worldPosition, st: s.status}))));
-    const r = fr.markSlotAvailable(f, slot.worldPosition);
-    expect(r).toBe(true);
-    expect(slot.status).toBe("available");
+    const slot = fr.nextPlannableSlot(f.id)!;
+    fr.reserveSlot(f.id, slot.index, BOT_A);
+    fr.markSlotOccupied(f.id, slot.index, "ws-1");
+    expect(fr.markSlotMissing(f.id, slot.index, "block_removed")).toBe(true);
+    expect(slot.status).toBe("missing");
+    expect(fr.replanSlot(f.id, slot.index)).toBe(true);
+    expect(slot.status).toBe("planned");
   });
 
   it("wall grid 4x2 → 8 slots, expansion to row 1 after row 0 full", () => {
@@ -120,8 +121,11 @@ describe("FacilityRegistry", () => {
       patternSlots: smeltingWallGridPattern(4, 2),
     });
     expect(f.slots).toHaveLength(8);
-    for (let i = 0; i < 4; i += 1) fr.markOccupied(f, f.slots[i]!, `ws-${i}`);
-    expect(fr.nextAvailableSlot(f)!.localOffset).toEqual({ x: 0, y: 1, z: 0 });
+    for (let i = 0; i < 4; i += 1) {
+      fr.reserveSlot(f.id, i, BOT_A);
+      fr.markSlotOccupied(f.id, i, `ws-${i}`);
+    }
+    expect(fr.nextPlannableSlot(f.id)!.localOffset).toEqual({ x: 0, y: 1, z: 0 });
   });
 });
 
@@ -183,26 +187,26 @@ describe("SmeltingZone vertical slice", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-29T12:00:00Z"));
     wsReg = new InMemoryWorkstationRegistry({ entryTtlMs: 300_000, leaseTtlMs: 30_000 });
-    fr = new FacilityRegistry();
+    fr = new FacilityRegistry({ now: () => Date.now() });
   });
 
   afterEach(() => { vi.useRealTimers(); });
 
-  function createZone() {
+  function createZone(anchor = { x: 100, y: 64, z: 200 }, slots = 8) {
     return fr.create({
       facilityType: "smelting_zone", serverProfileId: SERVER, dimension: DIM,
-      anchor: { x: 100, y: 64, z: 200 }, orientation: "north",
-      layoutVersion: "smelting_basic_v1", patternSlots: smeltingLinePattern(8),
+      anchor, orientation: "north",
+      layoutVersion: "smelting_basic_v1", patternSlots: smeltingLinePattern(slots),
     });
   }
 
   it("s1: create zone → place first furnace → register", () => {
     expect(fr.find(SERVER, DIM, "smelting_zone")).toBeNull();
     const facility = createZone();
-    const slot = fr.nextAvailableSlot(facility)!;
-    fr.reserveSlot(facility, slot, BOT_A);
+    const slot = fr.nextPlannableSlot(facility.id)!;
+    fr.reserveSlot(facility.id, slot.index, BOT_A);
     wsReg.register(SERVER, DIM, "furnace", slot.worldPosition);
-    fr.markOccupied(facility, slot, "ws-entry-1");
+    fr.markSlotOccupied(facility.id, slot.index, "ws-entry-1");
     expect(slot.status).toBe("occupied");
     expect(wsReg.get(SERVER, DIM, slot.worldPosition)).not.toBeNull();
   });
@@ -218,11 +222,13 @@ describe("SmeltingZone vertical slice", () => {
     const facility = createZone();
     wsReg.register(SERVER, DIM, "furnace", { x: 100, y: 64, z: 200 });
     wsReg.claim(SERVER, DIM, { x: 100, y: 64, z: 200 }, BOT_A, 60_000);
-    // Sync facility slot status with workstation registry claim
     const firstSlot = facility.slots.find(
       (s) => s.worldPosition.x === 100 && s.worldPosition.z === 200,
     );
-    if (firstSlot) fr.markOccupied(facility, firstSlot, "ws-busy-1");
+    if (firstSlot) {
+      fr.reserveSlot(facility.id, firstSlot.index, BOT_A);
+      fr.markSlotOccupied(facility.id, firstSlot.index, "ws-busy-1");
+    }
 
     expect(assessCapacity({
       policy: "scale_out", totalWorkstations: 1, busyWorkstations: 1,
@@ -234,8 +240,8 @@ describe("SmeltingZone vertical slice", () => {
       pendingItems: 128, throughputPerWorkstationPerMin: 8,
     }).decision).toBe("scale_out");
 
-    const nextSlot = fr.nextAvailableSlot(facility)!;
-    fr.reserveSlot(facility, nextSlot, BOT_B);
+    const nextSlot = fr.nextPlannableSlot(facility.id)!;
+    fr.reserveSlot(facility.id, nextSlot.index, BOT_B);
     expect(nextSlot.worldPosition).toEqual({ x: 101, y: 64, z: 200 });
   });
 
@@ -246,46 +252,54 @@ describe("SmeltingZone vertical slice", () => {
       layoutVersion: "smelting_wall_v1",
       patternSlots: smeltingWallGridPattern(4, 2),
     });
-    for (let i = 0; i < 4; i += 1) fr.markOccupied(facility, facility.slots[i]!, `ws-${i}`);
-    expect(fr.nextAvailableSlot(facility)!.localOffset).toEqual({ x: 0, y: 1, z: 0 });
+    for (let i = 0; i < 4; i += 1) {
+      fr.reserveSlot(facility.id, i, BOT_A);
+      fr.markSlotOccupied(facility.id, i, `ws-${i}`);
+    }
+    expect(fr.nextPlannableSlot(facility.id)!.localOffset).toEqual({ x: 0, y: 1, z: 0 });
   });
 
   it("s6: two bots cannot reserve same slot", () => {
     const facility = createZone();
-    const s1 = fr.nextAvailableSlot(facility)!;
-    fr.reserveSlot(facility, s1, BOT_A);
-    expect(fr.reserveSlot(facility, s1, BOT_B)).toBe(false);
-    const s2 = fr.nextAvailableSlot(facility)!;
+    const s1 = fr.nextPlannableSlot(facility.id)!;
+    fr.reserveSlot(facility.id, s1.index, BOT_A);
+    expect(fr.reserveSlot(facility.id, s1.index, BOT_B)).toBe(false);
+    const s2 = fr.nextPlannableSlot(facility.id)!;
     expect(s2).not.toBe(s1);
-    fr.reserveSlot(facility, s2, BOT_B);
-    expect(s2.status).toBe("reserved");
+    fr.reserveSlot(facility.id, s2.index, BOT_B);
+    expect(s2.status).toBe("placement_reserved");
   });
 
-  it("s7: blocked slot skipped", () => {
-    const facility = createZone({ x: 100, y: 64, z: 200 }, 3);
-    fr.markBlocked(facility, facility.slots[1]!);
-    // createZone creates 8 slots; blocking 1 → 7 available
-    expect(facility.slots.filter((s) => s.status === "available")).toHaveLength(7);
+  it("s7: temporarily blocked slot skipped", () => {
+    const facility = createZone({ x: 100, y: 64, z: 200 }, 8);
+    fr.reserveSlot(facility.id, 1, BOT_A);
+    fr.markSlotTemporarilyBlocked(facility.id, 1, "foreign_block:dirt");
+    expect(facility.slots.filter((s) => s.status === "planned")).toHaveLength(7);
+    expect(fr.nextPlannableSlot(facility.id)!.index).not.toBe(1);
   });
 
-  it("s8: destroyed furnace → slot reused", () => {
+  it("s8: destroyed furnace → missing → replan → reuse slot", () => {
     const facility = createZone({ x: 100, y: 64, z: 200 }, 2);
     const slot0 = facility.slots[0]!;
-    fr.markOccupied(facility, slot0, "ws-1");
+    fr.reserveSlot(facility.id, 0, BOT_A);
+    fr.markSlotOccupied(facility.id, 0, "ws-1");
     wsReg.register(SERVER, DIM, "furnace", slot0.worldPosition);
     wsReg.invalidate(SERVER, DIM, slot0.worldPosition);
-    fr.markSlotAvailable(facility, slot0.worldPosition);
-    expect(slot0.status).toBe("available");
+    fr.markSlotMissing(facility.id, 0, "invalidated");
+    expect(slot0.status).toBe("missing");
+    expect(fr.replanSlot(facility.id, 0)).toBe(true);
+    expect(slot0.status).toBe("planned");
   });
 
   it("s9: reservation TTL expiry", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-29T12:00:00Z"));
     const facility = createZone({ x: 100, y: 64, z: 200 }, 1);
-    const slot = fr.nextAvailableSlot(facility)!;
-    fr.reserveSlot(facility, slot, BOT_A, 5_000);
+    const slot = fr.nextPlannableSlot(facility.id)!;
+    fr.reserveSlot(facility.id, slot.index, BOT_A, 5_000);
     vi.advanceTimersByTime(6_000);
-    expect(fr.nextAvailableSlot(facility)!.status).toBe("available");
+    expect(fr.expireReservations(facility.id)).toBe(1);
+    expect(fr.nextPlannableSlot(facility.id)!.status).toBe("planned");
     vi.useRealTimers();
   });
 

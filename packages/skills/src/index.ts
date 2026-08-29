@@ -517,13 +517,18 @@ export {
 // ---------------------------------------------------------------------------
 export {
   FacilityRegistry,
+  TRANSITIONS,
+  canTransition,
+  facilityId,
   smeltingLinePattern,
   smeltingWallGridPattern,
   toWorldPosition,
   transformOffset,
   type Facility,
   type FacilityRegistryOptions,
+  type FacilityRegistryPort,
   type FacilitySlot,
+  type FacilitySlotStatus,
   type FacilityType,
   type Orientation,
   type PatternSlot,
