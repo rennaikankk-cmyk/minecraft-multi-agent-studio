@@ -229,7 +229,12 @@ export class WorldStateStore {
     let best: NearbyBlockState | null = null;
     let bestDistance = Number.POSITIVE_INFINITY;
     for (const block of this.blocks.values()) {
-      if (block.name !== name || block.position.dimension !== origin.dimension || (options.dimension && block.position.dimension !== options.dimension)) continue;
+      // P0-B10: serverProfileId + dimension 是不可省略的复合过滤键——
+      // 跨服的方块坐标拿来当前服导航是致命错误。
+      if (block.name !== name) continue;
+      if (block.position.serverProfileId !== origin.serverProfileId) continue;
+      if (block.position.dimension !== origin.dimension) continue;
+      if (options.dimension && block.position.dimension !== options.dimension) continue;
       if (options.reachableOnly && block.reachable !== true) continue;
       const distance = Math.hypot(block.position.x - origin.x, block.position.y - origin.y, block.position.z - origin.z);
       if (options.maxDistance !== undefined && distance > options.maxDistance) continue;
