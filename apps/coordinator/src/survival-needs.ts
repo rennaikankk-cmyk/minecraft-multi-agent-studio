@@ -18,31 +18,10 @@
 import type { BotRegistryRecord } from "./bot-registry.js";
 
 /** 安全食物名册（与 runtime L0 的 safeFoodItems 口径对齐：能吃的、无副作用的）。 */
-export const SAFE_FOOD_ITEM_NAMES: ReadonlySet<string> = new Set([
-  "bread",
-  "apple",
-  "golden_apple",
-  "cooked_beef",
-  "cooked_porkchop",
-  "cooked_chicken",
-  "cooked_mutton",
-  "cooked_rabbit",
-  "cooked_cod",
-  "cooked_salmon",
-  "baked_potato",
-  "beef",
-  "porkchop",
-  "mutton",
-  "rabbit",
-  "cod",
-  "salmon",
-  "carrot",
-  "potato",
-  "melon_slice",
-  "sweet_berries",
-  // 与 runtime L0 的应急口粮口径一致：腐肉有饥饿 debuff 但不掉血，
-  // 饿死面前算安全食物（排序/进食选择自然把它放在最后）。
-]);
+import { SAFE_FOOD_ITEMS as CATALOG_SAFE_FOOD } from "@minecraft-studio/skills";
+
+/** @deprecated 使用 @minecraft-studio/skills 的 SAFE_FOOD_ITEMS（唯一定义点）。 */
+export const SAFE_FOOD_ITEM_NAMES: ReadonlySet<string> = CATALOG_SAFE_FOOD;
 
 export type SurvivalNeedKey =
   | "FOOD_SECURITY"
@@ -147,6 +126,7 @@ const DEATH_RECOVERY_WINDOW_MS = 15 * 60_000;
 /** 距死点多近算"已到达"（掉落物碰撞拾取半径外扩）。 */
 const DEATH_RECOVERY_ARRIVAL_BLOCKS = 6;
 
+import { PICKAXE_BY_TIER } from "@minecraft-studio/skills";
 const PICKAXE_TIERS = ["wooden_pickaxe", "stone_pickaxe", "iron_pickaxe", "diamond_pickaxe"] as const;
 const TOOL_SOURCE_BLOCKS = ["oak_log", "stone", "iron_ore", "diamond_ore"] as const;
 

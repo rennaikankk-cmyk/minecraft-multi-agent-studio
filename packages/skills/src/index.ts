@@ -54,7 +54,6 @@ export {
 } from "./builtin/travel-route.js";
 export {
   ARMOR_SCORE,
-  ARMOR_SLOTS,
   armorEquipCapabilityInputSchema,
   armorEquipCapabilityOutputSchema,
   armorScore,
@@ -66,7 +65,6 @@ export {
   equipArmorOutputSchema,
   equipArmorSkill,
   equipArmorStateSchema,
-  type ArmorSlot,
 } from "./builtin/equip-armor.js";
 export {
   COLLECT_BLOCK_TIMEOUT_MS,
@@ -242,7 +240,6 @@ export {
   type ResourceInput,
   type ResourceRecipe,
   type ResourceStation,
-  type ToolTier,
 } from "./planning/resource-graph.js";
 export {
   GoalPlanner,
@@ -458,3 +455,27 @@ export {
   mineVeinCapabilityInputSchema,
   mineVeinCapabilityOutputSchema,
 } from "./planning/mine-planner.js";
+
+// ---------------------------------------------------------------------------
+// Bot State Catalog —— 跨层共享的 Bot 状态语义（唯一定义点）
+// ---------------------------------------------------------------------------
+export {
+  ALL_EDIBLE_ITEMS,
+  BOT_ARMOR_SLOTS,
+  ARMOR_SLOT_BY_ITEM,
+  DIAMOND_ARMOR_BY_SLOT,
+  EMERGENCY_FOOD_ITEMS,
+  highestPickaxeTier,
+  IRON_ARMOR_BY_SLOT,
+  LOG_BY_PLANKS,
+  PICKAXE_BY_TIER,
+  PLANKS_BY_LOG,
+  SAFE_FOOD_ITEMS,
+  totalWoodUnits,
+  TOOL_TIERS,
+  TOOL_TIER_BY_PICKAXE,
+  WOOD_LOG_ITEMS,
+  type BotArmorSlot,
+  type ToolTier,
+  type WoodLogItem,
+} from "./bot-state-catalog.js";

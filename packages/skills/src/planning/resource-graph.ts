@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { WOOD_LOG_ITEMS } from "../bot-state-catalog.js";
 
 // ---------------------------------------------------------------------------
 // ResourceGraph —— 目标 → 资源依赖的知识库。
@@ -126,9 +127,25 @@ const need = (itemName: string, count: number): ResourceInput => ({ itemName, co
  * 原版 1.21 的最小闭包配方表：空手 → 钻石装备全链路可从这张表推出。
  * 每条都是纯数据，规划器不认识"钻石装备"这个概念。
  */
+// ---- 木材族（数据驱动——从 bot-state-catalog 的 WOOD_LOG_ITEMS 生成全部配方）----
+const woodFamilyRecipes: ResourceRecipe[] = [];
+for (const log of WOOD_LOG_ITEMS) {
+  const planks = log.replace("_log", "_planks");
+  woodFamilyRecipes.push(
+    recipe({ itemName: log, kind: "mine", sourceBlock: log }),
+    recipe({ itemName: planks, kind: "craft", yield: 4, inputs: [need(log, 1)] }),
+  );
+}
+// stick/crafting_table 使用 oak_planks（Graph 单产出约束下的规范选择）。
+// TODO: Graph 支持多配方产出同一物品后，改为任意木板可合成。
+woodFamilyRecipes.push(
+  recipe({ itemName: "stick", kind: "craft", yield: 4, inputs: [need("oak_planks", 2)] }),
+  recipe({ itemName: "crafting_table", kind: "craft", inputs: [need("oak_planks", 4)] }),
+);
+
 export const vanillaResourceRecipes: readonly ResourceRecipe[] = Object.freeze([
+  ...woodFamilyRecipes,
   // ---- 采集源（不消耗任何东西，只需要档位） ----
-  recipe({ itemName: "oak_log", kind: "mine", sourceBlock: "oak_log" }),
   recipe({ itemName: "dirt", kind: "mine", sourceBlock: "dirt" }),
   recipe({ itemName: "cobblestone", kind: "mine", sourceBlock: "stone", toolTier: "wooden" }),
   recipe({ itemName: "coal", kind: "mine", sourceBlock: "coal_ore", toolTier: "wooden" }),
@@ -146,13 +163,6 @@ export const vanillaResourceRecipes: readonly ResourceRecipe[] = Object.freeze([
   }),
 
   // ---- 基础加工 ----
-  recipe({ itemName: "oak_planks", kind: "craft", yield: 4, inputs: [need("oak_log", 1)] }),
-  recipe({ itemName: "stick", kind: "craft", yield: 4, inputs: [need("oak_planks", 2)] }),
-  recipe({
-    itemName: "crafting_table",
-    kind: "craft",
-    inputs: [need("oak_planks", 4)],
-  }),
   recipe({
     itemName: "furnace",
     kind: "craft",
