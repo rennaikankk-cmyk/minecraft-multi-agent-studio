@@ -18,7 +18,7 @@
 import type { BotRegistryRecord } from "./bot-registry.js";
 
 /** 安全食物名册（与 runtime L0 的 safeFoodItems 口径对齐：能吃的、无副作用的）。 */
-import { SAFE_FOOD_ITEMS as CATALOG_SAFE_FOOD } from "@minecraft-studio/skills";
+import { SAFE_FOOD_ITEMS as CATALOG_SAFE_FOOD, totalWoodUnits } from "@minecraft-studio/skills";
 
 /** @deprecated 使用 @minecraft-studio/skills 的 SAFE_FOOD_ITEMS（唯一定义点）。 */
 export const SAFE_FOOD_ITEM_NAMES: ReadonlySet<string> = CATALOG_SAFE_FOOD;
@@ -140,7 +140,9 @@ export function assessSurvivalNeeds(
 
   const safeFood = countSafeFood(inventory);
   const foodLevel = status?.food.level ?? 20;
-  const woodUnits = (inventory.get("oak_log")?.count ?? 0) + Math.floor((inventory.get("oak_planks")?.count ?? 0) / 4);
+  const woodUnits = totalWoodUnits(new Map(
+    [...inventoryMap(status?.inventory).entries()].map(([k, v]) => [k, v.count] as const)
+  ));
 
   // ---- 食物安全：曲线而非开关。饿着肚子时储备不足急剧升权；饱腹时
   // 只做"顺手补到 12"的低权维护，不挡工具进度。

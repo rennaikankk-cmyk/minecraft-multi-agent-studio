@@ -42,6 +42,7 @@ import {
   travelRouteCapabilityInputSchema,
   tradeVillagerCapabilityInputSchema,
   tradeVillagerCapabilityOutputSchema,
+  ALL_EDIBLE_ITEMS,
   scanBlocksCapabilityInputSchema,
   scanBlocksCapabilityOutputSchema,
   secureFoodCapabilityInputSchema,
@@ -187,33 +188,8 @@ const ARMOR_ITEM_SLOT: Readonly<Record<string, "head" | "torso" | "legs" | "feet
     }),
   );
 
-const SAFE_FOOD_NAMES = new Set([
-  "apple",
-  "baked_potato",
-  "beef",
-  "beetroot",
-  "beetroot_soup",
-  "bread",
-  "carrot",
-  "cooked_beef",
-  "cooked_chicken",
-  "cooked_cod",
-  "cooked_mutton",
-  "cooked_porkchop",
-  "cooked_rabbit",
-  "cooked_salmon",
-  "dried_kelp",
-  "glow_berries",
-  "melon_slice",
-  "mutton",
-  "mushroom_stew",
-  "porkchop",
-  "pumpkin_pie",
-  "rabbit",
-  "rabbit_stew",
-  "salmon",
-  "sweet_berries",
-]);
+// P0-A5: 统一从 bot-state-catalog 消费（与 coordinator 的 survival-needs 同源）。
+const SAFE_FOOD_NAMES = ALL_EDIBLE_ITEMS;
 
 type MineflayerBlock = NonNullable<
   Awaited<ReturnType<Bot["blockAt"]>>

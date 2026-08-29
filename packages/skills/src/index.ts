@@ -479,3 +479,28 @@ export {
   type ToolTier,
   type WoodLogItem,
 } from "./bot-state-catalog.js";
+
+// ---------------------------------------------------------------------------
+// Skill SDK —— 统一的 Skill 开发框架
+// ---------------------------------------------------------------------------
+export {
+  ActionResult,
+  ActionStatus,
+  ActionError,
+  createSkillSDK,
+  DEFAULT_RECOVERY_POLICY,
+  ObservationSnapshot,
+  recoveryActionFor,
+  SkillSDK,
+  VerificationResult,
+  type RecoveryPolicy,
+} from "./sdk.js";
+
+// ---------------------------------------------------------------------------
+// Workstation Registry
+// ---------------------------------------------------------------------------
+export {
+  WorkstationRegistry,
+  type WorkstationEntry,
+  type WorkstationRegistryOptions,
+} from "./workstation-registry.js";

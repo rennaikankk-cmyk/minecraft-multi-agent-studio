@@ -34,7 +34,7 @@ export const SAFE_FOOD_ITEMS: ReadonlySet<string> = new Set([
  */
 export const EMERGENCY_FOOD_ITEMS: ReadonlySet<string> = new Set([
   "rotten_flesh",
-  "raw_beef",
+  "beef", // Minecraft 生牛肉的 registry 名就是 "beef"，不是 "raw_beef"
   "porkchop",
   "chicken",
   "mutton",

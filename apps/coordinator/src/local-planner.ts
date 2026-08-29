@@ -693,6 +693,13 @@ function placementSupportReason(advertised: ReadonlySet<string>): string | null 
 const PLANNED_ITEM_GOAL_ALIASES: Readonly<Record<string, readonly string[]>> =
   Object.freeze({
     oak_log: Object.freeze(["oak log", "oak_log", "橡木原木", "原木", "木头"]),
+    birch_log: Object.freeze(["birch log", "birch_log", "白桦原木"]),
+    spruce_log: Object.freeze(["spruce log", "spruce_log", "云杉原木"]),
+    jungle_log: Object.freeze(["jungle log", "jungle_log", "丛林原木"]),
+    acacia_log: Object.freeze(["acacia log", "acacia_log", "金合欢原木"]),
+    dark_oak_log: Object.freeze(["dark oak log", "dark_oak_log", "深色橡木原木"]),
+    mangrove_log: Object.freeze(["mangrove log", "mangrove_log", "红树林原木"]),
+    cherry_log: Object.freeze(["cherry log", "cherry_log", "樱花原木"]),
     dirt: Object.freeze(["dirt", "泥土"]),
     oak_planks: Object.freeze([
       "oak planks",
@@ -700,6 +707,13 @@ const PLANNED_ITEM_GOAL_ALIASES: Readonly<Record<string, readonly string[]>> =
       "橡木木板",
       "木板",
     ]),
+    birch_planks: Object.freeze(["birch_planks", "birch planks", "白桦木板"]),
+    spruce_planks: Object.freeze(["spruce_planks", "spruce planks", "云杉木板"]),
+    jungle_planks: Object.freeze(["jungle_planks", "jungle planks", "丛林木板"]),
+    acacia_planks: Object.freeze(["acacia_planks", "acacia planks", "金合欢木板"]),
+    dark_oak_planks: Object.freeze(["dark_oak_planks", "dark oak planks", "深色橡木木板"]),
+    mangrove_planks: Object.freeze(["mangrove_planks", "mangrove planks", "红树林木板"]),
+    cherry_planks: Object.freeze(["cherry_planks", "cherry planks", "樱花木板"]),
     stick: Object.freeze(["stick", "sticks", "木棍", "木棒"]),
     crafting_table: Object.freeze([
       "crafting table",
