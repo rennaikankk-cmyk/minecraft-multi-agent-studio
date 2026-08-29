@@ -556,3 +556,19 @@ export {
   type SharedStateResponse,
   type SharedStateSnapshot,
 } from "./shared-state.js";
+export {
+  STARTER_BASE_V1_ID,
+  STARTER_BASE_V1_VERSION,
+  BaseRegistry,
+  baseId,
+  reconcileBlueprint,
+  resolveMaterials,
+  starterBaseV1,
+  type BaseCellReservation,
+  type BaseRecord,
+  type BaseRegistryOptions,
+  type BaseStatus,
+  type ReconcileResult,
+  type ReconciledCell,
+  type StarterBaseParams,
+} from "./base-registry.js";
