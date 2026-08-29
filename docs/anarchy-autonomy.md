@@ -68,7 +68,14 @@ pnpm bot:start
    （4 选 1 白名单策略 + 白名单替代品；劫持也无法越权）。
 3. 未来：多 Bot 战略分工（同约束菜单模式）。
 
-## 5. 已知未完成
+## 5. NoHunger
+
+Bot Runtime 默认启用 `adaptive` NoHunger：先使用最高强度，观察到与改写
+相关的反作弊告警、位置纠正或踢出后逐级降档；最终退回原版发包时，现有
+L0 进食和 `food.secure` 仍继续工作。配置、状态机、研究依据和现实边界见
+[NoHunger 设计与运行说明](./no-hunger.md)。
+
+## 6. 已知未完成
 
 - 正版账号（online-mode）认证：profile 仍是 `auth: "offline"`。多数无政府服
   要求正版——需要账号凭据流（凭据只进环境变量/私密文件，绝不入 profile）。

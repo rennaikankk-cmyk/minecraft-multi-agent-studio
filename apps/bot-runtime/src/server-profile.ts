@@ -4,6 +4,7 @@ import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 
+import { serverProfileNoHungerConfigSchema } from "./no-hunger.js";
 import { isMineflayerTestedVersion } from "./version-compatibility.js";
 
 const MAX_PROFILE_BYTES = 64 * 1024;
@@ -200,6 +201,8 @@ export const serverProfileSchema = z
      * 下划线）读取，找不到即拒绝启动——不静默降级成离线模式。
      */
     auth: z.enum(["offline", "online"]),
+    /** 缺省即启用 adaptive NoHunger；可由单服 profile 显式关闭。 */
+    noHunger: serverProfileNoHungerConfigSchema.optional(),
     combat: serverProfileCombatConfigSchema.optional(),
     /** 导航档位；缺省 safe。anarchy purpose 建议配 anarchy（也可手动选 safe）。 */
     navigation: serverProfileNavigationSchema.optional(),
