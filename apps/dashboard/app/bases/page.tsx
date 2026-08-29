@@ -1,0 +1,18 @@
+import type { Metadata } from "next";
+
+import { BasesConsole } from "@/components/shared-state-console";
+
+export const metadata: Metadata = { title: "基地 · Minecraft Multi-Agent Studio" };
+
+export default function BasesPage() {
+  return (
+    <main className="shell">
+      <header className="pageHeader">
+        <p className="eyebrow">CONTROL PLANE · BASES</p>
+        <h2>基地 / 蓝图 / 设施</h2>
+        <p>来自 Coordinator 共享状态快照：Base 生命周期、蓝图 2D 网格（按 Y 层）、Facility slot 状态机。未启用共享状态时如实提示，不显示假基地。</p>
+      </header>
+      <BasesConsole />
+    </main>
+  );
+}

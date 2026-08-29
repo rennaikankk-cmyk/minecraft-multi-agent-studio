@@ -1166,3 +1166,74 @@ html:not([data-theme]) .botOverviewStrip h3 {
   [data-theme="pixel"] .roleGrid { grid-template-columns: 1fr 1fr; }
   [data-theme="pixel"] .botMetricGrid { grid-template-columns: 1fr 1fr; }
 }
+
+/* ===== Control Center additions: badges / metrics / blueprint grid ===== */
+.badge { display:inline-flex; align-items:center; gap:4px; padding:1px 8px; border-radius:4px;
+  font-size:11px; font-weight:600; letter-spacing:.04em; border:1px solid transparent; white-space:nowrap; }
+.badge-ok { color:var(--ok, #3fb950); border-color:currentColor; background:color-mix(in srgb, var(--ok, #3fb950) 12%, transparent); }
+.badge-warn { color:var(--warn, #d29922); border-color:currentColor; background:color-mix(in srgb, var(--warn, #d29922) 12%, transparent); }
+.badge-bad { color:var(--bad, #f85149); border-color:currentColor; background:color-mix(in srgb, var(--bad, #f85149) 12%, transparent); }
+.badge-muted { color:var(--muted, #8b949e); border-color:currentColor; background:transparent; }
+.badge-info { color:var(--info, #58a6ff); border-color:currentColor; background:color-mix(in srgb, var(--info, #58a6ff) 12%, transparent); }
+
+.metricRow { display:flex; flex-wrap:wrap; gap:12px; }
+.metricCard { display:flex; flex-direction:column; gap:2px; min-width:120px; padding:10px 14px;
+  border:1px solid var(--border, #30363d); border-radius:8px; background:var(--panel, #0d1117); }
+.metricLabel { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted, #8b949e); }
+.metricValue { font-size:22px; font-weight:700; }
+.metric-ok .metricValue { color:var(--ok, #3fb950); }
+.metric-bad .metricValue { color:var(--bad, #f85149); }
+.metric-info .metricValue { color:var(--info, #58a6ff); }
+.metricSub { font-size:11px; color:var(--muted, #8b949e); }
+
+.stateBox { display:flex; align-items:center; gap:10px; padding:18px; border:1px dashed var(--border, #30363d); border-radius:8px; color:var(--muted, #8b949e); }
+.stateBox.empty { border-style:solid; flex-direction:column; text-align:center; }
+.stateBox.error { border-color:var(--bad, #f85149); color:inherit; flex-direction:column; }
+.spinner { width:14px; height:14px; border:2px solid var(--muted, #8b949e); border-top-color:transparent; border-radius:50%; animation:spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.stack { display:flex; flex-direction:column; gap:16px; }
+.panel { border:1px solid var(--border, #30363d); border-radius:8px; padding:14px 16px; background:var(--panel, #0d1117); }
+.subPanel { border:1px solid var(--border, #30363d); border-radius:6px; padding:10px 12px; margin-top:10px; }
+.panelHeader { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:8px; }
+.panelHeader h3 { margin:0; font-size:15px; }
+.formRow { display:flex; flex-wrap:wrap; gap:10px; align-items:end; }
+.formRow label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted, #8b949e); }
+.formRow input { padding:6px 8px; border:1px solid var(--border, #30363d); border-radius:4px; background:var(--bg, #010409); color:inherit; min-width:110px; }
+button.danger { color:var(--bad, #f85149); }
+.muted { color:var(--muted, #8b949e); }
+.errorText { color:var(--bad, #f85149); }
+.hint { font-size:12px; color:var(--muted, #8b949e); margin:6px 0; }
+
+.tableScroll { overflow-x:auto; }
+.dataTable { border-collapse:collapse; width:100%; font-size:13px; }
+.dataTable th, .dataTable td { text-align:left; padding:6px 10px; border-bottom:1px solid var(--border, #30363d); }
+.dataTable th { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted, #8b949e); }
+
+.blueprintView { display:flex; flex-direction:column; gap:10px; }
+.levelSwitch { display:flex; gap:6px; }
+.levelSwitch button { padding:4px 12px; border:1px solid var(--border, #30363d); border-radius:4px; background:transparent; color:inherit; cursor:pointer; }
+.levelSwitch button.active { border-color:var(--info, #58a6ff); color:var(--info, #58a6ff); }
+.blueprintTable { border-collapse:collapse; }
+.gridAxis { font-size:10px; color:var(--muted, #8b949e); padding:2px 6px; text-align:right; }
+.gridCell { width:52px; height:52px; border:1px solid var(--border, #30363d); border-radius:4px;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1px;
+  font-size:9px; padding:0; cursor:pointer; background:transparent; color:inherit; }
+.gridCell.void { background:transparent; opacity:.25; border-style:dotted; cursor:default; }
+.cell-ok { background:color-mix(in srgb, var(--ok, #3fb950) 22%, transparent); }
+.cell-warn { background:color-mix(in srgb, var(--warn, #d29922) 22%, transparent); }
+.cell-bad { background:color-mix(in srgb, var(--bad, #f85149) 22%, transparent); }
+.cell-info { background:color-mix(in srgb, var(--info, #58a6ff) 22%, transparent); }
+.cell-muted { background:color-mix(in srgb, var(--muted, #8b949e) 14%, transparent); }
+.cellName { font-size:8px; opacity:.8; }
+
+.facilityStrip { display:flex; flex-direction:column; gap:6px; }
+.slotRow { display:flex; gap:4px; flex-wrap:wrap; }
+.slotCell { width:34px; height:34px; border:1px solid var(--border, #30363d); border-radius:4px;
+  font-weight:700; cursor:pointer; background:transparent; color:inherit; }
+
+.cellDetail { display:grid; grid-template-columns:repeat(auto-fit, minmax(160px, 1fr)); gap:8px 16px;
+  border:1px solid var(--border, #30363d); border-radius:6px; padding:10px 12px; margin:0; }
+.cellDetail dt { font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted, #8b949e); }
+.cellDetail dd { margin:0; font-size:13px; }
+.cellDetailClose { display:flex; align-items:end; }

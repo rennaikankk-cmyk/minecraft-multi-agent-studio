@@ -7,7 +7,10 @@ import { ThemeSwitcher } from "@/components/theme-switcher";
 
 const links = [
   { href: "/", label: "总览" },
+  { href: "/servers", label: "服务器" },
   { href: "/bots", label: "机器人" },
+  { href: "/bases", label: "基地" },
+  { href: "/shared-state", label: "共享状态" },
   { href: "/tasks", label: "任务" },
   { href: "/combat", label: "作战" },
 ] as const;
