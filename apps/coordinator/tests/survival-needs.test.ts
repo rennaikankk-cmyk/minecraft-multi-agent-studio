@@ -18,7 +18,7 @@ describe("assessSurvivalNeeds", () => {
     const needs = assess({ inventory: [], foodLevel: 12 });
     expect(needs[0]).toMatchObject({
       key: "FOOD_SECURITY",
-      operatorGoal: "获取 12 份安全食物",
+      operatorGoal: "获取安全食物到总量 12 份",
     });
   });
 
@@ -39,18 +39,19 @@ describe("assessSurvivalNeeds", () => {
       foodLevel: 20,
     });
     expect(needs.find((need) => need.key === "FOOD_SECURITY")).toMatchObject({
-      operatorGoal: "获取 5 份安全食物",
+      operatorGoal: "获取安全食物到总量 12 份",
       score: 34,
     });
   });
 
-  it("counts rotten flesh as emergency safe food", () => {
-    // 无规则立场：腐肉只有饥饿 debuff 不掉血，饿死面前算安全食物。
+  it("treats rotten flesh as NOT safe food reserve (P0-A5)", () => {
+    // 腐肉有饥饿 debuff，不是长期安全储备——必须触发食物需求
     const needs = assess({
       inventory: [{ itemName: "rotten_flesh", count: 32 }],
       foodLevel: 20,
     });
-    expect(needs.find((need) => need.key === "FOOD_SECURITY")).toBeUndefined();
+    const food = needs.find((need) => need.key === "FOOD_SECURITY");
+    expect(food).toBeDefined();
   });
 
   it("counts planks toward the wood reserve at a quarter rate", () => {

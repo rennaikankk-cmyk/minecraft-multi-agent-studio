@@ -42,7 +42,6 @@ export const SAFE_FOOD_ITEM_NAMES: ReadonlySet<string> = new Set([
   "sweet_berries",
   // 与 runtime L0 的应急口粮口径一致：腐肉有饥饿 debuff 但不掉血，
   // 饿死面前算安全食物（排序/进食选择自然把它放在最后）。
-  "rotten_flesh",
 ]);
 
 export type SurvivalNeedKey =
@@ -93,6 +92,8 @@ export type SurvivalAssessmentInput = Readonly<{
    * 只加不减、加权后钳到 95：重心改变"先做什么"，改不掉硬性生存需求。
    */
   focusBoosts?: Readonly<Record<string, number>> | undefined;
+  /** 可注入时钟（P0-A8）：不传则用 Date。一次读取贯穿整个评估。 */
+  now?: Date;
 }>;
 
 /**
@@ -146,10 +147,6 @@ const DEATH_RECOVERY_WINDOW_MS = 15 * 60_000;
 /** 距死点多近算"已到达"（掉落物碰撞拾取半径外扩）。 */
 const DEATH_RECOVERY_ARRIVAL_BLOCKS = 6;
 
-function validNow(): Date {
-  return new Date();
-}
-
 const PICKAXE_TIERS = ["wooden_pickaxe", "stone_pickaxe", "iron_pickaxe", "diamond_pickaxe"] as const;
 const TOOL_SOURCE_BLOCKS = ["oak_log", "stone", "iron_ore", "diamond_ore"] as const;
 
@@ -158,6 +155,7 @@ export function assessSurvivalNeeds(
 ): readonly SurvivalNeed[] {
   const status = input.record.currentStatus;
   const inventory = inventoryMap(status?.inventory);
+  const now = input.now ?? new Date();
   const needs: SurvivalNeed[] = [];
 
   const safeFood = countSafeFood(inventory);
@@ -167,11 +165,11 @@ export function assessSurvivalNeeds(
   // ---- 食物安全：曲线而非开关。饿着肚子时储备不足急剧升权；饱腹时
   // 只做"顺手补到 12"的低权维护，不挡工具进度。
   if (safeFood < FOOD_EMERGENCY) {
-    needs.push(foodNeed(Math.min(FOOD_TARGET, FOOD_TARGET - safeFood), foodLevel < 16 ? 92 : 62, safeFood, "emergency"));
+    needs.push(foodNeed(FOOD_TARGET, foodLevel < 16 ? 92 : 62, safeFood, "emergency"));
   } else if (safeFood < FOOD_MINIMUM) {
-    needs.push(foodNeed(FOOD_TARGET - safeFood, foodLevel < 16 ? 78 : 52, safeFood, "minimum"));
+    needs.push(foodNeed(FOOD_TARGET, foodLevel < 16 ? 78 : 52, safeFood, "minimum"));
   } else if (safeFood < FOOD_TARGET) {
-    needs.push(foodNeed(FOOD_TARGET - safeFood, 34, safeFood, "target"));
+    needs.push(foodNeed(FOOD_TARGET, 34, safeFood, "target"));
   }
 
   // ---- 死亡点回收：装备掉在原地，走过去就自动拾取（MC 的掉落物靠
@@ -183,20 +181,23 @@ export function assessSurvivalNeeds(
     !(input.recoveredDeaths ?? []).includes(lastDeath.diedAt)
   ) {
     const deathAgeMs = Date.parse(lastDeath.diedAt);
-    const distance = Math.hypot(
+    // P0-A7: 跨维度不导航——下界坐标拿到主世界走是致命错误
+    const sameDimension = status.position.dimension === lastDeath.dimension;
+    const distance = sameDimension ? Math.hypot(
       status.position.x - lastDeath.x,
       status.position.y - lastDeath.y,
       status.position.z - lastDeath.z,
-    );
+    ) : Infinity;
     if (
+      sameDimension &&
       Number.isFinite(deathAgeMs) &&
-      validNow().getTime() - deathAgeMs <= DEATH_RECOVERY_WINDOW_MS &&
+      now.getTime() - deathAgeMs <= DEATH_RECOVERY_WINDOW_MS &&
       distance > DEATH_RECOVERY_ARRIVAL_BLOCKS
     ) {
       needs.push({
         key: "DEATH_RECOVERY",
         score: 85,
-        reason: `gear dropped ${Math.round(distance)} blocks away ${Math.round((validNow().getTime() - deathAgeMs) / 60_000)}min ago`,
+        reason: `gear dropped ${Math.round(distance)} blocks away ${Math.round((now.getTime() - deathAgeMs) / 60_000)}min ago`,
         title: "回收死亡掉落",
         operatorGoal: `移动到坐标 x=${lastDeath.x} y=${lastDeath.y} z=${lastDeath.z} 附近，回收死亡掉落物`,
         sourceBlock: null,
@@ -206,7 +207,13 @@ export function assessSurvivalNeeds(
 
   // ---- 工具阶梯：Goal Graph 的主干。每档只看"有没有"，链路（木/石/铁）
   // 由确定性 GoalPlanner 倒推，这里不重复描述依赖。
-  const pickaxeTier = PICKAXE_TIERS.findIndex((name) => (inventory.get(name)?.count ?? 0) > 0);
+  // P0-A1: 从最高档往下找——同时有木镐和铁镐时，当前档位是铁，不是木。
+  const pickaxeTier = (() => {
+    for (let i = PICKAXE_TIERS.length - 1; i >= 0; i -= 1) {
+      if ((inventory.get(PICKAXE_TIERS[i]!)?.count ?? 0) > 0) return i;
+    }
+    return -1;
+  })();
   if (pickaxeTier < 0) {
     needs.push(itemNeed("TOOL_PROGRESSION", 75, "wooden_pickaxe", "no pickaxe at all", 1, "oak_log"));
   } else if (pickaxeTier < PICKAXE_TIERS.length - 1) {
@@ -259,9 +266,17 @@ export function assessSurvivalNeeds(
   }
 
   // ---- 武器：石器时代之后必须有；铁器时代升铁剑。
-  if (pickaxeTier >= 1 && (inventory.get("stone_sword")?.count ?? 0) === 0 && (inventory.get("iron_sword")?.count ?? 0) === 0 && (inventory.get("diamond_sword")?.count ?? 0) === 0) {
+  // P0-A1: 剑也用最高可用档
+  const bestSwordTier = (() => {
+    if ((inventory.get("diamond_sword")?.count ?? 0) > 0) return 3;
+    if ((inventory.get("iron_sword")?.count ?? 0) > 0) return 2;
+    if ((inventory.get("stone_sword")?.count ?? 0) > 0) return 1;
+    if ((inventory.get("wooden_sword")?.count ?? 0) > 0) return 0;
+    return -1;
+  })();
+  if (pickaxeTier >= 1 && bestSwordTier < 1) {
     needs.push(itemNeed("WEAPON", 50, "stone_sword", "no sword for defense and hunting", 1, "stone"));
-  } else if (pickaxeTier >= 2 && (inventory.get("iron_sword")?.count ?? 0) === 0 && (inventory.get("diamond_sword")?.count ?? 0) === 0) {
+  } else if (pickaxeTier >= 2 && bestSwordTier < 2) {
     needs.push(itemNeed("WEAPON", 44, "iron_sword", "iron age reached but sword is below tier", 1, "iron_ore"));
   }
 
@@ -282,16 +297,17 @@ export function assessSurvivalNeeds(
 
   // ---- 铁甲：armorPoints 只告诉"穿了没"，不告诉穿了什么；逐件补齐。
   // 只有在一件甲都没有时才走合成链——有甲先穿，缺件再补。
-  if (pickaxeTier >= 2 && armorPoints === 0 && ownedArmorPieces.length === 0) {
-    const missing = firstMissing([
-      "iron_helmet",
-      "iron_chestplate",
-      "iron_leggings",
-      "iron_boots",
-    ], inventory);
-    if (missing !== null) {
-      needs.push(itemNeed("ARMOR", 40, missing, "armor points 0 with iron age reached", 1, "iron_ore"));
-    }
+  // P0-A3: 只在背包中没有可穿护甲时才合成新的（有的话先 EQUIP_ARMOR）。
+  // armorPoints < 15 (full iron = 2+6+5+2) 表示没穿满。
+  if (pickaxeTier >= 2 && armorPoints < 15 && ownedArmorPieces.length === 0) {
+    // P0-A3: armorPoints < 15 (full iron = 2+6+5+2) 表示没穿满。
+    // 协议没有逐槽信息，用 armorPoints 推断下一个缺失件：
+    // <2=盔, <8=胸, <13=腿, <15=靴。
+    const nextPiece = armorPoints < 2 ? "iron_helmet"
+      : armorPoints < 8 ? "iron_chestplate"
+      : armorPoints < 13 ? "iron_leggings"
+      : "iron_boots";
+    needs.push(itemNeed("ARMOR", 40, nextPiece, `armor points ${armorPoints} < 15, filling slots`, 1, "iron_ore"));
   }
 
   // ---- 铁储备：铁器时代的持续本钱（工具链自己会要铁，这里补余量）。
@@ -327,8 +343,8 @@ export function assessSurvivalNeeds(
 
   // ---- 钻石推进：铁镐之后的下一个台阶，先攒镐+剑的本钱再谈甲。
   const diamonds = inventory.get("diamond")?.count ?? 0;
-  if (pickaxeTier === 2) {
-    needs.push(itemNeed("DIAMOND_PROGRESSION", 48, "diamond", `diamond reserve ${diamonds} < ${DIAMOND_PICKAXE_RESERVE} for a diamond pickaxe`, deficitCount(DIAMOND_PICKAXE_RESERVE, diamonds), "diamond_ore"));
+  if (pickaxeTier === 2 && diamonds < DIAMOND_PICKAXE_RESERVE) {
+    needs.push(itemNeed("DIAMOND_PROGRESSION", 48, "diamond", `diamond reserve ${diamonds} < ${DIAMOND_PICKAXE_RESERVE} for a diamond pickaxe`, DIAMOND_PICKAXE_RESERVE - diamonds, "diamond_ore"));
   }
   if (pickaxeTier >= 3) {
     const missingDiamondArmor = firstMissing([
@@ -392,7 +408,7 @@ function foodNeed(count: number, score: number, safeFood: number, tier: string):
     score,
     reason: `safe food ${safeFood} below ${tier} threshold`,
     title: "补充安全食物储备",
-    operatorGoal: `获取 ${count} 份安全食物`,
+    operatorGoal: `获取安全食物到总量 ${count} 份`,
     sourceBlock: null,
   };
 }

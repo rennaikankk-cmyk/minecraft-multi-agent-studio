@@ -117,7 +117,7 @@ describe("AutonomousDirector", () => {
     // Empty food reserve at food<=16 is the emergency branch (92) and must
     // outrank the wooden pickaxe (75).
     expect(planAndDispatch.mock.calls[0]?.[0].operatorGoal).toBe(
-      "获取 12 份安全食物",
+      "获取安全食物到总量 12 份",
     );
   });
 
