@@ -30,6 +30,7 @@ import {
   loadControlLinkConfig,
 } from "./control-link-config.js";
 import { ControlLinkServer } from "./control-link-server.js";
+import { SharedStateServer, loadSharedStateConfig } from "./shared-state-server.js";
 import {
   RuntimeLinkConfigError,
   loadRuntimeLinkConfig,
@@ -64,6 +65,7 @@ const logger = createStructuredLogger({ service: "coordinator", instanceId });
 async function main(): Promise<void> {
   const runtimeConfig = loadRuntimeLinkConfig();
   const controlConfig = loadControlLinkConfig();
+  const sharedStateConfig = loadSharedStateConfig();
   const localAIConfig = loadLocalAIConfig();
   const autonomousConfig = loadAutonomousConfig();
   const goalPersistenceConfig = loadGoalPersistenceConfig();
@@ -139,6 +141,7 @@ async function main(): Promise<void> {
   let taskQueue: BullMqTaskQueue | null = null;
   let outboxReconciler: TaskOutboxReconciler | null = null;
   let goalExecutionServer: CoordinatorGoalExecutionServer | null = null;
+  let sharedStateServer: SharedStateServer | null = null;
   let autonomousDirector: AutonomousDirector | null = null;
   if (localAIConfig.enabled && localAIConfig.baseUrl && localAIConfig.model) {
     aiRouter = new AIRouter();
@@ -333,6 +336,19 @@ async function main(): Promise<void> {
     await taskPool?.verifyConnection();
     await taskQueue?.verifyConnection();
     await goalExecutionServer?.start();
+    if (sharedStateConfig) {
+      sharedStateServer = new SharedStateServer({
+        host: sharedStateConfig.host,
+        port: sharedStateConfig.port,
+        ...(sharedStateConfig.token ? { token: sharedStateConfig.token } : {}),
+        logger,
+      });
+      const sharedStateAddress = await sharedStateServer.start();
+      logger.info("coordinator_shared_state_started", {
+        host: sharedStateAddress.host,
+        port: sharedStateAddress.port,
+      });
+    }
     const runtimeAddress = await runtimeServer.start();
     const controlAddress = await controlServer.start();
     autonomousDirector?.start();
@@ -383,7 +399,7 @@ async function main(): Promise<void> {
   } catch (cause) {
     if (staleTimer) clearInterval(staleTimer);
     if (autonomousDirector) await Promise.allSettled([autonomousDirector.stop()]);
-    await Promise.allSettled([controlServer.stop(), runtimeServer.stop()]);
+    await Promise.allSettled([controlServer.stop(), runtimeServer.stop(), sharedStateServer?.stop() ?? Promise.resolve()]);
     if (goalExecutionServer) {
       try {
         await goalExecutionServer.stop();
@@ -411,7 +427,7 @@ async function main(): Promise<void> {
     // Stop accepting new control/runtime work before draining durable delivery
     // and closing PostgreSQL. Existing leases are then recovered or handed off
     // by the bounded controllers without a new request racing shutdown.
-    await Promise.allSettled([controlServer.stop(), runtimeServer.stop()]);
+    await Promise.allSettled([controlServer.stop(), runtimeServer.stop(), sharedStateServer?.stop() ?? Promise.resolve()]);
     if (goalExecutionServer) {
       try {
         await goalExecutionServer.stop();

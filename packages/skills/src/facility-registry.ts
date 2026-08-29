@@ -522,7 +522,7 @@ export class FacilityRegistry implements FacilityRegistryPort {
 
   // -- 快照（Phase 5/6：跨进程 / 持久化） -----------------------------------
 
-  serialize(): unknown {
+  serialize(): { facilities: Facility[] } {
     return { facilities: [...this.facilities.values()] };
   }
 
@@ -534,6 +534,17 @@ export class FacilityRegistry implements FacilityRegistryPort {
       reg.facilities.set(facility.id, facility);
     }
     return reg;
+  }
+
+  /** 合并快照：同 id 以 incoming 为准（服务端恢复用）。 */
+  absorb(other: { serialize(): { facilities: Facility[] } }): number {
+    let merged = 0;
+    for (const facility of other.serialize().facilities) {
+      if (!facility || typeof facility.id !== "string" || !Array.isArray(facility.slots)) continue;
+      this.facilities.set(facility.id, facility);
+      merged += 1;
+    }
+    return merged;
   }
 
   // -- 内部：可变字段访问（slots 是浅 readonly，集中在此处理） ---------------

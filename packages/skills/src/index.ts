@@ -540,3 +540,19 @@ export {
   type CapacityPlannerInput,
   type WorkstationCreationPolicy,
 } from "./capacity-planner.js";
+export {
+  SharedStateClient,
+  SharedStateError,
+  captureSharedStateSnapshot,
+  createSharedStateDispatcher,
+  dispatchSharedState,
+  restoreSharedStateSnapshot,
+  type Maybe,
+  type MaybeAsyncFacilityRegistryPort,
+  type MaybeAsyncWorkstationRegistryPort,
+  type SharedStateClientOptions,
+  type SharedStateHandler,
+  type SharedStateRequest,
+  type SharedStateResponse,
+  type SharedStateSnapshot,
+} from "./shared-state.js";

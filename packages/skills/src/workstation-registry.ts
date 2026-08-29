@@ -108,12 +108,6 @@ export interface WorkstationRegistryPort {
   clearServer(serverProfileId: string): void;
 }
 
-export interface WorkstationRegistryOptions_ {
-  readonly entryTtlMs?: number;
-  readonly leaseTtlMs?: number;
-  readonly maxEntries?: number;
-}
-
 export class InMemoryWorkstationRegistry implements WorkstationRegistryPort {
   private readonly entries = new Map<string, WorkstationEntry>();
   private readonly entryTtlMs: number;
@@ -215,6 +209,32 @@ export class InMemoryWorkstationRegistry implements WorkstationRegistryPort {
   }
 
   get size(): number { return this.entries.size; }
+
+  /** 快照（Phase 5/6：跨进程 / 持久化）。 */
+  serialize(): { entries: WorkstationEntry[] } {
+    return { entries: [...this.entries.values()] };
+  }
+
+  static restore(snapshot: { entries?: WorkstationEntry[] }, options: WorkstationRegistryOptions = {}): InMemoryWorkstationRegistry {
+    const reg = new InMemoryWorkstationRegistry(options);
+    for (const entry of snapshot?.entries ?? []) {
+      if (!entry || typeof entry !== "object" || typeof entry.serverProfileId !== "string") continue;
+      reg.entries.set(posKey(entry.serverProfileId, entry.dimension, entry.position), entry);
+    }
+    return reg;
+  }
+
+  /** 合并快照：同 key 以 incoming 为准（服务端恢复用）。 */
+  absorb(other: { serialize(): { entries: WorkstationEntry[] } }): number {
+    let merged = 0;
+    for (const entry of other.serialize().entries) {
+      if (!entry || typeof entry !== "object" || typeof entry.serverProfileId !== "string") continue;
+      this.entries.set(posKey(entry.serverProfileId, entry.dimension, entry.position), entry);
+      merged += 1;
+    }
+    this.evictIfNeeded();
+    return merged;
+  }
 
   private evictIfNeeded(): void {
     if (this.entries.size <= this.maxEntries) return;
