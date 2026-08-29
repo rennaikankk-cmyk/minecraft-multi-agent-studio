@@ -120,6 +120,7 @@ export function createSharedStateDispatcher(
         layoutVersion: str(a, "layoutVersion"),
         patternSlots: (a.patternSlots as PatternSlot[] | undefined) ?? [],
         ...(a.discovery === undefined ? {} : { discovery: str(a, "discovery") as "planned" | "observed_existing" }),
+        ...(a.baseId === undefined ? {} : { baseId: str(a, "baseId") }),
       }),
     "fac.get": (a) => facilities.get(str(a, "facilityId")),
     "fac.findCandidates": (a) =>
@@ -127,13 +128,24 @@ export function createSharedStateDispatcher(
         str(a, "serverProfileId"), str(a, "dimension"),
         str(a, "facilityType") as FacilityType, pos(a, "reference"),
       ),
+    "fac.findByBase": (a) => facilities.findByBase(str(a, "baseId")),
     "fac.nextPlannableSlot": (a) => facilities.nextPlannableSlot(str(a, "facilityId")),
     "fac.reserveSlot": (a) =>
       facilities.reserveSlot(str(a, "facilityId"), int(a, "slotIndex"), str(a, "botId"), optNum(a, "ttlMs")),
     "fac.releaseReservation": (a) =>
-      facilities.releaseReservation(str(a, "facilityId"), int(a, "slotIndex"), str(a, "reason")),
+      facilities.releaseReservation(
+        str(a, "facilityId"), int(a, "slotIndex"), str(a, "reason"),
+        a.botId === undefined ? undefined : str(a, "botId"),
+      ),
+    "fac.renewSlotReservation": (a) =>
+      facilities.renewSlotReservation(str(a, "facilityId"), int(a, "slotIndex"), str(a, "botId"), optNum(a, "ttlMs")),
     "fac.markSlotOccupied": (a) =>
-      facilities.markSlotOccupied(str(a, "facilityId"), int(a, "slotIndex"), str(a, "workstationEntryKey")),
+      facilities.markSlotOccupied(
+        str(a, "facilityId"), int(a, "slotIndex"), str(a, "workstationEntryKey"),
+        a.reservationOwner === undefined ? undefined : { reservationOwner: str(a, "reservationOwner") },
+      ),
+    "fac.markPlacementFailed": (a) =>
+      facilities.markPlacementFailed(str(a, "facilityId"), int(a, "slotIndex"), str(a, "reason"), str(a, "botId")),
     "fac.markSlotMissing": (a) =>
       facilities.markSlotMissing(str(a, "facilityId"), int(a, "slotIndex"), str(a, "reason")),
     "fac.markSlotTemporarilyBlocked": (a) =>
@@ -217,13 +229,17 @@ export interface MaybeAsyncFacilityRegistryPort {
     layoutVersion: string;
     patternSlots: readonly PatternSlot[];
     discovery?: "planned" | "observed_existing";
+    baseId?: string;
   }>): Maybe<Facility>;
   get(facilityId: string): Maybe<Facility | null>;
   findCandidates(serverProfileId: string, dimension: string, facilityType: FacilityType, reference: BlockPosition): Maybe<readonly Facility[]>;
+  findByBase(baseId: string): Maybe<readonly Facility[]>;
   nextPlannableSlot(facilityId: string): Maybe<FacilitySlot | null>;
   reserveSlot(facilityId: string, slotIndex: number, botId: string, ttlMs?: number): Maybe<boolean>;
-  releaseReservation(facilityId: string, slotIndex: number, reason: string): Maybe<boolean>;
-  markSlotOccupied(facilityId: string, slotIndex: number, workstationEntryKey: string): Maybe<boolean>;
+  releaseReservation(facilityId: string, slotIndex: number, reason: string, botId?: string): Maybe<boolean>;
+  renewSlotReservation(facilityId: string, slotIndex: number, botId: string, ttlMs?: number): Maybe<boolean>;
+  markSlotOccupied(facilityId: string, slotIndex: number, workstationEntryKey: string, opts?: Readonly<{ reservationOwner?: string }>): Maybe<boolean>;
+  markPlacementFailed(facilityId: string, slotIndex: number, reason: string, botId: string): Maybe<boolean>;
   markSlotMissing(facilityId: string, slotIndex: number, reason: string): Maybe<boolean>;
   markSlotTemporarilyBlocked(facilityId: string, slotIndex: number, reason: string): Maybe<boolean>;
   markSlotInvalid(facilityId: string, slotIndex: number, reason: string): Maybe<boolean>;
@@ -296,14 +312,20 @@ export class SharedStateClient {
       get: (facilityId) => this.#rpc("fac.get", { facilityId }) as Promise<Facility | null>,
       findCandidates: (serverProfileId, dimension, facilityType, reference) =>
         this.#rpc("fac.findCandidates", { serverProfileId, dimension, facilityType, reference }) as Promise<readonly Facility[]>,
+      findByBase: (baseId) =>
+        this.#rpc("fac.findByBase", { baseId }) as Promise<readonly Facility[]>,
       nextPlannableSlot: (facilityId) =>
         this.#rpc("fac.nextPlannableSlot", { facilityId }) as Promise<FacilitySlot | null>,
       reserveSlot: (facilityId, slotIndex, botId, ttlMs) =>
         this.#rpc("fac.reserveSlot", { facilityId, slotIndex, botId, ttlMs }) as Promise<boolean>,
-      releaseReservation: (facilityId, slotIndex, reason) =>
-        this.#rpc("fac.releaseReservation", { facilityId, slotIndex, reason }) as Promise<boolean>,
-      markSlotOccupied: (facilityId, slotIndex, workstationEntryKey) =>
-        this.#rpc("fac.markSlotOccupied", { facilityId, slotIndex, workstationEntryKey }) as Promise<boolean>,
+      releaseReservation: (facilityId, slotIndex, reason, botId) =>
+        this.#rpc("fac.releaseReservation", { facilityId, slotIndex, reason, botId }) as Promise<boolean>,
+      renewSlotReservation: (facilityId, slotIndex, botId, ttlMs) =>
+        this.#rpc("fac.renewSlotReservation", { facilityId, slotIndex, botId, ttlMs }) as Promise<boolean>,
+      markSlotOccupied: (facilityId, slotIndex, workstationEntryKey, opts) =>
+        this.#rpc("fac.markSlotOccupied", { facilityId, slotIndex, workstationEntryKey, reservationOwner: opts?.reservationOwner }) as Promise<boolean>,
+      markPlacementFailed: (facilityId, slotIndex, reason, botId) =>
+        this.#rpc("fac.markPlacementFailed", { facilityId, slotIndex, reason, botId }) as Promise<boolean>,
       markSlotMissing: (facilityId, slotIndex, reason) =>
         this.#rpc("fac.markSlotMissing", { facilityId, slotIndex, reason }) as Promise<boolean>,
       markSlotTemporarilyBlocked: (facilityId, slotIndex, reason) =>
@@ -417,11 +439,20 @@ export class SharedStateClient {
   reserveSlot(facilityId: string, slotIndex: number, botId: string, ttlMs?: number) {
     return this.#rpc("fac.reserveSlot", { facilityId, slotIndex, botId, ttlMs }) as Promise<boolean>;
   }
-  releaseReservation(facilityId: string, slotIndex: number, reason: string) {
-    return this.#rpc("fac.releaseReservation", { facilityId, slotIndex, reason }) as Promise<boolean>;
+  releaseReservation(facilityId: string, slotIndex: number, reason: string, botId?: string) {
+    return this.#rpc("fac.releaseReservation", { facilityId, slotIndex, reason, botId }) as Promise<boolean>;
   }
-  markSlotOccupied(facilityId: string, slotIndex: number, workstationEntryKey: string) {
-    return this.#rpc("fac.markSlotOccupied", { facilityId, slotIndex, workstationEntryKey }) as Promise<boolean>;
+  renewSlotReservation(facilityId: string, slotIndex: number, botId: string, ttlMs?: number) {
+    return this.#rpc("fac.renewSlotReservation", { facilityId, slotIndex, botId, ttlMs }) as Promise<boolean>;
+  }
+  markSlotOccupied(facilityId: string, slotIndex: number, workstationEntryKey: string, opts?: { reservationOwner?: string }) {
+    return this.#rpc("fac.markSlotOccupied", { facilityId, slotIndex, workstationEntryKey, reservationOwner: opts?.reservationOwner }) as Promise<boolean>;
+  }
+  markPlacementFailed(facilityId: string, slotIndex: number, reason: string, botId: string) {
+    return this.#rpc("fac.markPlacementFailed", { facilityId, slotIndex, reason, botId }) as Promise<boolean>;
+  }
+  findByBase(baseId: string) {
+    return this.#rpc("fac.findByBase", { baseId }) as Promise<readonly Facility[]>;
   }
   markSlotMissing(facilityId: string, slotIndex: number, reason: string) {
     return this.#rpc("fac.markSlotMissing", { facilityId, slotIndex, reason }) as Promise<boolean>;

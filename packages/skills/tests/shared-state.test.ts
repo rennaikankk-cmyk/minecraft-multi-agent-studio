@@ -154,6 +154,24 @@ describe("SharedStateClient facility lifecycle (remote)", () => {
     const f = await client.getFacility(facility.id);
     expect(f?.slots[0]!.status).toBe("occupied");
   });
+
+  it("owner-safety holds across the wire: B cannot release/renew/complete A's reservation", async () => {
+    const fr = new FacilityRegistry();
+    const client = makeClient(createSharedStateDispatcher(new InMemoryWorkstationRegistry(), fr));
+    const facility = await client.create({
+      facilityType: "smelting_zone", serverProfileId: SERVER, dimension: DIM,
+      anchor: { x: 0, y: 64, z: 0 }, orientation: "north",
+      layoutVersion: "v1", patternSlots: smeltingLinePattern(2),
+    });
+    await client.reserveSlot(facility.id, 0, BOT_A);
+    expect(await client.releaseReservation(facility.id, 0, "b_mistake", BOT_B)).toBe(false);
+    expect(await client.renewSlotReservation(facility.id, 0, BOT_B)).toBe(false);
+    expect(await client.markSlotOccupied(facility.id, 0, "ws-stolen", { reservationOwner: BOT_B })).toBe(false);
+    expect(await client.markPlacementFailed(facility.id, 0, "not_owner", BOT_B)).toBe(false);
+    const f = await client.getFacility(facility.id);
+    expect(f?.slots[0]!.reservedBy).toBe(BOT_A);
+    expect(await client.markSlotOccupied(facility.id, 0, "ws-1", { reservationOwner: BOT_A })).toBe(true);
+  });
 });
 
 describe("snapshot capture/restore", () => {

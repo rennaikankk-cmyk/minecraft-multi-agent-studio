@@ -18,7 +18,7 @@
 //   6. 时钟可注入（options.now），测试与 coordinator 共享时钟。
 // ---------------------------------------------------------------------------
 
-import type { BlockPosition } from "./workstation-registry.js";
+import type { BlockPosition, WorkstationType } from "./workstation-registry.js";
 import { normalizeBlockPos } from "./workstation-registry.js";
 
 // ---------------------------------------------------------------------------
@@ -65,9 +65,11 @@ export function canTransition(from: FacilitySlotStatus, to: FacilitySlotStatus):
 
 export interface FacilitySlot {
   readonly index: number;
+  /** 稳定 slot 标识 `${facilityId}#${index}`——不依赖数组位置。 */
+  readonly slotId: string;
   readonly localOffset: { x: number; y: number; z: number };
   readonly worldPosition: BlockPosition;
-  readonly workstationType: string;
+  readonly workstationType: WorkstationType;
   status: FacilitySlotStatus;
   reservedBy: string | null;
   reservedUntilMs: number | null;
@@ -76,6 +78,10 @@ export interface FacilitySlot {
   lastVerifiedAtMs: number | null;
   /** 进入当前状态的原因（missing/blocked/invalid 必填，其余可空）。 */
   statusReason: string | null;
+  /** 累计施工失败次数（成功 occupied 时清零）。 */
+  failureCount: number;
+  /** 最后一次施工失败时间（退避计算用）。 */
+  lastFailureAtMs: number | null;
 }
 
 export interface Facility {
@@ -90,6 +96,8 @@ export interface Facility {
   readonly layoutVersion: string;
   /** planned：全新规划；observed_existing：从世界上发现并登记。 */
   readonly discovery: "planned" | "observed_existing";
+  /** 所属 Base（可空；Base→Facility→Workstation 层级，不靠距离猜）。 */
+  readonly baseId: string | null;
   createdAt: string;
   lastObservedAt: string;
   confidence: number;
@@ -133,7 +141,7 @@ export type PatternLayoutName = "line_v1" | "wall_grid_v1";
 
 export interface PatternSlot {
   readonly localOffset: { x: number; y: number; z: number };
-  readonly workstationType: string;
+  readonly workstationType: WorkstationType;
 }
 
 /**
@@ -211,6 +219,8 @@ export interface FacilityRegistryPort {
     patternSlots: readonly PatternSlot[];
     /** observed_existing：发现的既有设施（slot 初始 unknown）。默认 planned。 */
     discovery?: "planned" | "observed_existing";
+    /** 所属 Base（Base→Facility→Workstation 层级绑定）。 */
+    baseId?: string;
   }>): Facility;
   get(facilityId: string): Facility | null;
   /** 同 server+dimension+type 的全部 facility，按与 reference 的距离升序。 */
@@ -220,15 +230,27 @@ export interface FacilityRegistryPort {
     facilityType: FacilityType,
     reference: BlockPosition,
   ): readonly Facility[];
+  /** 查询绑定到某 Base 的全部 facility。 */
+  findByBase(baseId: string): readonly Facility[];
   /** 纯读：第一个 planned 状态 slot（不做过期释放）。 */
   nextPlannableSlot(facilityId: string): FacilitySlot | null;
   reserveSlot(facilityId: string, slotIndex: number, botId: string, ttlMs?: number): boolean;
-  releaseReservation(facilityId: string, slotIndex: number, reason: string): boolean;
-  markSlotOccupied(facilityId: string, slotIndex: number, workstationEntryKey: string): boolean;
+  /** owner-safe：botId 提供时必须匹配 reservedBy，否则拒绝。 */
+  releaseReservation(facilityId: string, slotIndex: number, reason: string, botId?: string): boolean;
+  /** owner-safe 续约：仅 reservation 持有者可延长 TTL。 */
+  renewSlotReservation(facilityId: string, slotIndex: number, botId: string, ttlMs?: number): boolean;
+  markSlotOccupied(
+    facilityId: string,
+    slotIndex: number,
+    workstationEntryKey: string,
+    opts?: Readonly<{ reservationOwner?: string }>,
+  ): boolean;
+  /** 施工失败：placement_reserved → temporarily_blocked，累计 failureCount。 */
+  markPlacementFailed(facilityId: string, slotIndex: number, reason: string, botId: string): boolean;
   markSlotMissing(facilityId: string, slotIndex: number, reason: string): boolean;
   markSlotTemporarilyBlocked(facilityId: string, slotIndex: number, reason: string): boolean;
   markSlotInvalid(facilityId: string, slotIndex: number, reason: string): boolean;
-  /** missing/temporarily_blocked → planned（显式重新规划）。 */
+  /** missing/temporarily_blocked → planned（显式重新规划；退避期内拒绝）。 */
   replanSlot(facilityId: string, slotIndex: number): boolean;
   /** 观测驱动更新（unknown/occupied 的现实同步）。 */
   observeSlot(
@@ -257,6 +279,18 @@ interface MutableSlotFields {
   workstationEntryKey: string | null;
   lastVerifiedAtMs: number | null;
   statusReason: string | null;
+  failureCount: number;
+  lastFailureAtMs: number | null;
+}
+
+/** 施工失败退避基数：10s * 2^(failureCount-1)，封顶 5 分钟。 */
+export const PLACEMENT_BACKOFF_BASE_MS = 10_000;
+export const PLACEMENT_BACKOFF_MAX_MS = 300_000;
+
+export function placementBackoffMs(failureCount: number): number {
+  if (failureCount <= 0) return 0;
+  const ms = PLACEMENT_BACKOFF_BASE_MS * 2 ** (failureCount - 1);
+  return Math.min(PLACEMENT_BACKOFF_MAX_MS, ms);
 }
 
 export class FacilityRegistry implements FacilityRegistryPort {
@@ -269,7 +303,8 @@ export class FacilityRegistry implements FacilityRegistryPort {
     this.now = options.now ?? (() => Date.now());
   }
 
-  /** 创建（或幂等返回）facility。同一身份重复 create 返回已有实例。 */
+  /** 创建（或幂等返回）facility。同一身份重复 create 返回已有实例。
+   *  超出 maxFacilitiesPerServer（scope = server+dimension）时抛错——绝不静默超限。 */
   create(params: Readonly<{
     facilityType: FacilityType;
     serverProfileId: string;
@@ -279,15 +314,29 @@ export class FacilityRegistry implements FacilityRegistryPort {
     layoutVersion: string;
     patternSlots: readonly PatternSlot[];
     discovery?: "planned" | "observed_existing";
+    baseId?: string;
   }>): Facility {
     const id = facilityId(params.serverProfileId, params.dimension, params.facilityType, params.anchor);
     const existing = this.facilities.get(id);
     if (existing) return existing;
 
+    let sameScope = 0;
+    for (const facility of this.facilities.values()) {
+      if (facility.serverProfileId === params.serverProfileId && facility.dimension === params.dimension) {
+        sameScope += 1;
+      }
+    }
+    if (sameScope >= this.maxPerServer) {
+      throw new Error(
+        `maxFacilitiesPerServer exceeded for ${params.serverProfileId}|${params.dimension} (limit ${this.maxPerServer})`,
+      );
+    }
+
     const discovery = params.discovery ?? "planned";
     const initialStatus: FacilitySlotStatus = discovery === "observed_existing" ? "unknown" : "planned";
     const slots: FacilitySlot[] = params.patternSlots.map((ps, index) => ({
       index,
+      slotId: `${id}#${index}`,
       localOffset: ps.localOffset,
       worldPosition: toWorldPosition(params.anchor, ps.localOffset, params.orientation),
       workstationType: ps.workstationType,
@@ -297,6 +346,8 @@ export class FacilityRegistry implements FacilityRegistryPort {
       workstationEntryKey: null,
       lastVerifiedAtMs: null,
       statusReason: null,
+      failureCount: 0,
+      lastFailureAtMs: null,
     }));
     const facility: Facility = {
       id,
@@ -307,6 +358,7 @@ export class FacilityRegistry implements FacilityRegistryPort {
       orientation: params.orientation,
       layoutVersion: params.layoutVersion,
       discovery,
+      baseId: params.baseId ?? null,
       createdAt: new Date(this.now()).toISOString(),
       lastObservedAt: new Date(this.now()).toISOString(),
       confidence: discovery === "observed_existing" ? 0.7 : 1,
@@ -344,6 +396,14 @@ export class FacilityRegistry implements FacilityRegistryPort {
     return matches.map((m) => m.facility);
   }
 
+  findByBase(baseId: string): readonly Facility[] {
+    const results: Facility[] = [];
+    for (const facility of this.facilities.values()) {
+      if (facility.baseId === baseId) results.push(facility);
+    }
+    return results;
+  }
+
   nextPlannableSlot(facilityId: string): FacilitySlot | null {
     const facility = this.facilities.get(facilityId);
     if (!facility) return null;
@@ -362,10 +422,12 @@ export class FacilityRegistry implements FacilityRegistryPort {
     return true;
   }
 
-  releaseReservation(facilityId: string, slotIndex: number, reason: string): boolean {
+  releaseReservation(facilityId: string, slotIndex: number, reason: string, botId?: string): boolean {
     const slot = this.mutableSlot(facilityId, slotIndex);
     if (!slot) return false;
     if (!canTransition(slot.fields.status, "planned")) return false;
+    // owner-safe：非持有者不得释放他人的 reservation
+    if (botId !== undefined && slot.fields.reservedBy !== null && slot.fields.reservedBy !== botId) return false;
     slot.fields.status = "planned";
     slot.fields.reservedBy = null;
     slot.fields.reservedUntilMs = null;
@@ -373,16 +435,53 @@ export class FacilityRegistry implements FacilityRegistryPort {
     return true;
   }
 
-  markSlotOccupied(facilityId: string, slotIndex: number, workstationEntryKey: string): boolean {
+  renewSlotReservation(facilityId: string, slotIndex: number, botId: string, ttlMs = 30_000): boolean {
+    const slot = this.mutableSlot(facilityId, slotIndex);
+    if (!slot) return false;
+    if (slot.fields.status !== "placement_reserved") return false;
+    if (slot.fields.reservedBy !== botId) return false;
+    slot.fields.reservedUntilMs = this.now() + ttlMs;
+    return true;
+  }
+
+  markSlotOccupied(
+    facilityId: string,
+    slotIndex: number,
+    workstationEntryKey: string,
+    opts?: Readonly<{ reservationOwner?: string }>,
+  ): boolean {
     const slot = this.mutableSlot(facilityId, slotIndex);
     if (!slot) return false;
     if (!canTransition(slot.fields.status, "occupied")) return false;
+    // owner-safe：指定 reservationOwner 时必须是当前持有者
+    if (opts?.reservationOwner !== undefined) {
+      if (slot.fields.status !== "placement_reserved") return false;
+      if (slot.fields.reservedBy !== opts.reservationOwner) return false;
+    }
     slot.fields.status = "occupied";
     slot.fields.reservedBy = null;
     slot.fields.reservedUntilMs = null;
     slot.fields.workstationEntryKey = workstationEntryKey;
     slot.fields.lastVerifiedAtMs = this.now();
     slot.fields.statusReason = null;
+    slot.fields.failureCount = 0;
+    slot.fields.lastFailureAtMs = null;
+    return true;
+  }
+
+  /** 施工失败：placement_reserved → temporarily_blocked，累计 failureCount。仅预约持有者可上报。 */
+  markPlacementFailed(facilityId: string, slotIndex: number, reason: string, botId: string): boolean {
+    const slot = this.mutableSlot(facilityId, slotIndex);
+    if (!slot) return false;
+    if (slot.fields.status !== "placement_reserved") return false;
+    if (slot.fields.reservedBy !== botId) return false;
+    if (!canTransition(slot.fields.status, "temporarily_blocked")) return false;
+    slot.fields.status = "temporarily_blocked";
+    slot.fields.reservedBy = null;
+    slot.fields.reservedUntilMs = null;
+    slot.fields.failureCount += 1;
+    slot.fields.lastFailureAtMs = this.now();
+    slot.fields.statusReason = reason;
     return true;
   }
 
@@ -425,6 +524,14 @@ export class FacilityRegistry implements FacilityRegistryPort {
     const slot = this.mutableSlot(facilityId, slotIndex);
     if (!slot) return false;
     if (!canTransition(slot.fields.status, "planned")) return false;
+    // 退避期保护：失败后必须等待 10s * 2^(failureCount-1)，防止热循环浪费
+    if (
+      slot.fields.status === "temporarily_blocked" &&
+      slot.fields.lastFailureAtMs !== null
+    ) {
+      const backoffUntil = slot.fields.lastFailureAtMs + placementBackoffMs(slot.fields.failureCount);
+      if (this.now() < backoffUntil) return false;
+    }
     slot.fields.status = "planned";
     slot.fields.statusReason = "replanned";
     return true;
