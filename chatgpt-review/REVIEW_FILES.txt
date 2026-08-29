@@ -1,0 +1,123 @@
+# REVIEW FILES — 供外部 AI 审计的核心源码清单
+
+## 架构核心
+
+apps/coordinator/src/main.ts
+Coordinator 组装入口:注册表/分配/planner/director/control-link 接线。
+
+apps/coordinator/src/local-planner.ts
+最大的单文件(4200行):LLM 规划 + 确定性目标快速路径 + 技能派发 + 恢复阶梯。
+审计重点:确定性决策与 LLM 决策的边界、安全 grounding、任务执行状态机迁移。
+
+apps/coordinator/src/autonomous-director.ts
+自主生存主循环:needs 评估→目标选择→派发→失败恢复→抑制→战略评审→聊天指令。
+
+apps/coordinator/src/survival-needs.ts
+Needs/Utility 评分器:食物曲线/工具阶梯/储备/武器护甲/避难所/钻石/探索。纯函数。
+
+apps/coordinator/src/deterministic-goals.ts
+协调器目标模板→结构化决策的解析器。自主链 0 LLM 的关键。
+
+apps/coordinator/src/replan-oracle.ts
+失败后模型介入:白名单策略菜单+sanitize。模型劫持也无法越权。
+
+apps/coordinator/src/strategy-review.ts
+5分钟周期战略评审:重心加权+立场切换+探索焦点。
+
+apps/coordinator/src/bot-registry.ts
+Bot 状态注册表:心跳/序列号/陈旧扫描/聊天事件分发。
+
+apps/bot-runtime/src/runtime.ts
+Bot 生命周期状态机:L0 安全评估、技能执行、死亡处理、移动租约、战斗反应循环。
+
+apps/bot-runtime/src/mineflayer-client.ts
+5600 行巨石:Mineflayer 能力层(移动/采集/合成/熔炼/容器/装备/交易/觅食/暴击/W-Tap/服务器认证)。
+
+## 战斗系统
+
+apps/bot-runtime/src/combat-driver.ts
+确定性战斗引擎:威胁打分/目标选择/撤退/图腾/武器/弓/暴击策略选择/crystal 评分调用。
+
+apps/bot-runtime/src/combat-mineflayer-adapter.ts
+战斗→Mineflayer 动作:MELEE_ATTACK(暴击+W-Tap)/PLACE_CRYSTAL/DETONATE/movement。
+
+packages/combat/src/critical-engine.ts
+暴击策略选择器:5种策略/物理状态检查/延迟适配/PACKET_CRIT 双包注入。
+
+packages/combat/src/melee-controller.ts
+战斗局部移动:距离带控制帧(100ms)/strafe/追击/后撤。
+
+packages/combat/src/crystal-executor.ts
+水晶执行:黑曜石基座枚举/放置/引爆/anchor burst 公式。
+
+packages/combat/src/wtap-engine.ts
+W-Tap/S-Tap:冲刺重置策略选择+执行。
+
+packages/combat/src/consumables.ts
+盾牌/药水/金苹果决策+执行(未接驱动)。
+
+packages/combat/src/retreat-controller.ts
+撤退决策:血量/人数/装备差/水晶威胁→分级撤退。
+
+packages/combat/src/gear-assessor.ts
+装备评估:比较攻防,unknown 处理(standard=avoid, anarchy=不判)。
+
+packages/combat/src/server-auth.ts
+AuthMe 自动认证:提示检测/命令发送/密码来源链/自动生成。
+
+## Skill 系统
+
+packages/skills/src/builtin/catalog.ts
+23 技能唯一清单(注册/验收/文档共用)。
+
+packages/skills/src/executor.ts
+技能执行器:前置条件/授权/超时/取消/重试/幂等。
+
+packages/skills/src/recovery/plan-supervisor.ts
+恢复阶梯:失败分类→修复步骤插入→有界重试。
+
+packages/skills/src/recovery/failure-classifier.ts
+错误码→类别→恢复动作映射表。
+
+packages/skills/src/planning/resource-graph.ts
+资源依赖图(配方/工具档位/工作站)——自主链 Goal Graph 的数据源。
+
+packages/skills/src/planning/goal-planner.ts
+目标→计划步骤分解(纯确定性)。
+
+packages/skills/src/policy/server-policy.ts
+服务器策略:STRICT/VANILLA/NORMAL/ANARCHY 档位+速率限制。
+
+## AI / LLM
+
+packages/ai-router/src/scheduler.ts
+AIRequestScheduler:优先级/并发/队列/超时/重试/取消/supersede/stale。
+
+packages/ai-router/src/adapters/vllm-adapter.ts
+vLLM OpenAI 兼容适配:结构化输出(z.toJSONSchema→format)。
+
+## 安全 / 基础设施
+
+packages/safety/src/index.ts
+L0 确定性安全:风险检测/决策/动作/冷却/TIDY_DROP_JUNK/EMERGENCY_STOP 语义。
+
+packages/task-system/src/task-fsm.ts
+执行 FSM:PRECHECK→PLAN→EXECUTE→VERIFY→SUCCESS/ABORT。
+
+packages/task-system/src/bullmq-worker.ts
+BullMQ 消费者:5重陈旧防护/租约续期/stalled 恢复。
+
+apps/dashboard/components/bot-map.tsx
+前端实时地图:canvas 轨迹/朝向/脉冲。
+
+apps/dashboard/components/bot-compass.tsx
+视角罗盘+生命/饥饿仪表。
+
+scripts/start-studio.mjs
+桌面启动器:Spark 自动发现→进程接线→环境注入。
+
+scripts/studio-local-manager.mjs
+本地 Bot 管理器:创建/启动/停止/重启/AI 发现。
+
+scripts/build-studio-exe.mjs
+SEA EXE 构建管线。

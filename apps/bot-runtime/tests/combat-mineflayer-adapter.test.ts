@@ -454,6 +454,9 @@ describe("MineflayerCombatAdapter", () => {
 
   it("uses the injected clock for acknowledged primitive actions", async () => {
     const bot = fakeBot();
+    // Put the bot in water so critical strategy = NO_CRIT (no window wait),
+    // isolating this test to clock verification only.
+    (bot.entity as Record<string, unknown>).isInWater = true;
     const adapter = new MineflayerCombatAdapter(bot, SERVER, true);
     adapter.setClock(() => 1_234);
     const action: CombatPrimitiveAction = {
@@ -461,9 +464,8 @@ describe("MineflayerCombatAdapter", () => {
       targetEntityId: 42,
       weaponSlot: 0,
     };
-    await expect(adapter.execute(action, new AbortController().signal)).resolves.toEqual({
-      outcome: "executed",
-      executedAtMs: 1_234,
-    });
+    const result = await adapter.execute(action, new AbortController().signal);
+    expect(result.outcome).toBe("executed");
+    expect(result.executedAtMs).toBe(1_234);
   });
 });

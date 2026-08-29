@@ -674,10 +674,26 @@ export class MineflayerCombatAdapter {
             const windowOpened = await this.waitForCriticalWindow(400);
             releaseCriticalPriming(critBotView);
             if (!windowOpened) {
-              return { outcome: "executed", executedAtMs: this.clock() };
+              // P0-C13: 暴击窗口未打开——不能假报 executed。
+              // 降级为普通攻击（真实攻击 + fallback 标注）。
+              await bot.attack(target);
+              return {
+                outcome: "executed",
+                executedAtMs: this.clock(),
+                ...{ fallback: "CRIT_WINDOW_TIMEOUT" },
+              } as never;
             }
           } else if (critical.strategy === "PACKET_CRIT") {
-            primeCritical(critBotView, "PACKET_CRIT");
+            const primed = primeCritical(critBotView, "PACKET_CRIT");
+            if (!primed) {
+              // PACKET_CRIT 包注入失败——降级为普通攻击
+              await bot.attack(target);
+              return {
+                outcome: "executed",
+                executedAtMs: this.clock(),
+                ...{ fallback: "PACKET_CRIT_PRIME_FAILED" },
+              } as never;
+            }
           }
           // ---- W-Tap（sprint reset）：贴脸 Combo 减少自身被弹开 ----
           const wtap = selectWTapStrategy({
@@ -690,6 +706,8 @@ export class MineflayerCombatAdapter {
             wtap,
           );
           await bot.attack(target);
+          // P0-C14: W-Tap 需要 tick 间隔让 sprint 真正重置——50ms = 1 tick
+          await new Promise((resolve) => setTimeout(resolve, 50));
           restoreWTap();
           releaseCriticalPriming(critBotView);
           return { outcome: "executed", executedAtMs: this.clock() };

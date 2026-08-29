@@ -1,0 +1,80 @@
+# Local AI Bot Guide
+
+Local AI runs through the U9 control plane. Bot Runtime never calls DGX Spark directly and never executes raw model text.
+
+```text
+DGX Spark inference API
+        |
+U9 AI Router + AIRequestScheduler
+        |
+Coordinator / Planner
+        |
+validated skill.invoke.v1
+        |
+authenticated Runtime Link
+        |
+Bot Runtime SkillExecutor
+        |
+Mineflayer capability adapters
+```
+
+## Safety boundary
+
+- The model can propose only structured, versioned skill invocations.
+- Coordinator validates identity, task, bot, expiry, and available skill catalog before dispatch.
+- Runtime Link accepts the strict `skill.invoke.v1` schema after mutual authentication.
+- Bot Runtime validates the selected Skill's exact input schema and derives its capability allow-list from the local registered definition. The model cannot grant capabilities to itself.
+- L0 safety can pause normal work and cancel an active skill at any time.
+- Movement, combat timing, target identity, reconnect and other tick-level behavior stay deterministic and local.
+
+The removed `AI_ENABLED`, `AI_API_URL` and `index-ai.js` path was an unsafe incomplete prototype: it called the model from Bot Runtime and only logged `Would execute skill`. Do not recreate or use that path.
+
+## Configuration
+
+U9 AI settings are server-side only. Put them in `.env` or `.env.local` (the latter
+overrides `.env`); never use a `NEXT_PUBLIC_` variable:
+
+```text
+LOCAL_AI_PROVIDER=vllm
+LOCAL_AI_HUB_URL=
+LOCAL_AI_MODEL=
+AI_MAX_CONCURRENCY=12
+AI_MAX_QUEUE=64
+AI_PER_BOT_CONCURRENCY=1
+AI_REQUEST_TIMEOUT_MS=120000
+```
+
+The desktop launcher probes the approved Spark hosts and ports, reads the model list from the
+service that is actually online, and injects the discovered provider, origin, and model into the
+Coordinator. The currently verified instance is OpenAI-compatible vLLM at
+`http://192.168.100.2:8001` serving `ornith15-heretic`; this is observed state, not a hardcoded
+dependency. If the service is unavailable, the Coordinator reports Local AI as unavailable and
+fails closed. Set all three `LOCAL_AI_PROVIDER`, `LOCAL_AI_HUB_URL`, and `LOCAL_AI_MODEL` values
+only when intentionally pinning an approved endpoint. Do not put credentials, production server
+addresses, player allow-lists or base coordinates in prompts or logs. See
+`docs/LOCAL_AI_PROMPTS.md` for discovery and safe goal examples.
+
+See `docs/AI_SCHEDULER.md` for queue semantics and priority assignments. The full local
+Studio launcher reads `.env` and `.env.local` before starting services:
+
+```bash
+pnpm start:services
+```
+
+When starting individual services with the normal commands below, export the same
+variables in the shell first; service processes do not implicitly read a dotenv file:
+
+```bash
+pnpm coordinator:start
+pnpm bot:start
+```
+
+Both require the existing authenticated Runtime Link configuration. Only an isolated or explicitly approved server profile may be enabled during development.
+
+## Current status
+
+The authenticated SkillInvocation transport, strict protocol validation, deterministic runtime
+execution, Coordinator planner, and authenticated goal ingress are implemented and tested. The
+Dashboard reports the actual Local AI health and still fails closed when Spark, a Bot, or the
+advertised Skill catalog is unavailable; it never claims autonomous operation from simulated
+state.
