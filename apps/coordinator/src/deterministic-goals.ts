@@ -212,9 +212,17 @@ export function parseScanGoal(operatorGoal: string): ParsedScanGoal | null {
  * food.secure 技能，不走 mine/craft/smelt 配方链。
  */
 export function parseFoodGoal(operatorGoal: string): ParsedFoodGoal | null {
-  const match = /获取\s*(\d{1,3})\s*份安全食物/u.exec(operatorGoal);
-  if (match === null) return null;
-  return { kind: "secure-food", targetCount: boundedCount(Number(match[1])) };
+  // P0: 匹配总量语义格式 "获取安全食物到总量 12 份"（survival-needs 产出）
+  const totalMatch = /获取安全食物到总量\s*(\d{1,3})\s*份/u.exec(operatorGoal);
+  if (totalMatch !== null) {
+    return { kind: "secure-food", targetCount: boundedCount(Number(totalMatch[1])) };
+  }
+  // 兼容旧格式 "获取 N 份安全食物"
+  const legacyMatch = /获取\s*(\d{1,3})\s*份安全食物/u.exec(operatorGoal);
+  if (legacyMatch !== null) {
+    return { kind: "secure-food", targetCount: boundedCount(Number(legacyMatch[1])) };
+  }
+  return null;
 }
 
 /**
