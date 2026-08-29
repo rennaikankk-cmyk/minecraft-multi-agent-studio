@@ -1205,6 +1205,7 @@ export class SingleBotRuntime {
           health: snapshot.health,
           food: snapshot.food,
           armorPoints: snapshot.armorPoints,
+          armorSlots: snapshot.armorSlots,
           inventory: snapshot.inventory,
           ...(this.lastDeath ? { lastDeath: this.lastDeath } : {}),
           position: snapshot.position,

@@ -20,6 +20,7 @@ export type BotClientSnapshot = {
   health: { current: number; maximum: number | null };
   food: { level: number; saturation: number };
   armorPoints: number | null;
+  armorSlots: { head: string | null; chest: string | null; legs: string | null; feet: string | null };
   inventory: readonly Readonly<{
     itemName: string;
     count: number;

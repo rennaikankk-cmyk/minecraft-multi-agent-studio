@@ -930,6 +930,16 @@ export const botStatusV1Schema = z
           })
           .strict(),
         armorPoints: z.number().int().min(0).max(20).nullable(),
+        /** 逐槽护甲（装备中的物品名），供 survival-needs 逐槽判断缺失。 */
+        armorSlots: z
+          .object({
+            head: z.string().nullable(),
+            chest: z.string().nullable(),
+            legs: z.string().nullable(),
+            feet: z.string().nullable(),
+          })
+          .strict()
+          .optional(),
         // Authenticated Runtime-to-Coordinator fact used by deterministic goal
         // planning. Public bot projections deliberately omit this field.
         inventory: botInventorySchema.optional(),

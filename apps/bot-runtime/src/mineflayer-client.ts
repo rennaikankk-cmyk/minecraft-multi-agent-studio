@@ -1045,6 +1045,21 @@ function toolDurability(item: {
   return { durability, maxDurability: Math.round(maxDurability) };
 }
 
+function readArmorSlots(bot: Bot): { head: string | null; chest: string | null; legs: string | null; feet: string | null } {
+  try {
+    const destinations = { head: "head", chest: "torso", legs: "legs", feet: "feet" } as const;
+    const result: Record<string, string | null> = {};
+    for (const [slot, destination] of Object.entries(destinations)) {
+      const slotIndex = bot.getEquipmentDestSlot(destination);
+      const item = bot.inventory.slots[slotIndex];
+      result[slot] = item?.name ?? null;
+    }
+    return result as { head: string | null; chest: string | null; legs: string | null; feet: string | null };
+  } catch {
+    return { head: null, chest: null, legs: null, feet: null };
+  }
+}
+
 function readArmorPoints(bot: Bot): number | null {
   try {
     const destinations = ["head", "torso", "legs", "feet"] as const;
@@ -1361,6 +1376,7 @@ export class MineflayerBotClient implements BotClient {
         saturation: this.bot.foodSaturation,
       },
       armorPoints: readArmorPoints(this.bot),
+      armorSlots: readArmorSlots(this.bot),
       inventory: [...inventoryCounts.entries()]
         .sort(([left], [right]) => left.localeCompare(right))
         .map(([itemName, entry]) => ({
