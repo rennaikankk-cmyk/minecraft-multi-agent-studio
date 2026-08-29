@@ -500,7 +500,14 @@ export {
 // Workstation Registry
 // ---------------------------------------------------------------------------
 export {
-  WorkstationRegistry,
+  InMemoryWorkstationRegistry,
+  acquireWorkstation,
   type WorkstationEntry,
   type WorkstationRegistryOptions,
+  type WorkstationAcquireResult,
+  type WorkstationRegistryPort,
+  type WorkstationScanFn,
+  type WorkstationVerifyFn,
+  normalizeBlockPos,
+  usageModeFor,
 } from "./workstation-registry.js";

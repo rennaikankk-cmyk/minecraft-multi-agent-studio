@@ -1,37 +1,160 @@
 // ---------------------------------------------------------------------------
-// WorkstationRegistry —— 工作站发现 / 注册 / 复用 / claim。
+// WorkstationRegistry v1 —— 工作站发现 / 注册 / 复用 / lease / claim。
 //
-// 解决核心问题：bot 周围已有工作台却继续制作新工作台。
-//
-// 设计：
-//   - Registry 按 serverProfileId + dimension 隔离
-//   - 每个 entry 有 lastSeenAt / confidence / lease（可选）
-//   - acquireWorkstation 依次查 registry → local scan → 才允许 craft
-//   - 放置/发现后必须 register
-//   - 被破坏后必须 invalidate
+// 设计决策：
+//   - Port 接口：Skill / planner 依赖接口，不依赖 Map 实现
+//   - lease 结构：lease: { owner, expiresAtMs } | null（消除非法组合）
+//   - usage mode：shared (crafting_table) vs exclusive (furnace)
+//   - block position 归一化：Math.floor 后入 key，禁止浮点坐标
+//   - candidate list：按 distance+confidence+freshness 排序，支持 fallback
+//   - confidence：直接观测=1.0，propagation=0.9，TTL 内随时间衰减
+//   - eviction：先删 stale，再按 lastSeenAt 淘汰最旧直到 maxEntries
+//   - 维度切换不清空：TTL + verify 负责 stale state
+//   - acquireWorkstation：query→verify→claim→fallback→NEED_CREATE
 // ---------------------------------------------------------------------------
 
-export interface WorkstationEntry {
-  readonly type: string;
-  readonly position: { x: number; y: number; z: number };
-  readonly dimension: string;
-  readonly serverProfileId: string;
-  lastSeenAt: number;
-  confidence: number;
-  claimedBy: string | null;
-  claimedUntilMs: number | null;
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export type WorkstationType =
+  | "crafting_table"
+  | "furnace"
+  | "blast_furnace"
+  | "smoker"
+  | "anvil"
+  | "enchanting_table"
+  | "brewing_stand"
+  | "stonecutter"
+  | "smithing_table"
+  | "grindstone"
+  | "chest"
+  | "barrel";
+
+export type WorkstationUsageMode = "shared" | "exclusive";
+
+export type BlockPosition = Readonly<{ x: number; y: number; z: number }>;
+
+export interface WorkstationLease {
+  readonly ownerBotId: string;
+  readonly expiresAtMs: number;
 }
 
+export interface WorkstationEntry {
+  readonly type: WorkstationType;
+  readonly position: BlockPosition;
+  readonly dimension: string;
+  readonly serverProfileId: string;
+  readonly usageMode: WorkstationUsageMode;
+  lastSeenAt: number;
+  confidence: number;
+  lease: WorkstationLease | null;
+}
+
+export type WorkstationAcquireResult =
+  | Readonly<{ status: "acquired"; entry: WorkstationEntry }>
+  | Readonly<{ status: "busy"; retryAfterMs: number }>
+  | Readonly<{ status: "not_found"; mayCreate: true }>
+  | Readonly<{ status: "unreachable" }>;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+export function normalizeBlockPos(p: { x: number; y: number; z: number }): BlockPosition {
+  return { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) };
+}
+
+function posKey(serverProfileId: string, dimension: string, p: BlockPosition): string {
+  return `${serverProfileId}|${dimension}|${p.x}|${p.y}|${p.z}`;
+}
+
+/** Usage mode by workstation type. Furnace-family = stateful/exclusive. */
+const USAGE_MODES: Readonly<Record<WorkstationType, WorkstationUsageMode>> = Object.freeze({
+  crafting_table: "shared",
+  stonecutter: "shared",
+  smithing_table: "shared",
+  anvil: "shared",
+  enchanting_table: "shared",
+  grindstone: "shared",
+  furnace: "exclusive",
+  blast_furnace: "exclusive",
+  smoker: "exclusive",
+  brewing_stand: "exclusive",
+  chest: "exclusive",
+  barrel: "exclusive",
+});
+
+export function usageModeFor(type: WorkstationType): WorkstationUsageMode {
+  return USAGE_MODES[type] ?? "shared";
+}
+
+/** Confidence decays linearly over TTL. Fresh direct observation = 1.0. */
+function decayedConfidence(entry: WorkstationEntry, ttlMs: number, now: number): number {
+  const age = now - entry.lastSeenAt;
+  if (age >= ttlMs) return 0;
+  return entry.confidence * (1 - age / ttlMs);
+}
+
+// ---------------------------------------------------------------------------
+// Port interface — Skills / planner depend on this, not Map
+// ---------------------------------------------------------------------------
+
+export interface WorkstationRegistryPort {
+  register(
+    serverProfileId: string,
+    dimension: string,
+    type: WorkstationType,
+    position: { x: number; y: number; z: number },
+    confidence?: number,
+  ): WorkstationEntry;
+  findCandidates(
+    serverProfileId: string,
+    dimension: string,
+    type: WorkstationType,
+    from: { x: number; y: number; z: number },
+    maxDistance?: number,
+  ): readonly WorkstationEntry[];
+  claim(
+    serverProfileId: string,
+    dimension: string,
+    position: BlockPosition,
+    botId: string,
+    ttlMs?: number,
+  ): boolean;
+  renewClaim(
+    serverProfileId: string,
+    dimension: string,
+    position: BlockPosition,
+    botId: string,
+    ttlMs?: number,
+  ): boolean;
+  release(
+    serverProfileId: string,
+    dimension: string,
+    position: BlockPosition,
+    botId: string,
+  ): void;
+  invalidate(
+    serverProfileId: string,
+    dimension: string,
+    position: BlockPosition,
+  ): void;
+  releaseAllClaims(botId: string): void;
+  clearServer(serverProfileId: string): void;
+}
+
+// ---------------------------------------------------------------------------
+// In-memory implementation
+// ---------------------------------------------------------------------------
+
 export interface WorkstationRegistryOptions {
-  /** Entry 过期时间（ms）。超时后不可信任，需要重新验证。默认 5 分钟。 */
   readonly entryTtlMs?: number;
-  /** Lease 默认持续时间（ms）。默认 30 秒。 */
   readonly leaseTtlMs?: number;
-  /** 最大 entries 数量（防无界增长）。默认 512。 */
   readonly maxEntries?: number;
 }
 
-export class WorkstationRegistry {
+export class InMemoryWorkstationRegistry implements WorkstationRegistryPort {
   private readonly entries = new Map<string, WorkstationEntry>();
   private readonly entryTtlMs: number;
   private readonly leaseTtlMs: number;
@@ -43,151 +166,281 @@ export class WorkstationRegistry {
     this.maxEntries = options.maxEntries ?? 512;
   }
 
-  private key(
-    serverProfileId: string,
-    dimension: string,
-    x: number,
-    y: number,
-    z: number,
-  ): string {
-    return `${serverProfileId}|${dimension}|${x}|${y}|${z}`;
-  }
-
-  /** 注册或更新一个工作站观测。 */
   register(
     serverProfileId: string,
     dimension: string,
-    type: string,
+    type: WorkstationType,
     position: { x: number; y: number; z: number },
-    confidence = 1,
+    confidence = 1.0,
   ): WorkstationEntry {
-    const key = this.key(serverProfileId, dimension, position.x, position.y, position.z);
+    const pos = normalizeBlockPos(position);
+    const key = posKey(serverProfileId, dimension, pos);
+    const now = Date.now();
     const existing = this.entries.get(key);
-    const entry: WorkstationEntry = {
+
+    // 同坐标 type 改变 → replace old observation (语义明确：一个 block 只有一个 type)
+    this.entries.set(key, {
       type,
-      position: { ...position },
+      position: pos,
       dimension,
       serverProfileId,
-      lastSeenAt: Date.now(),
+      usageMode: usageModeFor(type),
+      lastSeenAt: now,
       confidence,
-      claimedBy: existing?.claimedBy ?? null,
-      claimedUntilMs: existing?.claimedUntilMs ?? null,
-    };
-    this.entries.set(key, entry);
-    this.evictStale();
-    return entry;
+      // Preserve existing lease only if same type (type change = invalidates lease)
+      lease: existing && existing.type === type ? existing.lease : null,
+    });
+
+    this.evictIfNeeded();
+    return this.entries.get(key)!;
   }
 
-  /**
-   * 查询最近的可用工作站（同 server + dimension + type，未过期，未被 claim）。
-   */
-  findNearest(
+  findCandidates(
     serverProfileId: string,
     dimension: string,
-    type: string,
-    fromPosition: { x: number; y: number; z: number },
+    type: WorkstationType,
+    from: { x: number; y: number; z: number },
     maxDistance?: number,
-  ): WorkstationEntry | null {
+  ): readonly WorkstationEntry[] {
     const now = Date.now();
-    let best: WorkstationEntry | null = null;
-    let bestDist = maxDistance !== undefined ? maxDistance : Number.POSITIVE_INFINITY;
+    const results: Array<{ entry: WorkstationEntry; sortKey: number }> = [];
+
     for (const entry of this.entries.values()) {
       if (entry.serverProfileId !== serverProfileId) continue;
       if (entry.dimension !== dimension) continue;
       if (entry.type !== type) continue;
-      if (now - entry.lastSeenAt > this.entryTtlMs) continue;
-      if (entry.claimedBy !== null && (entry.claimedUntilMs === null || now < entry.claimedUntilMs)) continue;
+
+      const conf = decayedConfidence(entry, this.entryTtlMs, now);
+      if (conf <= 0) continue; // expired
+
       const dist = Math.hypot(
-        entry.position.x - fromPosition.x,
-        entry.position.y - fromPosition.y,
-        entry.position.z - fromPosition.z,
+        entry.position.x - from.x,
+        entry.position.y - from.y,
+        entry.position.z - from.z,
       );
-      if (dist < bestDist) {
-        best = entry;
-        bestDist = dist;
-      }
+      if (maxDistance !== undefined && dist > maxDistance) continue;
+
+      // Available if unleased or lease expired
+      const available = entry.lease === null || now >= entry.lease.expiresAtMs;
+
+      // Sort by distance (primary), confidence (secondary), freshness (tertiary)
+      const sortKey = dist - conf * 10 + (available ? 0 : 1000);
+      results.push({ entry, sortKey });
     }
-    return best;
+
+    return results
+      .sort((a, b) => a.sortKey - b.sortKey)
+      .map((r) => r.entry);
   }
 
-  /** Claim 一个工作站（独占使用，带 TTL）。 */
   claim(
     serverProfileId: string,
     dimension: string,
-    position: { x: number; y: number; z: number },
+    position: BlockPosition,
     botId: string,
     ttlMs?: number,
   ): boolean {
-    const key = this.key(serverProfileId, dimension, position.x, position.y, position.z);
+    const key = posKey(serverProfileId, dimension, normalizeBlockPos(position));
     const entry = this.entries.get(key);
     if (!entry) return false;
     const now = Date.now();
-    if (entry.claimedBy !== null && entry.claimedBy !== botId) {
-      if (entry.claimedUntilMs !== null && now < entry.claimedUntilMs) return false;
+    if (entry.lease !== null && entry.lease.ownerBotId !== botId && now < entry.lease.expiresAtMs) {
+      return false; // actively claimed by another bot
     }
-    entry.claimedBy = botId;
-    entry.claimedUntilMs = now + (ttlMs ?? this.leaseTtlMs);
+    entry.lease = { ownerBotId: botId, expiresAtMs: now + (ttlMs ?? this.leaseTtlMs) };
+    entry.lastSeenAt = now; // claiming implies we saw it
     return true;
   }
 
-  /** 释放 claim。 */
+  renewClaim(
+    serverProfileId: string,
+    dimension: string,
+    position: BlockPosition,
+    botId: string,
+    ttlMs?: number,
+  ): boolean {
+    const key = posKey(serverProfileId, dimension, normalizeBlockPos(position));
+    const entry = this.entries.get(key);
+    if (!entry || entry.lease === null || entry.lease.ownerBotId !== botId) return false;
+    entry.lease = { ownerBotId: botId, expiresAtMs: Date.now() + (ttlMs ?? this.leaseTtlMs) };
+    return true;
+  }
+
   release(
     serverProfileId: string,
     dimension: string,
-    position: { x: number; y: number; z: number },
+    position: BlockPosition,
     botId: string,
   ): void {
-    const key = this.key(serverProfileId, dimension, position.x, position.y, position.z);
+    const key = posKey(serverProfileId, dimension, normalizeBlockPos(position));
     const entry = this.entries.get(key);
-    if (entry && entry.claimedBy === botId) {
-      entry.claimedBy = null;
-      entry.claimedUntilMs = null;
+    if (entry && entry.lease !== null && entry.lease.ownerBotId === botId) {
+      entry.lease = null;
     }
   }
 
-  /** 标记工作站已被破坏 / 不再存在。 */
   invalidate(
     serverProfileId: string,
     dimension: string,
-    position: { x: number; y: number; z: number },
+    position: BlockPosition,
   ): void {
-    this.entries.delete(
-      this.key(serverProfileId, dimension, position.x, position.y, position.z),
-    );
+    this.entries.delete(posKey(serverProfileId, dimension, normalizeBlockPos(position)));
   }
 
-  /** 清除指定 server + dimension 的全部 entries（维度切换/重连时调用）。 */
-  clearScope(serverProfileId: string, dimension: string): void {
-    for (const key of this.entries.keys()) {
-      if (key.startsWith(`${serverProfileId}|${dimension}|`)) {
-        this.entries.delete(key);
-      }
-    }
-  }
-
-  /** 释放指定 bot 的全部 claims（断线/死亡时调用）。 */
   releaseAllClaims(botId: string): void {
     for (const entry of this.entries.values()) {
-      if (entry.claimedBy === botId) {
-        entry.claimedBy = null;
-        entry.claimedUntilMs = null;
+      if (entry.lease !== null && entry.lease.ownerBotId === botId) {
+        entry.lease = null;
       }
     }
   }
 
-  /** 清理过期 entries，防止无界增长。 */
-  private evictStale(): void {
-    if (this.entries.size <= this.maxEntries) return;
-    const now = Date.now();
-    for (const [key, entry] of this.entries) {
-      if (now - entry.lastSeenAt > this.entryTtlMs * 2) {
+  clearServer(serverProfileId: string): void {
+    for (const key of this.entries.keys()) {
+      if (key.startsWith(`${serverProfileId}|`)) {
         this.entries.delete(key);
       }
     }
   }
 
-  /** 当前 entries 数量（测试/诊断用）。 */
   get size(): number {
     return this.entries.size;
   }
+
+  private evictIfNeeded(): void {
+    if (this.entries.size <= this.maxEntries) return;
+    const now = Date.now();
+
+    // Phase 1: remove truly stale entries (beyond TTL)
+    for (const [key, entry] of this.entries) {
+      if (now - entry.lastSeenAt > this.entryTtlMs) {
+        this.entries.delete(key);
+      }
+    }
+    if (this.entries.size <= this.maxEntries) return;
+
+    // Phase 2: sort by lastSeenAt ascending, evict oldest until under limit
+    const sorted = [...this.entries.entries()]
+      .sort((a, b) => a[1].lastSeenAt - b[1].lastSeenAt);
+    const toRemove = this.entries.size - this.maxEntries;
+    for (let i = 0; i < toRemove && i < sorted.length; i += 1) {
+      this.entries.delete(sorted[i]![0]);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// acquireWorkstation orchestration
+// ---------------------------------------------------------------------------
+
+export type WorkstationVerifyFn = (
+  entry: WorkstationEntry,
+) => Promise<boolean>;
+
+export type WorkstationScanFn = (
+  type: WorkstationType,
+) => Promise<ReadonlyArray<{ position: BlockPosition; type: WorkstationType }>>;
+
+/**
+ * 统一的工作站获取流程。
+ *
+ * 1. query candidates from registry
+ * 2. verify each candidate against server state (caller-provided fn)
+ * 3. attempt claim if usage mode is exclusive
+ * 4. fallback to next candidate
+ * 5. if none valid → caller scans locally → register → re-check
+ * 6. only if still none → return not_found/mayCreate
+ *
+ * @param verifyFn - async block-at-position check (runtime injects this)
+ * @param scanFn - optional local world scan (runtime injects)
+ */
+export async function acquireWorkstation(
+  registry: WorkstationRegistryPort,
+  params: Readonly<{
+    serverProfileId: string;
+    dimension: string;
+    type: WorkstationType;
+    from: { x: number; y: number; z: number };
+    botId: string;
+    maxDistance?: number;
+    exclusive?: boolean;
+    scanFn?: WorkstationScanFn;
+    verifyFn?: WorkstationVerifyFn;
+  }>,
+): Promise<WorkstationAcquireResult> {
+  const { serverProfileId, dimension, type, from, botId } = params;
+
+  // Step 1: query candidates
+  const candidates = registry.findCandidates(
+    serverProfileId, dimension, type, from, params.maxDistance,
+  );
+
+  // Step 2-4: verify + claim each candidate, fallback to next
+  for (const candidate of candidates) {
+    const pos = normalizeBlockPos(candidate.position);
+
+    // Server-state verify if caller provides the function
+    if (params.verifyFn) {
+      const stillExists = await params.verifyFn(candidate);
+      if (!stillExists) {
+        registry.invalidate(serverProfileId, dimension, pos);
+        continue; // try next candidate
+      }
+    }
+
+    // Refresh confidence (server confirmed it exists)
+    registry.register(serverProfileId, dimension, type, pos, 1.0);
+
+    // Claim if exclusive
+    if (params.exclusive || usageModeFor(type) === "exclusive") {
+      const claimed = registry.claim(serverProfileId, dimension, pos, botId);
+      if (!claimed) {
+        continue; // another bot has it, try next candidate
+      }
+    }
+
+    return { status: "acquired", entry: registry.findCandidates(
+      serverProfileId, dimension, type, from, 1,
+    )[0] ?? { type, position: pos, dimension, serverProfileId, usageMode: usageModeFor(type), lastSeenAt: Date.now(), confidence: 1, lease: null } };
+  }
+
+  // Step 5: no registry candidate worked → local scan if available
+  if (params.scanFn) {
+    const found = await params.scanFn(type);
+    for (const station of found) {
+      const pos = normalizeBlockPos(station.position);
+      // Verify local scan result against server
+      if (params.verifyFn) {
+        const ok = await params.verifyFn({
+          type: station.type,
+          position: pos,
+          dimension,
+          serverProfileId,
+          usageMode: usageModeFor(station.type),
+          lastSeenAt: Date.now(),
+          confidence: 1,
+          lease: null,
+        });
+        if (!ok) continue;
+      }
+      registry.register(serverProfileId, dimension, station.type, pos);
+      // Claim if exclusive
+      if (params.exclusive || usageModeFor(station.type) === "exclusive") {
+        registry.claim(serverProfileId, dimension, pos, botId);
+      }
+      return { status: "acquired", entry: {
+        type: station.type,
+        position: pos,
+        dimension,
+        serverProfileId,
+        usageMode: usageModeFor(station.type),
+        lastSeenAt: Date.now(),
+        confidence: 1,
+        lease: null,
+      } };
+    }
+  }
+
+  // Step 6: nothing found → caller may create
+  return { status: "not_found", mayCreate: true };
 }
