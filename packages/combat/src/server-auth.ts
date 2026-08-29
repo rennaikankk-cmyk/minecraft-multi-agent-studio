@@ -139,9 +139,12 @@ export function attachServerAuth(
     const command = register
       ? `/register ${password} ${password}`
       : `/login ${password}`;
+    // P0-D22: 构建无秘密的展示文本，不对完整命令做字符串替换
+    // （/register pw pw 中 replace 只替换第一次，第二份明文泄漏）
+    const action = register ? "register" : "login";
     setState(
       register ? "registering" : "logging-in",
-      `${command.replace(password, "***")}${isNewPassword ? " (new)" : ""}`,
+      `sent /${action} with credential (masked)`,
     );
     bot.chat(command);
     pendingPassword = { password, register, isNewPassword };
