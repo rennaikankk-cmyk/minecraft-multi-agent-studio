@@ -10,6 +10,10 @@
   "username": "ChangeMe01",
   "auth": "offline",
   "navigation": "anarchy",
+  "noHunger": {
+    "enabled": true,
+    "mode": "adaptive"
+  },
   "combat": {
     "enabled": true,
     "stance": "preserve-life",

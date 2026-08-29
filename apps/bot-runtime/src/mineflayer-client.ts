@@ -82,6 +82,11 @@ import type {
   BotRecoveryAction,
   BotRecoveryActionResult,
 } from "./client.js";
+import {
+  attachNoHunger,
+  type NoHungerBot,
+  type NoHungerController,
+} from "./no-hunger.js";
 import type { ServerProfile } from "./server-profile.js";
 import {
   importantBlockNames,
@@ -1119,6 +1124,7 @@ export class MineflayerBotClient implements BotClient {
   private activePathInvocationId: string | null = null;
   private safeForageExplorationCursor = 0;
   private readonly combatAdapter: MineflayerCombatAdapter;
+  private readonly noHungerController: NoHungerController;
 
   /** Facilities are intentionally conservative: a nearby reachable table is
    * always reused, and creation is rate-limited even across separate tasks. */
@@ -1140,10 +1146,17 @@ export class MineflayerBotClient implements BotClient {
     worldState = new WorldStateStore(),
     navigationProfile: ServerProfile["navigation"] = "safe",
     serverAddress: Readonly<{ host: string; port: number }> | null = null,
+    noHungerConfig: ServerProfile["noHunger"] = undefined,
   ) {
     /** 无规则服导航档：true = 沿途挖掘/疾跑/跑酷/搭高全部放开。 */
     this.anarchyNavigation = navigationProfile === "anarchy";
     this.serverAddress = serverAddress;
+    this.noHungerController = attachNoHunger(bot as unknown as NoHungerBot, {
+      serverKey: serverAddress
+        ? `${serverAddress.host}:${serverAddress.port}`
+        : serverProfileId ?? "unknown-server",
+      ...(noHungerConfig ? { config: noHungerConfig } : {}),
+    });
     const combatEnabled = typeof combatEnabledOrWorldState === "boolean"
       ? combatEnabledOrWorldState
       : false;
@@ -1309,6 +1322,10 @@ export class MineflayerBotClient implements BotClient {
 
   setHandlers(handlers: BotClientHandlers): void {
     this.handlers = handlers;
+  }
+
+  noHungerSnapshot() {
+    return this.noHungerController.snapshot();
   }
 
   snapshot(): BotClientSnapshot {
@@ -5569,6 +5586,7 @@ export function createMineflayerClient(
     worldState,
     profile.navigation ?? "safe",
     { host: profile.host, port: profile.port },
+    profile.noHunger,
   );
 }
 
