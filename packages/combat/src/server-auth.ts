@@ -25,7 +25,7 @@ interface BotView {
 /** 提示语关键词 → 匹配到即认为需要该类认证。 */
 const REGISTER_PROMPTS = /register|\/reg\b|注册|请注册|please register/iu;
 const LOGIN_PROMPTS = /login|\/l\b|登录|请登录|please log ?in/iu;
-const SUCCESS_PROMPTS = /logged in|authenticated|registered successfully|已登录|注册成功|登录成功/iu;
+const SUCCESS_PROMPTS = /logged in|authenticated|successfully registered|registered successfully|已登录|注册成功|登录成功/iu;
 const ALREADY_REGISTERED = /already registered|已经注册|已注册/iu;
 const WRONG_PASSWORD = /wrong password|密码错误|incorrect password/iu;
 
@@ -40,8 +40,21 @@ export type AuthState =
   | "failed-wrong-password"; // 服务器拒绝
 
 export type ServerAuthConfig = Readonly<{
-  /** 认证密码（从环境变量解析，绝不进 profile）。 */
-  password: string;
+  /** 认证密码（优先级：显式传入 > 环境变量 > 自动生成）。 */
+  password?: string;
+  /**
+   * Bot 自管凭据存储（全自动模式核心）：传入后自动 getOrCreate/persist，
+   * 不需要人配任何东西。首次注册自动生成随机密码并持久化，后续登录
+   * 自动读取。
+   */
+  store?: {
+    getOrCreate: (host: string, port: number) => Readonly<{ password: string; isNew: boolean }>;
+    persist: (host: string, port: number, password: string) => void;
+    forget: (host: string, port: number) => void;
+  };
+  /** 服务器地址（store 模式下必填，用于按服隔离凭据）。 */
+  serverHost?: string;
+  serverPort?: number;
   /** 等服务器提示的超时（ms）。 */
   promptTimeoutMs: number;
   /** 命令发出后等待确认的超时（ms）。 */
@@ -96,18 +109,42 @@ export function attachServerAuth(
     confirmTimer = null;
   };
 
+  /** 认证成功后持久化（首次注册时把生成的密码存下来）。 */
+  let pendingPassword: Readonly<{ password: string; register: boolean; isNewPassword: boolean }> | null = null;
+  const onAuthenticated = () => {
+    if (pendingPassword && config.store && config.serverHost && config.serverPort) {
+      if (pendingPassword.isNewPassword) {
+        config.store.persist(config.serverHost, config.serverPort, pendingPassword.password);
+      }
+    }
+    pendingPassword = null;
+  };
   const sendAuth = (register: boolean) => {
     if (attempted) return;
     attempted = true;
-    if (!config.password) {
-      setState("failed-no-password", "No STUDIO_BOT_AUTH_PASSWORD env var set");
+    // 密码来源优先级：显式 password > store（自动管理）> 失败。
+    let password = config.password ?? "";
+    let isNewPassword = false;
+    if (!password && config.store && config.serverHost && config.serverPort) {
+      const result = config.store.getOrCreate(config.serverHost, config.serverPort);
+      password = result.password;
+      isNewPassword = result.isNew;
+    }
+    if (!password) {
+      setState("failed-no-password", "No password available (no explicit, no store, no env)");
       return;
     }
+    // 注册时用生成的新密码；登录时用已存的。服务器已注册但本地没存
+    // （换了机器/删了文件）时只能如实报错——瞎猜密码会被封。
     const command = register
-      ? `/register ${config.password} ${config.password}`
-      : `/login ${config.password}`;
-    setState(register ? "registering" : "logging-in", command.replace(config.password, "***"));
+      ? `/register ${password} ${password}`
+      : `/login ${password}`;
+    setState(
+      register ? "registering" : "logging-in",
+      `${command.replace(password, "***")}${isNewPassword ? " (new)" : ""}`,
+    );
     bot.chat(command);
+    pendingPassword = { password, register, isNewPassword };
     // 等确认
     confirmTimer = setTimeout(() => {
       if (state !== "authenticated") {
@@ -115,6 +152,7 @@ export function attachServerAuth(
       }
     }, config.confirmTimeoutMs);
   };
+
 
   // AuthMe 提示走 message 事件（含系统广播）。
   const onMessage = (jsonMsg: unknown) => {
@@ -128,11 +166,17 @@ export function attachServerAuth(
 
     if (SUCCESS_PROMPTS.test(text)) {
       clearTimers();
+      onAuthenticated();
       setState("authenticated", text.slice(0, 100));
       return;
     }
     if (WRONG_PASSWORD.test(text)) {
       clearTimers();
+      // 密码错误：本地存储与服务器不同步（换机器/文件被删/手动改过），
+      // 删掉本地凭据让下次重新走注册流程——反复用错密码会被封 IP。
+      if (config.store && config.serverHost && config.serverPort) {
+        config.store.forget(config.serverHost, config.serverPort);
+      }
       setState("failed-wrong-password", text.slice(0, 100));
       return;
     }

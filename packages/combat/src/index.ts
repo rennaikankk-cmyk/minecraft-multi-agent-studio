@@ -285,3 +285,9 @@ export {
   type AuthState,
   type ServerAuthConfig,
 } from "./server-auth.js";
+
+export {
+  AuthCredentialStore,
+  generatePassword,
+  type StoredCredential,
+} from "./auth-store.js";

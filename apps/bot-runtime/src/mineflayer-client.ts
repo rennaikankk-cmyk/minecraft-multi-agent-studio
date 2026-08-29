@@ -65,7 +65,11 @@ import type {
   CombatDriverObservation,
   CombatPrimitiveAction,
 } from "./combat-driver.js";
-import { attachServerAuth, resolveServerAuthPassword } from "@minecraft-studio/combat";
+import {
+    attachServerAuth,
+    AuthCredentialStore,
+    resolveServerAuthPassword,
+  } from "@minecraft-studio/combat";
 import { MineflayerCombatAdapter } from "./combat-mineflayer-adapter.js";
 import { observeSite, digShelter } from "./site-shelter-adapter.js";
 
@@ -1104,6 +1108,8 @@ export class MineflayerBotClient implements BotClient {
   private chatBound = false;
   /** 服务器认证监听的清理函数（断线/spawn 重建时调用）。 */
   private serverAuthDetach: (() => void) | null = null;
+  /** 服务器地址（auth store 按 host:port 隔离凭据用）。 */
+  private readonly serverAddress: Readonly<{ host: string; port: number }> | null;
   /** 最近一次熔炉掠夺的物品名（诊断留痕，不参与计数）。 */
   private lastFurnaceLoot: string[] = [];
   readonly movementController: MovementController;
@@ -1142,9 +1148,11 @@ export class MineflayerBotClient implements BotClient {
     combatEnabledOrWorldState: boolean | WorldStateStore = false,
     worldState = new WorldStateStore(),
     navigationProfile: ServerProfile["navigation"] = "safe",
+    serverAddress: Readonly<{ host: string; port: number }> | null = null,
   ) {
     /** 无规则服导航档：true = 沿途挖掘/疾跑/跑酷/搭高全部放开。 */
     this.anarchyNavigation = navigationProfile === "anarchy";
+    this.serverAddress = serverAddress;
     const combatEnabled = typeof combatEnabledOrWorldState === "boolean"
       ? combatEnabledOrWorldState
       : false;
@@ -1167,34 +1175,43 @@ export class MineflayerBotClient implements BotClient {
         ? Number(bot.health)
         : null;
       this.bindInventoryEvents();
-      // 服务器注册/登录自动认证（AuthMe 等）：监听提示消息 → 发命令。
-      // 每次连接只挂一次；密码从环境变量取，绝不入 profile。
+      // 服务器注册/登录自动认证（AuthMe 等）——全自动，不需要人配任何东西。
+      //
+      // 密码来源优先级：
+      //   1. 环境变量 STUDIO_BOT_AUTH_PASSWORD_<BOT_ID>（运维显式指定）
+      //   2. AuthCredentialStore（bot 自管存储：首次自动生成随机密码并
+      //      持久化到 ~/.studio-auth/<botId>.json，后续自动读取登录）
+      //   3. 都没有 → 生成随机密码（但不持久化，本次连接一次性使用）
       if (this.serverAuthDetach) {
         this.serverAuthDetach();
         this.serverAuthDetach = null;
       }
       const env = process.env as Record<string, string | undefined>;
-      const authPassword = this.serverProfileId
-        ? resolveServerAuthPassword(this.serverProfileId, env)
-        : "";
-      // botId 作为密码键比 serverProfileId 更稳定（跨服同名 bot 复用）。
-      const botIdPassword = (bot as { username?: string }).username
-        ? resolveServerAuthPassword((bot as { username: string }).username, env)
-        : "";
-      const effectivePassword = botIdPassword || authPassword;
-      if (effectivePassword) {
-        this.serverAuthDetach = attachServerAuth(
-          bot as never,
-          { password: effectivePassword, promptTimeoutMs: 10_000, confirmTimeoutMs: 8_000 },
-          (state, detail) => {
-            if (state !== "idle") {
-              this.handlers?.onStateChanged?.();
-            }
-            // 认证成功/失败是重要事件，通过 worldState 的 nearbyBlocks 变更
-            // 间接让协调器看到 bot 活了——不需要专门通道。
-          },
-        );
-      }
+      const botUsername = (bot as { username?: string }).username ?? "";
+      const envPassword =
+        (botUsername ? resolveServerAuthPassword(botUsername, env) : "") ||
+        (this.serverProfileId ? resolveServerAuthPassword(this.serverProfileId, env) : "");
+      // bot 自管凭据存储：按 botId 持久化，按服务器 host:port 隔离。
+      const store = botUsername ? new AuthCredentialStore(botUsername) : null;
+      const serverHost = this.serverAddress?.host ?? "";
+      const serverPort = this.serverAddress?.port ?? 25565;
+      this.serverAuthDetach = attachServerAuth(
+        bot as never,
+        {
+          // 显式环境变量 > 自管 store
+          ...(envPassword ? { password: envPassword } : {}),
+          ...(store && serverHost
+            ? { store: { getOrCreate: (h, p) => store.getOrCreate(h, p), persist: (h, p, pw) => store.persist(h, p, pw), forget: (h, p) => store.forget(h, p) }, serverHost, serverPort }
+            : {}),
+          promptTimeoutMs: 10_000,
+          confirmTimeoutMs: 8_000,
+        },
+        (state, detail) => {
+          if (state !== "idle") {
+            this.handlers?.onStateChanged?.();
+          }
+        },
+      );
       if (!this.chatBound) {
         this.chatBound = true;
         // 只上报玩家聊天（第二参为玩家名时）；服务器广播/系统消息不进指挥通道。
@@ -5559,6 +5576,7 @@ export function createMineflayerClient(
     profile.combat?.enabled === true,
     worldState,
     profile.navigation ?? "safe",
+    { host: profile.host, port: profile.port },
   );
 }
 
