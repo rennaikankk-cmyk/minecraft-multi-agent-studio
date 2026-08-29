@@ -511,3 +511,27 @@ export {
   normalizeBlockPos,
   usageModeFor,
 } from "./workstation-registry.js";
+
+// ---------------------------------------------------------------------------
+// Facility Registry + Placement + Capacity
+// ---------------------------------------------------------------------------
+export {
+  FacilityRegistry,
+  smeltingLinePattern,
+  smeltingWallGridPattern,
+  toWorldPosition,
+  transformOffset,
+  type Facility,
+  type FacilityRegistryOptions,
+  type FacilitySlot,
+  type FacilityType,
+  type Orientation,
+  type PatternSlot,
+} from "./facility-registry.js";
+export {
+  assessCapacity,
+  creationPolicyFor,
+  type CapacityDecision,
+  type CapacityPlannerInput,
+  type WorkstationCreationPolicy,
+} from "./capacity-planner.js";
