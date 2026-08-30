@@ -151,18 +151,19 @@ describe("expected-progress contract", () => {
     expect(events.filter((e) => e.kind === "oscillation")).toHaveLength(1);
   });
 
-  it("normal single retry does not create stuck (progress resets alarm)", () => {
-    const watchdog = new ProgressWatchdog({ stuckAfterMs: 1_000 });
+  it("normal single retry does not create stuck (progress resets alarm; window semantics)", () => {
+    const watchdog = new ProgressWatchdog({ stuckAfterMs: 2_000, progressWindowMs: 1_000 });
     watchdog.observe(base({ observedAtMs: 0, phaseExpectation: "movement" }));
     // 2s 静止 → stuck
     const stuck = watchdog.observe(base({ observedAtMs: 2_000, phaseExpectation: "movement" }));
     expect(stuck.some((e) => e.kind === "stuck")).toBe(true);
-    // 一次性真实移动 → progress，报警解除
+    // 一次性真实移动 → 窗口净位移 → progress，报警解除
     const after = watchdog.observe(base({ observedAtMs: 3_000, position: { x: 5, y: 64, z: 5 }, phaseExpectation: "movement" }));
     expect(after.some((e) => e.kind === "progress")).toBe(true);
-    // 再静止 2s 才会再次 stuck（不是每个 tick 都报）
-    const again = watchdog.observe(base({ observedAtMs: 5_000, phaseExpectation: "movement" }));
+    // 移动后 1s：尚在 stuckAfter 内 → 不报
+    const again = watchdog.observe(base({ observedAtMs: 4_000, phaseExpectation: "movement" }));
     expect(again.some((e) => e.kind === "stuck")).toBe(false);
+    // 之后继续停滞 → 再次 stuck（窗口滑过位移后）
     const later = watchdog.observe(base({ observedAtMs: 6_000, phaseExpectation: "movement" }));
     expect(later.some((e) => e.kind === "stuck")).toBe(true);
   });
@@ -257,4 +258,105 @@ describe("action/phase progress contracts", () => {
     const watchdog = new ProgressWatchdog();
     expect(() => watchdog.observe(base({ observedAtMs: 0, contract: "VIBING" }))).toThrow(/contract/);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Round 5: 窗口化 material progress 校准（消除物理抖动假进度）
+// ---------------------------------------------------------------------------
+import { FailureSignal } from "../src/progress-watchdog.js";
+
+describe("window-based material progress (Round 5)", () => {
+  const base = (over) => ({ observedAtMs: 0, position: { x: 0, y: 64, z: 0 }, ...over });
+
+  it("physics jitter above epsilon does NOT reset stuck timer (net ~0 over window)", () => {
+    const watchdog = new ProgressWatchdog({ stuckAfterMs: 5_000, noProgressAfterMs: 20_000 });
+    let stuck = null;
+    for (let t = 0; t <= 12_000; t += 250) {
+      // 每步 ±0.06 抖动（> 旧 movementEpsilon 0.05），净位移 ~0
+      const jx = (Math.floor(t / 250) % 2 === 0) ? 0.06 : -0.06;
+      const events = watchdog.observe(base({ observedAtMs: t, position: { x: jx, y: 64, z: 0 }, contract: "MOVE_TO_TARGET" }));
+      const s = events.find((e) => e.kind === "stuck");
+      if (s) { stuck = s; break; }
+    }
+    expect(stuck).not.toBeNull();
+    expect(stuck.ageMs).toBeLessThanOrEqual(6_000);
+  });
+
+  it("net displacement at/above threshold IS material; just below is NOT (boundary)", () => {
+    const wd = new ProgressWatchdog({ stuckAfterMs: 5_000, noProgressAfterMs: 20_000 });
+    // 单步 +1.9（< 2.0 netEps）：无 material
+    let events = wd.observe(base({ observedAtMs: 0, position: { x: 0, y: 64, z: 0 }, contract: "MOVE_TO_TARGET" }));
+    events = wd.observe(base({ observedAtMs: 500, position: { x: 1.9, y: 64, z: 0 }, contract: "MOVE_TO_TARGET" }));
+    expect(events.some((e) => e.kind === "progress")).toBe(false);
+    // 再 +0.2 → 窗口净 2.1 ≥ 2.0 → material
+    events = wd.observe(base({ observedAtMs: 1_000, position: { x: 2.1, y: 64, z: 0 }, contract: "MOVE_TO_TARGET" }));
+    expect(events.some((e) => e.kind === "progress")).toBe(true);
+  });
+
+  it("sustained slow approach (targetDistance dropping) IS material even below netEps", () => {
+    const wd = new ProgressWatchdog({ stuckAfterMs: 5_000, noProgressAfterMs: 20_000 });
+    let d = 20;
+    for (let t = 0; t <= 15_000; t += 1_000) {
+      d -= 0.35; // 慢速持续接近
+      const events = wd.observe(base({ observedAtMs: t, position: { x: 20 - d, y: 64, z: 0 }, targetDistance: d, contract: "MOVE_TO_TARGET" }));
+      if (t >= 6_000) {
+        expect(events.some((e) => e.kind === "stuck")).toBe(false);
+      }
+    }
+    expect(wd.snapshot().stuckCount).toBe(0);
+  });
+
+  it("single external displacement (knockback) resets once; later stagnation still fires stuck", () => {
+    const wd = new ProgressWatchdog({ stuckAfterMs: 5_000, noProgressAfterMs: 20_000 });
+    // 停滞 5s → stuck
+    for (let t = 0; t <= 5_000; t += 1_000) wd.observe(base({ observedAtMs: t, contract: "MOVE_TO_TARGET" }));
+    expect(wd.snapshot().stuckCount).toBe(1);
+    // 击退：单次 +8 → material（progress 重置）
+    const kb = wd.observe(base({ observedAtMs: 6_000, position: { x: 8, y: 64, z: 0 }, contract: "MOVE_TO_TARGET" }));
+    expect(kb.some((e) => e.kind === "progress")).toBe(true);
+    // 之后继续停滞 → 再次 stuck（不能逃过 watchdog）
+    let firedAgain = null;
+    for (let t = 7_000; t <= 20_000; t += 1_000) {
+      const events = wd.observe(base({ observedAtMs: t, contract: "MOVE_TO_TARGET" }));
+      const s = events.find((e) => e.kind === "stuck");
+      if (s) { firedAgain = s; break; }
+    }
+    expect(firedAgain).not.toBeNull();
+    expect(firedAgain.observedAtMs).toBeLessThanOrEqual(14_000);
+  });
+
+  it("back-and-forth (180° reversals) fires oscillation via reversals+path, not stuck-reset loop", () => {
+    const wd = new ProgressWatchdog({ stuckAfterMs: 60_000, noProgressAfterMs: 120_000 });
+    const events = [];
+    // 4 格往返，每步 0.5，方向 180° 翻转
+    let pos = 0; let dir = 1;
+    for (let t = 0; t <= 8_000; t += 250) {
+      pos += dir * 0.5;
+      if (pos >= 2 || pos <= 0) dir *= -1;
+      events.push(...wd.observe(base({ observedAtMs: t, position: { x: pos, y: 64, z: 0 }, contract: "MOVE_TO_TARGET" })));
+    }
+    expect(events.filter((e) => e.kind === "oscillation")).toHaveLength(1);
+    expect(events.filter((e) => e.kind === "stuck")).toHaveLength(0); // 在动，不是 stuck
+  });
+
+  it("stuck/no-progress signals carry bounded window diagnostics", () => {
+    const wd = new ProgressWatchdog({ stuckAfterMs: 1_000, noProgressAfterMs: 2_000 });
+    for (let t = 0; t <= 3_000; t += 500) {
+      wd.observe(base({ observedAtMs: t, position: { x: (t % 1_000) / 10_000, y: 64, z: 0 }, targetDistance: 10, contract: "MOVE_TO_TARGET" }));
+    }
+    const snap = wd.snapshot();
+    expect(snap.stuckCount).toBe(1);
+    // 静止样本：stuck 必带窗口诊断（净位移 ~0、无 material 时长达标）
+    const wd2 = new ProgressWatchdog({ stuckAfterMs: 500, noProgressAfterMs: 999_000 });
+    for (let t = 0; t <= 1_500; t += 250) {
+      const events = wd2.observe(base({ observedAtMs: t, position: { x: 0, y: 64, z: 0 }, contract: "MOVE_TO_TARGET" }));
+      const s = events.find((e) => e.kind === "stuck");
+      if (s) {
+        expect(s.diagnostics).toBeDefined();
+        expect(s.diagnostics.windowNetDisplacement).toBeLessThan(2);
+        expect(s.diagnostics.noMaterialProgressMs).toBeGreaterThanOrEqual(500);
+        expect(s.diagnostics.windowPathLength).toBeGreaterThanOrEqual(0);
+      }
+    }
+    });
 });

@@ -85,6 +85,15 @@ export type ProgressWatchdogEventKind =
   | "oscillation"
   | "deadline-exceeded";
 
+/** 滑动窗口诊断（有界数值；不进 fingerprint，供 Incident 的 actual/上下文解释）。 */
+export type ProgressWindowDiagnostics = Readonly<{
+  windowNetDisplacement: number;
+  windowTargetDistanceDrop: number | null;
+  windowPathLength: number;
+  reversals: number;
+  noMaterialProgressMs: number;
+}>;
+
 export type ProgressWatchdogEvent = Readonly<{
   kind: ProgressWatchdogEventKind;
   observedAtMs: number;
@@ -92,6 +101,7 @@ export type ProgressWatchdogEvent = Readonly<{
   goalKey: string | null;
   recoverySuggested: "local-unstuck" | "local-replan" | "high-level-replan" | null;
   phaseKey?: string;
+  diagnostics?: ProgressWindowDiagnostics;
 }>;
 
 export type ProgressWatchdogConfig = Readonly<{
@@ -104,6 +114,18 @@ export type ProgressWatchdogConfig = Readonly<{
   pathResetLimit: number;
   /** 震荡检测半径（格）；窗口内全部样本彼此距离 ≤ radius 且有移动 → oscillation。 */
   oscillationRadius: number;
+  /** movement 契约窗口（净结果判定窗）。 */
+  progressWindowMs: number;
+  /** 窗口净位移 ≥ 此值才算 material progress。 */
+  netDisplacementEpsilon: number;
+  /** 窗口内到目标距离下降 ≥ 此值也算 material progress（慢速持续接近）。 */
+  distanceDropEpsilon: number;
+  /** 反向计数 ≥ 此值且窗口净位移在 [oscillationNetMin, oscillationNetMax] 且路径 ≥ 2×净 → oscillation。 */
+  oscillationMinReversals: number;
+  oscillationNetMin: number;
+  oscillationNetMax: number;
+  /** 两次 oscillation 之间的最小间隔（去重冷却）。 */
+  oscillationCooldownMs: number;
 }>;
 
 export const DEFAULT_PROGRESS_WATCHDOG_CONFIG: ProgressWatchdogConfig = Object.freeze({
@@ -115,6 +137,13 @@ export const DEFAULT_PROGRESS_WATCHDOG_CONFIG: ProgressWatchdogConfig = Object.f
   repeatedGoalLimit: 4,
   pathResetLimit: 5,
   oscillationRadius: 2,
+  progressWindowMs: 5_000,
+  netDisplacementEpsilon: 2,
+  distanceDropEpsilon: 1,
+  oscillationMinReversals: 3,
+  oscillationNetMin: 0.5,
+  oscillationNetMax: 5,
+  oscillationCooldownMs: 10_000,
 });
 
 export type ProgressWatchdogSnapshot = Readonly<{
@@ -147,6 +176,13 @@ export class ProgressWatchdog {
   private pathResetBaseline: number | null = null;
   private recentPositions: Array<Readonly<{ x: number; y: number; z: number }>> = [];
   private readonly phaseStart: Array<{ key: string; startedAtMs: number }> = [];
+  /** movement 滑动窗口（净结果判定）；goal 切换即清空。 */
+  private window: Array<{ atMs: number; x: number; y: number; z: number; targetDistance: number | null }> = [];
+  private windowPathLength = 0;
+  private lastWindowDiagnostics: ProgressWindowDiagnostics | null = null;
+  /** 最后一次 material progress（窗口净结果）时间。 */
+  private lastMaterialProgressAtMs: number | null = null;
+  private lastOscillationAtMs = Number.NEGATIVE_INFINITY;
   private pendingContractDeadline: { key: string | undefined; deadlineAtMs: number } | null = null;
 
   constructor(config: Partial<ProgressWatchdogConfig> = {}) {
@@ -159,7 +195,14 @@ export class ProgressWatchdog {
       !Number.isSafeInteger(this.config.loopWindow) || this.config.loopWindow < 2 ||
       !Number.isSafeInteger(this.config.repeatedGoalLimit) || this.config.repeatedGoalLimit < 2 ||
       !Number.isSafeInteger(this.config.pathResetLimit) || this.config.pathResetLimit < 1 ||
-      !Number.isFinite(this.config.oscillationRadius) || this.config.oscillationRadius < 0
+      !Number.isFinite(this.config.oscillationRadius) || this.config.oscillationRadius < 0 ||
+      !Number.isSafeInteger(this.config.progressWindowMs) || this.config.progressWindowMs < 1_000 ||
+      !Number.isFinite(this.config.netDisplacementEpsilon) || this.config.netDisplacementEpsilon <= 0 ||
+      !Number.isFinite(this.config.distanceDropEpsilon) || this.config.distanceDropEpsilon <= 0 ||
+      !Number.isSafeInteger(this.config.oscillationMinReversals) || this.config.oscillationMinReversals < 2 ||
+      !Number.isFinite(this.config.oscillationNetMin) || !Number.isFinite(this.config.oscillationNetMax) ||
+      this.config.oscillationNetMin >= this.config.oscillationNetMax ||
+      !Number.isSafeInteger(this.config.oscillationCooldownMs) || this.config.oscillationCooldownMs < 1_000
     ) {
       throw new TypeError("Progress watchdog configuration is invalid.");
     }
@@ -195,18 +238,73 @@ export class ProgressWatchdog {
       sample.position.y - previous.position.y,
       sample.position.z - previous.position.z,
     ) > this.config.movementEpsilon;
-    const distanceImproved = previous !== null &&
-      sample.targetDistance != null && previous.targetDistance != null &&
-      previous.targetDistance - sample.targetDistance > this.config.distanceEpsilon;
+
     const inventoryChanged = previous !== null &&
       sample.inventoryFingerprint !== undefined &&
       sample.inventoryFingerprint !== previous.inventoryFingerprint;
-    const materialProgress = moved || distanceImproved || inventoryChanged;
+
+    // goal 切换 = 新任务阶段：清窗口
+    if (goalChanged) {
+      this.window = [];
+      this.windowPathLength = 0;
+    }
+
+    // ---- 滑动窗口净结果（Round 5：区分真实推进 vs 抖动/往返）----
+    const lastWindowSample = this.window.at(-1);
+    if (lastWindowSample) {
+      this.windowPathLength += Math.hypot(
+        sample.position.x - lastWindowSample.x,
+        sample.position.y - lastWindowSample.y,
+        sample.position.z - lastWindowSample.z,
+      );
+    }
+    this.window.push({
+      atMs: sample.observedAtMs,
+      x: sample.position.x, y: sample.position.y, z: sample.position.z,
+      targetDistance: sample.targetDistance ?? null,
+    });
+    const windowCutoff = sample.observedAtMs - this.config.progressWindowMs;
+    while (this.window.length > 2 && this.window[0]!.atMs < windowCutoff) this.window.shift();
+    const windowFirst = this.window[0]!;
+    const windowLast = this.window.at(-1)!;
+    const windowNetDisplacement = Math.hypot(
+      windowLast.x - windowFirst.x, windowLast.y - windowFirst.y, windowLast.z - windowFirst.z,
+    );
+    const windowTargetDistanceDrop =
+      windowFirst.targetDistance !== null && windowLast.targetDistance !== null
+        ? windowFirst.targetDistance - windowLast.targetDistance
+        : null;
+    // 反向计数：相邻位移向量点积 < 0（180° 往返）
+    let windowReversals = 0;
+    for (let i = 2; i < this.window.length; i += 1) {
+      const a = this.window[i - 2]!; const b = this.window[i - 1]!; const c = this.window[i]!;
+      const dx1 = b.x - a.x, dy1 = b.y - a.y, dz1 = b.z - a.z;
+      const dx2 = c.x - b.x, dy2 = c.y - b.y, dz2 = c.z - b.z;
+      const l1 = Math.hypot(dx1, dy1, dz1); const l2 = Math.hypot(dx2, dy2, dz2);
+      if (l1 > this.config.movementEpsilon && l2 > this.config.movementEpsilon &&
+          dx1 * dx2 + dy1 * dy2 + dz1 * dz2 < 0) {
+        windowReversals += 1;
+      }
+    }
+    this.lastWindowDiagnostics = {
+      windowNetDisplacement,
+      windowTargetDistanceDrop,
+      windowPathLength: this.windowPathLength,
+      reversals: windowReversals,
+      noMaterialProgressMs: Math.max(0, sample.observedAtMs - (this.lastMaterialProgressAtMs ?? this.lastProgressAtMs ?? sample.observedAtMs)),
+    };
+    const ageMs = Math.max(0, sample.observedAtMs - (this.lastProgressAtMs ?? sample.observedAtMs));
+
+    // material progress = 窗口净结果（净位移 / 距离持续下降），不再是"有活动"
+    const materialProgress = inventoryChanged ||
+      windowNetDisplacement >= this.config.netDisplacementEpsilon ||
+      (windowTargetDistanceDrop !== null && windowTargetDistanceDrop >= this.config.distanceDropEpsilon);
     const progress = previous === null || goalChanged || materialProgress;
     if (progress) {
       this.lastProgressAtMs = sample.observedAtMs;
       this.stuckReported = false;
       this.noProgressReported = false;
+      if (materialProgress) this.lastMaterialProgressAtMs = sample.observedAtMs;
       if (materialProgress) {
         this.loopReported = false;
         this.pathResetBaseline = sample.pathResetCount ?? null;
@@ -220,7 +318,6 @@ export class ProgressWatchdog {
       this.recentPositions.push(sample.position);
       if (this.recentPositions.length > this.config.loopWindow) this.recentPositions.shift();
     }
-    const ageMs = Math.max(0, sample.observedAtMs - (this.lastProgressAtMs ?? sample.observedAtMs));
     const events: ProgressWatchdogEvent[] = [];
     if (progress) {
       events.push(Object.freeze({ kind: "progress", observedAtMs: sample.observedAtMs, ageMs: 0, goalKey, recoverySuggested: null }));
@@ -236,25 +333,42 @@ export class ProgressWatchdog {
       : (sample.phaseExpectation ?? (sample.movementExpected === false ? "timer_wait" : "movement"));
     const waitingStyle = expectation !== "movement";
 
-    // 震荡检测：仅 movement 期待；窗口内两两距离全 ≤ 半径 → 报一次；逃出半径 → 复位
-    if (!waitingStyle && this.recentPositions.length >= 4) {
-      const window = this.recentPositions.slice(-this.config.loopWindow);
+    // 震荡检测（两条互补规则，共用去重标志；证据消失才复位）：
+    //   R1 半径规则：窗口内两两距离全 ≤ oscillationRadius 且在移动
+    //   R2 反向规则：span≥3s、样本≥6、反向 ≥3、净位移 ∈ [netMin, netMax]、路径 ≥ 2×净
+    if (!waitingStyle && this.lastWindowDiagnostics !== null) {
+      const diag = this.lastWindowDiagnostics;
+      const windowSamples = this.window.length;
+      const windowSpan = windowSamples >= 2 ? windowLast.atMs - this.window[0]!.atMs : 0;
       let maxPairwise = 0;
-      for (const a of window) {
-        for (const b of window) {
+      for (const a of this.window) {
+        for (const b of this.window) {
           maxPairwise = Math.max(maxPairwise, Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z));
         }
       }
-      if (maxPairwise <= this.config.oscillationRadius) {
-        if (!this.oscillationReported) {
-          this.oscillationReported = true;
-          this.oscillationCount += 1;
-          events.push(Object.freeze({
-            kind: "oscillation", observedAtMs: sample.observedAtMs, ageMs, goalKey,
-            recoverySuggested: "local-replan", ...(sample.phaseKey ? { phaseKey: sample.phaseKey } : {}),
-          }));
-        }
-      } else {
+      const radiusOscillation = maxPairwise <= this.config.oscillationRadius && moved && windowSamples >= 4;
+      const reversalOscillation =
+        windowSpan >= 3_000 &&
+        windowSamples >= 6 &&
+        diag.reversals >= this.config.oscillationMinReversals &&
+        diag.windowNetDisplacement >= this.config.oscillationNetMin &&
+        diag.windowNetDisplacement <= this.config.oscillationNetMax &&
+        diag.windowPathLength >= 2 * Math.max(diag.windowNetDisplacement, 1);
+      const evidenceGone =
+        maxPairwise > this.config.oscillationRadius && windowSamples >= 4 &&
+        (windowSpan < 3_000 || windowSamples < 6 || diag.reversals < this.config.oscillationMinReversals ||
+         diag.windowNetDisplacement > this.config.oscillationNetMax);
+      const cooldownElapsed = sample.observedAtMs - this.lastOscillationAtMs >= this.config.oscillationCooldownMs;
+      if ((radiusOscillation || reversalOscillation) && !this.oscillationReported && cooldownElapsed) {
+        this.oscillationReported = true;
+        this.oscillationCount += 1;
+        this.lastOscillationAtMs = sample.observedAtMs;
+        events.push(Object.freeze({
+          kind: "oscillation", observedAtMs: sample.observedAtMs, ageMs, goalKey,
+          recoverySuggested: "local-replan", ...(sample.phaseKey ? { phaseKey: sample.phaseKey } : {}),
+          ...(this.lastWindowDiagnostics ? { diagnostics: this.lastWindowDiagnostics } : {}),
+        }));
+      } else if (evidenceGone && cooldownElapsed) {
         this.oscillationReported = false;
       }
     }
@@ -321,6 +435,7 @@ export class ProgressWatchdog {
         events.push(Object.freeze({
           kind: "stuck", observedAtMs: sample.observedAtMs, ageMs, goalKey,
           recoverySuggested: "local-unstuck", ...(sample.phaseKey ? { phaseKey: sample.phaseKey } : {}),
+          ...(this.lastWindowDiagnostics ? { diagnostics: this.lastWindowDiagnostics } : {}),
         }));
       }
       if (ageMs >= this.config.noProgressAfterMs && !this.noProgressReported) {

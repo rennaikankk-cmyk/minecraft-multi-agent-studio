@@ -126,7 +126,7 @@ export class IncidentReporter {
 
 /** watchdog 事件 → Incident 信号映射（十三/十一节）。 */
 export function watchdogEventToSignal(params: Readonly<{
-  event: { kind: string; goalKey: string | null; ageMs: number; phaseKey?: string };
+  event: { kind: string; goalKey: string | null; ageMs: number; phaseKey?: string; diagnostics?: { windowNetDisplacement: number; windowTargetDistanceDrop: number | null; windowPathLength: number; reversals: number; noMaterialProgressMs: number } | undefined };
   position: { x: number; y: number; z: number };
   dimension: string | null;
   skillId?: string | undefined;
@@ -153,7 +153,7 @@ export function watchdogEventToSignal(params: Readonly<{
     sourceComponent: "progress-watchdog",
     severity: "ERROR",
     expected: params.expectedProgress ?? `steady progress toward ${event.goalKey ?? "active goal"} (phase expectation: movement)`,
-    actual: params.actualProgress ?? `${event.kind} after ${event.ageMs}ms without material progress${params.replanCount !== undefined ? `; pathResets=${params.replanCount}` : ""}`,
+    actual: params.actualProgress ?? `${event.kind} after ${event.ageMs}ms without material progress${params.replanCount !== undefined ? `; pathResets=${params.replanCount}` : ""}${event.diagnostics ? ` [window: net=${event.diagnostics.windowNetDisplacement?.toFixed(2)}, distDrop=${event.diagnostics.windowTargetDistanceDrop === null || event.diagnostics.windowTargetDistanceDrop === undefined ? "n/a" : event.diagnostics.windowTargetDistanceDrop.toFixed(2)}, path=${event.diagnostics.windowPathLength?.toFixed(2)}, reversals=${event.diagnostics.reversals}, noProgressMs=${event.diagnostics.noMaterialProgressMs}]` : ""}`,
     position: params.position,
     ...(params.dimension ? { dimension: params.dimension } : {}),
     ...(params.minecraftVersion ? { minecraftVersion: params.minecraftVersion } : {}),
@@ -166,5 +166,6 @@ export function watchdogEventToSignal(params: Readonly<{
     ...(params.replanCount !== undefined ? { normalizedErrorSignature: `path-resets:${params.replanCount}` } : {}),
     actionFamily: "navigation",
     ...(params.eventWindow ? { eventWindow: params.eventWindow.slice(-60) } : {}),
+    snapshots: event.diagnostics ? { windowDiagnostics: { ...event.diagnostics } } : {},
   };
 }

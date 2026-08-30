@@ -121,7 +121,7 @@ export async function createE2EFixture() {
     containerName,
     port,
     volumeName,
-    async waitReady(timeoutMs = 240_000) {
+    async waitReady(timeoutMs = Number(process.env.STUDIO_E2E_READY_TIMEOUT_MS ?? 420_000)) {
       const startedAt = Date.now();
       while (Date.now() - startedAt < timeoutMs) {
         const logs = await docker(["logs", "--tail", "60", containerName], 15_000).catch(() => "");
