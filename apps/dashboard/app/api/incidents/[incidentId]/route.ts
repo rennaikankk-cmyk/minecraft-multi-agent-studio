@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
 
 export async function GET(_request: Request, context: { params: Promise<{ incidentId: string }> }) {
   const { incidentId } = await context.params;
-  if (!/^INC-[0-9]{4}$/.test(incidentId)) {
+  if (!/^INC-[0-9]{4,}$/.test(incidentId)) {
     return NextResponse.json({ status: "bad_request" }, { status: 400 });
   }
   try {

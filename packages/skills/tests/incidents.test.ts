@@ -239,7 +239,8 @@ describe("secret redaction (export boundary)", () => {
     expect(out.apiKey).toBe("[REDACTED]");
     expect(JSON.stringify(out.nested)).not.toContain("eyJhbGci");
     expect(out.url).toContain("[REDACTED]");
-    expect(out.header).toContain("Bearer [REDACTED]");
+    expect(out.header).not.toContain("abc.def.ghi123456789012");
+    expect(out.header).toContain("[REDACTED]");
     expect(JSON.stringify(out)).not.toContain("hunter2");
     expect((out.nested as Record<string, unknown>).keep).toBe("plain");
   });
@@ -261,5 +262,38 @@ describe("secret redaction (export boundary)", () => {
     expect(markdown).toContain(issue.incidentId);
     expect(markdown).toContain("PATHFINDING");
     expect(safeExportText(markdown)).not.toBeNull(); // snapshot 内 secret 已被 redact
+  });
+});
+
+describe("round2 fixes: fingerprint de-aggregation + free-text redaction", () => {
+  it("different crash exit signatures stay separate issues; same signature across bots merges", () => {
+    const store = new IncidentStore();
+    const base = { subject: "bot" as const, botId: "bot-a", failureCode: "BOT_PROCESS_EXITED", incidentType: "BOT_CRASH", sourceComponent: "studio-local-manager" };
+    store.report({ ...base, botId: "bot-a", normalizedErrorSignature: "exit-mode:1/null" });
+    store.report({ ...base, botId: "bot-b", normalizedErrorSignature: "exit-mode:1/null" }); // 同签名 → 聚合
+    store.report({ ...base, botId: "bot-c", normalizedErrorSignature: "exit-mode:null/SIGKILL" }); // 不同退出模式 → 新 issue
+    const issues = store.listIssues();
+    expect(issues).toHaveLength(2);
+    const merged = issues.find((issue) => issue.occurrenceCount === 2)!;
+    expect(merged.affectedBotIds).toEqual(["bot-a", "bot-b"]);
+  });
+
+  it("free-text password=/token: forms are redacted", () => {
+    const out = redactSecrets("connect failed password=hunter2 next token: abc123xyz tail") as string;
+    expect(out).not.toContain("hunter2");
+    expect(out).not.toContain("abc123xyz");
+    expect(out).toContain("[REDACTED]");
+  });
+
+  it("markdown export redacts free-text secrets in expected/actual", () => {
+    const store = new IncidentStore();
+    const { issue, occurrence } = store.report({
+      subject: "bot", botId: "bot-1", failureCode: "SERVER_PLUGIN_AUTH_FAILED", incidentType: "SKILL_FAILED",
+      sourceComponent: "connection",
+      expected: "login ok", actual: "auth failed api_key=sk-abcdefghijklmnopqrst rejected",
+    });
+    const { markdown } = occurrenceToMarkdown(issue, occurrence);
+    expect(markdown).not.toContain("sk-abcdefghijklmnopqrst");
+    expect(safeExportText(markdown)).not.toBeNull();
   });
 });

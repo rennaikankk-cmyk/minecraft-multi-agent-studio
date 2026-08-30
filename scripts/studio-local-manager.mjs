@@ -341,7 +341,7 @@ export class StudioLocalManager {
         });
         return;
       }
-      const incidentMatch = url.pathname.match(/^\/v1\/incidents\/(INC-[0-9]{4})$/u);
+      const incidentMatch = url.pathname.match(/^\/v1\/incidents\/(INC-[0-9]{4,})$/u);
       if (request.method === "GET" && incidentMatch) {
         const issue = this.incidents.getIssue(incidentMatch[1]);
         if (!issue) {
@@ -572,6 +572,8 @@ export class StudioLocalManager {
           failureCode: "BOT_PROCESS_EXITED",
           incidentType: "BOT_CRASH",
           sourceComponent: "studio-local-manager",
+          normalizedErrorSignature: `exit-mode:${code ?? "none"}/${signal ?? "none"}`,
+          actionFamily: "bot-runtime-process",
           severity: "CRITICAL",
           expected: "bot runtime keeps running or exits 0 after graceful stop",
           actual: `exit code=${code ?? "none"} signal=${signal ?? "none"}`,

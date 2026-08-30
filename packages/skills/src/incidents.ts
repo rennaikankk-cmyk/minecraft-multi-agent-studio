@@ -217,6 +217,8 @@ export interface FingerprintInput {
   readonly sourceComponent: string;
   /** 归一化错误签名（可选；去掉数字/坐标等噪声后）。 */
   readonly normalizedErrorSignature?: string | undefined;
+  /** 动作家族（可选；进 fingerprint，区分同 FailureCode 的不同行为族）。 */
+  readonly actionFamily?: string | undefined;
   /** MC 版本族（可选；如 "1.21.x"）。 */
   readonly versionFamily?: string | undefined;
 }
@@ -232,6 +234,7 @@ export function incidentFingerprint(input: FingerprintInput): string {
     input.incidentType,
     input.failureCode,
     input.sourceComponent,
+    input.actionFamily ?? "",
     input.normalizedErrorSignature ?? "",
     input.versionFamily ?? "",
   ]);
@@ -311,14 +314,22 @@ const KEY_VALUE_SECRET_PATTERN = /\b(sk|pk|ghp|gho|xox[baprs]|AKIA)[-_]?[A-Za-z0
 const URL_USERINFO_PATTERN = /:\/\/[^\s/@:]+:[^\s/@]+@/g;
 export const REDACTED = "[REDACTED]";
 
+/** 自由文本 key/value redaction：password=xxx / token: xxx / api_key: xxx 等形态。 */
+const FREE_TEXT_KV_PATTERN = /\b(password|passwd|token|api[_-]?key|secret|authorization|credential)\b\s*[:=]\s*([^\s,;'}'\]]+)/gi;
+function redactFreeText(text: string): string {
+  return text.replace(FREE_TEXT_KV_PATTERN, (match, key) => `${key}=${REDACTED}`);
+}
+
 /** 递归 key/value redaction + 最终 pattern 扫描。循环引用安全。 */
 export function redactSecrets<T>(value: T, seen = new WeakSet<object>()): T {
   if (typeof value === "string") {
-    return value
-      .replace(URL_USERINFO_PATTERN, `://${REDACTED}@`)
+    return redactFreeText(
+      value
+        .replace(URL_USERINFO_PATTERN, `://${REDACTED}@`)
       .replace(BEARER_PATTERN, `Bearer ${REDACTED}`)
       .replace(JWT_PATTERN, REDACTED)
-      .replace(KEY_VALUE_SECRET_PATTERN, REDACTED) as unknown as T;
+      .replace(KEY_VALUE_SECRET_PATTERN, REDACTED),
+    ) as unknown as T;
   }
   if (Array.isArray(value)) {
     if (seen.has(value)) return value;
@@ -411,6 +422,10 @@ export interface ReportOccurrenceInput {
   readonly failureCode: string;
   readonly incidentType: IncidentType;
   readonly sourceComponent: string;
+  /** 归一化错误/退出签名（进 fingerprint；不同 crash 不合并）。 */
+  readonly normalizedErrorSignature?: string;
+  /** 动作家族（进 fingerprint）。 */
+  readonly actionFamily?: string;
   readonly severity?: Severity;
   readonly expected?: string | null;
   readonly actual?: string | null;
@@ -469,7 +484,9 @@ export class IncidentStore {
       incidentType: input.incidentType,
       failureCode,
       sourceComponent: input.sourceComponent,
-      versionFamily,
+      ...(input.normalizedErrorSignature === undefined ? {} : { normalizedErrorSignature: input.normalizedErrorSignature }),
+      ...(input.actionFamily === undefined ? {} : { actionFamily: input.actionFamily }),
+      ...(versionFamily === undefined ? {} : { versionFamily }),
     });
 
     const existing = [...this.issues.values()].find((issue) => issue.fingerprint === fingerprint);
