@@ -681,7 +681,11 @@ export class IncidentStore {
       } catch {
         this.droppedWriteCount += 1; // 可观测降级：内存照常工作
       } finally {
-        rmSync(tmp, { force: true });
+        try {
+          rmSync(tmp, { force: true });
+        } catch {
+          // 清理失败不影响主流程（ENOTDIR 等场景）
+        }
       }
     });
     this.flushing = run.catch(() => undefined);
