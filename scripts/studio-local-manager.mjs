@@ -9,6 +9,18 @@ import {
 } from "node:fs/promises";
 import { createServer } from "node:http";
 import { IncidentStore } from "../packages/skills/dist/incidents.js";
+import { execFileSync } from "node:child_process";
+
+function readGitMetadata() {
+  try {
+    const commit = execFileSync("git", ["rev-parse", "--short", "HEAD"], { cwd: path.resolve(import.meta.dirname, ".."), encoding: "utf8" }).trim();
+    const branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: path.resolve(import.meta.dirname, ".."), encoding: "utf8" }).trim();
+    return { commit, branch };
+  } catch {
+    return { commit: null, branch: null };
+  }
+}
+const GIT_METADATA = readGitMetadata();
 import { isIP } from "node:net";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -617,6 +629,8 @@ export class StudioLocalManager {
         // Bot runtime 的非阻塞 Incident 上报入口（stuck/oscillation 等）
         STUDIO_INCIDENT_ENDPOINT: `http://127.0.0.1:${this.options.managerPort}/v1/incidents`,
         STUDIO_INCIDENT_TOKEN: this.options.token,
+        ...(GIT_METADATA.commit ? { STUDIO_RUNTIME_COMMIT: GIT_METADATA.commit } : {}),
+        ...(GIT_METADATA.branch ? { STUDIO_RUNTIME_BRANCH: GIT_METADATA.branch } : {}),
       },
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe", "ipc"],

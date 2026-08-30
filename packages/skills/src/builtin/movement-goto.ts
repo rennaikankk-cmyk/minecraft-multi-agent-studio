@@ -29,6 +29,9 @@ const observedPositionSchema = z
     z: z.number().finite().min(-30_000_000).max(30_000_000),
     dimension: dimensionSchema,
     serverProfileId: identifierSchema,
+    // runtime 快照附带朝向角；剥掉语义上不需要，但 strict 下缺失会拒真状态
+    yaw: z.number().finite().optional(),
+    pitch: z.number().finite().optional(),
   })
   .strict();
 
@@ -137,5 +140,5 @@ export const movementGotoSkill = defineSkill({
       "bot.move",
       "pathfinder.goto-safe",
       safeMovementGotoCapabilityInputSchema.parse(input),
-    ),
+    ) as Promise<z.infer<typeof safeMovementGotoOutputSchema> | null>,
 });

@@ -25,6 +25,7 @@ export interface IncidentSignal {
   readonly phase?: string | undefined;
   readonly position?: { x: number; y: number; z: number } | undefined;
   readonly dimension?: string | undefined;
+  readonly taskId?: string | undefined;
   readonly failureCode: string;
   readonly incidentType: string;
   readonly sourceComponent: string;
@@ -130,12 +131,16 @@ export function watchdogEventToSignal(params: Readonly<{
   position: { x: number; y: number; z: number };
   dimension: string | null;
   skillId?: string | undefined;
+  taskId?: string | undefined;
+  goal?: string | null | undefined;
   expectedProgress?: string | undefined;
   actualProgress?: string | undefined;
-  minecraftVersion?: string | undefined;
-  protocolVersion?: number | undefined;
+  minecraftVersion?: string | null | undefined;
+  protocolVersion?: number | null | undefined;
   gitCommit?: string | undefined;
   branch?: string | undefined;
+  sessionId?: string | null | undefined;
+  serverProfileId?: string | null | undefined;
   phase?: string | undefined;
   replanCount?: number | undefined;
   eventWindow?: Array<{ at: string; kind: string; detail?: string }> | undefined;
@@ -157,10 +162,15 @@ export function watchdogEventToSignal(params: Readonly<{
     position: params.position,
     ...(params.dimension ? { dimension: params.dimension } : {}),
     ...(params.minecraftVersion ? { minecraftVersion: params.minecraftVersion } : {}),
-    ...(params.protocolVersion !== undefined ? { protocolVersion: params.protocolVersion } : {}),
+    ...(params.protocolVersion ? { protocolVersion: params.protocolVersion } : {}),
     ...(params.gitCommit ? { gitCommit: params.gitCommit } : {}),
     ...(params.branch ? { branch: params.branch } : {}),
+    ...(params.sessionId ? { sessionId: params.sessionId } : {}),
+    ...(params.serverProfileId ? { serverProfileId: params.serverProfileId } : {}),
     ...(params.skillId ? { skillId: params.skillId } : {}),
+    ...(params.taskId ? { taskId: params.taskId } : {}),
+    ...(params.goal ? { goal: params.goal } : {}),
+    ...(params.goal ? { goal: params.goal } : {}),
     ...(params.phase ? { phase: params.phase } : {}),
     ...(event.phaseKey ? { phase: event.phaseKey } : {}),
     ...(params.replanCount !== undefined ? { normalizedErrorSignature: `path-resets:${params.replanCount}` } : {}),

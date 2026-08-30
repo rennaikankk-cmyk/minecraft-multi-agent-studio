@@ -1464,12 +1464,32 @@ export class SingleBotRuntime {
         if (event.kind === "stuck" || event.kind === "no-progress" || event.kind === "oscillation" || event.kind === "loop") {
           // 非阻塞 Incident 上报（有界队列；失败只计数，绝不打断恢复流程）
           const activeTask = [...this.activeSkillTasks.values()][0];
+          const telemetryTask = this.currentTaskTelemetry();
+          let versionInfo: { minecraftVersion?: string | undefined; protocolVersion?: number | undefined } = {};
+          try {
+            const compatibility = this.client?.versionCompatibility();
+            if (compatibility) {
+              versionInfo = {
+                minecraftVersion: compatibility.resolvedVersion ?? undefined,
+                protocolVersion: compatibility.protocolVersion ?? undefined,
+              };
+            }
+          } catch {
+            // 版本协商完成前未知 → 缺省，不伪造
+          }
           this.incidentReporter.report(watchdogEventToSignal({
             event,
             position,
             dimension: worldSnapshot.navigation.target?.dimension ?? null,
             replanCount: worldSnapshot.navigation.pathResetCount,
             skillId: activeTask?.title,
+            taskId: telemetryTask?.taskId,
+            goal: telemetryTask?.title,
+            sessionId: this.runtimeInstanceId,
+            serverProfileId: this.profile.id,
+            gitCommit: process.env.STUDIO_RUNTIME_COMMIT === undefined ? undefined : process.env.STUDIO_RUNTIME_COMMIT,
+            branch: process.env.STUDIO_RUNTIME_BRANCH === undefined ? undefined : process.env.STUDIO_RUNTIME_BRANCH,
+            ...versionInfo,
             expectedProgress: worldSnapshot.navigation.target
               ? `target distance decreasing toward ${worldSnapshot.navigation.target.x},${worldSnapshot.navigation.target.z} (dimension ${worldSnapshot.navigation.target.dimension})`
               : undefined,
