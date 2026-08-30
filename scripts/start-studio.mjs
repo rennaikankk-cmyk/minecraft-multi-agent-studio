@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import { parseEnv } from "node:util";
 
 import { resolveStudioStartupPlan } from "../packages/protocol/dist/studio-startup.js";
+import { startLocalTestServer, stopLocalTestServer } from "./local-test-server.mjs";
 import {
   createLocalBotSlots,
   discoverLocalAIWithRetry,
@@ -33,6 +34,17 @@ const shutdownPreload = `data:text/javascript,${encodeURIComponent(
   "process.on('message', (message) => { if (message?.type === 'studio.shutdown') process.emit('SIGTERM'); });",
 )}`;
 
+async function stopSessionLocalTestServer() {
+  if (localTestServerObserved !== "ready" && localTestServerObserved !== "failed") return;
+  try {
+    const result = await stopLocalTestServer({ sessionId: instanceId });
+    process.stdout.write(`[studio] Local Test Server stop: ${result.status}
+`);
+  } catch (error) {
+    process.stdout.write(`[studio] Local Test Server stop failed: ${error instanceof Error ? error.message : error}
+`);
+  }
+}
 process.once("SIGINT", () => void stopAll("SIGINT"));
 process.once("SIGTERM", () => void stopAll("SIGTERM"));
 
@@ -49,6 +61,9 @@ const cliModeArg = (() => {
   if (modeFlagIndex !== -1 && process.argv[modeFlagIndex + 1]) return process.argv[modeFlagIndex + 1];
   return undefined;
 })();
+const instanceId = `studio-session-${Date.now().toString(36)}`;
+let localTestServerObserved = "not_started";
+let localTestServerError = null;
 const startupPlan = resolveStudioStartupPlan({
   ...(cliModeArg === undefined ? {} : { cliMode: cliModeArg }),
   env: { ...environmentFileValues, ...process.env },
@@ -228,6 +243,19 @@ try {
       `Local Minecraft Server: ${startupPlan.localMinecraftServer.desired === "not_started" ? "NOT STARTED" : startupPlan.localMinecraftServer.desired.toUpperCase()}`,
     ].join("\n") + "\n",
   );
+  if (startupPlan.localMinecraftServer.desired === "session") {
+    // LOCAL_TEST 真实执行：desired != observed —— 只有 readiness 通过才 ONLINE
+    process.stdout.write("[studio] Starting Local Test Server (ownership=session)...\n");
+    const observed = await startLocalTestServer({ sessionId: instanceId, reason: startupPlan.localMinecraftServer.startReason });
+    localTestServerObserved = observed.status;
+    if (observed.status === "ready") {
+      process.stdout.write("Local Minecraft Server: Observed ONLINE (port 25598, ownership SESSION)\n");
+    } else {
+      // 失败不拖垮控制面：DEGRADED 继续 + 告警
+      localTestServerError = observed.error ?? "unknown";
+      process.stdout.write(`Local Minecraft Server: Observed FAILED/DEGRADED — ${localTestServerError}\n`);
+    }
+  }
   if (packagedMode && hostEnvironment.STUDIO_OPEN_BROWSER?.trim() !== "0") {
     openDashboardInBrowser(dashboardUrl);
   }
