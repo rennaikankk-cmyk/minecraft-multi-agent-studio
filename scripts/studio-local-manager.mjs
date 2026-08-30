@@ -132,7 +132,17 @@ export async function discoverLocalAI(environment = process.env) {
       config: null,
       probe: result.probe,
       reason: selection.error,
-      ...(selection.models ? { availableModels: selection.models } : {}),
+      status: {
+        state: "unavailable",
+        source: "explicit",
+        provider: result.candidate.provider,
+        baseUrl: result.candidate.baseUrl,
+        model: null,
+        models: selection.models ?? [],
+        latencyMs: result.probe.latencyMs ?? null,
+        lastCheckedAt: new Date().toISOString(),
+        message: selection.error,
+      },
     };
   }
   const model = selection.model;
@@ -937,7 +947,20 @@ async function probeExplicitEndpoint(rawUrl, provider, preferredModel, apiKey, s
   if (!probe) return null;
   const selection = selectModel(probe.models, preferredModel);
   if (selection.error) {
-    return { state: "unavailable", message: selection.error };
+    return {
+      config: null,
+      status: {
+        state: "unavailable",
+        source,
+        provider,
+        baseUrl,
+        model: null,
+        models: selection.models ?? [],
+        latencyMs: probe.latencyMs,
+        lastCheckedAt: probe.checkedAt,
+        message: selection.error,
+      },
+    };
   }
   const model = selection.model;
   if (!model) return null;
@@ -1216,7 +1239,8 @@ function safeRequestUrl(value) {
   if (!value || value.length > 2_048) return null;
   try {
     const url = new URL(value, "http://studio-manager.local");
-    return url.search === "" && url.hash === "" ? url : null;
+    // 允许查询串（incidents 筛选用），仍拒绝 hash
+    return url.hash === "" ? url : null;
   } catch {
     return null;
   }
