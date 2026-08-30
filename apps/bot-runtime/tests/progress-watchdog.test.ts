@@ -178,3 +178,83 @@ describe("expected-progress contract", () => {
     expect(fired).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Round 4: 按动作/阶段的进度契约 + FailureSignal（2/3 节）
+// ---------------------------------------------------------------------------
+import { PROGRESS_CONTRACTS } from "../src/progress-watchdog.js";
+
+describe("action/phase progress contracts", () => {
+  const base = (over) => ({ observedAtMs: 0, position: { x: 0, y: 64, z: 0 }, ...over });
+
+  it("registry exposes the five named contracts with expectations", () => {
+    expect(Object.keys(PROGRESS_CONTRACTS).sort()).toEqual([
+      "MOVE_TO_TARGET", "PLACE_AND_VERIFY", "RECOVERING", "SMELTING_WAIT", "WAITING_EXTERNAL",
+    ]);
+    expect(PROGRESS_CONTRACTS.MOVE_TO_TARGET.expectation).toBe("movement");
+    expect(PROGRESS_CONTRACTS.PLACE_AND_VERIFY.expectation).toBe("world_state_change");
+    expect(PROGRESS_CONTRACTS.SMELTING_WAIT.expectation).toBe("server_event");
+    expect(PROGRESS_CONTRACTS.WAITING_EXTERNAL.expectation).toBe("timer_wait");
+    expect(PROGRESS_CONTRACTS.RECOVERING.expectation).toBe("timer_wait");
+    expect(PROGRESS_CONTRACTS.RECOVERING.deadlineMs).toBeGreaterThan(0);
+  });
+
+  it("SMELTING_WAIT: stationary is normal; contract default deadline fires deadline-exceeded", () => {
+    const watchdog = new ProgressWatchdog({ stuckAfterMs: 1_000, noProgressAfterMs: 2_000 });
+    const events = [];
+    for (let t = 0; t <= 70_000; t += 2_000) {
+      events.push(...watchdog.observe(base({
+        observedAtMs: t,
+        contract: "SMELTING_WAIT",
+        phaseKey: "smelt:ore-iron",
+      })));
+    }
+    expect(events.filter((e) => e.kind === "stuck")).toHaveLength(0);
+    expect(events.filter((e) => e.kind === "no-progress")).toHaveLength(0);
+    expect(events.filter((e) => e.kind === "deadline-exceeded")).toHaveLength(1);
+  });
+
+  it("PLACE_AND_VERIFY: stationary normal; world signal (inventory proxy) counts as progress", () => {
+    const watchdog = new ProgressWatchdog({ stuckAfterMs: 1_000, noProgressAfterMs: 2_000 });
+    const events = [];
+    for (let t = 0; t <= 30_000; t += 2_000) {
+      events.push(...watchdog.observe(base({
+        observedAtMs: t,
+        contract: "PLACE_AND_VERIFY",
+        phaseKey: "place:furnace-1",
+      })));
+      if (t === 10_000) {
+        events.push(...watchdog.observe(base({ observedAtMs: t + 1_000, contract: "PLACE_AND_VERIFY", phaseKey: "place:furnace-1", inventoryFingerprint: "changed" })));
+      }
+    }
+    expect(events.filter((e) => e.kind === "stuck")).toHaveLength(0);
+  });
+
+  it("RECOVERING: recovery gets its own window, then deadline-exceeded (no infinite exemption)", () => {
+    const watchdog = new ProgressWatchdog({ stuckAfterMs: 1_000, noProgressAfterMs: 2_000 });
+    const events = [];
+    for (let t = 0; t <= 40_000; t += 2_000) {
+      events.push(...watchdog.observe(base({
+        observedAtMs: t,
+        contract: "RECOVERING",
+        phaseKey: "recover:unstuck-1",
+      })));
+    }
+    expect(events.filter((e) => e.kind === "deadline-exceeded")).toHaveLength(1);
+  });
+
+  it("MOVE_TO_TARGET: stagnant movement fires stuck (contract default)", () => {
+    const watchdog = new ProgressWatchdog();
+    let stuck = 0;
+    for (let t = 0; t <= 12_000; t += 1_000) {
+      stuck += watchdog.observe(base({ observedAtMs: t, contract: "MOVE_TO_TARGET" }))
+        .filter((e) => e.kind === "stuck").length;
+    }
+    expect(stuck).toBe(1);
+  });
+
+  it("unknown contract name is rejected (no silent fallback)", () => {
+    const watchdog = new ProgressWatchdog();
+    expect(() => watchdog.observe(base({ observedAtMs: 0, contract: "VIBING" }))).toThrow(/contract/);
+  });
+});

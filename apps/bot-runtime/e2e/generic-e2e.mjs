@@ -21,7 +21,12 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { E2E_CONTAINER, E2E_HOST_PORT, E2E_MC_VERSION, isRunning, startServer, stopServer, rcon } from "./server-manager.mjs";
+import { withE2EFixture } from "./fixture-manager.mjs";
+
+/** 当前 run 的 fixture（withE2EFixture 内赋值）。 */
+let activeFixture = null;
+function rcon(command) { return activeFixture.rcon(command); }
+function fixturePort() { return activeFixture.port; }
 import { InMemoryWorkstationRegistry } from "@minecraft-studio/skills";
 import { FacilityRegistry, smeltingLinePattern } from "@minecraft-studio/skills";
 
@@ -51,9 +56,8 @@ function sleep(ms) {
 function createBot(username = BOT_NAME) {
   return mineflayer.createBot({
     host: "127.0.0.1",
-    port: E2E_HOST_PORT,
+    port: fixturePort(),
     username,
-    version: E2E_MC_VERSION,
     auth: "offline",
   });
 }
@@ -178,8 +182,6 @@ async function placeAndVerify(bot, referencePos, placePos, itemName, timeoutMs =
 // 场景主流程
 // ---------------------------------------------------------------------------
 
-const KEEP_SERVER = process.argv.includes("--keep-server");
-const SKIP_START = process.argv.includes("--skip-start");
 
 let failures = 0;
 async function step(name, fn) {
@@ -194,14 +196,11 @@ async function step(name, fn) {
 }
 
 async function main() {
-  if (!SKIP_START) {
-    await step("server: start offline-mode fixture", async () => {
-      await startServer();
-      assert(await isRunning(), "server container must be running");
-    });
-  } else {
-    assert(await isRunning(), "--skip-start requires a running server");
-  }
+  // fixture 隔离：唯一容器/动态端口/独立 world，finally cleanup 由 withE2EFixture 保证
+  await withE2EFixture(async (fixture) => {
+    activeFixture = fixture;
+    log(`fixture ready: container=${fixture.containerName} port=${fixture.port} world=${fixture.volumeName}`);
+  // （原 --skip-start/--keep-server 语义已被隔离 fixture 取代）
 
   const wsRegistry = new InMemoryWorkstationRegistry();
   const facilities = new FacilityRegistry();
@@ -330,6 +329,7 @@ async function main() {
   bot.quit();
   log(failures === 0 ? "GENERIC E2E: ALL STEPS PASSED" : `GENERIC E2E: ${failures} FAILURES`);
   process.exitCode = failures === 0 ? 0 : 1;
+  });
 }
 
 try {
@@ -338,9 +338,5 @@ try {
   log(`FATAL: ${error.message}`);
   process.exitCode = 1;
 } finally {
-  if (!KEEP_SERVER && !SKIP_START) {
-    await stopServer();
-  } else {
-    log("server kept running (--keep-server / --skip-start)");
-  }
+  // cleanup 由 withE2EFixture finally 保证
 }

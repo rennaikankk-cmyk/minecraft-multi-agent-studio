@@ -18,6 +18,44 @@ export type PhaseExpectation =
   | "timer_wait"
   | "external_completion";
 
+/**
+ * FailureSignal —— watchdog 的唯一输出语义（第 3 节）。
+ * Watchdog 只产生有界结构化信号；是否升级为 Incident 由
+ * runtime/IncidentReporter 决定。Watchdog 自身不做 IO、不做上报。
+ */
+export type FailureSignal = ProgressWatchdogEvent;
+
+/**
+ * 按动作/阶段定义的进度契约（第 2 节：不按 Skill 名判断）。
+ * 每个契约声明：期望信号类型、静止是否正常、默认 deadline（自 phase 开始）。
+ * 新增 Skill 时映射到既有契约，而不是为每个 Skill 补防误报逻辑。
+ */
+export const PROGRESS_CONTRACTS = Object.freeze({
+  MOVE_TO_TARGET: Object.freeze({ expectation: "movement" as const, stationaryOk: false, deadlineMs: 120_000 }),
+  PLACE_AND_VERIFY: Object.freeze({ expectation: "world_state_change" as const, stationaryOk: true, deadlineMs: 45_000 }),
+  SMELTING_WAIT: Object.freeze({ expectation: "server_event" as const, stationaryOk: true, deadlineMs: 60_000 }),
+  WAITING_EXTERNAL: Object.freeze({ expectation: "timer_wait" as const, stationaryOk: true, deadlineMs: 45_000 }),
+  /** 恢复阶段有独立超时——不能无限豁免 watchdog。 */
+  RECOVERING: Object.freeze({ expectation: "timer_wait" as const, stationaryOk: true, deadlineMs: 30_000 }),
+} as const);
+
+export type ProgressContractName = keyof typeof PROGRESS_CONTRACTS;
+
+/**
+ * 动作名（skill id）→ 进度契约。集中一处；未列出的动作按 movement 归属推断。
+ * movementOwner 存在时永远是 MOVE_TO_TARGET（寻路是唯一位移来源）。
+ */
+export function progressContractForAction(actionTitle: string | null | undefined, movementOwner: string | null | undefined): ProgressContractName | undefined {
+  if (movementOwner !== null && movementOwner !== undefined) return "MOVE_TO_TARGET";
+  if (!actionTitle) return undefined;
+  const title = actionTitle.toLowerCase();
+  if (title.includes("smelt")) return "SMELTING_WAIT";
+  if (title.includes("place") || title.includes("build") || title.includes("blueprint")) return "PLACE_AND_VERIFY";
+  if (title.includes("recover") || title.includes("unstuck") || title.includes("replan")) return "RECOVERING";
+  if (title.includes("wait") || title.includes("observe") || title.includes("trade")) return "WAITING_EXTERNAL";
+  return undefined;
+}
+
 export type ProgressSample = Readonly<{
   observedAtMs: number;
   position: Readonly<{ x: number; y: number; z: number }>;
@@ -29,8 +67,10 @@ export type ProgressSample = Readonly<{
   targetDistance?: number | null;
   goalKey?: string | null;
   pathResetCount?: number;
-  /** 当前 phase 的期望信号（缺省按 movementExpected 旧语义）。 */
+  /** 当前 phase 的期望信号（缺省按 movementExpected 旧语义；contract 优先）。 */
   phaseExpectation?: PhaseExpectation;
+  /** 动作/阶段契约名（PROGRESS_CONTRACTS 键；未知名直接抛错）。 */
+  contract?: ProgressContractName | undefined;
   /** phase 标识（deadline-exceeded 去重键）。 */
   phaseKey?: string;
   /** phase 绝对截止时间；超过且无预期信号 → deadline-exceeded。 */
@@ -106,6 +146,8 @@ export class ProgressWatchdog {
   private deadlineReportedForKey: string | null = null;
   private pathResetBaseline: number | null = null;
   private recentPositions: Array<Readonly<{ x: number; y: number; z: number }>> = [];
+  private readonly phaseStart: Array<{ key: string; startedAtMs: number }> = [];
+  private pendingContractDeadline: { key: string | undefined; deadlineAtMs: number } | null = null;
 
   constructor(config: Partial<ProgressWatchdogConfig> = {}) {
     this.config = Object.freeze({ ...DEFAULT_PROGRESS_WATCHDOG_CONFIG, ...config });
@@ -184,9 +226,14 @@ export class ProgressWatchdog {
       events.push(Object.freeze({ kind: "progress", observedAtMs: sample.observedAtMs, ageMs: 0, goalKey, recoverySuggested: null }));
     }
 
-    // expected-progress contract 判定
-    const expectation = sample.phaseExpectation
-      ?? (sample.movementExpected === false ? "timer_wait" : "movement");
+    // expected-progress contract 判定：contract 注册表 > 旧 phaseExpectation > movementExpected
+    if (sample.contract !== undefined && !(sample.contract in PROGRESS_CONTRACTS)) {
+      throw new TypeError(`Unknown progress contract: ${sample.contract}`);
+    }
+    const resolvedContract = sample.contract !== undefined ? PROGRESS_CONTRACTS[sample.contract] : null;
+    const expectation = resolvedContract
+      ? resolvedContract.expectation
+      : (sample.phaseExpectation ?? (sample.movementExpected === false ? "timer_wait" : "movement"));
     const waitingStyle = expectation !== "movement";
 
     // 震荡检测：仅 movement 期待；窗口内两两距离全 ≤ 半径 → 报一次；逃出半径 → 复位
@@ -228,16 +275,40 @@ export class ProgressWatchdog {
       events.push(Object.freeze({ kind: "loop", observedAtMs: sample.observedAtMs, ageMs, goalKey, recoverySuggested: "high-level-replan" }));
     }
 
+    // 契约默认 deadline：phaseKey 变化时记录起点，超 contract.deadlineMs 触发
+    if (resolvedContract && sample.phaseKey && sample.phaseDeadlineMs === undefined) {
+      if (this.phaseStart.at(-1)?.key !== sample.phaseKey) {
+        this.phaseStart.push({ key: sample.phaseKey, startedAtMs: sample.observedAtMs });
+        this.deadlineReportedForKey = null;
+        if (this.phaseStart.length > 8) this.phaseStart.shift();
+      }
+      const startedAt = this.phaseStart.find((entry) => entry.key === sample.phaseKey)!.startedAtMs;
+      this.pendingContractDeadline = { key: sample.phaseKey, deadlineAtMs: startedAt + resolvedContract.deadlineMs };
+    }
     // 等待型期待：静止正常；只看 deadline
     if (sample.phaseDeadlineMs !== undefined && sample.phaseKey) {
       const deadlinePassed = sample.observedAtMs >= sample.phaseDeadlineMs;
       const phaseChanged = this.deadlineReportedForKey !== null && this.deadlineReportedForKey !== sample.phaseKey;
       if (deadlinePassed && !phaseChanged && this.deadlineReportedForKey !== sample.phaseKey) {
-        this.deadlineReportedForKey = sample.phaseKey;
+        this.deadlineReportedForKey = sample.phaseKey ?? null;
         this.deadlineCount += 1;
         events.push(Object.freeze({
           kind: "deadline-exceeded", observedAtMs: sample.observedAtMs, ageMs, goalKey,
-          recoverySuggested: "high-level-replan", phaseKey: sample.phaseKey,
+          recoverySuggested: "high-level-replan",
+          ...(sample.phaseKey === undefined ? {} : { phaseKey: sample.phaseKey }),
+        }));
+      }
+    }
+
+    // 契约默认 deadline 判定（sample 未显式给 phaseDeadlineMs 时）
+    if (this.pendingContractDeadline && sample.phaseDeadlineMs === undefined) {
+      if (this.pendingContractDeadline.key === sample.phaseKey && sample.observedAtMs >= this.pendingContractDeadline.deadlineAtMs && this.deadlineReportedForKey !== sample.phaseKey) {
+        this.deadlineReportedForKey = sample.phaseKey ?? null;
+        this.deadlineCount += 1;
+        events.push(Object.freeze({
+          kind: "deadline-exceeded", observedAtMs: sample.observedAtMs, ageMs, goalKey,
+          recoverySuggested: "high-level-replan",
+          ...(sample.phaseKey === undefined ? {} : { phaseKey: sample.phaseKey }),
         }));
       }
     }
@@ -276,6 +347,8 @@ export class ProgressWatchdog {
     this.deadlineReportedForKey = null;
     this.pathResetBaseline = null;
     this.recentPositions = [];
+    this.phaseStart.length = 0;
+    this.pendingContractDeadline = null;
   }
 
   snapshot(): ProgressWatchdogSnapshot {

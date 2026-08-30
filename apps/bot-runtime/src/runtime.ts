@@ -99,6 +99,7 @@ import {
   type ProgressWatchdogEvent,
   type ProgressWatchdogSnapshot,
 } from "./progress-watchdog.js";
+import { progressContractForAction } from "./progress-watchdog.js";
 import { IncidentReporter, watchdogEventToSignal } from "./incident-reporter.js";
 import { WorldStateStore, type WorldStateSnapshot } from "./world-state.js";
 
@@ -1435,9 +1436,11 @@ export class SingleBotRuntime {
       const inventoryFingerprint = worldSnapshot.inventory
         .map((item) => `${item.name}:${item.count}:${item.durability ?? ""}`)
         .join("|");
+      const activeRuntimeTask = [...this.activeSkillTasks.values()][0];
       const events = this.progressWatchdog.observe({
         observedAtMs: observedAt.getTime(),
         position,
+        contract: progressContractForAction(activeRuntimeTask?.title, worldSnapshot.navigation.movementOwner),
         inventoryFingerprint,
         targetDistance: worldSnapshot.navigation.target
           ? Math.hypot(
