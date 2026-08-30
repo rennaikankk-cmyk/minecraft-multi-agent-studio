@@ -8,6 +8,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { createServer } from "node:http";
+import { IncidentStore } from "../packages/skills/dist/incidents.js";
 import { isIP } from "node:net";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -244,6 +245,9 @@ export class StudioLocalManager {
       mkdir(this.logRoot, { recursive: true }),
     ]);
     await this.loadManifest();
+    this.incidents = new IncidentStore({
+      persistPath: process.env.STUDIO_INCIDENT_STORE_PATH?.trim() || path.join(this.runtimeRoot, "incidents.json"),
+    });
     this.server = createServer(
       {
         maxHeaderSize: 16_384,
@@ -320,6 +324,29 @@ export class StudioLocalManager {
       return;
     }
     try {
+      if (request.method === "GET" && url.pathname === "/v1/incidents") {
+        this.writeJson(response, 200, {
+          schemaVersion: "1.0",
+          generatedAt: new Date().toISOString(),
+          issues: this.incidents.listIssues(),
+        });
+        return;
+      }
+      const incidentMatch = url.pathname.match(/^\/v1\/incidents\/(INC-[0-9]{4})$/u);
+      if (request.method === "GET" && incidentMatch) {
+        const issue = this.incidents.getIssue(incidentMatch[1]);
+        if (!issue) {
+          this.writeError(response, 404, "INCIDENT_NOT_FOUND", "未找到该 Incident。");
+          return;
+        }
+        this.writeJson(response, 200, {
+          schemaVersion: "1.0",
+          generatedAt: new Date().toISOString(),
+          issue,
+          occurrences: this.incidents.listOccurrences(issue.incidentId),
+        });
+        return;
+      }
       if (request.method === "GET" && url.pathname === "/v1/status") {
         this.writeJson(response, 200, this.status());
         return;
@@ -529,6 +556,18 @@ export class StudioLocalManager {
       config.processState = code === 0 ? "stopped" : "error";
       if (code !== 0) {
         config.lastError = `Bot Runtime 已退出（code=${code ?? "none"}, signal=${signal ?? "none"}）。`;
+        // 父进程侧 BOT_CRASH：child 来不及 flush 时也要有证据（十.4）
+        this.incidents.report({
+          subject: "bot",
+          botId,
+          failureCode: "BOT_PROCESS_EXITED",
+          incidentType: "BOT_CRASH",
+          sourceComponent: "studio-local-manager",
+          severity: "CRITICAL",
+          expected: "bot runtime keeps running or exits 0 after graceful stop",
+          actual: `exit code=${code ?? "none"} signal=${signal ?? "none"}`,
+          snapshots: { username: config.username, serverHost: config.serverHost, serverPort: config.serverPort },
+        });
       }
     });
   }

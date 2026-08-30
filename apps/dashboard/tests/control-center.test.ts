@@ -9,8 +9,8 @@ import {
   connectionTone,
   facilitySlotLabel,
   facilitySlotTone,
-} from "@/components/status-badges";
-import { buildGrid } from "@/components/blueprint-grid";
+} from "@/lib/status-classification";
+import { buildGrid } from "@/lib/blueprint-geometry";
 import { toSharedStateView } from "@/lib/shared-state-client";
 
 describe("connection badge classification", () => {

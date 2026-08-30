@@ -10,6 +10,7 @@ const links = [
   { href: "/servers", label: "服务器" },
   { href: "/bots", label: "机器人" },
   { href: "/bases", label: "基地" },
+  { href: "/incidents", label: "Incidents" },
   { href: "/shared-state", label: "共享状态" },
   { href: "/tasks", label: "任务" },
   { href: "/combat", label: "作战" },
