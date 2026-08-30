@@ -5,7 +5,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { parseEnv } from "node:util";
 
-import { resolveStudioStartupPlan } from "../packages/protocol/src/studio-startup.js";
+import { resolveStudioStartupPlan } from "../packages/protocol/dist/studio-startup.js";
 import {
   createLocalBotSlots,
   discoverLocalAIWithRetry,
