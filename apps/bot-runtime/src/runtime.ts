@@ -99,6 +99,7 @@ import {
   type ProgressWatchdogEvent,
   type ProgressWatchdogSnapshot,
 } from "./progress-watchdog.js";
+import { IncidentReporter, watchdogEventToSignal } from "./incident-reporter.js";
 import { WorldStateStore, type WorldStateSnapshot } from "./world-state.js";
 
 type TimerHandle = ReturnType<typeof setTimeout>;
@@ -296,6 +297,7 @@ export class SingleBotRuntime {
   private readonly goalExecutor: GoalExecutor;
   private readonly worldState = new WorldStateStore();
   private readonly progressWatchdog = new ProgressWatchdog();
+  private incidentReporter!: IncidentReporter;
   private state: BotConnectionState = "offline";
   private client: BotClient | null = null;
   private generation = 0;
@@ -372,6 +374,12 @@ export class SingleBotRuntime {
     private readonly dependencies: RuntimeDependencies,
   ) {
     this.now = dependencies.now ?? (() => new Date());
+    this.incidentReporter = new IncidentReporter({
+      botId: profile.botId,
+      endpoint: process.env.STUDIO_INCIDENT_ENDPOINT?.trim() || undefined,
+      token: process.env.STUDIO_INCIDENT_TOKEN?.trim() || undefined,
+      logger: { warn: (message: string) => dependencies.logger?.warn?.(message) ?? console.warn(message) },
+    });
     this.randomId = dependencies.randomId ?? randomUUID;
     this.runtimeInstanceId = `runtime-${this.randomId()}`;
     this.metrics = dependencies.metrics ?? new InMemoryMetricRegistry();
@@ -1450,6 +1458,21 @@ export class SingleBotRuntime {
           worldSnapshot.navigation.movementOwner !== null,
       });
       for (const event of events) {
+        if (event.kind === "stuck" || event.kind === "no-progress" || event.kind === "oscillation" || event.kind === "loop") {
+          // 非阻塞 Incident 上报（有界队列；失败只计数，绝不打断恢复流程）
+          const activeTask = [...this.activeSkillTasks.values()][0];
+          this.incidentReporter.report(watchdogEventToSignal({
+            event,
+            position,
+            dimension: worldSnapshot.navigation.target?.dimension ?? null,
+            replanCount: worldSnapshot.navigation.pathResetCount,
+            skillId: activeTask?.title,
+            expectedProgress: worldSnapshot.navigation.target
+              ? `target distance decreasing toward ${worldSnapshot.navigation.target.x},${worldSnapshot.navigation.target.z} (dimension ${worldSnapshot.navigation.target.dimension})`
+              : undefined,
+            actualProgress: `${event.kind} after ${event.ageMs}ms without material progress; pathResets=${worldSnapshot.navigation.pathResetCount}`,
+          }));
+        }
         if (event.kind === "stuck") {
           this.metrics.increment("bot_watchdog_stuck_total", { bot_id: this.profile.botId });
           this.dependencies.logger.warn("bot_progress_stuck", this.logFields({ ageMs: event.ageMs, recovery: event.recoverySuggested }));

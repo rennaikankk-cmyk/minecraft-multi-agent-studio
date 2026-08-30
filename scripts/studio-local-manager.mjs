@@ -319,6 +319,18 @@ export class StudioLocalManager {
     };
   }
 
+  async readRequestBody(request) {
+    const chunks = [];
+    let bytes = 0;
+    for await (const chunk of request) {
+      const buffer = Buffer.isBuffer(chunk) ? Buffer.from(chunk) : chunk;
+      bytes += buffer.length;
+      if (bytes > 256 * 1024) throw new Error("body too large");
+      chunks.push(buffer);
+    }
+    return Buffer.concat(chunks).toString("utf8");
+  }
+
   async handleRequest(request, response) {
     response.setHeader("Cache-Control", "no-store");
     response.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -334,11 +346,82 @@ export class StudioLocalManager {
     }
     try {
       if (request.method === "GET" && url.pathname === "/v1/incidents") {
+        const issues = this.incidents.listIssues();
+        const q = url.searchParams;
+        const limit = Math.min(200, Math.max(1, Number.parseInt(q.get("limit") ?? "50", 10) || 50));
+        const offset = Math.max(0, Number.parseInt(q.get("offset") ?? "0", 10) || 0);
+        const status = q.get("status");
+        const severity = q.get("severity");
+        const suspectedLayer = q.get("suspectedLayer");
+        const botId = q.get("botId");
+        const failureCode = q.get("failureCode");
+        const since = q.get("since");
+        const filtered = issues.filter((issue) => {
+          if (status && issue.status !== status) return false;
+          if (severity && issue.maxSeverity !== severity) return false;
+          if (suspectedLayer && issue.suspectedLayer !== suspectedLayer) return false;
+          if (failureCode && issue.primaryFailureCode !== failureCode) return false;
+          if (botId && !issue.affectedBotIds.includes(botId)) return false;
+          if (since && issue.lastSeenAt < since) return false;
+          return true;
+        });
         this.writeJson(response, 200, {
           schemaVersion: "1.0",
           generatedAt: new Date().toISOString(),
-          issues: this.incidents.listIssues(),
+          total: filtered.length,
+          limit,
+          offset,
+          issues: filtered.slice(offset, offset + limit),
         });
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/v1/incidents") {
+        // Bot runtime 上报入口（stuck/oscillation/deadline 等）；token 已在上面统一校验
+        let body;
+        try {
+          body = JSON.parse(await this.readRequestBody(request));
+        } catch {
+          this.writeError(response, 400, "INVALID_REQUEST", "请求正文不是有效 JSON。");
+          return;
+        }
+        try {
+          const result = this.incidents.report({
+            subject: body.subject === "process_group" || body.subject === "server" || body.subject === "service" ? body.subject : "bot",
+            botId: typeof body.botId === "string" ? body.botId : null,
+            sessionId: typeof body.sessionId === "string" ? body.sessionId : null,
+            serverProfileId: typeof body.serverProfileId === "string" ? body.serverProfileId : null,
+            minecraftVersion: typeof body.minecraftVersion === "string" ? body.minecraftVersion : null,
+            protocolVersion: typeof body.protocolVersion === "number" ? body.protocolVersion : null,
+            gitCommit: typeof body.gitCommit === "string" ? body.gitCommit : null,
+            branch: typeof body.branch === "string" ? body.branch : null,
+            goal: typeof body.goal === "string" ? body.goal.slice(0, 300) : null,
+            skillId: typeof body.skillId === "string" ? body.skillId : null,
+            skillStep: typeof body.skillStep === "string" ? body.skillStep : null,
+            phase: typeof body.phase === "string" ? body.phase : null,
+            position: body.position && Number.isFinite(body.position.x) ? body.position : null,
+            dimension: typeof body.dimension === "string" ? body.dimension : null,
+            failureCode: typeof body.failureCode === "string" ? body.failureCode : "UNKNOWN_FAILURE",
+            incidentType: typeof body.incidentType === "string" ? body.incidentType : "UNKNOWN_FAILURE",
+            sourceComponent: typeof body.sourceComponent === "string" ? body.sourceComponent.slice(0, 120) : "bot-runtime",
+            severity: body.severity === "INFO" || body.severity === "WARNING" || body.severity === "CRITICAL" ? body.severity : "ERROR",
+            expected: typeof body.expected === "string" ? body.expected.slice(0, 600) : null,
+            actual: typeof body.actual === "string" ? body.actual.slice(0, 600) : null,
+            eventWindow: Array.isArray(body.eventWindow) ? body.eventWindow.slice(-60) : [],
+            snapshots: body.snapshots && typeof body.snapshots === "object" ? body.snapshots : {},
+            normalizedErrorSignature: typeof body.normalizedErrorSignature === "string" ? body.normalizedErrorSignature.slice(0, 200) : undefined,
+            actionFamily: typeof body.actionFamily === "string" ? body.actionFamily.slice(0, 120) : undefined,
+          });
+          this.writeJson(response, 201, {
+            schemaVersion: "1.0",
+            generatedAt: new Date().toISOString(),
+            incidentId: result.issue.incidentId,
+            occurrenceId: result.occurrence.occurrenceId,
+            createdIssue: result.createdIssue,
+            occurrenceCount: result.issue.occurrenceCount,
+          });
+        } catch (error) {
+          this.writeError(response, 400, "INVALID_REQUEST", error instanceof Error ? error.message.slice(0, 200) : "invalid incident");
+        }
         return;
       }
       const incidentMatch = url.pathname.match(/^\/v1\/incidents\/(INC-[0-9]{4,})$/u);
@@ -521,6 +604,9 @@ export class StudioLocalManager {
           `ws://127.0.0.1:${this.options.runtimeLinkPort}/v1/runtime-link`,
         BOT_RUNTIME_LINK_KEY_ID: slot.keyId,
         BOT_RUNTIME_LINK_SECRET: slot.secret,
+        // Bot runtime 的非阻塞 Incident 上报入口（stuck/oscillation 等）
+        STUDIO_INCIDENT_ENDPOINT: `http://127.0.0.1:${this.options.managerPort}/v1/incidents`,
+        STUDIO_INCIDENT_TOKEN: this.options.token,
       },
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe", "ipc"],

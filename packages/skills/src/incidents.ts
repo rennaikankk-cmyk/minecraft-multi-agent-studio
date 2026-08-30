@@ -13,7 +13,7 @@
 //   - evidence bounded；export 边界做 recursive redaction，宁可拒绝不泄漏
 // ---------------------------------------------------------------------------
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { createHash } from "node:crypto";
 
@@ -397,9 +397,12 @@ export class EventRingBuffer {
 // ---------------------------------------------------------------------------
 
 export interface IncidentStoreOptions {
-  /** 提供则启用原子 JSON 持久化（tmp+rename）。 */
+  /** 提供则启用原子 JSON 持久化（write-behind 异步 flush）。 */
   readonly persistPath?: string;
+  /** flush 防抖窗口；0 = 只在 flush()/shutdown 时写盘。 */
+  readonly flushDebounceMs?: number;
   readonly maxIssues?: number;
+  readonly maxAgeDays?: number;
   readonly maxOccurrencesPerIssue?: number;
   readonly eventWindowMs?: number;
 }
@@ -440,14 +443,23 @@ export class IncidentStore {
   private readonly occurrences = new Map<string, IncidentOccurrence[]>();
   private readonly persistPath: string | undefined;
   private readonly maxIssues: number;
+  private readonly maxAgeDays: number;
   private readonly maxOccurrencesPerIssue: number;
   private readonly eventWindowMs: number;
   private issueCounter = 0;
   private occurrenceCounter = 0;
+  private readonly flushDebounceMs: number;
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private dirty = false;
+  private flushing: Promise<void> = Promise.resolve();
+  /** 写盘失败计数（可观测降级，绝不抛出）。 */
+  droppedWriteCount = 0;
 
   constructor(options: IncidentStoreOptions = {}) {
     this.persistPath = options.persistPath;
+    this.flushDebounceMs = options.flushDebounceMs ?? 500;
     this.maxIssues = options.maxIssues ?? 500;
+    this.maxAgeDays = options.maxAgeDays ?? 30;
     this.maxOccurrencesPerIssue = options.maxOccurrencesPerIssue ?? 50;
     this.eventWindowMs = options.eventWindowMs ?? 60_000;
     if (this.persistPath && existsSync(this.persistPath)) {
@@ -461,6 +473,7 @@ export class IncidentStore {
           this.occurrences.set(incidentId, list);
         }
         this.issueCounter = raw.issueCounter ?? this.issues.size;
+        this.enforceRetention();
         this.occurrenceCounter = raw.occurrenceCounter
           ?? [...this.occurrences.values()].reduce((sum, list) => sum + list.length, 0);
       } catch {
@@ -610,7 +623,22 @@ export class IncidentStore {
     return true;
   }
 
+  /** 测试钩子：手动触发 retention（生产路径在 report 内自动跑）。 */
+  enforceRetentionForTest(): void {
+    this.enforceRetention();
+  }
+
   private enforceRetention(): void {
+    // 硬边界 1：按时间淘汰（closed 且超龄）
+    const cutoff = Date.now() - this.maxAgeDays * 86_400_000;
+    for (const [incidentId, issue] of this.issues) {
+      if (issue.status === "open" || issue.status === "investigating") continue;
+      if (Date.parse(issue.lastSeenAt) < cutoff) {
+        this.issues.delete(incidentId);
+        this.occurrences.delete(incidentId);
+      }
+    }
+    // 硬边界 2：按数量淘汰最老的 closed；open/investigating 永不淘汰（宁超限不误删活跃）
     const issues = this.listIssues();
     for (let i = this.maxIssues; i < issues.length; i += 1) {
       const victim = issues[i]!;
@@ -620,9 +648,22 @@ export class IncidentStore {
     }
   }
 
+  /** 热路径只标脏 + 排程防抖 flush；绝不同步写盘。 */
   private persist(): void {
     if (!this.persistPath) return;
-    try {
+    this.dirty = true;
+    if (this.flushTimer !== null || this.flushDebounceMs <= 0) return;
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      void this.flush();
+    }, this.flushDebounceMs);
+    this.flushTimer.unref?.();
+  }
+
+  /** 把脏状态原子落盘（唯一 tmp + rename）；失败计数不抛出。可并发调用，内部串行。 */
+  flush(): Promise<void> {
+    const run = this.flushing.then(async () => {
+      if (!this.persistPath) return; // 显式 flush 无条件落盘（测试/关闭路径可能直接改过内存）
       const payload = JSON.stringify({
         schemaVersion: "1.0",
         savedAt: new Date().toISOString(),
@@ -631,13 +672,20 @@ export class IncidentStore {
         issues: [...this.issues.values()],
         occurrences: Object.fromEntries(this.occurrences),
       });
-      const tmp = `${this.persistPath}.tmp`;
-      mkdirSync(dirname(this.persistPath), { recursive: true });
-      writeFileSync(tmp, payload, "utf8");
-      renameSync(tmp, this.persistPath);
-    } catch {
-      // 持久化失败不阻塞调用方（hot path 契约）
-    }
+      const tmp = `${this.persistPath}.tmp-${process.pid}-${Date.now().toString(36)}`;
+      try {
+        mkdirSync(dirname(this.persistPath), { recursive: true });
+        writeFileSync(tmp, payload, "utf8");
+        renameSync(tmp, this.persistPath);
+        this.dirty = false;
+      } catch {
+        this.droppedWriteCount += 1; // 可观测降级：内存照常工作
+      } finally {
+        rmSync(tmp, { force: true });
+      }
+    });
+    this.flushing = run.catch(() => undefined);
+    return run;
   }
 }
 

@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Incident 领域核心回归测试（fingerprint/dedup/分类/redaction/持久化/bounds）
 // ---------------------------------------------------------------------------
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -176,7 +176,7 @@ describe("IncidentStore dedup + aggregation", () => {
     expect(store.getIssue(issue.incidentId)!.fixedByCommit).toBe("abc123");
   });
 
-  it("persistence round-trip: issues/occurrences survive restart (atomic file)", () => {
+  it("persistence round-trip: issues/occurrences survive restart (atomic file)", async () => {
     const dir = tmpDir();
     const path = join(dir, "incidents.json");
     const store = new IncidentStore({ persistPath: path });
@@ -185,6 +185,7 @@ describe("IncidentStore dedup + aggregation", () => {
       sourceComponent: "build", expected: "cobblestone at (10,65,8)", actual: "dirt at (10,65,8)",
       snapshots: { cell: "41", attempts: 3 },
     });
+    await store.flush();
     expect(existsSync(path)).toBe(true);
     JSON.parse(readFileSync(path, "utf8")); // 合法 JSON（原子写）
 
@@ -295,5 +296,109 @@ describe("round2 fixes: fingerprint de-aggregation + free-text redaction", () =>
     const { markdown } = occurrenceToMarkdown(issue, occurrence);
     expect(markdown).not.toContain("sk-abcdefghijklmnopqrst");
     expect(safeExportText(markdown)).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round 3: async writer + retention（P0 持久化可靠性）
+// ---------------------------------------------------------------------------
+
+describe("async writer + retention", () => {
+  it("report() returns synchronously without blocking on disk; flush() completes persistence", async () => {
+    const path = join(tmpDir(), "inc.json");
+    const store = new IncidentStore({ persistPath: path, flushDebounceMs: 60_000 }); // 不自动 flush
+    const { issue } = store.report({ subject: "bot", botId: "b1", failureCode: "PATH_NO_PROGRESS", incidentType: "STUCK", sourceComponent: "pf" });
+    // 未 flush：磁盘上还没有（或不是最新）——内存已可查询
+    expect(store.getIssue(issue.incidentId)).not.toBeNull();
+    await store.flush();
+    const reopened = new IncidentStore({ persistPath: path });
+    expect(reopened.getIssue(issue.incidentId)).not.toBeNull();
+  });
+
+  it("concurrent reports preserve order and all survive flush", async () => {
+    const path = join(tmpDir(), "inc.json");
+    const store = new IncidentStore({ persistPath: path, flushDebounceMs: 60_000, maxOccurrencesPerIssue: 200 });
+    const signatures = Array.from({ length: 50 }, (_, i) => `sig-${i}`);
+    for (const sig of signatures) {
+      store.report({ subject: "bot", botId: "b", failureCode: "BOT_PROCESS_EXITED", incidentType: "BOT_CRASH", sourceComponent: "mgr", normalizedErrorSignature: sig });
+    }
+    await store.flush();
+    const reopened = new IncidentStore({ persistPath: path });
+    let total = 0;
+    for (const issue of reopened.listIssues()) total += reopened.listOccurrences(issue.incidentId).length;
+    expect(total).toBe(50);
+  });
+
+  it("corrupt store file recovers to empty without throwing; writes still work", () => {
+    const path = join(tmpDir(), "inc.json");
+    writeFileSync(path, "{corrupt", "utf8");
+    const store = new IncidentStore({ persistPath: path });
+    expect(store.listIssues()).toHaveLength(0);
+    const { issue } = store.report({ subject: "bot", botId: "b", failureCode: "UNKNOWN_FAILURE", incidentType: "UNKNOWN_FAILURE", sourceComponent: "x" });
+    expect(store.getIssue(issue.incidentId)).not.toBeNull();
+  });
+
+  it("issue ids go beyond INC-9999", () => {
+    const store = new IncidentStore({ maxOccurrencesPerIssue: 1 });
+    // 直接操纵计数器模拟历史存量（不真造 9999 条）
+    const internal = store as unknown as { issueCounter: number };
+    internal.issueCounter = 9999;
+    const first = store.report({ subject: "bot", botId: "b", failureCode: "A1" in {} ? "UNKNOWN_FAILURE" : "UNKNOWN_FAILURE", incidentType: "UNKNOWN_FAILURE", sourceComponent: "x1" });
+    const second = store.report({ subject: "bot", botId: "b", failureCode: "LLM_OUTPUT_INVALID", incidentType: "LLM_INVALID_OUTPUT", sourceComponent: "x2" });
+    expect(first.issue.incidentId).toBe("INC-10000");
+    expect(second.issue.incidentId).toBe("INC-10001");
+  });
+
+  it("retention: count cap evicts oldest closed issues but never open/active ones", () => {
+    const store = new IncidentStore({ maxIssues: 3 });
+    const made = [];
+    for (let i = 0; i < 5; i += 1) {
+      const { issue } = store.report({ subject: "bot", botId: `b${i}`, failureCode: `SIG-${i}` in {} ? "UNKNOWN_FAILURE" : "UNKNOWN_FAILURE", incidentType: "UNKNOWN_FAILURE", sourceComponent: `comp-${i}`, normalizedErrorSignature: `u-${i}` });
+      made.push(issue.incidentId);
+    }
+    // 全部 open 时 retention 不得淘汰任何活跃 issue（宁超限不误删）
+    expect(store.listIssues().length).toBe(5);
+    // 手动关闭两个最老的 → 超限时它们被清理，open 全保留
+    const internalIssues = (store as unknown as { issues: Map<string, { status: string }> }).issues;
+    internalIssues.get(made[0]!)!.status = "ignored";
+    internalIssues.get(made[1]!)!.status = "ignored";
+    internalIssues.get(made[0]!)!.lastSeenAt = "2026-01-01T00:00:00.000Z";
+    internalIssues.get(made[1]!)!.lastSeenAt = "2026-01-02T00:00:00.000Z";
+    store.report({ subject: "bot", botId: "b9", failureCode: "UNKNOWN_FAILURE", incidentType: "UNKNOWN_FAILURE", sourceComponent: "comp-9", normalizedErrorSignature: "u-9" });
+    store.enforceRetentionForTest();
+    const survivors = store.listIssues().map((issue) => issue.incidentId);
+    expect(survivors).toHaveLength(4);
+    expect(survivors).not.toContain(made[0]!);
+    expect(survivors).not.toContain(made[1]!);
+    for (let i = 2; i <= 4; i += 1) expect(survivors).toContain(made[i]!);
+  });
+
+  it("retention: maxAgeDays evicts only old issues", async () => {
+    const path = join(tmpDir(), "inc.json");
+    const store = new IncidentStore({ persistPath: path });
+    const { issue } = store.report({ subject: "bot", botId: "b", failureCode: "UNKNOWN_FAILURE", incidentType: "UNKNOWN_FAILURE", sourceComponent: "x" });
+    await store.flush();
+    void issue;
+    expect(existsSync(path)).toBe(true);
+    const internal = store as unknown as { issues: Map<string, { firstSeenAt: string; lastSeenAt: string; status: string }> };
+    for (const rec of internal.issues.values()) {
+      rec.firstSeenAt = "2026-07-01T00:00:00.000Z";
+      rec.lastSeenAt = "2026-07-01T00:00:00.000Z";
+      rec.status = "known_issue";
+    }
+    await store.flush();
+    const aged = new IncidentStore({ persistPath: path, maxAgeDays: 30 });
+    expect(aged.listIssues()).toHaveLength(0);
+  });
+
+  it("disk write failure degrades with dropped-writes counter, never throws", async () => {
+    // 用一个"文件当目录"的路径强制 mkdir/write 失败
+    const blocker = join(tmpDir(), "blocker");
+    writeFileSync(blocker, "x", "utf8");
+    const store = new IncidentStore({ persistPath: join(blocker, "inc.json"), flushDebounceMs: 10 });
+    const { issue } = store.report({ subject: "bot", botId: "b", failureCode: "UNKNOWN_FAILURE", incidentType: "UNKNOWN_FAILURE", sourceComponent: "x" });
+    expect(store.getIssue(issue.incidentId)).not.toBeNull(); // 内存不受影响
+    await store.flush();
+    expect((store as unknown as { droppedWriteCount: number }).droppedWriteCount).toBeGreaterThan(0);
   });
 });
