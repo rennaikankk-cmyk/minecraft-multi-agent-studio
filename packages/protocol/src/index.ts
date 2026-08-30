@@ -329,3 +329,13 @@ export {
   type SupervisorIpcStopV1,
   type SupervisorParentMessageV1,
 } from "./supervisor-ipc.js";
+export {
+  resolveStudioStartupPlan,
+  studioStartupModeSchema,
+  studioDeploymentModeSchema,
+  type LocalServerLifecycle,
+  type ResolveStartupInput,
+  type StudioDeploymentMode,
+  type StudioStartupMode,
+  type StudioStartupPlan,
+} from "./studio-startup.js";

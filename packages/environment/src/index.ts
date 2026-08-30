@@ -69,7 +69,12 @@ export function resolveDeploymentMode(
   env: NodeJS.ProcessEnv,
   hasDockerMarker: boolean,
 ): EnvironmentSnapshot["mode"] {
-  const configured = deploymentModeSchema.safeParse(env.STUDIO_MODE);
+  // 部署形态现在读取 STUDIO_DEPLOYMENT_MODE；
+  // 旧 STUDIO_MODE 的 deployment 取值作为兼容回退（正常路径下 start-studio
+  // 已把旧值迁移为 STUDIO_DEPLOYMENT_MODE，这里兜底直接读旧值的场景）。
+  const configured = deploymentModeSchema.safeParse(
+    env.STUDIO_DEPLOYMENT_MODE ?? env.STUDIO_MODE,
+  );
   if (configured.success) {
     return { value: configured.data, source: "environment" };
   }

@@ -45,7 +45,10 @@
     "test:minecraft-skills": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-isolated-minecraft-test.ps1",
     "check:minecraft-workflow": "node scripts/validate-minecraft-acceptance-workflow.mjs",
     "test:e2e": "pnpm --filter @minecraft-studio/dashboard test:e2e",
-    "check": "pnpm typecheck && pnpm test && pnpm build"
+    "check": "pnpm typecheck && pnpm test && pnpm build",
+    "studio:start": "node scripts/start-studio.mjs",
+    "studio:start:local-test": "node scripts/start-studio.mjs --mode local_test",
+    "minecraft:e2e": "node apps/bot-runtime/e2e/generic-e2e.mjs"
   },
   "devDependencies": {
     "@types/node": "26.1.1",

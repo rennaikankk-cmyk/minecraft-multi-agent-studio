@@ -5,6 +5,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { parseEnv } from "node:util";
 
+import { resolveStudioStartupPlan } from "../packages/protocol/src/studio-startup.js";
 import {
   createLocalBotSlots,
   discoverLocalAIWithRetry,
@@ -43,6 +44,26 @@ const hostEnvironment = await loadLocalAIKeyFile(
   { ...environmentFileValues, ...process.env },
   configRoot,
 );
+const cliModeArg = (() => {
+  const modeFlagIndex = process.argv.indexOf("--mode");
+  if (modeFlagIndex !== -1 && process.argv[modeFlagIndex + 1]) return process.argv[modeFlagIndex + 1];
+  return undefined;
+})();
+const startupPlan = resolveStudioStartupPlan({
+  ...(cliModeArg === undefined ? {} : { cliMode: cliModeArg }),
+  env: { ...environmentFileValues, ...process.env },
+});
+for (const warning of startupPlan.warnings) {
+  process.stdout.write(`[studio] WARNING: ${warning}\n`);
+}
+process.stdout.write(
+  `[studio] Startup mode: ${startupPlan.startupMode.toUpperCase()} (resolved from ${startupPlan.resolvedFrom}), deployment: ${startupPlan.deploymentMode}\n`
+);
+if (startupPlan.localMinecraftServer.desired === "not_started") {
+  process.stdout.write(
+    "[studio] Local Minecraft Server: NOT STARTED (use --mode local_test, STUDIO_MODE=local_test, or pnpm studio:start:local-test to start one)\n"
+  );
+}
 const runtimeLinkPort = boundedPort(
   hostEnvironment.COORDINATOR_RUNTIME_LINK_PORT ?? "3220",
   "COORDINATOR_RUNTIME_LINK_PORT",
@@ -198,6 +219,15 @@ try {
       );
   await waitForDashboard(dashboard, dashboardUrl, 20_000);
   process.stdout.write(`Minecraft Multi-Agent Studio ready: ${dashboardUrl}\n`);
+  // Startup summary：模式与本地 MC Server 期望状态来自单一来源 startupPlan
+  process.stdout.write(
+    [
+      `Studio Mode: ${startupPlan.startupMode.toUpperCase()}`,
+      `Deployment Mode: ${startupPlan.deploymentMode.toUpperCase()}`,
+      `Dashboard: ONLINE (${dashboardUrl})`,
+      `Local Minecraft Server: ${startupPlan.localMinecraftServer.desired === "not_started" ? "NOT STARTED" : startupPlan.localMinecraftServer.desired.toUpperCase()}`,
+    ].join("\n") + "\n",
+  );
   if (packagedMode && hostEnvironment.STUDIO_OPEN_BROWSER?.trim() !== "0") {
     openDashboardInBrowser(dashboardUrl);
   }
