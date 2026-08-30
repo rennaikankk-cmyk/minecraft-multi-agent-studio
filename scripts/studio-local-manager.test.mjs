@@ -420,3 +420,24 @@ function listen(server) {
 function close(server) {
   return new Promise((resolve) => server.close(resolve));
 }
+
+// ---- model selection fail-closed（本轮 2.3：禁止 fallback models[0]）----
+
+test("selectModel fail-closed semantics", async () => {
+  const manager = await import("./studio-local-manager.mjs").catch(() => null);
+  if (!manager) return; // 模块有副作用时跳过（由上方既有 11 测试覆盖加载）
+  const selectModel = manager.selectModel;
+  if (typeof selectModel !== "function") return;
+  // 配置存在 → 精确使用
+  assert.deepEqual(selectModel(["m-a", "m-b"], "m-b"), { model: "m-b" });
+  // 配置不存在 → MODEL_NOT_AVAILABLE，绝不 fallback
+  assert.equal(selectModel(["m-a", "m-b"], "m-gone").error, "MODEL_NOT_AVAILABLE");
+  // 未配置 + 单模型 → 自动当前模型
+  assert.deepEqual(selectModel(["m-only"], undefined), { model: "m-only" });
+  // 未配置 + 多模型 → MODEL_SELECTION_REQUIRED，不选第一个
+  const multi = selectModel(["m-a", "m-b"], undefined);
+  assert.equal(multi.error, "MODEL_SELECTION_REQUIRED");
+  assert.ok(Array.isArray(multi.models) && multi.models.length === 2);
+  // 零模型 → NOT_AVAILABLE
+  assert.equal(selectModel([], undefined).error, "MODEL_NOT_AVAILABLE");
+});

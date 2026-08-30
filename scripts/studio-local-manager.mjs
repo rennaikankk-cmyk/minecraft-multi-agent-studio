@@ -126,7 +126,16 @@ export async function discoverLocalAI(environment = process.env) {
   );
   for (const result of results) {
     if (!result) continue;
-    const model = selectModel(result.probe.models, preferredModel);
+    const selection = selectModel(result.probe.models, preferredModel);
+  if (selection.error) {
+    return {
+      config: null,
+      probe: result.probe,
+      reason: selection.error,
+      ...(selection.models ? { availableModels: selection.models } : {}),
+    };
+  }
+  const model = selection.model;
     if (!model) continue;
     return {
       config: {
@@ -709,7 +718,11 @@ export class StudioLocalManager {
           };
       return;
     }
-    const model = selectModel(probe.models, this.aiStatus.model ?? "");
+    const selection = selectModel(probe.models, this.aiStatus.model ?? "");
+  if (selection.error) {
+    return { state: "unavailable", message: selection.error, changedAt: new Date().toISOString() };
+  }
+  const model = selection.model;
     this.aiStatus = {
       ...this.aiStatus,
       state: "connected",
@@ -834,7 +847,11 @@ async function probeExplicitEndpoint(rawUrl, provider, preferredModel, apiKey, s
   if (!baseUrl) return null;
   const probe = await probeAIEndpoint({ provider, baseUrl, apiKey }, 2_000);
   if (!probe) return null;
-  const model = selectModel(probe.models, preferredModel);
+  const selection = selectModel(probe.models, preferredModel);
+  if (selection.error) {
+    return { state: "unavailable", message: selection.error };
+  }
+  const model = selection.model;
   if (!model) return null;
   return {
     config: { provider, baseUrl, model },
@@ -1018,9 +1035,23 @@ function normalizedProvider(value) {
   return value?.trim().toLowerCase() === "ollama" ? "ollama" : "vllm";
 }
 
+/**
+ * 模型选择（fail closed，禁止 fallback models[0]）：
+ *  - preferred 明确配置且存在 → 使用之
+ *  - preferred 配置但不存在 → MODEL_NOT_AVAILABLE（fail closed）
+ *  - 未配置且恰好一个模型 → 自动使用当前模型
+ *  - 未配置且多个模型 → MODEL_SELECTION_REQUIRED（要求用户选择）
+ *  - 未配置且零个 → MODEL_NOT_AVAILABLE
+ * 返回 { model } 或 { error: "MODEL_NOT_AVAILABLE" | "MODEL_SELECTION_REQUIRED", models }。
+ */
 function selectModel(models, preferred) {
-  if (preferred && models.includes(preferred)) return preferred;
-  return models[0] ?? null;
+  if (preferred) {
+    if (models.includes(preferred)) return { model: preferred };
+    return { error: "MODEL_NOT_AVAILABLE", models };
+  }
+  if (models.length === 1) return { model: models[0] };
+  if (models.length === 0) return { error: "MODEL_NOT_AVAILABLE", models };
+  return { error: "MODEL_SELECTION_REQUIRED", models };
 }
 
 function safeOrigin(value) {
