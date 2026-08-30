@@ -73,7 +73,7 @@ export type BotDeathInfo = Readonly<{
 
 export type BotRecoveryAction = Readonly<{
   kind: "local-unstick" | "local-replan";
-  trigger: "stuck" | "no-progress" | "loop";
+  trigger: "stuck" | "no-progress" | "loop" | "oscillation" | "deadline-exceeded";
   taskId: string;
   goalKey: string | null;
   durationMs: number;

@@ -1,6 +1,23 @@
 /** Deterministic local progress monitoring.  It never asks the planner what
  * to do; it only reports bounded recovery signals to the runtime. */
 
+/**
+ * Expected-progress contract（十一节）：
+ *   movement            期待位移/target distance 推进（默认语义）
+ *   inventory_change    期待背包变化（craft/collect；站立正常）
+ *   world_state_change  期待方块/世界状态变化（place/break；站立正常）
+ *   server_event        期待服务器事件（smelt output、chunk 等；站立正常）
+ *   timer_wait          纯等待（熔炼计时等；静止即正常，只有 deadline 超时才报）
+ *   external_completion 等待外部完成（LLM 回复等；同上）
+ */
+export type PhaseExpectation =
+  | "movement"
+  | "inventory_change"
+  | "world_state_change"
+  | "server_event"
+  | "timer_wait"
+  | "external_completion";
+
 export type ProgressSample = Readonly<{
   observedAtMs: number;
   position: Readonly<{ x: number; y: number; z: number }>;
@@ -12,13 +29,21 @@ export type ProgressSample = Readonly<{
   targetDistance?: number | null;
   goalKey?: string | null;
   pathResetCount?: number;
+  /** 当前 phase 的期望信号（缺省按 movementExpected 旧语义）。 */
+  phaseExpectation?: PhaseExpectation;
+  /** phase 标识（deadline-exceeded 去重键）。 */
+  phaseKey?: string;
+  /** phase 绝对截止时间；超过且无预期信号 → deadline-exceeded。 */
+  phaseDeadlineMs?: number;
 }>;
 
 export type ProgressWatchdogEventKind =
   | "progress"
   | "stuck"
   | "no-progress"
-  | "loop";
+  | "loop"
+  | "oscillation"
+  | "deadline-exceeded";
 
 export type ProgressWatchdogEvent = Readonly<{
   kind: ProgressWatchdogEventKind;
@@ -26,6 +51,7 @@ export type ProgressWatchdogEvent = Readonly<{
   ageMs: number;
   goalKey: string | null;
   recoverySuggested: "local-unstuck" | "local-replan" | "high-level-replan" | null;
+  phaseKey?: string;
 }>;
 
 export type ProgressWatchdogConfig = Readonly<{
@@ -36,6 +62,8 @@ export type ProgressWatchdogConfig = Readonly<{
   loopWindow: number;
   repeatedGoalLimit: number;
   pathResetLimit: number;
+  /** 震荡检测半径（格）；窗口内全部样本彼此距离 ≤ radius 且有移动 → oscillation。 */
+  oscillationRadius: number;
 }>;
 
 export const DEFAULT_PROGRESS_WATCHDOG_CONFIG: ProgressWatchdogConfig = Object.freeze({
@@ -46,6 +74,7 @@ export const DEFAULT_PROGRESS_WATCHDOG_CONFIG: ProgressWatchdogConfig = Object.f
   loopWindow: 8,
   repeatedGoalLimit: 4,
   pathResetLimit: 5,
+  oscillationRadius: 2,
 });
 
 export type ProgressWatchdogSnapshot = Readonly<{
@@ -53,6 +82,8 @@ export type ProgressWatchdogSnapshot = Readonly<{
   stuckCount: number;
   noProgressCount: number;
   loopCount: number;
+  oscillationCount: number;
+  deadlineCount: number;
   lastGoalKey: string | null;
   recentGoals: readonly string[];
 }>;
@@ -66,10 +97,15 @@ export class ProgressWatchdog {
   private stuckCount = 0;
   private noProgressCount = 0;
   private loopCount = 0;
+  private oscillationCount = 0;
+  private deadlineCount = 0;
   private stuckReported = false;
   private noProgressReported = false;
   private loopReported = false;
+  private oscillationReported = false;
+  private deadlineReportedForKey: string | null = null;
   private pathResetBaseline: number | null = null;
+  private recentPositions: Array<Readonly<{ x: number; y: number; z: number }>> = [];
 
   constructor(config: Partial<ProgressWatchdogConfig> = {}) {
     this.config = Object.freeze({ ...DEFAULT_PROGRESS_WATCHDOG_CONFIG, ...config });
@@ -80,7 +116,8 @@ export class ProgressWatchdog {
       !Number.isFinite(this.config.distanceEpsilon) || this.config.distanceEpsilon < 0 ||
       !Number.isSafeInteger(this.config.loopWindow) || this.config.loopWindow < 2 ||
       !Number.isSafeInteger(this.config.repeatedGoalLimit) || this.config.repeatedGoalLimit < 2 ||
-      !Number.isSafeInteger(this.config.pathResetLimit) || this.config.pathResetLimit < 1
+      !Number.isSafeInteger(this.config.pathResetLimit) || this.config.pathResetLimit < 1 ||
+      !Number.isFinite(this.config.oscillationRadius) || this.config.oscillationRadius < 0
     ) {
       throw new TypeError("Progress watchdog configuration is invalid.");
     }
@@ -136,11 +173,45 @@ export class ProgressWatchdog {
     }
     this.previous = sample;
 
+    // 震荡窗口：仅 movement 期待下跟踪；逃出半径即复位
+    if (moved) {
+      this.recentPositions.push(sample.position);
+      if (this.recentPositions.length > this.config.loopWindow) this.recentPositions.shift();
+    }
     const ageMs = Math.max(0, sample.observedAtMs - (this.lastProgressAtMs ?? sample.observedAtMs));
     const events: ProgressWatchdogEvent[] = [];
     if (progress) {
       events.push(Object.freeze({ kind: "progress", observedAtMs: sample.observedAtMs, ageMs: 0, goalKey, recoverySuggested: null }));
     }
+
+    // expected-progress contract 判定
+    const expectation = sample.phaseExpectation
+      ?? (sample.movementExpected === false ? "timer_wait" : "movement");
+    const waitingStyle = expectation !== "movement";
+
+    // 震荡检测：仅 movement 期待；窗口内两两距离全 ≤ 半径 → 报一次；逃出半径 → 复位
+    if (!waitingStyle && this.recentPositions.length >= 4) {
+      const window = this.recentPositions.slice(-this.config.loopWindow);
+      let maxPairwise = 0;
+      for (const a of window) {
+        for (const b of window) {
+          maxPairwise = Math.max(maxPairwise, Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z));
+        }
+      }
+      if (maxPairwise <= this.config.oscillationRadius) {
+        if (!this.oscillationReported) {
+          this.oscillationReported = true;
+          this.oscillationCount += 1;
+          events.push(Object.freeze({
+            kind: "oscillation", observedAtMs: sample.observedAtMs, ageMs, goalKey,
+            recoverySuggested: "local-replan", ...(sample.phaseKey ? { phaseKey: sample.phaseKey } : {}),
+          }));
+        }
+      } else {
+        this.oscillationReported = false;
+      }
+    }
+
     const repeatedGoal = goalKey !== null &&
       this.recentGoals.filter((candidate) => candidate === goalKey).length >= this.config.repeatedGoalLimit;
     const alternatingLoop = this.recentGoals.length >= 4 &&
@@ -156,19 +227,39 @@ export class ProgressWatchdog {
       this.loopCount += 1;
       events.push(Object.freeze({ kind: "loop", observedAtMs: sample.observedAtMs, ageMs, goalKey, recoverySuggested: "high-level-replan" }));
     }
-    if (
-      sample.movementExpected !== false &&
-      ageMs >= this.config.stuckAfterMs &&
-      !this.stuckReported
-    ) {
-      this.stuckReported = true;
-      this.stuckCount += 1;
-      events.push(Object.freeze({ kind: "stuck", observedAtMs: sample.observedAtMs, ageMs, goalKey, recoverySuggested: "local-unstuck" }));
+
+    // 等待型期待：静止正常；只看 deadline
+    if (sample.phaseDeadlineMs !== undefined && sample.phaseKey) {
+      const deadlinePassed = sample.observedAtMs >= sample.phaseDeadlineMs;
+      const phaseChanged = this.deadlineReportedForKey !== null && this.deadlineReportedForKey !== sample.phaseKey;
+      if (deadlinePassed && !phaseChanged && this.deadlineReportedForKey !== sample.phaseKey) {
+        this.deadlineReportedForKey = sample.phaseKey;
+        this.deadlineCount += 1;
+        events.push(Object.freeze({
+          kind: "deadline-exceeded", observedAtMs: sample.observedAtMs, ageMs, goalKey,
+          recoverySuggested: "high-level-replan", phaseKey: sample.phaseKey,
+        }));
+      }
     }
-    if (ageMs >= this.config.noProgressAfterMs && !this.noProgressReported) {
-      this.noProgressReported = true;
-      this.noProgressCount += 1;
-      events.push(Object.freeze({ kind: "no-progress", observedAtMs: sample.observedAtMs, ageMs, goalKey, recoverySuggested: "local-replan" }));
+
+    // stuck/no-progress 只适用于 movement 期待
+    if (!waitingStyle) {
+      if (ageMs >= this.config.stuckAfterMs && !this.stuckReported) {
+        this.stuckReported = true;
+        this.stuckCount += 1;
+        events.push(Object.freeze({
+          kind: "stuck", observedAtMs: sample.observedAtMs, ageMs, goalKey,
+          recoverySuggested: "local-unstuck", ...(sample.phaseKey ? { phaseKey: sample.phaseKey } : {}),
+        }));
+      }
+      if (ageMs >= this.config.noProgressAfterMs && !this.noProgressReported) {
+        this.noProgressReported = true;
+        this.noProgressCount += 1;
+        events.push(Object.freeze({
+          kind: "no-progress", observedAtMs: sample.observedAtMs, ageMs, goalKey,
+          recoverySuggested: "local-replan", ...(sample.phaseKey ? { phaseKey: sample.phaseKey } : {}),
+        }));
+      }
     }
     return Object.freeze(events);
   }
@@ -181,7 +272,10 @@ export class ProgressWatchdog {
     this.stuckReported = false;
     this.noProgressReported = false;
     this.loopReported = false;
+    this.oscillationReported = false;
+    this.deadlineReportedForKey = null;
     this.pathResetBaseline = null;
+    this.recentPositions = [];
   }
 
   snapshot(): ProgressWatchdogSnapshot {
@@ -190,6 +284,8 @@ export class ProgressWatchdog {
       stuckCount: this.stuckCount,
       noProgressCount: this.noProgressCount,
       loopCount: this.loopCount,
+      oscillationCount: this.oscillationCount,
+      deadlineCount: this.deadlineCount,
       lastGoalKey: this.lastGoalKey,
       recentGoals: Object.freeze([...this.recentGoals]),
     });

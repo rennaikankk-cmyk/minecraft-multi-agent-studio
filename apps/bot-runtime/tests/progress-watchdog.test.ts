@@ -77,3 +77,104 @@ describe("ProgressWatchdog", () => {
     expect(watchdog.snapshot().lastProgressAtMs).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Round 3: expected-progress contract（十一节）
+// ---------------------------------------------------------------------------
+describe("expected-progress contract", () => {
+  const base = (over: Record<string, unknown>) => ({
+    observedAtMs: 0,
+    position: { x: 0, y: 64, z: 0 },
+    ...over,
+  });
+
+  it("timer_wait phase: position stagnation is normal (no stuck/no-progress)", () => {
+    const watchdog = new ProgressWatchdog({ stuckAfterMs: 1_000, noProgressAfterMs: 2_000 });
+    const events = [];
+    for (let t = 0; t <= 5_000; t += 500) {
+      events.push(...watchdog.observe(base({
+        observedAtMs: t,
+        phaseKey: "smelt:await",
+        phaseExpectation: "timer_wait",
+        phaseDeadlineMs: 60_000,
+      })));
+    }
+    expect(events.filter((e) => e.kind === "stuck")).toHaveLength(0);
+    expect(events.filter((e) => e.kind === "no-progress")).toHaveLength(0);
+    expect(events.filter((e) => e.kind === "deadline-exceeded")).toHaveLength(0);
+  });
+
+  it("timer_wait phase: passing deadline with no expected signal fires deadline-exceeded once", () => {
+    const watchdog = new ProgressWatchdog({ stuckAfterMs: 1_000, noProgressAfterMs: 2_000 });
+    const events = [];
+    for (let t = 0; t <= 8_000; t += 500) {
+      events.push(...watchdog.observe(base({
+        observedAtMs: t,
+        phaseKey: "smelt:await",
+        phaseExpectation: "timer_wait",
+        phaseDeadlineMs: 4_000,
+      })));
+    }
+    expect(events.filter((e) => e.kind === "deadline-exceeded")).toHaveLength(1);
+    expect(events.find((e) => e.kind === "deadline-exceeded")!.recoverySuggested).toBe("high-level-replan");
+  });
+
+  it("inventory_change expectation: position stagnation alone never fires stuck", () => {
+    const watchdog = new ProgressWatchdog({ stuckAfterMs: 1_000, noProgressAfterMs: 2_000 });
+    for (let t = 0; t <= 5_000; t += 500) {
+      watchdog.observe(base({ observedAtMs: t, phaseExpectation: "inventory_change" }));
+    }
+    const snap = watchdog.snapshot();
+    expect(snap.stuckCount).toBe(0);
+  });
+
+  it("movement expectation: same-position samples past threshold fire stuck + no-progress", () => {
+    const watchdog = new ProgressWatchdog({ stuckAfterMs: 1_000, noProgressAfterMs: 3_000 });
+    const events = [];
+    for (let t = 0; t <= 5_000; t += 500) {
+      events.push(...watchdog.observe(base({ observedAtMs: t, phaseExpectation: "movement" })));
+    }
+    expect(events.filter((e) => e.kind === "stuck")).toHaveLength(1);
+    expect(events.filter((e) => e.kind === "no-progress")).toHaveLength(1);
+  });
+
+  it("oscillation: movement within small radius over window fires oscillation once", () => {
+    const watchdog = new ProgressWatchdog({ stuckAfterMs: 60_000, noProgressAfterMs: 120_000, oscillationRadius: 2 });
+    const events = [];
+    const wiggle = [
+      { x: 0, y: 64, z: 0 }, { x: 1.4, y: 64, z: 0 },
+      { x: 0, y: 64, z: 1.4 }, { x: 1.4, y: 64, z: 1.4 },
+    ];
+    for (let i = 0; i < 12; i += 1) {
+      events.push(...watchdog.observe(base({ observedAtMs: i * 500, position: wiggle[i % 4]! })));
+    }
+    expect(events.filter((e) => e.kind === "oscillation")).toHaveLength(1);
+  });
+
+  it("normal single retry does not create stuck (progress resets alarm)", () => {
+    const watchdog = new ProgressWatchdog({ stuckAfterMs: 1_000 });
+    watchdog.observe(base({ observedAtMs: 0, phaseExpectation: "movement" }));
+    // 2s 静止 → stuck
+    const stuck = watchdog.observe(base({ observedAtMs: 2_000, phaseExpectation: "movement" }));
+    expect(stuck.some((e) => e.kind === "stuck")).toBe(true);
+    // 一次性真实移动 → progress，报警解除
+    const after = watchdog.observe(base({ observedAtMs: 3_000, position: { x: 5, y: 64, z: 5 }, phaseExpectation: "movement" }));
+    expect(after.some((e) => e.kind === "progress")).toBe(true);
+    // 再静止 2s 才会再次 stuck（不是每个 tick 都报）
+    const again = watchdog.observe(base({ observedAtMs: 5_000, phaseExpectation: "movement" }));
+    expect(again.some((e) => e.kind === "stuck")).toBe(false);
+    const later = watchdog.observe(base({ observedAtMs: 6_000, phaseExpectation: "movement" }));
+    expect(later.some((e) => e.kind === "stuck")).toBe(true);
+  });
+
+  it("deadline-exceeded dedups per phaseKey until phase changes", () => {
+    const watchdog = new ProgressWatchdog();
+    let fired = 0;
+    for (let t = 0; t <= 10_000; t += 1_000) {
+      fired += watchdog.observe(base({
+        observedAtMs: t, phaseKey: "craft:await", phaseExpectation: "timer_wait", phaseDeadlineMs: 2_000,
+      })).filter((e) => e.kind === "deadline-exceeded").length;
+    }
+    expect(fired).toBe(1);
+  });
+});
