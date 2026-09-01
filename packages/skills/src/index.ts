@@ -160,18 +160,10 @@ export {
   smeltItemStateSchema,
 } from "./builtin/smelt-item.js";
 export {
-  closedLoopSkillStatuses,
-  closedLoopSkillStatusSchema,
-  ENSURE_ITEM_TIMEOUT_MS,
-  ensureItemInputSchema,
-  ensureItemOutputSchema,
-  ensureItemSkill,
-  ensureItemSmeltCapabilityInputSchema,
-  ensureItemStateSchema,
   INVENTORY_SNAPSHOT_MAX_ITEM_TYPES,
   inventorySnapshotCapabilityInputSchema,
   inventorySnapshotCapabilityOutputSchema,
-} from "./builtin/ensure-item.js";
+} from "./builtin/inventory-snapshot.js";
 export {
   antiCheatCompatibilityProfiles,
   antiCheatCompatibilityProfileSchema,

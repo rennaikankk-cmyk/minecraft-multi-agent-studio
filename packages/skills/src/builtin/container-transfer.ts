@@ -112,7 +112,7 @@ export const containerTransferSkill = defineSkill({
     ],
   },
   // 读写都要：开箱清点是读，存取是写。
-  requiredCapabilities: ["container.read", "container.write"] as const,
+  requiredCapabilities: ["container.write"] as const,
   timeoutMs: CONTAINER_TRANSFER_TIMEOUT_MS,
   // 部分转移后重试会造成重复搬运，禁止自动重试；幂等收敛由上层用
   // movedCount 反馈决定是否续搬。

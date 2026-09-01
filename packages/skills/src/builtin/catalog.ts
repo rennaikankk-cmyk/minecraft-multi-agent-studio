@@ -6,7 +6,6 @@ import { combatStanceSkill } from "./combat-stance.js";
 import { containerTransferSkill } from "./container-transfer.js";
 import { craftItemSkill } from "./craft-item.js";
 import { equipArmorSkill } from "./equip-armor.js";
-import { ensureItemSkill } from "./ensure-item.js";
 import { movementGotoSkill } from "./movement-goto.js";
 import { placeBlockSkill } from "./place-block.js";
 import { scanBlocksSkill } from "./scan-blocks.js";
