@@ -345,11 +345,14 @@ export class StudioLocalManager {
     // IncidentStore graceful shutdown：有 deadline 的 flush（超时记录未写盘事实）
     if (this.incidents) {
       const flushDeadline = 3_000;
+      let flushTimeoutTimer = null;
       try {
         await Promise.race([
           this.incidents.flush(),
-          new Promise((resolve) => setTimeout(resolve, flushDeadline)),
+          new Promise((resolve) => { flushTimeoutTimer = setTimeout(resolve, flushDeadline); }),
         ]);
+        // race 输家 timer 若不清理会拖住事件循环整个 flushDeadline（进程退出晚 3s）
+        if (flushTimeoutTimer !== null) clearTimeout(flushTimeoutTimer);
         const health = this.incidents.writerHealth();
         if (health.dirty) {
           console.warn(JSON.stringify({
@@ -608,7 +611,7 @@ export class StudioLocalManager {
           });
           return;
         }
-        if (operation === "restart") await this.stopBot(botId);
+        if (operation === "restart") await this.stopBot(botId, { purpose: "restart", requestedBy: "studio-api" });
         await this.startBot(botId);
         this.writeJson(response, 200, {
           schemaVersion: "1.0",
@@ -1165,14 +1168,20 @@ export class StudioLocalManager {
     );
     child.stdout.pipe(log, { end: false });
     child.stderr.pipe(log, { end: false });
-    this.observeRuntimeOutput(config, child.stdout);
-    this.observeRuntimeOutput(config, child.stderr);
     const managed = {
       child,
       log,
       logClosed: false,
       stopping: false,
+      // P0-2 退出分类：expected-exit 标记绑定本 child 对象（不可被 PID 复用/
+      // 旧 session 污染——spawn 的 exit handler 以 current?.child === child 判同）。
+      startedAtMs: Date.now(),
+      readyAtMs: null,
+      expectedExit: null,
+      forcedKill: null,
     };
+    this.observeRuntimeOutput(config, child.stdout, managed);
+    this.observeRuntimeOutput(config, child.stderr, managed);
     this.processes.set(botId, managed);
     config.processState = "running";
     config.updatedAt = new Date().toISOString();
@@ -1192,34 +1201,118 @@ export class StudioLocalManager {
       // Runtime must remain authoritative when that old event arrives.
       if (!isCurrent && managed.stopping) return;
       config.updatedAt = new Date().toISOString();
-      if (this.stopping || config.processState === "stopping") {
-        config.processState = "stopped";
-        return;
-      }
-      config.processState = code === 0 ? "stopped" : "error";
-      if (code !== 0) {
-        config.lastError = `Bot Runtime 已退出（code=${code ?? "none"}, signal=${signal ?? "none"}）。`;
-        // 父进程侧 BOT_CRASH：child 来不及 flush 时也要有证据（十.4）
+      const classification = this.classifyBotExit(managed, code, signal);
+      config.exit = {
+        classification: classification.classification,
+        requestedAction: managed.expectedExit?.action ?? null,
+        requestedBy: managed.expectedExit?.requestedBy ?? null,
+        requestedAt: managed.expectedExit?.requestedAt ?? null,
+        shutdownDeadlineMs: managed.expectedExit?.deadlineMs ?? null,
+        forcedKillAt: managed.forcedKill?.at ?? null,
+        pid: child.pid ?? null,
+        exitCode: code,
+        exitSignal: signal,
+        ready: managed.readyAtMs !== null,
+        uptimeMs: managed.readyAtMs !== null ? Date.now() - managed.startedAtMs : null,
+        observedAt: new Date().toISOString(),
+      };
+      config.processState =
+        classification.classification === "UNEXPECTED_CRASH" ||
+        classification.classification === "STARTUP_FAILURE" ||
+        classification.classification === "EXTERNAL_TERMINATION" ||
+        classification.classification === "FORCED_STOP_TIMEOUT"
+          ? "error"
+          : "stopped";
+      if (classification.incident) {
+        const incident = classification.incident;
+        const sig = `exit-class:${classification.classification}/${code ?? "none"}/${signal ?? "none"}`;
+        const actual = `exit classification=${classification.classification} code=${code ?? "none"} signal=${signal ?? "none"} ready=${managed.readyAtMs !== null ? "yes" : "no"}`;
         this.incidents.report({
           subject: "bot",
           botId,
-          failureCode: "BOT_PROCESS_EXITED",
-          incidentType: "BOT_CRASH",
+          failureCode: incident.failureCode,
+          incidentType: incident.incidentType,
           sourceComponent: "studio-local-manager",
-          normalizedErrorSignature: `exit-mode:${code ?? "none"}/${signal ?? "none"}`,
+          normalizedErrorSignature: sig,
           actionFamily: "bot-runtime-process",
-          severity: "CRITICAL",
+          severity: incident.severity,
           expected: "bot runtime keeps running or exits 0 after graceful stop",
-          actual: `exit code=${code ?? "none"} signal=${signal ?? "none"}`,
+          actual,
           ...(GIT_METADATA.commit ? { gitCommit: GIT_METADATA.commit } : {}),
-          ...(GIT_METADATA.branch ? { branch: GIT_METADATA.branch } : {}),
-          snapshots: { username: config.username, serverHost: config.serverHost, serverPort: config.serverPort },
+          ...(GIT_METADATA.branch ? { gitCommitBranch: GIT_METADATA.branch } : {}),
+          snapshots: {
+            username: config.username,
+            serverHost: config.serverHost,
+            serverPort: config.serverPort,
+            exit: config.exit,
+          },
         });
       }
     });
   }
 
-  async stopBot(botId) {
+  /**
+   * P0-2 退出分类（退出语义模型）：
+   * EXPECTED_STOP / EXPECTED_RESTART —— 本 manager 请求的停止/重启（优雅或超时强停），
+   *   不产生 BOT_CRASH。此前正常 stop 常以 code!=0 退出被误记为 crash。
+   * GRACEFUL_SHUTDOWN —— manager 自身关闭中（this.stopping）。
+   * FORCED_STOP_TIMEOUT —— 优雅停止超 deadline 后本 manager SIGKILL：记 WARNING 级
+   *   BOT_LIFECYCLE Incident（graceful 停止失败是真实可靠性信号，但不是 crash）。
+   * STARTUP_FAILURE —— 从未 ready（未观测到 runtime_link_authenticated/bot_runtime_online）
+   *   就退出且非本 manager 请求；重启场景中新进程失败不与旧进程退出混淆。
+   * EXTERNAL_TERMINATION —— 被本 manager 未发出的 signal 终止（POSIX 侧证据；
+   *   Windows signal 语义弱化为 code，不可分辨时按下面的顺序落到 crash/startup）。
+   * UNEXPECTED_CRASH —— ready 后非预期非零退出；唯一映射 BOT_CRASH/CRITICAL 的分类。
+   */
+  classifyBotExit(managed, code, signal) {
+    const expectedAction = managed.expectedExit?.action;
+    if (this.stopping) return { classification: "GRACEFUL_SHUTDOWN" };
+    if (expectedAction === "restart") return { classification: "EXPECTED_RESTART" };
+    if (expectedAction === "stop") {
+      if (managed.forcedKill) {
+        return {
+          classification: "FORCED_STOP_TIMEOUT",
+          incident: {
+            failureCode: "BOT_FORCED_STOP_TIMEOUT",
+            incidentType: "BOT_LIFECYCLE",
+            severity: "WARNING",
+          },
+        };
+      }
+      return { classification: "EXPECTED_STOP" };
+    }
+    if (code === 0) return { classification: "EXPECTED_STOP" };
+    if (signal && !managed.forcedKill) {
+      return {
+        classification: "EXTERNAL_TERMINATION",
+        incident: {
+          failureCode: "BOT_EXTERNAL_TERMINATION",
+          incidentType: "BOT_LIFECYCLE",
+          severity: "ERROR",
+        },
+      };
+    }
+    if (managed.readyAtMs === null) {
+      return {
+        classification: "STARTUP_FAILURE",
+        incident: {
+          failureCode: "BOT_STARTUP_FAILED",
+          incidentType: "BOT_LIFECYCLE",
+          severity: "ERROR",
+        },
+      };
+    }
+    return {
+      classification: "UNEXPECTED_CRASH",
+      incident: {
+        failureCode: "BOT_PROCESS_EXITED",
+        incidentType: "BOT_CRASH",
+        severity: "CRITICAL",
+      },
+    };
+  }
+
+  async stopBot(botId, options = undefined) {
     const config = this.configs.get(botId);
     const managed = this.processes.get(botId);
     const child = managed?.child;
@@ -1234,6 +1327,15 @@ export class StudioLocalManager {
       return;
     }
     managed.stopping = true;
+    // P0-2：发信号前先标记 expected exit（绑定本 child 对象 + botId + 请求者/期限）。
+    managed.expectedExit = {
+      action: options?.purpose ?? "stop",
+      requestedBy: options?.requestedBy ?? "studio-manager",
+      requestedAt: new Date().toISOString(),
+      deadlineMs: this.options.stopTimeoutMs ?? 10_000,
+      pid: child.pid ?? null,
+      botId,
+    };
     config.processState = "stopping";
     config.updatedAt = new Date().toISOString();
     await new Promise((resolve) => {
@@ -1257,6 +1359,7 @@ export class StudioLocalManager {
           return;
         }
         try {
+          managed.forcedKill = { at: new Date().toISOString(), by: "stop-timeout" };
           child.kill("SIGKILL");
         } catch {
           // The exit event or bounded fallback below still completes cleanup.
@@ -1289,7 +1392,7 @@ export class StudioLocalManager {
     }
   }
 
-  observeRuntimeOutput(config, stream) {
+  observeRuntimeOutput(config, stream, currentManaged = null) {
     let remainder = "";
     stream.setEncoding("utf8");
     stream.on("data", (chunk) => {
@@ -1299,6 +1402,14 @@ export class StudioLocalManager {
         if (!line.startsWith("{")) continue;
         try {
           const event = JSON.parse(line);
+          // P0-2：首个 ready 信号（runtime link 认证或 bot 上线）标记进程已就绪，
+          // 用于区分 STARTUP_FAILURE 与 UNEXPECTED_CRASH。
+          if (
+            currentManaged?.readyAtMs === null &&
+            (event?.event === "runtime_link_authenticated" || event?.event === "bot_runtime_online")
+          ) {
+            currentManaged.readyAtMs = Date.now();
+          }
           if (event?.level === "error") {
             config.lastError = [event.event, event.code]
               .filter((value) => typeof value === "string")
@@ -1326,6 +1437,9 @@ export class StudioLocalManager {
       createdAt: config.createdAt,
       updatedAt: config.updatedAt,
       lastError: config.lastError,
+      // P0-2：最近一次退出的显式分类（EXPECTED_STOP/EXPECTED_RESTART/GRACEFUL_SHUTDOWN/
+      // FORCED_STOP_TIMEOUT/STARTUP_FAILURE/EXTERNAL_TERMINATION/UNEXPECTED_CRASH）
+      exit: config.exit ?? null,
     };
   }
 

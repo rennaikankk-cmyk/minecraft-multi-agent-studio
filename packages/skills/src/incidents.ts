@@ -42,6 +42,9 @@ export const FAILURE_CODES = [
   "RESERVATION_STALE",
   "BOT_PROCESS_EXITED",
   "BOT_RESTART_EXHAUSTED",
+  "BOT_FORCED_STOP_TIMEOUT",
+  "BOT_STARTUP_FAILED",
+  "BOT_EXTERNAL_TERMINATION",
   "SERVER_KICKED",
   "SERVER_RECONNECT_LOOP",
   "SERVER_READINESS_TIMEOUT",
@@ -86,6 +89,7 @@ export const INCIDENT_TYPES = [
   "STUCK", "PATH_FAILED", "SKILL_FAILED", "VERIFY_TIMEOUT", "FALSE_SUCCESS",
   "PLACEMENT_FAILED", "UNREACHABLE", "REPEATED_RETRY", "TASK_TIMEOUT",
   "RESERVATION_CONFLICT", "STATE_DIVERGENCE", "BOT_CRASH", "BOT_DISCONNECT",
+  "BOT_LIFECYCLE",
   "SERVER_KICK", "LLM_TIMEOUT", "LLM_INVALID_OUTPUT", "WORLD_OBSERVATION_FAILURE",
   "INVENTORY_MISMATCH", "UNKNOWN_FAILURE",
 ] as const;
@@ -158,6 +162,10 @@ export const INCIDENT_TYPE_BY_CODE: Readonly<Partial<Record<FailureCode, Inciden
   RESERVATION_STALE: "RESERVATION_CONFLICT",
   BOT_PROCESS_EXITED: "BOT_CRASH",
   BOT_RESTART_EXHAUSTED: "BOT_CRASH",
+  // P0-2 退出语义：预期内停止/强停/启动失败/外部终止不是 BOT_CRASH 噪音
+  BOT_FORCED_STOP_TIMEOUT: "BOT_LIFECYCLE",
+  BOT_STARTUP_FAILED: "BOT_LIFECYCLE",
+  BOT_EXTERNAL_TERMINATION: "BOT_LIFECYCLE",
   SERVER_KICKED: "SERVER_KICK",
   SERVER_RECONNECT_LOOP: "BOT_DISCONNECT",
   SERVER_READINESS_TIMEOUT: "BOT_DISCONNECT",
@@ -258,6 +266,11 @@ export function classifyIncident(input: ClassifyInput): Classification {
     case "BOT_RESTART_EXHAUSTED":
       matched.push(`failureCode=${input.failureCode}`);
       return { suspectedLayer: "RUNTIME", ruleId: "R-CRASH-1", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "medium", matchedEvidence: matched };
+    case "BOT_FORCED_STOP_TIMEOUT":
+    case "BOT_STARTUP_FAILED":
+    case "BOT_EXTERNAL_TERMINATION":
+      matched.push(`failureCode=${input.failureCode}`);
+      return { suspectedLayer: "RUNTIME", ruleId: "R-LIFECYCLE-1", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "medium", matchedEvidence: matched };
     case "BUILD_VERIFY_TIMEOUT":
     case "BUILD_WRONG_BLOCK":
     case "BUILD_MISSING_BLOCK":

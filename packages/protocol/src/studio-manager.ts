@@ -51,6 +51,33 @@ export const studioManagedBotV1Schema = z
     createdAt: timestampSchema,
     updatedAt: timestampSchema,
     lastError: z.string().trim().min(1).max(500).nullable(),
+    /** P0-2 退出分类：最近一次进程退出的显式语义与证据（未退出过则缺省）。 */
+    exit: z
+      .object({
+        classification: z.enum([
+          "EXPECTED_STOP",
+          "EXPECTED_RESTART",
+          "GRACEFUL_SHUTDOWN",
+          "FORCED_STOP_TIMEOUT",
+          "STARTUP_FAILURE",
+          "EXTERNAL_TERMINATION",
+          "UNEXPECTED_CRASH",
+        ]),
+        requestedAction: z.enum(["stop", "restart"]).nullable(),
+        requestedBy: z.string().trim().min(1).max(120).nullable(),
+        requestedAt: timestampSchema.nullable(),
+        shutdownDeadlineMs: z.number().int().min(0).nullable(),
+        forcedKillAt: timestampSchema.nullable(),
+        pid: z.number().int().nullable(),
+        exitCode: z.number().int().nullable(),
+        exitSignal: z.string().trim().min(1).max(16).nullable(),
+        ready: z.boolean(),
+        uptimeMs: z.number().int().min(0).nullable(),
+        observedAt: timestampSchema,
+      })
+      .strict()
+      .nullable()
+      .optional(),
   })
   .strict();
 

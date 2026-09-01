@@ -1,3 +1,4 @@
+const __T0=Date.now();const __mk=(l)=>console.error(`[${Date.now()-__T0}ms] ${l}`);
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -656,4 +657,258 @@ test("local-test observed state endpoint reports facts and capabilities", async 
   assert.equal(observed.resource.world.volumeName, "studio-local-test-data");
   assert.equal(observed.resource.shutdownPolicy, "keep");
   assert.deepEqual(observed.resource.capabilities, { start: true, stop: true, restart: true, resetWorld: true, logs: true });
+});
+
+// ---------------------------------------------------------------------------
+// P0-2：退出语义分类（EXPECTED_STOP/RESTART vs BOT_CRASH 等）——全部走真实
+// startBot/stopBot 路径（spawn 注入），exit 分类 handler 由生产代码注册。
+// ---------------------------------------------------------------------------
+
+async function exitTestManager(overrides = {}) {
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "exit-sem-"));
+  await mkdir(path.join(runtimeRoot, "logs"), { recursive: true });
+  const children = [];
+  const manager = new StudioLocalManager({
+    repositoryRoot: process.cwd(),
+    runtimeRoot,
+    port: 0,
+    token: TOKEN,
+    slots: createLocalBotSlots(SECRET, 1),
+    aiStatus: unavailableStatus(),
+    environment: { STUDIO_SPARK_AUTO_DISCOVERY: "0" },
+    runtimeLinkPort: 3220,
+    packagedMode: false,
+    spawn: () => {
+      const child = new EventEmitter();
+      child.stdout = fakeOutputStream();
+      child.stderr = fakeOutputStream();
+      child.exitCode = null;
+      child.pid = 42000 + children.length;
+      child.connected = true;
+      child.send = (_message, callback) => {
+        child.connected = false;
+        callback?.(null);
+        if (child.__exitOnSend != null) {
+          const [code, signal] = child.__exitOnSend;
+          queueMicrotask(() => {
+            child.exitCode = code ?? 0;
+            child.emit("exit", code, signal ?? null);
+          });
+        }
+      };
+      child.disconnect = () => {
+        child.connected = false;
+      };
+      child.kill = (signal) => {
+        if (signal === "SIGKILL") {
+          queueMicrotask(() => {
+            child.exitCode = 1;
+            child.emit("exit", 1, "SIGKILL");
+          });
+        }
+        return true;
+      };
+      children.push(child);
+      return child;
+    },
+    stopTimeoutMs: 40,
+    forceKillWaitMs: 40,
+    ...overrides,
+  });
+  manager.configs.set("studio-bot-01", {
+    botId: "studio-bot-01",
+    username: "StudioBot1",
+    serverHost: "127.0.0.1",
+    serverPort: 25565,
+    minecraftVersion: "auto",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    processState: "stopped",
+    lastError: null,
+  });
+  await manager.start(); // 初始化 IncidentStore 与服务（真实 startBot 路径保留）
+  const cleanup = async () => {
+    await manager.stop();
+    await rm(runtimeRoot, { recursive: true, force: true });
+  };
+  return { manager, children, runtimeRoot, config: manager.configs.get("studio-bot-01"), cleanup };
+}
+
+function markReady(child) {
+  child.stdout.emit("data", '{"level":"info","event":"runtime_link_authenticated"}' + "\n");
+}
+
+function incidentsOf(manager) {
+  return [...(manager.incidents.issues ?? new Map()).values()];
+}
+
+test("exit classification: graceful normal stop is EXPECTED_STOP with no incident", async () => {
+  __mk("test start");
+  const { manager, children, config, cleanup } = await exitTestManager();
+  await manager.startBot("studio-bot-01");
+  __mk("startBot done");
+  children[0].__exitOnSend = [0, null];
+  await manager.stopBot("studio-bot-01", { purpose: "stop", requestedBy: "test" });
+  __mk("stopBot done");
+
+  assert.equal(config.exit.classification, "EXPECTED_STOP");
+  __mk("asserts done");
+  assert.equal(config.exit.requestedAction, "stop");
+  assert.equal(config.exit.requestedBy, "test");
+  assert.equal(config.exit.pid, children[0].pid);
+  assert.equal(config.processState, "stopped");
+  assert.equal(incidentsOf(manager).length, 0);
+  await cleanup();
+});
+
+test("exit classification: graceful stop exiting non-zero stays EXPECTED_STOP (no BOT_CRASH noise)", async () => {
+  const { manager, children, config, cleanup } = await exitTestManager();
+  await manager.startBot("studio-bot-01");
+  markReady(children[0]);
+  children[0].__exitOnSend = [1, null];
+  await manager.stopBot("studio-bot-01");
+
+  assert.equal(config.exit.classification, "EXPECTED_STOP");
+  assert.equal(incidentsOf(manager).length, 0);
+  await cleanup();
+});
+
+test("exit classification: restart-marked stop is EXPECTED_RESTART even on non-zero exit", async () => {
+  const { manager, children, config, cleanup } = await exitTestManager();
+  await manager.startBot("studio-bot-01");
+  children[0].__exitOnSend = [1, null];
+  await manager.stopBot("studio-bot-01", { purpose: "restart", requestedBy: "studio-api" });
+
+  assert.equal(config.exit.classification, "EXPECTED_RESTART");
+  assert.equal(config.exit.requestedAction, "restart");
+  assert.equal(incidentsOf(manager).length, 0);
+  await cleanup();
+});
+
+test("exit classification: forced kill after stop deadline is FORCED_STOP_TIMEOUT (WARNING lifecycle incident)", async () => {
+  const { manager, config, cleanup } = await exitTestManager({ stopTimeoutMs: 5, forceKillWaitMs: 40 });
+  await manager.startBot("studio-bot-01");
+
+  await manager.stopBot("studio-bot-01"); // child ignores IPC send; deadline forces SIGKILL
+
+  assert.equal(config.exit.classification, "FORCED_STOP_TIMEOUT");
+  assert.notEqual(config.exit.forcedKillAt, null);
+  assert.notEqual(config.exit.shutdownDeadlineMs, null);
+  const incidents = incidentsOf(manager);
+  assert.equal(incidents.length, 1);
+  assert.equal(incidents[0].type, "BOT_LIFECYCLE");
+  assert.equal(incidents[0].primaryFailureCode, "BOT_FORCED_STOP_TIMEOUT");
+  assert.equal(incidents[0].maxSeverity, "WARNING");
+  await cleanup();
+});
+
+test("exit classification: external signal kill on a ready bot is EXTERNAL_TERMINATION, not BOT_CRASH", async () => {
+  const { manager, children, config, cleanup } = await exitTestManager();
+  await manager.startBot("studio-bot-01");
+  markReady(children[0]);
+
+  children[0].exitCode = null;
+  children[0].emit("exit", null, "SIGKILL");
+
+  assert.equal(config.exit.classification, "EXTERNAL_TERMINATION");
+  assert.equal(config.exit.ready, true);
+  const incidents = incidentsOf(manager);
+  assert.equal(incidents.length, 1);
+  assert.equal(incidents[0].type, "BOT_LIFECYCLE");
+  assert.equal(incidents[0].primaryFailureCode, "BOT_EXTERNAL_TERMINATION");
+  await cleanup();
+});
+
+test("exit classification: unexpected non-zero exit of a ready bot stays BOT_CRASH / CRITICAL", async () => {
+  const { manager, children, config, cleanup } = await exitTestManager();
+  await manager.startBot("studio-bot-01");
+  markReady(children[0]);
+
+  children[0].exitCode = 1;
+  children[0].emit("exit", 1, null);
+
+  assert.equal(config.exit.classification, "UNEXPECTED_CRASH");
+  assert.equal(config.processState, "error");
+  const incidents = incidentsOf(manager);
+  assert.equal(incidents.length, 1);
+  assert.equal(incidents[0].type, "BOT_CRASH");
+  assert.equal(incidents[0].primaryFailureCode, "BOT_PROCESS_EXITED");
+  assert.equal(incidents[0].maxSeverity, "CRITICAL");
+  await cleanup();
+});
+
+test("exit classification: never-ready process exit is STARTUP_FAILURE, not BOT_CRASH", async () => {
+  const { manager, children, config, cleanup } = await exitTestManager();
+  await manager.startBot("studio-bot-01");
+
+  children[0].exitCode = 1;
+  children[0].emit("exit", 1, null);
+
+  assert.equal(config.exit.classification, "STARTUP_FAILURE");
+  assert.equal(config.exit.ready, false);
+  const incidents = incidentsOf(manager);
+  assert.equal(incidents.length, 1);
+  assert.equal(incidents[0].type, "BOT_LIFECYCLE");
+  assert.equal(incidents[0].primaryFailureCode, "BOT_STARTUP_FAILED");
+  await cleanup();
+});
+
+test("exit classification: manager global shutdown classifies owned bots as GRACEFUL_SHUTDOWN without incidents", async () => {
+  const { manager, children, config, cleanup } = await exitTestManager();
+  await manager.startBot("studio-bot-01");
+  markReady(children[0]);
+  manager.stopping = true;
+
+  children[0].exitCode = 1;
+  children[0].emit("exit", 1, null);
+
+  assert.equal(config.exit.classification, "GRACEFUL_SHUTDOWN");
+  assert.equal(incidentsOf(manager).length, 0);
+  // 手动置位的全局 stopping 会让 manager.stop() early-return（真实关闭路径由
+  // 调用方先置位），这里复位让 cleanup 能真正关闭 server，避免悬挂句柄。
+  manager.stopping = false;
+  await cleanup();
+});
+
+test("exit classification: duplicate stop is a no-op and keeps the first classification", async () => {
+  const { manager, children, config, cleanup } = await exitTestManager();
+  await manager.startBot("studio-bot-01");
+  children[0].__exitOnSend = [0, null];
+  await manager.stopBot("studio-bot-01");
+  const first = config.exit;
+  await manager.stopBot("studio-bot-01");
+
+  assert.equal(config.exit, first);
+  assert.equal(config.exit.classification, "EXPECTED_STOP");
+  assert.equal(incidentsOf(manager).length, 0);
+  await cleanup();
+});
+
+test("exit classification: late exit from a replaced runtime must not classify over the new owner", async () => {
+  const { manager, children, config, cleanup } = await exitTestManager();
+  await manager.startBot("studio-bot-01");
+  const firstManaged = manager.processes.get("studio-bot-01");
+  firstManaged.stopping = true;
+  children[0].exitCode = 0;
+  children[0].emit("exit", 0, null);
+
+  await manager.startBot("studio-bot-01");
+  config.exit = null;
+  children[0].exitCode = 1;
+  children[0].emit("exit", 1, null); // stale event for the replaced child
+
+  assert.equal(config.exit, null, "stale exit must not classify over the new runtime");
+  assert.equal(config.processState, "running");
+  await cleanup();
+});
+
+test("exit classification metadata reaches the public Bot payload", async () => {
+  const { manager, children, cleanup } = await exitTestManager();
+  await manager.startBot("studio-bot-01");
+  children[0].__exitOnSend = [0, null];
+  await manager.stopBot("studio-bot-01");
+
+  const bot = manager.publicBot(manager.configs.get("studio-bot-01"));
+  assert.equal(bot.exit.classification, "EXPECTED_STOP");
+  await cleanup();
 });
