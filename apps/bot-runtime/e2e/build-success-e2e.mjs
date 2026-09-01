@@ -57,7 +57,10 @@ await withE2EFixture(async (fixture) => {
       method: "POST",
       body: JSON.stringify({ schemaVersion: "1.0", requestId, botId: BOT, operatorGoal: text, timeoutMs: 120_000 }),
     });
-    if (goalRes.status >= 300) { log(`FATAL goal ${goalRes.status}: ${JSON.stringify(goalRes.body).slice(0,150)}`); process.exit(1); }
+    if (goalRes.status >= 300) {
+      log(`goal rejected ${goalRes.status}: ${JSON.stringify(goalRes.body).slice(0, 120)}`);
+      return null;
+    }
     for (let i = 0; i < 60; i++) {
       await sleep(2_000);
       const { body } = await api(CONTROL_API, "/v1/tasks?limit=10");
@@ -71,11 +74,21 @@ await withE2EFixture(async (fixture) => {
     return null;
   }
 
-  // 1) reposition 到开阔区
-  await submitGoal("移动到坐标 x=0 y=70 z=0 附近");
+  // 1) reposition 到开阔区（结果/超时竞争导致的偶发拒绝 → 有界重提，不吞错）
+  let positioned = false;
+  for (let attempt = 1; attempt <= 3 && !positioned; attempt += 1) {
+    const result = await submitGoal("移动到坐标 x=0 y=70 z=0 附近");
+    positioned = result !== null && result.status === "completed";
+    if (!positioned) log(`reposition attempt ${attempt} not completed; ${attempt < 3 ? "retrying" : "continuing anyway"}`);
+  }
 
-  // 2) 确定性采集 oak_log
-  const acquire = await submitGoal("获取 1 个 oak_log");
+  // 2) 确定性采集 oak_log（允许有界重提）
+  let acquire = null;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    acquire = await submitGoal("获取 1 个 oak_log");
+    if (acquire?.status === "completed") break;
+    log(`acquisition attempt ${attempt} failed`);
+  }
   if (acquire?.status !== "completed") {
     log("FATAL: acquisition failed");
     await api(MANAGER, `/v1/bots/${BOT}/stop`, { method: "POST" }).catch(() => undefined);
@@ -83,16 +96,34 @@ await withE2EFixture(async (fixture) => {
   }
   log("acquisition PASS (oak_log in inventory)");
 
-  // 3) 目标格：bot 面前（北向）一格空气、其下是地面（参考方块）
+  // 3) 目标格：用 rcon 服务器真值扫描 bot 四邻，找到"目标格是空气且其下
+  //    是实心地面"的格子（第一轮失败教训：凭几何假设选格，脚下地形不是
+  //    平的就会 REFERENCE_BLOCK_NOT_FOUND）。
   const rconOut = await fixture.rcon(`data get entity ${created.body.bot.username} Pos`).catch(() => "");
   const posMatch = /\[(-?[\d.]+)d, ?(-?[\d.]+)d, ?(-?[\d.]+)d\]/.exec(rconOut)
     ?? /X: (-?[\d.]+),? Y: (-?[\d.]+),? Z: (-?[\d.]+)/.exec(rconOut);
   if (!posMatch) { log(`FATAL: no position: ${rconOut.slice(0, 80)}`); process.exit(1); }
   const fx = Number(posMatch[1]), fy = Number(posMatch[2]), fz = Number(posMatch[3]);
-  // 锚点：面前空气格（z-1），参考：该格正下方（地面）
-  const ax = Math.floor(fx), ay = Math.floor(fy), az = Math.floor(fz) - 1;
+  const bx = Math.floor(fx), by = Math.floor(fy), bz = Math.floor(fz);
+  const neighbors = [
+    { x: bx, y: by, z: bz - 1 }, { x: bx, y: by, z: bz + 1 },
+    { x: bx - 1, y: by, z: bz }, { x: bx + 1, y: by, z: bz },
+    { x: bx, y: by + 1, z: bz - 1 }, { x: bx, y: by + 1, z: bz + 1 },
+    { x: bx - 1, y: by + 1, z: bz }, { x: bx + 1, y: by + 1, z: bz },
+  ];
+  let ax = null, ay = null, az = null;
+  for (const cell of neighbors) {
+    // execute-if 不带 run：rcon 回传 "Test passed"/"Test failed"（say 只进控制台）
+    const air = await fixture.rcon(`execute if block ${cell.x} ${cell.y} ${cell.z} minecraft:air`).catch(() => "");
+    if (!air.includes("Test passed")) continue;
+    const solid = await fixture.rcon(`execute unless block ${cell.x} ${cell.y - 1} ${cell.z} minecraft:air`).catch(() => "");
+    if (!solid.includes("Test passed")) continue;
+    ax = cell.x; ay = cell.y; az = cell.z;
+    break;
+  }
+  if (ax === null) { log("FATAL: no adjacent air-on-solid cell found"); process.exit(1); }
   const rx = ax, ry = ay - 1, rz = az;
-  log(`anchor=(${ax},${ay},${az}) reference=(${rx},${ry},${rz}) from feet (${fx.toFixed(1)},${fy.toFixed(1)},${fz.toFixed(1)})`);
+  log(`anchor=(${ax},${ay},${az}) reference=(${rx},${ry},${rz}) from feet (${fx.toFixed(1)},${fy.toFixed(1)},${fz.toFixed(1)}) [rcon-scanned]`);
 
   const goalText = [
     "使用蓝图施工技能放置一个 oak_log：",
@@ -103,10 +134,10 @@ await withE2EFixture(async (fixture) => {
   ].join("");
   const build = await submitGoal(goalText);
 
-  // 4) server truth：目标格现在是 oak_log？
-  const block = await fixture.rcon(`data get block ${ax} ${ay} ${az}`).catch(() => "");
-  log(`server block @(${ax},${ay},${az}): ${block.slice(0, 120)}`);
-  const placed = block.includes("oak_log") || block.includes('"Name": "minecraft:oak_log"') || block.includes("oak_log");
+  // 4) server truth：execute if block 逐格验证（回传 Test passed/failed）
+  const check = await fixture.rcon(`execute if block ${ax} ${ay} ${az} minecraft:oak_log`).catch(() => "");
+  log(`server check @(${ax},${ay},${az}): ${check.slice(0, 120)}`);
+  const placed = check.includes("Test passed");
 
   // 5) 无误报 Incident
   const afterIncidents = await api(MANAGER, "/v1/incidents?limit=100");
