@@ -82,7 +82,14 @@ export async function createE2EFixture() {
       "-e", "EULA=TRUE",
       "-e", "ONLINE_MODE=FALSE",
       "-e", `VERSION=${MC_VERSION}`,
-      "-e", "TYPE=VANILLA",
+      // Round 6.1：默认 VANILLA 需要 itzg 在 boot 时联网解析 Mojang manifest——
+      // 本机外网今天反复劣化导致 fixture 420s 不就绪。STUDIO_E2E_TYPE=CUSTOM +
+      // STUDIO_E2E_CUSTOM_SERVER=<镜像内 jar 路径>（配 studio-e2e-mc-cached 镜像）
+      // 可完全离线启动；不设置时行为与以前完全一致。
+      "-e", `TYPE=${process.env.STUDIO_E2E_TYPE?.trim() || "VANILLA"}`,
+      ...(process.env.STUDIO_E2E_CUSTOM_SERVER?.trim()
+        ? ["-e", `CUSTOM_SERVER=${process.env.STUDIO_E2E_CUSTOM_SERVER.trim()}`]
+        : []),
       "-e", "SEED=studio-e2e-fixed",
       "-e", "MODE=survival",
       "-e", "DIFFICULTY=peaceful",
