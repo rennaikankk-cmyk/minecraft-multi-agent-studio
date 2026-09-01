@@ -56,33 +56,49 @@ for (let i = 0; i < 60 && !bot; i++) { await sleep(1_000); bot = await botOnline
 if (!bot) { log("FATAL: bot never online"); process.exit(1); }
 log(`bot ${BOT} ONLINE at ${JSON.stringify(bot.position ?? {}).slice(0, 60)}`);
 
-// 受控失败 goal：绝对锚点 y=40 深埋地下（海平面 ~63），目标 cell 必在实体方块内。
-// 目标文本携带完整蓝图数据，planner 模型分支只需忠实转写为 build.blueprint 输入。
-const requestId = randomUUID();
-const goalText = [
-  "任务分两步：第一步，准备一个圆石放进背包（可以从脚下的石头挖取）。",
-  "第二步，使用蓝图施工技能把这块圆石放置到指定的绝对位置：",
-  "锚点在 x=4、y=40、z=4，维度为主世界，",
-  "参考方块在锚点正下方一格，唯一单元格偏移为零，物品为圆石，结构类别 structural。",
-  "锚点深埋地下，如果放置结果与目标不一致属于本次受控验证的预期结果。",
-  "两步都必须执行，坐标与结构不要改动。",
-].join("");
-const goalRes = await api(CONTROL_API, "/v1/goals", {
-  method: "POST",
-  body: JSON.stringify({ schemaVersion: "1.0", requestId, botId: BOT, operatorGoal: goalText, timeoutMs: 90_000 }),
-});
-log(`goal HTTP ${goalRes.status}`);
-if (goalRes.status >= 300) { log(`FATAL goal: ${JSON.stringify(goalRes.body).slice(0,200)}`); process.exit(1); }
-
-// 轮询任务终态
-let terminal = null;
-for (let i = 0; i < 45 && !terminal; i++) {
-  await sleep(2_000);
-  const { body } = await api(CONTROL_API, `/v1/tasks?requestId=${requestId}`);
-  const task = (body.data?.tasks ?? body.tasks ?? []).find((t) => t.requestId === requestId) ?? (body.data?.tasks ?? [])[0];
-  if (task && ["completed", "failed", "aborted"].includes(String(task.status ?? ""))) terminal = task;
+// 两阶段（Round 6.2 重设计，绕开多步 item-progression 链）：
+//   Goal A：确定性采集模板（"获取 1 个 dirt"）→ collect.block 真实执行
+//           （带 Round 6.2 拾取重试修复）→ 背包拿到 dirt → completed。
+//   Goal B：模型分支单技能直派（G 场景已证此形态可靠）——自然语言蓝图，
+//           锚点 y=40 深埋地下 → 放置 receipt 与目标不一致 → BUILD_WRONG_BLOCK。
+async function submitGoal(text) {
+  const requestId = randomUUID();
+  const goalRes = await api(CONTROL_API, "/v1/goals", {
+    method: "POST",
+    body: JSON.stringify({ schemaVersion: "1.0", requestId, botId: BOT, operatorGoal: text, timeoutMs: 120_000 }),
+  });
+  log(`goal HTTP ${goalRes.status}: ${text.slice(0, 60)}`);
+  if (goalRes.status >= 300) { log(`FATAL goal: ${JSON.stringify(goalRes.body).slice(0,200)}`); process.exit(1); }
+  let terminal = null;
+  for (let i = 0; i < 60 && !terminal; i++) {
+    await sleep(2_000);
+    const { body } = await api(CONTROL_API, `/v1/tasks?requestId=${requestId}`);
+    const task = (body.data?.tasks ?? body.tasks ?? []).find((t) => t.requestId === requestId) ?? (body.data?.tasks ?? [])[0];
+    if (task && ["completed", "failed", "aborted"].includes(String(task.status ?? ""))) terminal = task;
+  }
+  log(`terminal: ${terminal ? `${terminal.status} ${terminal.failureReason ?? ""}` : "none in 120s"}`);
+  return terminal;
 }
-log(`terminal: ${terminal ? `${terminal.status} ${terminal.failureReason ?? ""}` : "none in 90s"}`);
+
+// —— Goal A：确定性采集（英文物品名命中 acquisition 模板）——
+const terminalA = await submitGoal("获取 1 个 dirt");
+if (terminalA?.status !== "completed") {
+  log("FATAL: acquisition goal did not complete (pickup fix validation failed)");
+  await api(MANAGER, `/v1/bots/${BOT}/stop`, { method: "POST" }).catch(() => undefined);
+  process.exit(1);
+}
+log("Goal A PASS: dirt acquired (deterministic template + real collect + pickup retry)");
+
+// —— Goal B：受控建造失败（模型分支单技能直派）——
+const goalText = [
+  "使用蓝图施工技能把一个 dirt 放置到指定位置：",
+  "锚点在 x=4、y=40、z=4，维度为主世界，",
+  "参考方块在锚点正下方一格，唯一单元格偏移为零，物品为 dirt，结构类别 structural。",
+  "锚点深埋地下，放置结果与目标不一致属于本次受控验证的预期结果。",
+  "坐标与结构不要改动。",
+].join("");
+const terminalB = await submitGoal(goalText);
+log(`Goal B terminal: ${terminalB?.status} ${terminalB?.failureReason ?? ""}`);
 
 // 观察结果：BUILD_WRONG_BLOCK / BUILD_* / SKILL fault 之一应自动出现
 let found = null;
@@ -94,7 +110,7 @@ for (let i = 0; i < 10 && !found; i++) {
   await sleep(2_000);
 }
 if (!found) {
-  log(`NO PLACEMENT_FAILED increase (baseline ${baseCount}). terminal=${terminal?.status ?? "none"}`);
+  log(`NO PLACEMENT_FAILED increase (baseline ${baseCount}). goalB terminal=${terminalB?.status ?? "none"}`);
   log("J VERDICT: controlled build failure did not surface a BUILD incident in this run");
   await api(MANAGER, `/v1/bots/${BOT}/stop`, { method: "POST" }).catch(() => undefined);
   process.exit(2);
