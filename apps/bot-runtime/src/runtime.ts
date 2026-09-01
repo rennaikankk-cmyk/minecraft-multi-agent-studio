@@ -96,6 +96,8 @@ import type {
 import { unsupportedVersionCompatibility } from "./version-compatibility.js";
 import {
   ProgressWatchdog,
+  resolveProgressWatchdogConfig,
+  resolveWatchdogProfile,
   type ProgressWatchdogEvent,
   type ProgressWatchdogSnapshot,
 } from "./progress-watchdog.js";
@@ -167,6 +169,8 @@ export type RuntimeDependencies = {
   /** 恢复阶梯的副作用钩子。缺失的钩子记 repair-rejected，不假装执行过。 */
   goalRecoveryEffects?: RecoveryEffects;
   now?: () => Date;
+  /** 单调时钟（watchdog elapsed 计算注入用；缺省 performance.now()）。 */
+  monotonicNow?: () => number;
   randomId?: () => string;
   /** Optional measured probe report; absent is deliberately NO_PROBE_DATA. */
   combatReflexProbe?: CombatReflexProbeReport | null;
@@ -298,7 +302,9 @@ export class SingleBotRuntime {
   private readonly skillExecutor: SkillExecutor;
   private readonly goalExecutor: GoalExecutor;
   private readonly worldState = new WorldStateStore();
-  private readonly progressWatchdog = new ProgressWatchdog();
+  private readonly progressWatchdog: ProgressWatchdog;
+  /** monotonic 时钟（watchdog elapsed 计算用；wall clock 只做展示）。 */
+  private readonly monotonicNow: () => number;
   private incidentReporter!: IncidentReporter;
   private state: BotConnectionState = "offline";
   private client: BotClient | null = null;
@@ -376,6 +382,9 @@ export class SingleBotRuntime {
     private readonly dependencies: RuntimeDependencies,
   ) {
     this.now = dependencies.now ?? (() => new Date());
+    this.monotonicNow = dependencies.monotonicNow ?? (() => performance.now());
+    const watchdogProfile = resolveWatchdogProfile();
+    this.progressWatchdog = new ProgressWatchdog(resolveProgressWatchdogConfig());
     this.incidentReporter = new IncidentReporter({
       botId: profile.botId,
       endpoint: process.env.STUDIO_INCIDENT_ENDPOINT?.trim() || undefined,
@@ -384,6 +393,10 @@ export class SingleBotRuntime {
       logger: { warn: (message: string) => dependencies.logger?.warn?.(message) ?? console.warn(message) },
     });
     this.randomId = dependencies.randomId ?? randomUUID;
+    dependencies.logger?.warn?.(
+      "bot_runtime_watchdog_profile",
+      { profile: watchdogProfile, note: "production 35s/90s; e2e test-only 8s/20s" },
+    );
     this.runtimeInstanceId = `runtime-${this.randomId()}`;
     this.metrics = dependencies.metrics ?? new InMemoryMetricRegistry();
     this.safetyController = dependencies.safetyController ?? new L0SafetyController();
@@ -1155,6 +1168,8 @@ export class SingleBotRuntime {
       expected: info.expected,
     }));
 
+    this.reportConnectionIncident(info);
+
     if (!this.stopping && !this.versionUnsupported) {
       this.scheduleReconnect();
     } else if (this.versionUnsupported) {
@@ -1164,12 +1179,69 @@ export class SingleBotRuntime {
     }
   }
 
+  /** 连接类 Incident（kick / auth / network / version mismatch；expected 断开不上报）。 */
+  private reportConnectionIncident(info: { reason: string; expected: boolean; detail?: string }): void {
+    if (info.expected) return; // requested_stop / server_shutdown 是正常断开
+    let failureCode: string | null = null;
+    let incidentType = "BOT_DISCONNECT";
+    if (info.reason === "kicked") {
+      failureCode = "SERVER_KICKED";
+      incidentType = "SERVER_KICK";
+    } else if (info.reason === "authentication_error") {
+      failureCode = "SERVER_PLUGIN_AUTH_FAILED";
+    } else if (info.reason === "network_error") {
+      failureCode = "NETWORK_DISCONNECTED";
+    } else if (info.reason === "runtime_error" && info.detail === "unsupported_minecraft_version") {
+      failureCode = "SERVER_VERSION_MISMATCH";
+    }
+    if (!failureCode) return; // unknown 等其它原因：等 reconnect 结果再定性
+    const identity = loadRuntimeIdentity();
+    const detailSuffix = info.detail ? `: ${String(info.detail).slice(0, 200)}` : "";
+    this.incidentReporter.report({
+      failureCode,
+      incidentType,
+      sourceComponent: "connection",
+      severity: "ERROR",
+      sessionId: this.runtimeInstanceId,
+      runtimeInstanceId: this.runtimeInstanceId,
+      serverProfileId: this.profile.id,
+      ...(identity.gitCommit ? { gitCommit: identity.gitCommit } : {}),
+      ...(identity.branch ? { branch: identity.branch } : {}),
+      ...(identity.buildVersion ? { buildVersion: identity.buildVersion } : {}),
+      expected: "bot stays connected",
+      actual: info.reason + detailSuffix,
+      normalizedErrorSignature: info.reason,
+      actionFamily: "connection",
+      snapshots: {},
+    });
+  }
+
   private scheduleReconnect(): void {
     const config = this.profile.reconnect;
     if (!config.enabled || this.reconnectAttempts >= config.maxAttempts) {
       this.dependencies.logger.warn("bot_runtime_reconnect_exhausted", this.logFields({
         attempts: this.reconnectAttempts,
       }));
+      // 重连预算耗尽 = reconnect loop 终态 → Incident（expected 断开不进这里）
+      if (config.enabled && !this.stopping) {
+        const identity = loadRuntimeIdentity();
+        this.incidentReporter.report({
+          failureCode: "SERVER_RECONNECT_LOOP",
+          incidentType: "BOT_DISCONNECT",
+          sourceComponent: "connection",
+          severity: "ERROR",
+          sessionId: this.runtimeInstanceId,
+          runtimeInstanceId: this.runtimeInstanceId,
+          serverProfileId: this.profile.id,
+          ...(identity.gitCommit ? { gitCommit: identity.gitCommit } : {}),
+          ...(identity.branch ? { branch: identity.branch } : {}),
+          expected: "bot reconnects within bounded attempts",
+          actual: `reconnect exhausted after ${this.reconnectAttempts} attempt(s)`,
+          normalizedErrorSignature: "reconnect-exhausted",
+          actionFamily: "connection",
+          snapshots: {},
+        });
+      }
       return;
     }
 
@@ -1488,6 +1560,7 @@ export class SingleBotRuntime {
       const activeRuntimeTask = [...this.activeSkillTasks.values()][0];
       const events = this.progressWatchdog.observe({
         observedAtMs: observedAt.getTime(),
+        monotonicMs: this.monotonicNow(),
         position,
         contract: progressContractForAction(activeRuntimeTask?.title, worldSnapshot.navigation.movementOwner),
         inventoryFingerprint,

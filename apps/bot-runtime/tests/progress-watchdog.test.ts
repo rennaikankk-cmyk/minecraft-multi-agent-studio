@@ -244,10 +244,16 @@ describe("action/phase progress contracts", () => {
     expect(events.filter((e) => e.kind === "deadline-exceeded")).toHaveLength(1);
   });
 
-  it("MOVE_TO_TARGET: stagnant movement fires stuck (contract default)", () => {
+  it("MOVE_TO_TARGET: stagnant movement fires stuck at production threshold (35s)", () => {
     const watchdog = new ProgressWatchdog();
     let stuck = 0;
+    // 生产默认 35s：12s 内不得误报（不是测试阈值），40s 必须触发
     for (let t = 0; t <= 12_000; t += 1_000) {
+      stuck += watchdog.observe(base({ observedAtMs: t, contract: "MOVE_TO_TARGET" }))
+        .filter((e) => e.kind === "stuck").length;
+    }
+    expect(stuck).toBe(0);
+    for (let t = 13_000; t <= 40_000; t += 1_000) {
       stuck += watchdog.observe(base({ observedAtMs: t, contract: "MOVE_TO_TARGET" }))
         .filter((e) => e.kind === "stuck").length;
     }
@@ -359,4 +365,47 @@ describe("window-based material progress (Round 5)", () => {
       }
     }
     });
+});
+
+import { resolveProgressWatchdogConfig, resolveWatchdogProfile } from "../src/progress-watchdog.js";
+
+describe("watchdog monotonic clock + profiles (Round 6)", () => {
+  const base = (over: Record<string, unknown>) => ({ observedAtMs: 0, position: { x: 0, y: 64, z: 0 }, ...over });
+  it("resolveWatchdogProfile: default production, explicit e2e, garbage fail-closed", () => {
+    expect(resolveWatchdogProfile({})).toBe("production");
+    expect(resolveWatchdogProfile({ STUDIO_WATCHDOG_PROFILE: "" })).toBe("production");
+    expect(resolveWatchdogProfile({ STUDIO_WATCHDOG_PROFILE: "e2e" })).toBe("e2e");
+    expect(() => resolveWatchdogProfile({ STUDIO_WATCHDOG_PROFILE: "fast" })).toThrow(/production\|e2e/);
+  });
+
+  it("e2e profile shortens thresholds; production default stays 35s/90s", () => {
+    expect(resolveProgressWatchdogConfig({ STUDIO_WATCHDOG_PROFILE: "e2e" })).toEqual({ stuckAfterMs: 8_000, noProgressAfterMs: 20_000 });
+    expect(resolveProgressWatchdogConfig({})).toEqual({});
+    const production = new ProgressWatchdog();
+    const events = [];
+    for (let t = 0; t <= 12_000; t += 1_000) {
+      events.push(...production.observe(base({ observedAtMs: t, contract: "MOVE_TO_TARGET" })));
+    }
+    expect(events.filter((e) => e.kind === "stuck")).toHaveLength(0); // 12s < 35s 不误报
+  });
+
+  it("monotonicMs drives elapsed math: wall clock rollback cannot fake progress", () => {
+    const watchdog = new ProgressWatchdog({ stuckAfterMs: 5_000, noProgressAfterMs: 10_000 });
+    let stuck = 0;
+    // wall clock 回拨 1 小时（NTP 修正），monotonic 连续推进
+    for (let t = 0; t <= 8_000; t += 1_000) {
+      stuck += watchdog.observe(base({
+        observedAtMs: 1_700_000_000_000 - 3_600_000 + t,
+        monotonicMs: t,
+        contract: "MOVE_TO_TARGET",
+      })).filter((e) => e.kind === "stuck").length;
+    }
+    expect(stuck).toBe(1); // wall 回拨救不了 stuck 判定
+  });
+
+  it("monotonic regression is rejected", () => {
+    const watchdog = new ProgressWatchdog({ stuckAfterMs: 5_000, noProgressAfterMs: 10_000 });
+    watchdog.observe(base({ observedAtMs: 1_000, monotonicMs: 1_000, contract: "MOVE_TO_TARGET" }));
+    expect(() => watchdog.observe(base({ observedAtMs: 2_000, monotonicMs: 500, contract: "MOVE_TO_TARGET" }))).toThrow(/backwards/);
+  });
 });

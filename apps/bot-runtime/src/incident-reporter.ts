@@ -314,7 +314,12 @@ export function watchdogEventToSignal(params: Readonly<{
     ...(params.goal ? { goal: params.goal } : {}),
     ...(params.phase ? { phase: params.phase } : {}),
     ...(event.phaseKey ? { phase: event.phaseKey } : {}),
-    ...(params.replanCount !== undefined ? { normalizedErrorSignature: `path-resets:${params.replanCount}` } : {}),
+    // replan 计数是诊断数值，不进 fingerprint（stuck/no-progress/oscillation
+    // 跨场景必须聚合到同一 Issue）；仅 loop（PATH_REPLAN_STORM）以 replan
+    // 为身份本质时保留。
+    ...(params.replanCount !== undefined && event.kind === "loop"
+      ? { normalizedErrorSignature: `path-resets:${params.replanCount}` }
+      : {}),
     actionFamily: "navigation",
     ...(params.eventWindow ? { eventWindow: params.eventWindow.slice(-60) } : {}),
     snapshots: event.diagnostics ? { windowDiagnostics: { ...event.diagnostics } } : {},

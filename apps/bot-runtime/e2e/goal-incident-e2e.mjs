@@ -103,7 +103,7 @@ const result = await withE2EFixture(async (fixture) => {
   log(`fixture: container=${fixture.containerName} port=${fixture.port} world=${fixture.volumeName}`);
 
   // 基线：本轮之前的 PATH_NO_PROGRESS 聚合计数
-  const before = await managerApi("/v1/incidents?failureCode=SKILL_RECOVERY_EXHAUSTED");
+  const before = await managerApi("/v1/incidents?failureCode=PATHFINDER_GOTO_FAILED");
   aggregateBefore = before.body.issues?.[0]?.occurrenceCount ?? 0;
   log(`baseline PATH_NO_PROGRESS occurrences=${aggregateBefore}`);
 
@@ -133,7 +133,7 @@ const result = await withE2EFixture(async (fixture) => {
     await sleep(25_000);
 
     // 服务端查询本 run 的新 occurrence
-    const after = await managerApi("/v1/incidents?failureCode=SKILL_RECOVERY_EXHAUSTED");
+    const after = await managerApi("/v1/incidents?failureCode=PATHFINDER_GOTO_FAILED");
     const issue = after.body.issues?.[0];
     const newCount = issue?.occurrenceCount ?? 0;
     if (newCount <= aggregateBefore) {
@@ -149,7 +149,7 @@ const result = await withE2EFixture(async (fixture) => {
   }
 
   // 详情断言：元数据（MC version/position/skill/commit）
-  const detail = await managerApi("/v1/incidents?failureCode=SKILL_RECOVERY_EXHAUSTED");
+  const detail = await managerApi("/v1/incidents?failureCode=PATHFINDER_GOTO_FAILED");
   const issue = detail.body.issues?.[0];
   const detailResponse = await fetch(`http://127.0.0.1:${MANAGER_PORT}/v1/incidents/${issue.incidentId}`, {
     headers: { Authorization: `Bearer ${secrets.dashboardToken}` },
@@ -157,7 +157,10 @@ const result = await withE2EFixture(async (fixture) => {
   const detailBody = await detailResponse.json();
   const lastOcc = (detailBody.occurrences ?? []).at(-1);
   log(`last occurrence: pos=${JSON.stringify(lastOcc?.position)} skill=${lastOcc?.skillId} mc=${lastOcc?.minecraftVersion} proto=${lastOcc?.protocolVersion} commit=${lastOcc?.gitCommit} session=${lastOcc?.sessionId}`);
-  const metaOk = lastOcc?.minecraftVersion != null && lastOcc?.position != null && lastOcc?.skillId != null;
+  const metaOk = lastOcc?.minecraftVersion != null && lastOcc?.position != null && lastOcc?.skillId != null
+    && issue?.terminalFailureCode === "SKILL_RECOVERY_EXHAUSTED" && issue?.suspectedLayer === "PATHFINDING"
+    && lastOcc?.terminalFailureCode === "SKILL_RECOVERY_EXHAUSTED" && (lastOcc?.causedByFailureCodes ?? []).includes("PATHFINDER_GOTO_FAILED");
+  log(`causal: issue layer=${issue?.suspectedLayer} rule=${issue?.classifierRuleId} terminal=${issue?.terminalFailureCode} causedBy=${JSON.stringify(lastOcc?.causedByFailureCodes)}`);
 
   // 持久化重启校验：直接读 manager 的 incidents.json
   const fs = await import("node:fs");

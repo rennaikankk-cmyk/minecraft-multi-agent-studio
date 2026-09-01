@@ -73,7 +73,8 @@ describe("watchdogEventToSignal mapping", () => {
     expect(signal.position).toEqual({ x: 10.2, y: 65, z: -3.4 });
     expect(signal.expected).toContain("target distance");
     expect(signal.actual).toContain("pathResets=16");
-    expect(signal.normalizedErrorSignature).toBe("path-resets:16");
+    // replan 计数是诊断数值：stuck 事件不进 fingerprint（聚合到同一 Issue）
+    expect(signal.normalizedErrorSignature).toBeUndefined();
   });
 });
 
@@ -120,6 +121,17 @@ describe("IncidentReporter spool + idempotency (Round 6)", () => {
     });
     expect(signal.failureCode).toBe("TASK_PROGRESS_TIMEOUT");
     expect(signal.incidentType).toBe("TASK_TIMEOUT");
+  });
+
+  it("loop event keeps replan signature (identity essence of PATH_REPLAN_STORM)", () => {
+    const signal = watchdogEventToSignal({
+      event: { kind: "loop", goalKey: "overworld:1,64,2", ageMs: 20_000 },
+      position: { x: 1, y: 64, z: 2 },
+      dimension: "minecraft:overworld",
+      replanCount: 6,
+    });
+    expect(signal.failureCode).toBe("PATH_REPLAN_STORM");
+    expect(signal.normalizedErrorSignature).toBe("path-resets:6");
   });
 
   it("causal fields and runtime identity pass through", () => {

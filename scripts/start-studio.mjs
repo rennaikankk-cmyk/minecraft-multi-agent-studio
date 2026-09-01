@@ -184,6 +184,9 @@ try {
     "Control API",
   );
 
+  // manager 侧 local-test desired/ownership 身份（observed 端点与 UI 显示用）
+  environment.STUDIO_STARTUP_LOCAL_TEST_DESIRED = startupPlan.localMinecraftServer.desired === "session" ? "session" : "";
+  environment.STUDIO_SESSION_ID = instanceId;
   studioManager = new StudioLocalManager({
     repositoryRoot,
     runtimeRoot,
@@ -237,12 +240,32 @@ try {
   // Startup summary：模式与本地 MC Server 期望状态来自单一来源 startupPlan
   process.stdout.write(
     [
-      `Studio Mode: ${startupPlan.startupMode.toUpperCase()}`,
+      // observed 状态都来自上方 waitForTcp/waitForHttp/waitForServiceStable/
+      // manager.start() 的真实探测 —— 不是按 session 配置打印 ONLINE。
+      `Studio Mode: ${startupPlan.startupMode.toUpperCase()} (resolved from ${startupPlan.resolvedFrom})`,
       `Deployment Mode: ${startupPlan.deploymentMode.toUpperCase()}`,
-      `Dashboard: ONLINE (${dashboardUrl})`,
-      `Local Minecraft Server: ${startupPlan.localMinecraftServer.desired === "not_started" ? "NOT STARTED" : startupPlan.localMinecraftServer.desired.toUpperCase()}`,
+      `Dashboard: ONLINE (${dashboardUrl}) [observed via HTTP probe]`,
+      `Coordinator: ONLINE (control link 127.0.0.1:${controlLinkPort}) [observed via TCP probe]`,
+      `Control API: ONLINE (127.0.0.1:${controlApiPort}) [observed via HTTP probe]`,
+      `Bot Supervisor (Studio Manager): ONLINE (127.0.0.1:${managerPort}) [observed via listen]`,
+      `Local Minecraft Server Desired: ${startupPlan.localMinecraftServer.desired === "not_started" ? "OFF" : startupPlan.localMinecraftServer.desired.toUpperCase()}`,
+      `Local Minecraft Server Shutdown Policy: ${startupPlan.localMinecraftServer.shutdownPolicy}`,
     ].join("\n") + "\n",
   );
+  if (startupPlan.localMinecraftServer.desired !== "session") {
+    // NORMAL/E2E：desired OFF —— 主动探测 observed（docker 事实），
+    // 残留容器不得因"没启动过"而被误报为 NOT RUNNING。
+    try {
+      const { observeLocalTestServer } = await import("./local-test-server.mjs");
+      const observed = await observeLocalTestServer();
+      const line = observed.status === "online"
+        ? `RUNNING (port ${observed.hostPort}, owner ${observed.ownerSessionId ?? "unknown"}) — 与 desired OFF 不一致，如非手工调试残留请手动清理`
+        : "NOT RUNNING [observed via docker inspect]";
+      process.stdout.write(`Local Minecraft Server Observed: ${line}\n`);
+    } catch {
+      process.stdout.write("Local Minecraft Server Observed: NOT RUNNING (docker 不可用，按无容器处理)\n");
+    }
+  }
   if (startupPlan.localMinecraftServer.desired === "session") {
     // LOCAL_TEST 真实执行：desired != observed —— 只有 readiness 通过才 ONLINE
     process.stdout.write("[studio] Starting Local Test Server (ownership=session)...\n");

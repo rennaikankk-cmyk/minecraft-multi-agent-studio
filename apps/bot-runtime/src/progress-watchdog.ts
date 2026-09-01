@@ -58,6 +58,12 @@ export function progressContractForAction(actionTitle: string | null | undefined
 
 export type ProgressSample = Readonly<{
   observedAtMs: number;
+  /**
+   * 单调时钟毫秒（performance.now()）。提供时所有 elapsed/窗口/deadline 计算
+   * 都用它（NTP/系统时间回拨不会伪造或吞掉 stuck 判定）；observedAtMs 仅作
+   * wall-clock 展示。
+   */
+  monotonicMs?: number;
   position: Readonly<{ x: number; y: number; z: number }>;
   /** Idle bots must not accumulate false stuck/no-progress alarms. */
   active?: boolean;
@@ -128,9 +134,13 @@ export type ProgressWatchdogConfig = Readonly<{
   oscillationCooldownMs: number;
 }>;
 
+/**
+ * 生产默认阈值：慢速 STUCK 判定 35s、整体无进展 90s。
+ * 不允许为了让测试通过而压到 5/8 秒 —— E2E 必须走显式 test-only profile。
+ */
 export const DEFAULT_PROGRESS_WATCHDOG_CONFIG: ProgressWatchdogConfig = Object.freeze({
-  stuckAfterMs: 8_000,
-  noProgressAfterMs: 20_000,
+  stuckAfterMs: 35_000,
+  noProgressAfterMs: 90_000,
   movementEpsilon: 0.05,
   distanceEpsilon: 0.05,
   loopWindow: 8,
@@ -145,6 +155,30 @@ export const DEFAULT_PROGRESS_WATCHDOG_CONFIG: ProgressWatchdogConfig = Object.f
   oscillationNetMax: 5,
   oscillationCooldownMs: 10_000,
 });
+
+/** E2E 显式 test-only profile（约 8 秒阈值；由 STUDIO_WATCHDOG_PROFILE=e2e 激活）。 */
+export const E2E_PROGRESS_WATCHDOG_CONFIG: Partial<ProgressWatchdogConfig> = Object.freeze({
+  stuckAfterMs: 8_000,
+  noProgressAfterMs: 20_000,
+});
+
+export type WatchdogProfile = "production" | "e2e";
+
+/**
+ * 从环境解析 watchdog 配置。生产零配置 → production 阈值；仅当显式
+ * STUDIO_WATCHDOG_PROFILE=e2e（test-only）才允许缩短阈值。任何其他值
+ * fail closed（抛错），避免拼错的环境变量静默变成未知 profile。
+ */
+export function resolveWatchdogProfile(environment: Readonly<Record<string, string | undefined>> = process.env): WatchdogProfile {
+  const value = environment.STUDIO_WATCHDOG_PROFILE?.trim();
+  if (value === undefined || value === "") return "production";
+  if (value === "e2e") return "e2e";
+  throw new Error(`STUDIO_WATCHDOG_PROFILE 必须是 production|e2e（收到：${value}）`);
+}
+
+export function resolveProgressWatchdogConfig(environment: Readonly<Record<string, string | undefined>> = process.env): Partial<ProgressWatchdogConfig> {
+  return resolveWatchdogProfile(environment) === "e2e" ? E2E_PROGRESS_WATCHDOG_CONFIG : {};
+}
 
 export type ProgressWatchdogSnapshot = Readonly<{
   lastProgressAtMs: number | null;
@@ -210,6 +244,8 @@ export class ProgressWatchdog {
 
   observe(sample: ProgressSample): readonly ProgressWatchdogEvent[] {
     this.validateSample(sample);
+    // 单调时钟优先：所有 elapsed/窗口/deadline 计算用它（防 NTP 回拨伪造/吞掉判定）
+    const nowMs = sample.monotonicMs ?? sample.observedAtMs;
     if (sample.active === false) {
       this.reset();
       return Object.freeze([]);
@@ -231,7 +267,7 @@ export class ProgressWatchdog {
       this.loopReported = false;
       this.pathResetBaseline = sample.pathResetCount ?? null;
     }
-    if (this.lastProgressAtMs === null) this.lastProgressAtMs = sample.observedAtMs;
+    if (this.lastProgressAtMs === null) this.lastProgressAtMs = nowMs;
 
     const moved = previous !== null && Math.hypot(
       sample.position.x - previous.position.x,
@@ -259,11 +295,11 @@ export class ProgressWatchdog {
       );
     }
     this.window.push({
-      atMs: sample.observedAtMs,
+      atMs: nowMs,
       x: sample.position.x, y: sample.position.y, z: sample.position.z,
       targetDistance: sample.targetDistance ?? null,
     });
-    const windowCutoff = sample.observedAtMs - this.config.progressWindowMs;
+    const windowCutoff = nowMs - this.config.progressWindowMs;
     while (this.window.length > 2 && this.window[0]!.atMs < windowCutoff) this.window.shift();
     const windowFirst = this.window[0]!;
     const windowLast = this.window.at(-1)!;
@@ -291,9 +327,9 @@ export class ProgressWatchdog {
       windowTargetDistanceDrop,
       windowPathLength: this.windowPathLength,
       reversals: windowReversals,
-      noMaterialProgressMs: Math.max(0, sample.observedAtMs - (this.lastMaterialProgressAtMs ?? this.lastProgressAtMs ?? sample.observedAtMs)),
+      noMaterialProgressMs: Math.max(0, nowMs - (this.lastMaterialProgressAtMs ?? this.lastProgressAtMs ?? nowMs)),
     };
-    const ageMs = Math.max(0, sample.observedAtMs - (this.lastProgressAtMs ?? sample.observedAtMs));
+    const ageMs = Math.max(0, nowMs - (this.lastProgressAtMs ?? nowMs));
 
     // material progress = 窗口净结果（净位移 / 距离持续下降），不再是"有活动"
     const materialProgress = inventoryChanged ||
@@ -301,10 +337,10 @@ export class ProgressWatchdog {
       (windowTargetDistanceDrop !== null && windowTargetDistanceDrop >= this.config.distanceDropEpsilon);
     const progress = previous === null || goalChanged || materialProgress;
     if (progress) {
-      this.lastProgressAtMs = sample.observedAtMs;
+      this.lastProgressAtMs = nowMs;
       this.stuckReported = false;
       this.noProgressReported = false;
-      if (materialProgress) this.lastMaterialProgressAtMs = sample.observedAtMs;
+      if (materialProgress) this.lastMaterialProgressAtMs = nowMs;
       if (materialProgress) {
         this.loopReported = false;
         this.pathResetBaseline = sample.pathResetCount ?? null;
@@ -358,11 +394,11 @@ export class ProgressWatchdog {
         maxPairwise > this.config.oscillationRadius && windowSamples >= 4 &&
         (windowSpan < 3_000 || windowSamples < 6 || diag.reversals < this.config.oscillationMinReversals ||
          diag.windowNetDisplacement > this.config.oscillationNetMax);
-      const cooldownElapsed = sample.observedAtMs - this.lastOscillationAtMs >= this.config.oscillationCooldownMs;
+      const cooldownElapsed = nowMs - this.lastOscillationAtMs >= this.config.oscillationCooldownMs;
       if ((radiusOscillation || reversalOscillation) && !this.oscillationReported && cooldownElapsed) {
         this.oscillationReported = true;
         this.oscillationCount += 1;
-        this.lastOscillationAtMs = sample.observedAtMs;
+        this.lastOscillationAtMs = nowMs;
         events.push(Object.freeze({
           kind: "oscillation", observedAtMs: sample.observedAtMs, ageMs, goalKey,
           recoverySuggested: "local-replan", ...(sample.phaseKey ? { phaseKey: sample.phaseKey } : {}),
@@ -392,7 +428,7 @@ export class ProgressWatchdog {
     // 契约默认 deadline：phaseKey 变化时记录起点，超 contract.deadlineMs 触发
     if (resolvedContract && sample.phaseKey && sample.phaseDeadlineMs === undefined) {
       if (this.phaseStart.at(-1)?.key !== sample.phaseKey) {
-        this.phaseStart.push({ key: sample.phaseKey, startedAtMs: sample.observedAtMs });
+        this.phaseStart.push({ key: sample.phaseKey, startedAtMs: nowMs });
         this.deadlineReportedForKey = null;
         if (this.phaseStart.length > 8) this.phaseStart.shift();
       }
@@ -401,7 +437,7 @@ export class ProgressWatchdog {
     }
     // 等待型期待：静止正常；只看 deadline
     if (sample.phaseDeadlineMs !== undefined && sample.phaseKey) {
-      const deadlinePassed = sample.observedAtMs >= sample.phaseDeadlineMs;
+      const deadlinePassed = nowMs >= sample.phaseDeadlineMs;
       const phaseChanged = this.deadlineReportedForKey !== null && this.deadlineReportedForKey !== sample.phaseKey;
       if (deadlinePassed && !phaseChanged && this.deadlineReportedForKey !== sample.phaseKey) {
         this.deadlineReportedForKey = sample.phaseKey ?? null;
@@ -416,7 +452,7 @@ export class ProgressWatchdog {
 
     // 契约默认 deadline 判定（sample 未显式给 phaseDeadlineMs 时）
     if (this.pendingContractDeadline && sample.phaseDeadlineMs === undefined) {
-      if (this.pendingContractDeadline.key === sample.phaseKey && sample.observedAtMs >= this.pendingContractDeadline.deadlineAtMs && this.deadlineReportedForKey !== sample.phaseKey) {
+      if (this.pendingContractDeadline.key === sample.phaseKey && nowMs >= this.pendingContractDeadline.deadlineAtMs && this.deadlineReportedForKey !== sample.phaseKey) {
         this.deadlineReportedForKey = sample.phaseKey ?? null;
         this.deadlineCount += 1;
         events.push(Object.freeze({
@@ -485,6 +521,10 @@ export class ProgressWatchdog {
     if (![position.x, position.y, position.z].every(Number.isFinite)) throw new TypeError("Watchdog sample position is invalid.");
     if (sample.targetDistance != null && (!Number.isFinite(sample.targetDistance) || sample.targetDistance < 0)) throw new TypeError("Watchdog target distance is invalid.");
     if (sample.pathResetCount !== undefined && (!Number.isSafeInteger(sample.pathResetCount) || sample.pathResetCount < 0)) throw new TypeError("Watchdog path reset count is invalid.");
-    if (this.previous !== null && sample.observedAtMs < this.previous.observedAtMs) throw new TypeError("Watchdog sample time moved backwards.");
+    if (this.previous !== null && sample.monotonicMs !== undefined && this.previous.monotonicMs !== undefined) {
+      if (sample.monotonicMs < this.previous.monotonicMs) throw new TypeError("Watchdog sample time moved backwards.");
+    } else if (this.previous !== null && sample.observedAtMs < this.previous.observedAtMs) {
+      throw new TypeError("Watchdog sample time moved backwards.");
+    }
   }
 }
