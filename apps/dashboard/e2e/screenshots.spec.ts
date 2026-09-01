@@ -16,8 +16,8 @@ for (const route of routes) {
       test.skip(process.env.UI_SHOOT !== "1", "screenshot tool only");
       mkdirSync(OUT, { recursive: true });
       await page.setViewportSize({ width: viewport.width, height: viewport.height });
-      await page.goto(route, { waitUntil: "networkidle" });
-      await page.waitForTimeout(1500);
+      await page.goto(route, { waitUntil: "load" });
+      await page.waitForTimeout(2500);
       const name = route === "/" ? "overview" : route.slice(1).replace("/", "-");
       await page.screenshot({ path: `${OUT}/${name}-${viewport.name}.png`, fullPage: false });
     });

@@ -41,7 +41,7 @@ export function CardContent({ className, ...props }: React.ComponentProps<"div">
 export type StatusTone =
   | "online" | "offline" | "starting" | "stopping" | "degraded"
   | "failed" | "unknown" | "notstarted" | "managed" | "external"
-  | "ai" | "manual" | "autonomy" | "localtest" | "info" | "neutral";
+  | "warning" | "ai" | "manual" | "autonomy" | "localtest" | "info" | "neutral";
 
 export function Badge({
   tone = "neutral",
@@ -70,7 +70,8 @@ function toneClasses(tone: StatusTone): string {
     case "offline": return "border-danger/30 bg-danger/10 text-danger";
     case "starting": return "border-warning/30 bg-warning/10 text-warning";
     case "stopping": return "border-warning/30 bg-warning/10 text-warning";
-    case "degraded": return "border-warning/40 bg-warning/15 text-warning";
+    case "degraded":
+    case "warning": return "border-warning/40 bg-warning/15 text-warning";
     case "failed": return "border-danger/40 bg-danger/15 text-danger";
     case "unknown": return "border-border-strong bg-elevated text-subtle-foreground";
     case "notstarted": return "border-border-strong bg-elevated text-subtle-foreground";

@@ -77,7 +77,6 @@ export default function OverviewPage() {
       for (const issue of issues) {
         layerCounts.set(issue.suspectedLayer, (layerCounts.get(issue.suspectedLayer) ?? 0) + issue.occurrenceCount);
       }
-      const environment = environmentSnapshot;
       setData({
         spark: studioRes?.ai ?? null,
         localTest: localRes?.resource ?? null,
@@ -97,17 +96,7 @@ export default function OverviewPage() {
             })),
         },
         servers: (serversRes?.servers ?? []) as OverviewData["servers"],
-        environment: environment
-          ? {
-              mode: environment.mode?.value ?? "—",
-              cpuModel: environment.hardware?.cpu?.model ?? "—",
-              memoryTotal: environment.hardware?.memory ? `${Math.round(environment.hardware.memory.totalBytes / 1024 ** 3)} GB` : "—",
-              memoryFree: environment.hardware?.memory ? `${Math.round(environment.hardware.memory.freeBytes / 1024 ** 3)} GB` : "—",
-              software: (environment.software ?? []).map((entry: { id: string; status: string; version: string | null }) => ({
-                id: entry.id, status: entry.status, version: entry.version,
-              })),
-            }
-          : null,
+        environment: environmentSnapshot,
         failed: null,
       });
     } catch (error) {
@@ -173,7 +162,7 @@ export default function OverviewPage() {
 
       {/* Row 1 —— 核心状态 */}
       <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-        <MetricCard label="Studio Mode" value={data?.environment?.mode ?? "—"} tone="info" href="/runtime" />
+        <MetricCard label="Studio Mode" value={data?.environment?.mode ?? "—"} tone="info" href="/runtime" note={undefined} />
         <MetricCard
           label="Local MC"
           value={localOnline ? "ONLINE" : data?.localTest?.status === "starting" ? "STARTING" : "OFF"}
@@ -181,7 +170,7 @@ export default function OverviewPage() {
           note={localOnline ? (data?.localTest?.managedByStudio ? "managed by Studio" : undefined) : localTestNormalOff ? "NORMAL 下为正常状态" : undefined}
           href="/servers"
         />
-        <MetricCard label="Bots Online" value={`${botsOnline} / ${data?.bots.length ?? 0}`} tone={botsOnline > 0 ? "online" : "neutral"} href="/bots" />
+        <MetricCard label="Bots Online" value={`${botsOnline} / ${data?.bots.length ?? 0}`} tone={botsOnline > 0 ? "online" : "neutral"} href="/bots" note={undefined} />
         <MetricCard
           label="Open Incidents"
           value={String(data?.incidents?.open ?? 0)}
@@ -242,7 +231,7 @@ export default function OverviewPage() {
               <Badge tone={(data?.incidents?.newLastHour ?? 0) > 0 ? "warning" : "neutral"}>New 1h: {data?.incidents?.newLastHour ?? 0}</Badge>
               <Badge tone={(data?.incidents?.repeated ?? 0) > 0 ? "warning" : "neutral"}>Repeated: {data?.incidents?.repeated ?? 0}</Badge>
             </div>
-            <p className="mt-3 text-[11px] font-semibold uppercase tracking-wider text-subtle-foreground">Top Layers（后端分类，非默认归咎 Skill）</p>
+            <p className="mt-3 text-[11px] font-semibold uppercase tracking-wider text-subtle-foreground">Top Layers（按后端确定性分类聚合的 occurrence 数）</p>
             <ul className="mt-1 space-y-1">
               {(data?.incidents?.topLayers ?? []).map(({ layer, occurrences }) => (
                 <li key={layer}>
@@ -322,7 +311,7 @@ export default function OverviewPage() {
                 <Badge key={entry.id} tone={entry.status === "available" ? "online" : "neutral"}>{entry.id}{entry.version ? ` ${entry.version}` : ""}</Badge>
               ))}
             </div>
-            <p className="mt-3 text-[11px] text-subtle-foreground">趋势图（Incident 1h/24h/7d、Spark latency P50/P95）需要后端时序通道——已记录缺口，不伪造。</p>
+            <p className="mt-3 text-[11px] leading-4 text-muted-foreground">趋势图（Incident 1h/24h/7d、Spark latency P50/P95）需要后端时序通道——已记录缺口，不伪造。</p>
           </CardContent>
         </Card>
       </div>
@@ -336,7 +325,7 @@ function MetricCard({
   label: string;
   value: string;
   tone: "info" | "online" | "warning" | "critical" | "neutral" | "localtest";
-  note?: string;
+  note: string | undefined;
   href: string;
 }) {
   const content = (
@@ -345,7 +334,7 @@ function MetricCard({
         <p className="text-[11px] font-semibold uppercase tracking-wider text-subtle-foreground">{label}</p>
         <p
           className={cn(
-            "mt-1 truncate text-xl font-semibold data-mono",
+            "mt-1 text-xl font-semibold leading-7 data-mono",
             tone === "online" && "text-success",
             tone === "warning" && "text-warning",
             tone === "critical" && "text-critical",
@@ -356,7 +345,7 @@ function MetricCard({
         >
           {value}
         </p>
-        {note ? <p className="mt-0.5 text-[11px] text-subtle-foreground">{note}</p> : null}
+        {note ? <p className="mt-0.5 text-[11px] leading-4 text-subtle-foreground">{note}</p> : null}
       </div>
     </Card>
   );

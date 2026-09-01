@@ -150,7 +150,7 @@ export function EnvironmentMemoryCard() {
 
   return (
     <div>
-      <div className="flex justify-between text-[12.5px]">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 text-[12.5px]">
         <span className="text-subtle-foreground">Memory total / free</span>
         <span className="data-mono">{formatBytes(totalBytes)} / {formatBytes(freeBytes)}</span>
       </div>

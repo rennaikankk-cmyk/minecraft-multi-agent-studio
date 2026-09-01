@@ -235,7 +235,7 @@ function StatusPill({ label, value, tone }: { label: string; value: string; tone
   );
 }
 
-function StatusDot({ label, tone, text }: { label: string; tone: "ai" | "localtest" | "notstarted"; text: string }) {
+function StatusDot({ label, tone, text }: { label: string; tone: "ai" | "localtest" | "notstarted" | "failed" | "warning" | "neutral"; text: string }) {
   return (
     <span className="hidden items-center gap-1.5 rounded-[6px] border border-border-subtle bg-elevated px-2 py-1 lg:inline-flex" title={label}>
       <span
@@ -243,7 +243,9 @@ function StatusDot({ label, tone, text }: { label: string; tone: "ai" | "localte
           "size-1.5 rounded-full",
           tone === "ai" && "bg-ai",
           tone === "localtest" && "bg-localtest",
-          tone === "notstarted" && "bg-subtle-foreground/50",
+          tone === "failed" && "bg-critical",
+          tone === "warning" && "bg-warning",
+          (tone === "notstarted" || tone === "neutral") && "bg-subtle-foreground/50",
         )}
         aria-hidden
       />

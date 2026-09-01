@@ -21,6 +21,7 @@ test("console navigation reaches every page", async ({ page }) => {
 });
 
 test("combat page renders real runtime state and marks missing telemetry", async ({ page }) => {
+  await routeStreamUnavailable(page);
   await page.route(/\/api\/bots$/, async (route) => {
     await route.fulfill({
       status: 200,
@@ -479,6 +480,19 @@ async function routeEmptyBots(page: Page) {
           bots: [],
         },
       }),
+    });
+  });
+  // 真实后端在跑时 SSE 会推送真实注册表快照并覆盖 mock（CI 无后端则自然失败降级）。
+  // 统一注入 stream-error，让用例在轮询降级路径上确定性运行。
+  await routeStreamUnavailable(page);
+}
+
+async function routeStreamUnavailable(page: Page) {
+  await page.route(/\/api\/bots\/stream$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      body: `event: stream-error\ndata: ${JSON.stringify({ requestId: UUID, code: "UPSTREAM_UNAVAILABLE" })}\n\n`,
     });
   });
 }

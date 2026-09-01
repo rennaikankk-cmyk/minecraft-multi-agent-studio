@@ -46,6 +46,7 @@ test("shows backend failure without fake Bot fallback", async ({ page }) => {
 
 test("requires confirmation and shows the confirmed stop result", async ({ page }) => {
   let stopped = false;
+  await routeStreamUnavailable(page);
   await page.route(/\/api\/bots$/, async (route) => {
     await fulfillBots(route, stopped ? "offline" : "online");
   });
@@ -186,6 +187,19 @@ test("samples real memory every five seconds without repeating full detection", 
 
 async function routeBots(page: Page, state: "online" | "offline" | "stale") {
   await page.route(/\/api\/bots$/, async (route) => fulfillBots(route, state));
+  await routeStreamUnavailable(page);
+}
+
+async function routeStreamUnavailable(page: Page) {
+  // SSE 若可达会推送真实注册表快照并覆盖 mock（CI 无后端则自然失败降级）。
+  // 注入 stream-error，让用例在轮询降级路径上确定性运行。
+  await page.route(/\/api\/bots\/stream$/, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      body: `event: stream-error\ndata: ${JSON.stringify({ code: "UPSTREAM_UNAVAILABLE" })}\n\n`,
+    });
+  });
 }
 
 async function fulfillBots(route: Route, state: "online" | "offline" | "stale") {
