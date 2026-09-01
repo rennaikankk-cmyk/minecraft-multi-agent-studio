@@ -166,6 +166,7 @@ function executeStatePreconditions(input: Readonly<{ serverProfileId: string; di
 export const storeSortSkill = defineSkill({
   id: "store.sort",
   version: "1.0.0",
+  progressContract: "INVENTORY_CHANGE",
   inputSchema: storeSortInputSchema,
   outputSchema: storeSortOutputSchema,
   stateSchema: storageStateSchema,

@@ -55,7 +55,7 @@ export const tradeVillagerCapabilityInputSchema = tradeVillagerInputSchema;
 export const tradeVillagerCapabilityOutputSchema = tradeVillagerOutputSchema;
 
 export const tradeVillagerSkill = defineSkill({
-  id: "trade.villager", version: "1.0.0", inputSchema: tradeVillagerInputSchema, outputSchema: tradeVillagerOutputSchema, stateSchema: tradeVillagerStateSchema,
+  id: "trade.villager", version: "1.0.0", progressContract: "WAITING_EXTERNAL", inputSchema: tradeVillagerInputSchema, outputSchema: tradeVillagerOutputSchema, stateSchema: tradeVillagerStateSchema,
   compatibility: { variants: [{ id: "portable", requirements: [], verifiedMinecraftVersions: [] }] },
   requiredCapabilities: ["world.interact", "inventory.write"] as const, timeoutMs: TRADE_VILLAGER_TIMEOUT_MS, idempotent: false,
   retryPolicy: { maxAttempts: 1, baseDelayMs: 50, maxDelayMs: 250, retryableErrorCodes: [] },

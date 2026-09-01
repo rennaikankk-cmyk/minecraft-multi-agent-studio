@@ -101,6 +101,7 @@ export const movementProfileOutputSchema = z.object({
 export const movementProfileSkill = defineSkill({
   id: "movement.profile",
   version: "1.0.0",
+  progressContract: "RECOVERING",
   inputSchema: movementProfileInputSchema,
   outputSchema: movementProfileOutputSchema,
   stateSchema: movementProfileStateSchema,

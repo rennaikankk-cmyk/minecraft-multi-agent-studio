@@ -1601,11 +1601,19 @@ export class SingleBotRuntime {
         .map((item) => `${item.name}:${item.count}:${item.durability ?? ""}`)
         .join("|");
       const activeRuntimeTask = [...this.activeSkillTasks.values()][0];
+      // Phase 3：typed progressContract——技能声明的契约优先于 title 子串推断
+      const declaredContract = activeRuntimeTask
+        ? this.skillRegistry.resolve(activeRuntimeTask.title, "1.0.0")?.progressContract
+        : undefined;
       const events = this.progressWatchdog.observe({
         observedAtMs: observedAt.getTime(),
         monotonicMs: this.monotonicNow(),
         position,
-        contract: progressContractForAction(activeRuntimeTask?.title, worldSnapshot.navigation.movementOwner),
+        contract: progressContractForAction(
+          activeRuntimeTask?.title,
+          worldSnapshot.navigation.movementOwner,
+          declaredContract,
+        ),
         inventoryFingerprint,
         targetDistance: worldSnapshot.navigation.target
           ? Math.hypot(

@@ -256,7 +256,7 @@ async function executeMine<TInput extends MineBranchInput | MineVeinInput>(conte
 }
 
 export const mineBranchSkill = defineSkill({
-  id: "mine.branch", version: "1.0.0", inputSchema: mineBranchInputSchema,
+  id: "mine.branch", version: "1.0.0", progressContract: "INVENTORY_CHANGE", inputSchema: mineBranchInputSchema,
   outputSchema: mineBranchOutputSchema, stateSchema: mineBranchStateSchema,
   compatibility: { variants: [{ id: "portable", requirements: [], verifiedMinecraftVersions: [] }] },
   requiredCapabilities: ["world.interact"] as const,
@@ -272,7 +272,7 @@ export const mineBranchSkill = defineSkill({
 });
 
 export const mineVeinSkill = defineSkill({
-  id: "mine.vein", version: "1.0.0", inputSchema: mineVeinInputSchema,
+  id: "mine.vein", version: "1.0.0", progressContract: "INVENTORY_CHANGE", inputSchema: mineVeinInputSchema,
   outputSchema: mineVeinOutputSchema, stateSchema: mineVeinStateSchema,
   compatibility: { variants: [{ id: "portable", requirements: [], verifiedMinecraftVersions: [] }] },
   requiredCapabilities: ["world.interact"] as const,

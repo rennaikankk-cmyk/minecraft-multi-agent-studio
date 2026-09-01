@@ -145,6 +145,18 @@ export type SkillExecutionContext = Readonly<{
 export type SkillDefinition<TInput, TOutput, TState> = Readonly<{
   id: string;
   version: string;
+  /**
+   * Phase 3 typed expected-progress 契约：技能声明自己的进度形态，取代
+   * progressContractForAction 的 title 子串猜测。可选——未声明的技能沿用
+   * 兜底推断（movementOwner 优先），新技能必须声明。
+   */
+  progressContract?:
+    | "MOVE_TO_TARGET"
+    | "SMELTING_WAIT"
+    | "PLACE_AND_VERIFY"
+    | "RECOVERING"
+    | "WAITING_EXTERNAL"
+    | "INVENTORY_CHANGE";
   inputSchema: z.ZodType<TInput>;
   outputSchema: z.ZodType<TOutput>;
   stateSchema: z.ZodType<TState>;

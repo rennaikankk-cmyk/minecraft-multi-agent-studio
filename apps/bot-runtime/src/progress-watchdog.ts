@@ -45,8 +45,21 @@ export type ProgressContractName = keyof typeof PROGRESS_CONTRACTS;
  * 动作名（skill id）→ 进度契约。集中一处；未列出的动作按 movement 归属推断。
  * movementOwner 存在时永远是 MOVE_TO_TARGET（寻路是唯一位移来源）。
  */
-export function progressContractForAction(actionTitle: string | null | undefined, movementOwner: string | null | undefined): ProgressContractName | undefined {
+/**
+ * Phase 3：技能可声明 typed progressContract（defineSkill 的字段），声明值
+ * 优先；未声明的技能才落回 title 子串兜底推断。movementOwner 存在时永远
+ * 是 MOVE_TO_TARGET（寻路是唯一位移来源）。子串表是过渡兼容层，新技能
+ * 必须显式声明。
+ */
+export function progressContractForAction(
+  actionTitle: string | null | undefined,
+  movementOwner: string | null | undefined,
+  declaredContract?: string | null | undefined,
+): ProgressContractName | undefined {
   if (movementOwner !== null && movementOwner !== undefined) return "MOVE_TO_TARGET";
+  if (declaredContract !== null && declaredContract !== undefined) {
+    return declaredContract as ProgressContractName;
+  }
   if (!actionTitle) return undefined;
   const title = actionTitle.toLowerCase();
   if (title.includes("smelt")) return "SMELTING_WAIT";

@@ -50,7 +50,7 @@ export const smeltItemCapabilityInputSchema = smeltItemInputSchema;
 export const smeltItemCapabilityOutputSchema = smeltItemOutputSchema;
 
 export const smeltItemSkill = defineSkill({
-  id: "smelt.item", version: "1.0.0", inputSchema: smeltItemInputSchema,
+  id: "smelt.item", version: "1.0.0", progressContract: "SMELTING_WAIT", inputSchema: smeltItemInputSchema,
   outputSchema: smeltItemOutputSchema, stateSchema: smeltItemStateSchema,
   compatibility: {
     variants: [

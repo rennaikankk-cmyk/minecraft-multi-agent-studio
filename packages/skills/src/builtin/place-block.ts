@@ -92,6 +92,7 @@ export const placeBlockCapabilityOutputSchema = placeBlockOutputSchema;
 export const placeBlockSkill = defineSkill({
   id: "world.place-block",
   version: "1.0.0",
+  progressContract: "PLACE_AND_VERIFY",
   inputSchema: placeBlockInputSchema,
   outputSchema: placeBlockOutputSchema,
   stateSchema: placeBlockStateSchema,

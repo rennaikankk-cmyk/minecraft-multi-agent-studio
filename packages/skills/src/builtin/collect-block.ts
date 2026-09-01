@@ -84,6 +84,7 @@ export const collectBlockCapabilityOutputSchema = collectBlockOutputSchema;
 export const collectBlockSkill = defineSkill({
   id: "collect.block",
   version: "1.0.0",
+  progressContract: "INVENTORY_CHANGE",
   inputSchema: collectBlockInputSchema,
   outputSchema: collectBlockOutputSchema,
   stateSchema: collectBlockStateSchema,

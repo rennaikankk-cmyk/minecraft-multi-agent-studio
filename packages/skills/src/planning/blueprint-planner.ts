@@ -310,6 +310,7 @@ async function executeBlueprint(
 export const buildBlueprintSkill = defineSkill({
   id: "build.blueprint",
   version: "1.0.0",
+  progressContract: "PLACE_AND_VERIFY",
   inputSchema: buildBlueprintInputSchema,
   outputSchema: buildBlueprintOutputSchema,
   stateSchema: buildBlueprintStateSchema,

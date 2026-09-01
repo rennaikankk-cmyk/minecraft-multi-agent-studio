@@ -1708,6 +1708,46 @@ export class CoordinatorLocalPlanner {
             );
           }
         },
+        // Phase 3.6：moveCloser 复用 movement.goto 确定性派发（不复制移动实现）。
+        // 目标取步骤绑定里的世界目标位置；预算有界，失败交回重试阶梯。
+        moveCloser: async (step) => {
+          const target = stepTargetPosition(step, { placementSites });
+          if (target === null) return;
+          const record = this.requireAvailableBot(request.botId);
+          await this.dispatchObservation(
+            request,
+            record,
+            record.skillCatalog!.skills,
+            "movement.goto",
+            {
+              target: {
+                x: target.x,
+                y: target.y,
+                z: target.z,
+                dimension: record.currentStatus!.position!.dimension,
+                serverProfileId: record.serverProfileId,
+              },
+              radius: 3,
+            },
+            deadlineMs,
+          );
+          this.options.logger?.info?.("coordinator_recovery_move_closer", {
+            taskId: request.taskId,
+            botId: request.botId,
+            stepIndex: step.stepIndex,
+            target: { x: target.x, y: target.y, z: target.z },
+          });
+        },
+        // Phase 3.6：freeInventory 的实际转移由 runtime 的稳定 inventory/container
+        // 原语承担（store.sort/capability 层）；这里只记录恢复意图，不复制实现。
+        freeInventory: async (step) => {
+          void step;
+          this.options.logger?.info?.("coordinator_recovery_free_inventory", {
+            taskId: request.taskId,
+            botId: request.botId,
+            note: "inventory space recovery handled by runtime container primitives",
+          });
+        },
       },
     );
     this.logSupervision(request, plan.steps, supervision);
@@ -3671,6 +3711,21 @@ function stepOutcomeFromResult(
       ? result.payload.errorCode
       : "SKILL_HANDLER_FAILED";
   return { ok: false, errorCode };
+}
+
+/**
+ * Phase 3.6：从步骤绑定里取“值得走近”的世界目标位置。
+ * mine 步骤的站点位置来自 binding；没有世界目标的步骤返回 null。
+ */
+function stepTargetPosition(
+  step: PlanStep,
+  binding: Readonly<{ placementSites: ReadonlyMap<string, { x: number; y: number; z: number }> }>,
+): { x: number; y: number; z: number } | null {
+  if (step.kind === "mine") {
+    const site = step.station === null ? undefined : binding.placementSites.get(step.station);
+    return site ?? null;
+  }
+  return null;
 }
 
 function nonIdempotentStepOutcome(
