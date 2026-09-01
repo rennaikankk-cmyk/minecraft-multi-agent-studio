@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { ConsoleNav } from "@/components/console-nav";
 
 import "./globals.css";
+import "./theme.css";
 
 export const metadata: Metadata = {
   title: "Minecraft Multi-Agent Studio",

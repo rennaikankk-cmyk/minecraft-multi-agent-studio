@@ -1,0 +1,115 @@
+/* ============================================================
+   Studio UI — Design Tokens (Tailwind v4 theme layer)
+   ----------------------------------------------------------------
+   - 单一 token 来源：页面不得硬编码 hex；颜色经语义 token 使用
+   - dark-first：neutral/zinc 表面 + 语义状态色
+   - 不加载 preflight（旧 globals.css 类在 parity 前继续工作）；
+     新 shell 自己的最小 reset 限定在 .studio-ui 作用域内
+   - 参考视觉语言：shadcn/ui new-york + shadcn-admin 布局模式
+   ============================================================ */
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+@theme {
+  /* —— Surfaces（dark-first；neutral 系） —— */
+  --color-background: #09090b; /* app bg ≈ zinc-950 */
+  --color-sidebar: #0d0d10;
+  --color-card: #18181b; /* ≈ zinc-900 */
+  --color-card-hover: #1e1e22;
+  --color-elevated: #202024; /* popover/menu ≈ neutral-850 */
+  --color-border-subtle: #27272a; /* ≈ zinc-800 */
+  --color-border-strong: #3f3f46;
+  --color-hover: #232327;
+  --color-selected: #2a2a30;
+
+  /* —— Text —— */
+  --color-foreground: #fafafa;
+  --color-muted-foreground: #a1a1aa;
+  --color-subtle-foreground: #71717a;
+
+  /* —— 语义（状态） —— */
+  --color-primary: #22d3ee; /* cyan —— action/brand */
+  --color-primary-foreground: #08222a;
+  --color-success: #34d399; /* emerald —— online/healthy */
+  --color-warning: #fbbf24; /* amber —— degraded/warning */
+  --color-danger: #f87171; /* red —— error/offline */
+  --color-critical: #ef4444; /* red+ —— critical */
+  --color-ai: #a78bfa; /* violet —— Spark/AI */
+  --color-manual: #60a5fa; /* blue —— operator/manual */
+  --color-autonomy: #22d3ee; /* cyan —— autonomy */
+  --color-localtest: #fb923c; /* orange —— local test */
+  --color-external: #94a3b8; /* slate —— external server */
+
+  /* —— Typography —— */
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+
+  /* —— Shape / motion —— */
+  --radius-panel: 8px;
+  --radius-control: 6px;
+  --shadow-panel: 0 1px 2px rgb(0 0 0 / 0.35);
+  --shadow-pop: 0 8px 24px rgb(0 0 0 / 0.45);
+}
+
+/* 新 shell 作用域最小 reset（不影响旧页面） */
+.studio-ui {
+  font-family: var(--font-sans);
+  color: var(--color-foreground);
+  background: var(--color-background);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "tnum" 1; /* 指标数字 tabular-nums */
+}
+.studio-ui *,
+.studio-ui *::before,
+.studio-ui *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+.studio-ui button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+.studio-ui input,
+.studio-ui select,
+.studio-ui textarea {
+  font: inherit;
+  color: inherit;
+}
+
+/* 可见 focus ring（键盘可达性） */
+.studio-ui :focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .studio-ui *,
+  .studio-ui *::before,
+  .studio-ui *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+.studio-ui .anim-120 { transition: all 120ms ease; }
+.studio-ui .anim-200 { transition: all 200ms ease; }
+
+/* monospace 数据（ID/坐标/hash/端口） */
+.studio-ui .data-mono {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+}
+
+/* 滚动条（dark、细、不占位） */
+.studio-ui ::-webkit-scrollbar { width: 8px; height: 8px; }
+.studio-ui ::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 4px; }
+.studio-ui ::-webkit-scrollbar-track { background: transparent; }
