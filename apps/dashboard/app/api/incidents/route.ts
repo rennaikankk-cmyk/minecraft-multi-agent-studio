@@ -9,11 +9,12 @@ import {
 
 export const dynamic = "force-dynamic";
 
-/** GET /api/incidents —— 代理 Studio Manager 的 Incident 列表（token 只在服务端）。 */
-export async function GET() {
+/** GET /api/incidents —— 代理 Studio Manager 的 Incident 列表（token 只在服务端；filters 透传）。 */
+export async function GET(request: Request) {
   try {
     const config = loadStudioManagerConfig();
-    const response = await fetch(`${config.baseUrl}/v1/incidents`, {
+    const search = new URL(request.url).searchParams.toString();
+    const response = await fetch(`${config.baseUrl}/v1/incidents${search ? `?${search}` : ""}`, {
       headers: { Authorization: `Bearer ${config.token}` },
       cache: "no-store",
       signal: AbortSignal.timeout(5_000),

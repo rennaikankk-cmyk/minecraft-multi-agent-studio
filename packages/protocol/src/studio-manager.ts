@@ -58,12 +58,45 @@ export const studioManagerStatusV1Schema = z
     generatedAt: timestampSchema,
     ai: studioAiStatusV1Schema,
     bots: z.array(studioManagedBotV1Schema).max(16),
+    /** manager 进程 ownership 身份（local test server labels / 元数据）。 */
+    sessionId: z.string().min(1).max(120).optional(),
     capabilities: z
       .object({
         createBot: z.boolean(),
         maxBots: z.number().int().min(0).max(16),
+        /** capability honesty：前端按这里声明渲染（可选，向后兼容）。 */
+        incidentExport: z
+          .object({
+            json: z.boolean(),
+            markdown: z.boolean(),
+            zipBundle: z.boolean(),
+            repairPrompt: z.boolean(),
+          })
+          .strict()
+          .optional(),
+        localTestServer: z
+          .object({
+            start: z.boolean(),
+            stop: z.boolean(),
+            restart: z.boolean(),
+            resetWorld: z.boolean(),
+            logs: z.boolean(),
+          })
+          .strict()
+          .optional(),
+        incidentQuery: z
+          .object({
+            filters: z.boolean(),
+            issueOccurrences: z.boolean(),
+            occurrenceDetail: z.boolean(),
+            statusTransition: z.boolean(),
+          })
+          .strict()
+          .optional(),
       })
       .strict(),
+    /** IncidentStore writer 健康（信息性 passthrough）。 */
+    incidents: z.record(z.string(), z.unknown()).nullable().optional(),
   })
   .strict();
 

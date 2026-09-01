@@ -9,8 +9,8 @@ export default function ServersPage() {
     <main className="shell">
       <header className="pageHeader">
         <p className="eyebrow">CONTROL PLANE · SERVERS</p>
-        <h2>真实服务器与 Bot 登录</h2>
-        <p>让 Bot 进入哪个真实 Minecraft 服务器、当前连接状态如何。连接命令由 Coordinator / Studio Manager 执行，前端只发起与观察。</p>
+        <h2>External Servers 与 Local Test Server</h2>
+        <p>External Server 由 Studio 连接但不管理其进程；Local Test Server 由 Studio 启停并记录 ownership。observed state 来自真实容器探测，前端只发起与观察。</p>
       </header>
       <ServersConsole />
     </main>

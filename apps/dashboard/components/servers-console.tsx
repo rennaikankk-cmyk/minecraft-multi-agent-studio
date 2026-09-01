@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import type { ServersView } from "@/app/api/servers/route";
+import { LocalTestServerCard } from "@/components/local-test-server-card";
 import { ConnectionStateBadge, ProcessStateBadge, StatusBadge } from "@/components/status-badges";
 import { EmptyState, ErrorState, LoadingState, MetricCard } from "@/components/data-states";
 
@@ -93,6 +94,19 @@ export function ServersConsole() {
         后端尚未上报，前端不伪造。Ping / 玩家数当前后端未提供 → 不显示。
       </p>
 
+      <LocalTestServerCard />
+
+      <div className="panel">
+        <header className="panelHeader">
+          <h3>External Servers（Studio 只连接，不管理其进程）</h3>
+          <StatusBadge tone="muted">managedByStudio=false</StatusBadge>
+        </header>
+        <p className="hint">
+          External Server 的生命周期（Stop/Restart/Reset World）不属于 Studio：后端同样拒绝这类操作，前端不提供入口。
+          下表中的 重启/停止 按钮作用于 <strong>Bot 进程</strong>（Studio Manager 拥有），不是服务器本身。
+        </p>
+      </div>
+
       <div className="panel">
         <h3>连接新 Bot（由 Studio Manager 创建进程并连接真实服务器）</h3>
         <div className="formRow">
@@ -110,8 +124,8 @@ export function ServersConsole() {
 
       {view?.servers.length === 0 ? (
         <EmptyState
-          title="没有已连接的真实服务器"
-          hint="Studio Manager 中尚无 Bot 进程。使用上方表单连接第一个 Bot，或检查 STUDIO_MANAGER 配置。"
+          title="没有已连接的 External Server"
+          hint="Studio Manager 中尚无 Bot 进程。使用下方表单连接第一个 Bot（或在上方启动 Local Test Server），或检查 STUDIO_MANAGER 配置。"
         />
       ) : (
         view?.servers.map((server) => (
@@ -122,6 +136,7 @@ export function ServersConsole() {
               <span className="hint">
                 READY {server.counts.ready} · CONNECTING {server.counts.connecting} · FAILED {server.counts.failed} · 其他 {server.counts.other}
               </span>
+              <a className="buttonLike" href={`/incidents?server=${encodeURIComponent(`${server.host}:${server.port}`)}`}>Connection Incidents</a>
             </header>
             <div className="tableScroll">
               <table className="dataTable">

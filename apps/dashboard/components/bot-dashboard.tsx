@@ -213,6 +213,20 @@ export function BotDashboard() {
                 value={new Date(detailBot.lastMessageAt).toLocaleString("zh-CN")}
               />
             </dl>
+            <div className="filterBar">
+              <a
+                className="buttonLike"
+                href={`/incidents?bot=${encodeURIComponent(detailBot.botId)}`}
+              >
+                该 Bot 的 Incidents
+              </a>
+              <a
+                className="buttonLike"
+                href={`/api/incidents/export?scope=bot:${encodeURIComponent(detailBot.botId)}&format=zip`}
+              >
+                Export Bot Incidents (ZIP)
+              </a>
+            </div>
           </aside>
         </div>
       ) : null}
