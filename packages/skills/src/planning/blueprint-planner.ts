@@ -266,7 +266,13 @@ async function executeBlueprint(
   const startIndex = Math.min(input.startIndex ?? 0, plan.totalCells);
   const maxPlacements = input.maxPlacements ?? MAX_BLUEPRINT_BATCH;
   const cells = plan.orderedCells.slice(startIndex, startIndex + maxPlacements);
-  if (!isIntermediateBlueprintSafe(cells)) throw new SkillFault("BLUEPRINT_STEP_BLOCKED");
+  if (!isIntermediateBlueprintSafe(cells)) {
+    // server false-success / 世界漂移证据：cell 索引与期望进入 reason（P1-1）
+    throw new SkillFault(
+      "BUILD_WRONG_BLOCK",
+      `anchor=${input.blueprint.anchor.x},${input.blueprint.anchor.y},${input.blueprint.anchor.z}@${input.blueprint.dimension} startIndex=${startIndex} expected=intermediate cells match plan actual=placed state diverges (server false-success or world drift)`,
+    );
+  }
   const placements: z.infer<typeof placementSchema>[] = [];
   for (let offset = 0; offset < cells.length; offset += 1) {
     if (context.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
@@ -280,7 +286,10 @@ async function executeBlueprint(
     );
     const receipt = buildBlueprintCapabilityOutputSchema.parse(raw);
     if (receipt.position.x !== target.x || receipt.position.y !== target.y || receipt.position.z !== target.z) {
-      throw new SkillFault("BLUEPRINT_STEP_BLOCKED");
+      throw new SkillFault(
+        "BUILD_WRONG_BLOCK",
+        `anchor=${input.blueprint.anchor.x},${input.blueprint.anchor.y},${input.blueprint.anchor.z}@${input.blueprint.dimension} cellIndex=${index} order=${cell.order} expected=${cell.itemName}@${target.x},${target.y},${target.z} actual=receipt@${receipt.position.x},${receipt.position.y},${receipt.position.z}`,
+      );
     }
     placements.push({ index, position: target, itemName: cell.itemName, blockClass: cell.blockClass, placed: true });
   }
@@ -323,7 +332,7 @@ export const buildBlueprintSkill = defineSkill({
     },
     {
       id: "blueprint.materials-available",
-      failureCode: "BLUEPRINT_MATERIAL_INSUFFICIENT",
+      failureCode: "BUILD_MATERIAL_MISSING",
       check: (input) => {
         const ordered = orderBlueprintCells(input.blueprint);
         const startIndex = input.startIndex ?? 0;
@@ -333,7 +342,7 @@ export const buildBlueprintSkill = defineSkill({
     },
     {
       id: "blueprint.any-cell-in-reach",
-      failureCode: "ALL_CELLS_OUT_OF_REACH",
+      failureCode: "BUILD_CELL_UNREACHABLE",
       check: (input, state, policy) => {
         const position = state.position;
         if (position === null) return false;

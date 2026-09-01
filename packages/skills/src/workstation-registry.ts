@@ -256,6 +256,25 @@ export class InMemoryWorkstationRegistry implements WorkstationRegistryPort {
 export type WorkstationVerifyFn = (entry: WorkstationEntry) => Promise<boolean>;
 export type WorkstationScanFn = (type: WorkstationType) => Promise<ReadonlyArray<{ position: BlockPosition; type: WorkstationType }>>;
 
+/**
+ * P1-1 Facility FailureSignal：库级 hook 只上报信号，不写 Incident JSON——
+ * 上报与否、严重度与聚合由宿主（bot-runtime 的 incident reporter）决定。
+ * - FACILITY_VERIFY_FAILED：registry 记录的工作站经 server 侧 verifyFn 证伪
+ *   （方块被换/被挖——状态分歧证据，expected/actual 齐全）。
+ * - FACILITY_RESERVATION_CORRUPT：lease 已过期却 claim 失败（注册表内部
+ *   状态损坏；正常 contention（active lease → busy）绝不上报）。
+ */
+export type FacilityFailureSignal = Readonly<{
+  failureCode: "FACILITY_VERIFY_FAILED" | "FACILITY_RESERVATION_CORRUPT";
+  facilityType: WorkstationType;
+  serverProfileId: string;
+  dimension: string;
+  position: BlockPosition;
+  expected: string;
+  actual: string;
+  observedAt: string;
+}>;
+
 export async function acquireWorkstation(
   registry: WorkstationRegistryPort,
   params: Readonly<{
@@ -263,9 +282,18 @@ export async function acquireWorkstation(
     from: { x: number; y: number; z: number }; botId: string;
     maxDistance?: number; exclusive?: boolean;
     scanFn?: WorkstationScanFn; verifyFn?: WorkstationVerifyFn;
+    onFailureSignal?: (signal: FacilityFailureSignal) => void;
   }>,
 ): Promise<WorkstationAcquireResult> {
   const { serverProfileId, dimension, type, from, botId } = params;
+  const emitSignal = (signal: Omit<FacilityFailureSignal, "observedAt">) => {
+    if (!params.onFailureSignal) return;
+    try {
+      params.onFailureSignal({ ...signal, observedAt: new Date().toISOString() });
+    } catch {
+      // 诊断信号绝不能反向破坏获取主流程
+    }
+  };
   const candidates = registry.findCandidates(serverProfileId, dimension, type, from, params.maxDistance);
   const needsClaim = params.exclusive || usageModeFor(type) === "exclusive";
 
@@ -273,14 +301,39 @@ export async function acquireWorkstation(
     const pos = normalizeBlockPos(candidate.position);
     if (params.verifyFn) {
       const stillExists = await params.verifyFn(candidate);
-      if (!stillExists) { registry.invalidate(serverProfileId, dimension, pos); continue; }
+      if (!stillExists) {
+        emitSignal({
+          failureCode: "FACILITY_VERIFY_FAILED",
+          facilityType: type,
+          serverProfileId,
+          dimension,
+          position: pos,
+          expected: `workstation type=${type} present at registry position`,
+          actual: "server-side verifyFn rejected the entry (block missing or changed)",
+        });
+        registry.invalidate(serverProfileId, dimension, pos);
+        continue;
+      }
     }
     // Refresh observation (server confirmed it exists)
     registry.register(serverProfileId, dimension, type, pos, 1.0);
 
     if (needsClaim) {
+      const before = registry.get(serverProfileId, dimension, pos);
+      const leaseWasExpired = before?.lease ? before.lease.expiresAtMs <= Date.now() : true;
       const claimed = registry.claim(serverProfileId, dimension, pos, botId);
       if (!claimed) {
+        if (leaseWasExpired) {
+          emitSignal({
+            failureCode: "FACILITY_RESERVATION_CORRUPT",
+            facilityType: type,
+            serverProfileId,
+            dimension,
+            position: pos,
+            expected: "expired lease is reclaimable by any bot",
+            actual: `claim refused for botId=${botId} while lease expiry=${before?.lease?.expiresAtMs ?? "none"} was already past`,
+          });
+        }
         // P0-5: busy ≠ not_found — 返回 busy + 已有 entry，让 CapacityPlanner 决策
         const entry = registry.get(serverProfileId, dimension, pos);
         if (entry) return { status: "busy", entry, retryAfterMs: entry.lease ? entry.lease.expiresAtMs - Date.now() : 30_000 };

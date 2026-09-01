@@ -2882,5 +2882,13 @@ function syntheticCombatReceipt(
 function skillFaultIncidentType(rootErrorCode: string): string {
   if (rootErrorCode === "PATHFINDER_GOTO_FAILED" || rootErrorCode === "PATH_NO_PROGRESS") return "PATH_FAILED";
   if (rootErrorCode === "PATH_UNREACHABLE") return "UNREACHABLE";
+  // P1-1 Build 家族稳定码：wrong-block/false-success 与不可达在 type 上可区分
+  if (rootErrorCode === "BUILD_WRONG_BLOCK" || rootErrorCode === "BUILD_MISSING_BLOCK"
+    || rootErrorCode === "BUILD_PLACEMENT_REJECTED" || rootErrorCode === "BUILD_MATERIAL_MISSING") return "PLACEMENT_FAILED";
+  if (rootErrorCode === "BUILD_VERIFY_TIMEOUT") return "VERIFY_TIMEOUT";
+  if (rootErrorCode === "BUILD_CELL_UNREACHABLE") return "UNREACHABLE";
+  if (rootErrorCode === "FACILITY_VERIFY_FAILED") return "FALSE_SUCCESS";
+  if (rootErrorCode === "FACILITY_SLOT_INVALID") return "STATE_DIVERGENCE";
+  if (rootErrorCode === "FACILITY_RESERVATION_CORRUPT") return "RESERVATION_CONFLICT";
   return "SKILL_FAILED";
 }
