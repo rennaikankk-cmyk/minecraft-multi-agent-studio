@@ -44,6 +44,9 @@ const observedPositionSchema = z
     z: z.number().finite().min(-30_000_000).max(30_000_000),
     dimension: dimensionSchema,
     serverProfileId: identifierSchema,
+    // runtime 快照附带朝向角（与 movement-goto 同一形状）：strict 下缺失会拒真状态
+    yaw: z.number().finite().optional(),
+    pitch: z.number().finite().optional(),
   })
   .strict();
 
