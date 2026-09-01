@@ -1,12 +1,13 @@
 // ---------------------------------------------------------------------------
 // Incident 领域核心回归测试（fingerprint/dedup/分类/redaction/持久化/bounds）
 // ---------------------------------------------------------------------------
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  buildRepairPrompt,
   classifyIncident,
   containsUnredactedSecrets,
   EventRingBuffer,
@@ -19,6 +20,10 @@ import {
   safeExportText,
   type Severity,
 } from "../src/incidents.js";
+
+function readdirSyncSafe(dir: string): string[] {
+  return readdirSync(dir);
+}
 
 const dirs: string[] = [];
 function tmpDir(): string {
@@ -167,13 +172,24 @@ describe("IncidentStore dedup + aggregation", () => {
     expect(issue.suspectedLayer).toBe("RUNTIME");
   });
 
-  it("status transitions: open→fixed directly is rejected; via investigating works", () => {
+  it("status transitions: open→fixed directly is rejected; fixed requires passed verification", () => {
     const store = new IncidentStore();
     const { issue } = store.report({ subject: "bot", botId: "b", failureCode: "PATH_NO_PROGRESS", incidentType: "STUCK", sourceComponent: "pf" });
-    expect(store.transitionStatus(issue.incidentId, "fixed")).toBe(false);
-    expect(store.transitionStatus(issue.incidentId, "investigating")).toBe(true);
-    expect(store.transitionStatus(issue.incidentId, "fixed", { fixedByCommit: "abc123" })).toBe(true);
+    expect(store.transitionStatus(issue.incidentId, "fixed").ok).toBe(false);
+    expect(store.transitionStatus(issue.incidentId, "investigating").ok).toBe(true);
+    // 未经过验证 → fixed 拒绝（不能只点按钮）
+    expect(store.transitionStatus(issue.incidentId, "fixed", { fixedByCommit: "abc123" })).toEqual({
+      ok: false,
+      reason: "FIXED_REQUIRES_PASSED_VERIFICATION",
+    });
+    // 验证流程：request → record passed → fixed
+    expect(store.requestVerification(issue.incidentId)).toBe(true);
+    expect(store.recordVerificationResult(issue.incidentId, "passed")).toBe(true);
+    expect(store.transitionStatus(issue.incidentId, "fixed", { fixedByCommit: "abc123" }).ok).toBe(true);
     expect(store.getIssue(issue.incidentId)!.fixedByCommit).toBe("abc123");
+    // 状态机审计历史
+    const history = store.getIssue(issue.incidentId)!.statusHistory;
+    expect(history.map((entry) => `${entry.from}>${entry.to}`)).toEqual(["open>investigating", "investigating>fixed"]);
   });
 
   it("persistence round-trip: issues/occurrences survive restart (atomic file)", async () => {
@@ -400,5 +416,307 @@ describe("async writer + retention", () => {
     expect(store.getIssue(issue.incidentId)).not.toBeNull(); // 内存不受影响
     await store.flush();
     expect((store as unknown as { droppedWriteCount: number }).droppedWriteCount).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round 6：causal model / 三维 retention / quarantine-backup / writer health / repair prompt
+// ---------------------------------------------------------------------------
+
+describe("incident causal model (Round 6)", () => {
+  it("SKILL_RECOVERY_EXHAUSTED with causedBy chain reclassifies root as primary (PATHFINDING, R-CAUSAL-1)", () => {
+    const store = new IncidentStore();
+    const { issue, occurrence } = store.report({
+      subject: "bot",
+      botId: "bot-a",
+      failureCode: "SKILL_RECOVERY_EXHAUSTED",
+      incidentType: "SKILL_FAILED",
+      sourceComponent: "skill-executor",
+      terminalFailureCode: "SKILL_RECOVERY_EXHAUSTED",
+      causedByFailureCodes: ["PATHFINDER_GOTO_FAILED"],
+    });
+    // 主码换根因，terminal 保留为终态
+    expect(issue.primaryFailureCode).toBe("PATHFINDER_GOTO_FAILED");
+    expect(issue.terminalFailureCode).toBe("SKILL_RECOVERY_EXHAUSTED");
+    expect(issue.suspectedLayer).toBe("PATHFINDING");
+    expect(issue.classifierRuleId).toBe("R-CAUSAL-1");
+    expect(issue.type).toBe("SKILL_FAILED"); // reporter 显式给出的 type 保留
+    expect(occurrence.failureCode).toBe("PATHFINDER_GOTO_FAILED");
+    expect(occurrence.terminalFailureCode).toBe("SKILL_RECOVERY_EXHAUSTED");
+    expect(occurrence.causedByFailureCodes).toEqual(["PATHFINDER_GOTO_FAILED"]);
+    expect(occurrence.classification.matchedEvidence.join(" ")).toContain("terminal=SKILL_RECOVERY_EXHAUSTED");
+  });
+
+  it("fast PATH_FAILED and slow STUCK produce different fingerprints/issues", () => {
+    const store = new IncidentStore();
+    const fast = store.report({
+      subject: "bot", botId: "b1", failureCode: "PATHFINDER_GOTO_FAILED", incidentType: "PATH_FAILED",
+      sourceComponent: "movement.goto", normalizedErrorSignature: "no-path", actionFamily: "navigation",
+    });
+    const slow = store.report({
+      subject: "bot", botId: "b1", failureCode: "PATH_NO_PROGRESS", incidentType: "STUCK",
+      sourceComponent: "progress-watchdog", normalizedErrorSignature: "path-resets:3", actionFamily: "navigation",
+    });
+    expect(fast.issue.incidentId).not.toBe(slow.issue.incidentId);
+    expect(fast.issue.type).toBe("PATH_FAILED");
+    expect(slow.issue.type).toBe("STUCK");
+  });
+
+  it("incidentType UNKNOWN_FAILURE derives from failureCode family", () => {
+    const store = new IncidentStore();
+    const { issue } = store.report({
+      subject: "bot", botId: "b", failureCode: "PATHFINDER_GOTO_FAILED", incidentType: "UNKNOWN_FAILURE",
+      sourceComponent: "movement.goto",
+    });
+    expect(issue.type).toBe("PATH_FAILED");
+  });
+
+  it("PATHFINDER_GOTO_FAILED classifies to PATHFINDING (R-PATH-CODE-1)", () => {
+    const result = classifyIncident({ failureCode: "PATHFINDER_GOTO_FAILED", incidentType: "PATH_FAILED" });
+    expect(result.suspectedLayer).toBe("PATHFINDING");
+    expect(result.ruleId).toBe("R-PATH-CODE-1");
+  });
+
+  it("recovery-exhausted without causedBy chain stays SKILL/low (legacy reports)", () => {
+    const result = classifyIncident({ failureCode: "SKILL_RECOVERY_EXHAUSTED", incidentType: "SKILL_FAILED" });
+    expect(result.suspectedLayer).toBe("SKILL");
+    expect(result.confidenceBand).toBe("low");
+  });
+});
+
+describe("corruption quarantine & backup recovery (Round 6)", () => {
+  it("corrupt main file is quarantined (.corrupt-*), not silently cleared; store continues", async () => {
+    const dir = tmpDir();
+    const path = join(dir, "incidents.json");
+    writeFileSync(path, "{corrupt", "utf8");
+    const store = new IncidentStore({ persistPath: path });
+    expect(store.listIssues()).toHaveLength(0);
+    const health = store.writerHealth();
+    expect(health.quarantinedCount).toBe(1);
+    const quarantined = readdirSyncSafe(dir).filter((name) => name.includes(".corrupt-"));
+    expect(quarantined).toHaveLength(1);
+    // 原始损坏字节保留在 quarantine 文件里，未被覆盖清空
+    expect(readFileSync(join(dir, quarantined[0]!), "utf8")).toBe("{corrupt");
+  });
+
+  it("flush keeps a last-known-good .bak; corrupt main → restore from backup", async () => {
+    const dir = tmpDir();
+    const path = join(dir, "incidents.json");
+    const store = new IncidentStore({ persistPath: path, flushDebounceMs: 0 });
+    const { issue } = store.report({
+      subject: "bot", botId: "b", failureCode: "PATH_NO_PROGRESS", incidentType: "STUCK", sourceComponent: "pf",
+    });
+    await store.flush();
+    expect(existsSync(`${path}.bak`)).toBe(true);
+
+    // 主文件被外部损坏
+    writeFileSync(path, "not json at all", "utf8");
+    const reopened = new IncidentStore({ persistPath: path });
+    expect(reopened.getIssue(issue.incidentId)).not.toBeNull();
+    expect(reopened.writerHealth().restoredFromBackupCount).toBe(1);
+    expect(reopened.writerHealth().recoveryEvents.some((event) => event.kind === "restored-from-backup")).toBe(true);
+  });
+});
+
+describe("disk retention & counts (Round 6)", () => {
+  it("maxDiskBytes evicts closed issues first; newest issue survives within bounds", () => {
+    const store = new IncidentStore({
+      maxDiskBytes: 6_000,
+      maxIssues: 500,
+      maxOccurrencesPerIssue: 5,
+    });
+    const ids: string[] = [];
+    for (let i = 0; i < 6; i += 1) {
+      const { issue } = store.report({
+        subject: "bot", botId: "b", failureCode: "UNKNOWN_FAILURE", incidentType: "UNKNOWN_FAILURE",
+        sourceComponent: `x-${i}`, severity: "ERROR",
+        snapshots: { pad: "x".repeat(2_000) },
+      });
+      store.transitionStatus(issue.incidentId, "investigating");
+      store.requestVerification(issue.incidentId);
+      store.recordVerificationResult(issue.incidentId, "passed");
+      store.transitionStatus(issue.incidentId, "fixed");
+      ids.push(issue.incidentId);
+    }
+    expect(store.writerHealth().approxStoreBytes).toBeLessThanOrEqual(6_000);
+    // 磁盘边界确实淘汰了旧的 closed issue（不是全部保留）
+    expect(store.listIssues().length).toBeLessThan(6);
+    // 最新一条（报告后仍在写路径上的）必然存活
+    expect(store.getIssue(ids[ids.length - 1]!)).not.toBeNull();
+  });
+
+  it("pinned overflow beyond maxPinnedIssues is evictable under hard disk limit", () => {
+    const store = new IncidentStore({
+      maxDiskBytes: 4_000,
+      maxPinnedIssues: 1,
+      maxOccurrencesPerIssue: 3,
+    });
+    for (let i = 0; i < 8; i += 1) {
+      store.report({
+        subject: "bot", botId: "b", failureCode: "PATH_NO_PROGRESS", incidentType: "STUCK",
+        sourceComponent: `pf-${i}`, snapshots: { pad: "y".repeat(1_500) },
+      });
+    }
+    expect(store.writerHealth().approxStoreBytes).toBeLessThanOrEqual(4_000);
+    expect(store.listIssues().length).toBeLessThanOrEqual(2);
+  });
+
+  it("fixed issue reopens on recurrence (regression detection) with audit history", () => {
+    const store = new IncidentStore();
+    const { issue } = store.report({
+      subject: "bot", botId: "b", failureCode: "PATH_NO_PROGRESS", incidentType: "STUCK", sourceComponent: "pf",
+    });
+    store.transitionStatus(issue.incidentId, "investigating");
+    store.requestVerification(issue.incidentId);
+    store.recordVerificationResult(issue.incidentId, "passed");
+    store.transitionStatus(issue.incidentId, "fixed");
+    // 回归：同一 fingerprint 再次发生
+    const again = store.report({
+      subject: "bot", botId: "b", failureCode: "PATH_NO_PROGRESS", incidentType: "STUCK", sourceComponent: "pf",
+    });
+    expect(again.issue.incidentId).toBe(issue.incidentId);
+    expect(again.issue.status).toBe("open");
+    expect(again.issue.occurrenceCount).toBe(2);
+    const history = again.issue.statusHistory.map((entry) => `${entry.from}>${entry.to}`);
+    expect(history).toContain("fixed>open");
+  });
+
+  it("lifetime occurrenceCount vs retainedOccurrenceCount diverge after occurrence trimming", () => {
+    const store = new IncidentStore({ maxOccurrencesPerIssue: 3 });
+    for (let i = 0; i < 7; i += 1) {
+      store.report({
+        subject: "bot", botId: "b", failureCode: "PATH_NO_PROGRESS", incidentType: "STUCK", sourceComponent: "pf",
+      });
+    }
+    const issue = store.listIssues()[0]!;
+    expect(issue.occurrenceCount).toBe(7);
+    expect(issue.retainedOccurrenceCount).toBe(3);
+    expect(store.listOccurrences(issue.incidentId)).toHaveLength(3);
+  });
+
+  it("report currently-being-written issue is never evicted by retention race", () => {
+    const store = new IncidentStore({ maxDiskBytes: 5_000, maxPinnedIssues: 0, maxOccurrencesPerIssue: 5 });
+    for (let i = 0; i < 10; i += 1) {
+      store.report({
+        subject: "bot", botId: "b", failureCode: "PATH_NO_PROGRESS", incidentType: "STUCK",
+        sourceComponent: "pf", snapshots: { pad: "z".repeat(1_200) },
+      });
+    }
+    const last = store.listIssues()[0]!;
+    expect(store.getIssue(last.incidentId)).not.toBeNull();
+  });
+
+  it("low-severity evidence is stripped under hard disk pressure but counts survive", () => {
+    const store = new IncidentStore({ maxDiskBytes: 2_000, maxOccurrencesPerIssue: 50 });
+    store.report({
+      subject: "bot", botId: "b", failureCode: "PATH_NO_PROGRESS", incidentType: "STUCK",
+      sourceComponent: "pf", severity: "ERROR", snapshots: { pad: "p".repeat(1_800) },
+    });
+    const before = store.writerHealth().approxStoreBytes;
+    const { issue } = store.report({
+      subject: "bot", botId: "b", failureCode: "UNKNOWN_FAILURE", incidentType: "UNKNOWN_FAILURE",
+      sourceComponent: "x", severity: "INFO", snapshots: { pad: "q".repeat(2_000) },
+    });
+    expect(before).toBeGreaterThanOrEqual(2_000);
+    const occurrence = store.listOccurrences(issue.incidentId)[0]!;
+    expect(occurrence.evidenceStripped).toBe(true);
+    expect(occurrence.eventWindow).toHaveLength(0);
+    expect(issue.occurrenceCount).toBe(1);
+    expect(store.writerHealth().evidenceDroppedCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it("evidence cap truncates oversized snapshots deterministically", () => {
+    const store = new IncidentStore({ maxEvidenceBytesPerIncident: 1_000 });
+    const { issue } = store.report({
+      subject: "bot", botId: "b", failureCode: "PATH_NO_PROGRESS", incidentType: "STUCK",
+      sourceComponent: "pf", snapshots: { huge: "h".repeat(4_000) }, metadata: { also: "m".repeat(4_000) },
+    });
+    const occurrence = store.listOccurrences(issue.incidentId)[0]!;
+    expect(JSON.stringify(occurrence.snapshots).length).toBeLessThanOrEqual(1_200);
+    expect(occurrence.snapshots).toHaveProperty("_truncated");
+  });
+});
+
+describe("writer health & identity (Round 6)", () => {
+  it("writerHealth exposes flush counters, errors and recovery events", async () => {
+    const store = new IncidentStore({ persistPath: join(tmpDir(), "inc.json"), flushDebounceMs: 0 });
+    store.report({
+      subject: "bot", botId: "b", failureCode: "PATH_NO_PROGRESS", incidentType: "STUCK", sourceComponent: "pf",
+    });
+    await store.flush();
+    const health = store.writerHealth();
+    expect(health.flushCount).toBe(1);
+    expect(health.lastFlushAt).not.toBeNull();
+    expect(health.lastFlushError).toBeNull();
+    expect(health.dirty).toBe(false);
+    expect(health.lifetimeOccurrences).toBe(1);
+    expect(health.retainedOccurrences).toBe(1);
+  });
+
+  it("occurrence keeps runtime identity fields end to end", () => {
+    const store = new IncidentStore();
+    const { occurrence } = store.report({
+      subject: "bot", botId: "bot-a", sessionId: "sess-1", runtimeInstanceId: "runtime-uuid-1",
+      correlationId: "corr-9", goalId: "goal-7", taskId: "task-3", buildVersion: "0.1.0", dirtyBuild: true,
+      failureCode: "PATH_NO_PROGRESS", incidentType: "STUCK", sourceComponent: "pf",
+      minecraftVersion: "1.21.11", protocolVersion: 774, gitCommit: "abc1234", branch: "main",
+    });
+    expect(occurrence.runtimeInstanceId).toBe("runtime-uuid-1");
+    expect(occurrence.correlationId).toBe("corr-9");
+    expect(occurrence.goalId).toBe("goal-7");
+    expect(occurrence.taskId).toBe("task-3");
+    expect(occurrence.buildVersion).toBe("0.1.0");
+    expect(occurrence.dirtyBuild).toBe(true);
+    expect(occurrence.protocolVersion).toBe(774);
+  });
+
+  it("ID guard: counter never regresses below highest persisted INC number", async () => {
+    const path = join(tmpDir(), "inc.json");
+    const store = new IncidentStore({ persistPath: path, flushDebounceMs: 0 });
+    store.report({ subject: "bot", botId: "b", failureCode: "PATH_NO_PROGRESS", incidentType: "STUCK", sourceComponent: "pf" });
+    await store.flush();
+    const raw = JSON.parse(readFileSync(path, "utf8")) as { issues: { incidentId: string }[]; issueCounter: number };
+    writeFileSync(path, JSON.stringify({ ...raw, issueCounter: 0 }), "utf8");
+    const reopened = new IncidentStore({ persistPath: path });
+    // 新 fingerprint 的新 issue 不得复用已有 ID
+    const next = reopened.report({ subject: "bot", botId: "b", failureCode: "PATH_NO_PROGRESS", incidentType: "STUCK", sourceComponent: "pf-other" });
+    expect(next.issue.incidentId).toBe("INC-0002");
+  });
+});
+
+describe("repair prompt (Round 6)", () => {
+  it("buildRepairPrompt is deterministic, versioned, layer-aware and leak-free", () => {
+    const store = new IncidentStore();
+    const { issue } = store.report({
+      subject: "bot", botId: "bot-a", failureCode: "SKILL_RECOVERY_EXHAUSTED", incidentType: "SKILL_FAILED",
+      sourceComponent: "skill-executor", terminalFailureCode: "SKILL_RECOVERY_EXHAUSTED",
+      causedByFailureCodes: ["PATHFINDER_GOTO_FAILED"], gitCommit: "deadbee", branch: "main",
+      minecraftVersion: "1.21.11", protocolVersion: 774,
+      expected: "bot reaches target", actual: "pathfinder no path after 3 recovery attempts",
+      eventWindow: [{ at: "2026-09-01T00:00:00.000Z", kind: "path_reset", detail: "replan #3" }],
+    });
+    const occurrence = store.listOccurrences(issue.incidentId)[0]!;
+    const first = buildRepairPrompt(issue, occurrence, { repository: "test/repo", bundleFiles: ["incident.json"] });
+    const second = buildRepairPrompt(issue, occurrence, { repository: "test/repo", bundleFiles: ["incident.json"] });
+    expect(first.prompt).toBe(second.prompt);
+    expect(first.promptVersion).toMatch(/^repair-v/);
+    expect(first.prompt).toContain("PATHFINDER_GOTO_FAILED");
+    expect(first.prompt).toContain("terminal outcome, NOT the root cause");
+    expect(first.prompt).toContain("movement ownership");
+    expect(first.prompt).toContain("do NOT modify Skills by default");
+    expect(first.prompt).toContain("UNTRUSTED_EXTERNAL_TEXT");
+    expect(first.prompt).toContain("test/repo");
+    expect(safeExportText(first.prompt)).not.toBeNull();
+  });
+
+  it("repair prompt lists missing evidence instead of guessing", () => {
+    const store = new IncidentStore();
+    const { issue } = store.report({
+      subject: "bot", botId: "b", failureCode: "UNKNOWN_FAILURE", incidentType: "UNKNOWN_FAILURE", sourceComponent: "x",
+    });
+    const occurrence = store.listOccurrences(issue.incidentId)[0]!;
+    const { prompt } = buildRepairPrompt(issue, occurrence);
+    expect(prompt).toContain("## Missing Evidence");
+    expect(prompt).toContain("gitCommit");
   });
 });
