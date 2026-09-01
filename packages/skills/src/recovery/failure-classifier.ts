@@ -238,6 +238,7 @@ const EXPLICIT: Readonly<Record<string, FailureCategory>> = Object.freeze({
   SKILL_HANDLER_FAILED: "TRANSIENT",
   // 适配器把底层错误原样抬上来：可能是抖动，重试一次是合理的第一步。
   SKILL_CAPABILITY_FAILED: "TRANSIENT",
+  SKILL_RECOVERY_EXHAUSTED: "CONTRACT_BUG",
   // pathfinder 抛错常是一次性的（区块没加载、目标瞬时被占）：先原样重试。
   PATHFINDER_GOTO_FAILED: "TRANSIENT",
   // 思考预算用尽（pathfinder 的 `Timeout`）。它**没有**证明目标不可达：实测
