@@ -2262,7 +2262,13 @@ export class MineflayerBotClient implements BotClient {
   interruptNormalActions(): void {
     this.releaseCollectBlockTask();
     this.activePathInvocationId = null;
-    this.bot.clearControlStates();
+    // 连接失败/半初始化的 bot 没有 clearControlStates（mineflayer 装好后才有）。
+    // 断开路径上这里抛 TypeError 会直接杀死进程（Round 6.1 场景 H 实测：
+    // 连接撞上暂停的服务器 → protocol fatal → 断开 → 此处崩溃）。
+    // 中断动作本来就是 best-effort——bot 都断了，没有可清的控制状态。
+    if (typeof this.bot.clearControlStates === "function") {
+      this.bot.clearControlStates();
+    }
   }
 
   private async invokeMovementGoto(

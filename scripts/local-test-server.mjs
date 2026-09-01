@@ -93,6 +93,9 @@ export async function startLocalTestServer({ sessionId, timeoutMs = Number(proce
     "-e", "MEMORY=2G",
     "-e", "SPAWN_PROTECTION=0",
     "-e", "VIEW_DISTANCE=6",
+    // Round 6.1 场景 H 实测：持久卷里遗留的 autopause 让空服 60s 后暂停，
+    // bot 连接撞上暂停中的服务器 → protocol fatal。本地测试服禁用 autopause。
+    "-e", "ENABLE_AUTOPAUSE=FALSE",
     IMAGE,
   ]);
   const startedAt = Date.now();
