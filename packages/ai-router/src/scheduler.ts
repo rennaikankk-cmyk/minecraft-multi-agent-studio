@@ -146,6 +146,9 @@ const KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/u;
 export class AIRequestScheduler {
   private readonly maxConcurrency: number;
   private readonly maxQueue: number;
+  /** 多 Bot 公平调度：同优先级下优先最久未获调度的 bot（防单 bot 洪泛饿死他人）。 */
+  private readonly lastDispatchSequenceByBot = new Map<string, number>();
+  private dispatchClock = 0;
   private readonly perBotConcurrency: number;
   private readonly defaultTimeoutMs: number;
   private readonly now: () => number;
@@ -405,20 +408,33 @@ export class AIRequestScheduler {
       if ((this.runningByBot.get(candidate.request.botId) ?? 0) >= this.perBotConcurrency) {
         continue;
       }
-      if (
-        !selected ||
-        candidate.request.priority < selected.request.priority ||
-        (candidate.request.priority === selected.request.priority &&
-          candidate.sequence < selected.sequence)
-      ) {
+      if (!selected) {
         selected = candidate;
         selectedIndex = index;
+        continue;
+      }
+      if (candidate.request.priority < selected.request.priority) {
+        selected = candidate;
+        selectedIndex = index;
+        continue;
+      }
+      if (candidate.request.priority === selected.request.priority) {
+        // 公平性：同优先级先比 per-bot 最近调度序（小者优先），再比 FIFO sequence
+        const candidateBotSeq = this.lastDispatchSequenceByBot.get(candidate.request.botId) ?? -1;
+        const selectedBotSeq = this.lastDispatchSequenceByBot.get(selected.request.botId) ?? -1;
+        if (candidateBotSeq < selectedBotSeq ||
+            (candidateBotSeq === selectedBotSeq && candidate.sequence < selected.sequence)) {
+          selected = candidate;
+          selectedIndex = index;
+        }
       }
     }
     return selectedIndex;
   }
 
   private async runEntry(entry: AnyQueueEntry): Promise<void> {
+    this.dispatchClock += 1;
+    this.lastDispatchSequenceByBot.set(entry.request.botId, this.dispatchClock);
     try {
       const retry = normalizedRetry(entry.request.retry);
       for (;;) {

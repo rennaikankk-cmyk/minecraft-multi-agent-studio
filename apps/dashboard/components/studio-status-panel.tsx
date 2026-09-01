@@ -57,10 +57,14 @@ export function StudioStatusPanel() {
           {loading
             ? "探测中"
             : ai?.state === "connected"
-              ? "在线"
-              : ai?.state === "disabled"
-                ? "已关闭"
-                : "离线"}
+              ? "READY"
+              : ai?.state === "degraded"
+                ? "DEGRADED"
+                : ai?.state === "misconfigured"
+                  ? "MISCONFIGURED"
+                  : ai?.state === "disabled"
+                    ? "已关闭"
+                    : "UNAVAILABLE"}
         </span>
       </div>
 

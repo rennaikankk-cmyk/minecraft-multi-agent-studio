@@ -1,3 +1,5 @@
+export { AICircuitBreaker, CircuitOpenError } from './circuit-breaker.js';
+export { discoverModels, resolveModel, ModelSelectionError } from './model-selection.js';
 export { AIRouter } from './router.js';
 export { OllamaAdapter } from './adapters/ollama-adapter.js';
 export { VLLMAdapter } from './adapters/vllm-adapter.js';
@@ -28,3 +30,5 @@ export type {
   AISchedulerSnapshot,
 } from './scheduler.js';
 export type { ScheduledGenerateOptions } from './scheduled-router.js';
+export type { CircuitBreakerOptions, CircuitBreakerSnapshot, CircuitState } from './circuit-breaker.js';
+export type { ModelSelectionErrorCode, ModelSelectionResult, DiscoverModelsOptions } from './model-selection.js';

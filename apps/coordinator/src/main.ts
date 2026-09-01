@@ -4,7 +4,9 @@ import {
   AIRouter,
   AIRequestScheduler,
   AISchedulerError,
+  ModelSelectionError,
   OllamaAdapter,
+  resolveModel,
   ScheduledAIRouter,
   VLLMAdapter,
 } from "@minecraft-studio/ai-router";
@@ -143,14 +145,41 @@ async function main(): Promise<void> {
   let goalExecutionServer: CoordinatorGoalExecutionServer | null = null;
   let sharedStateServer: SharedStateServer | null = null;
   let autonomousDirector: AutonomousDirector | null = null;
-  if (localAIConfig.enabled && localAIConfig.baseUrl && localAIConfig.model) {
+  // —— Spark 模型选择（统一规则，启动时执行；绝不 models[0] 静默选择）——
+  let resolvedAIModel: string | null = localAIConfig.model;
+  if (localAIConfig.enabled && localAIConfig.baseUrl) {
+    try {
+      const selection = await resolveModel({
+        baseUrl: localAIConfig.baseUrl,
+        apiKey: localAIConfig.apiKey,
+        configuredModel: localAIConfig.model,
+        timeoutMs: 5_000,
+      });
+      resolvedAIModel = selection.model;
+      logger.info("coordinator_local_ai_model_selected", {
+        model: selection.model,
+        selection: selection.selection,
+        source: selection.source,
+        advertisedModels: selection.discoveredModels.length,
+      });
+    } catch (cause) {
+      resolvedAIModel = null;
+      const code = cause instanceof ModelSelectionError ? cause.code : "AI_MODEL_DISCOVERY_FAILED";
+      logger.error("coordinator_local_ai_unavailable", {
+        code,
+        detail: cause instanceof Error ? cause.message.slice(0, 300) : String(cause),
+        note: "planner degrades to deterministic-only (fail closed, no silent fallback)",
+      });
+    }
+  }
+  if (localAIConfig.enabled && localAIConfig.baseUrl && resolvedAIModel) {
     aiRouter = new AIRouter();
     aiRouter.register(
       localAIConfig.provider === "ollama"
-        ? new OllamaAdapter(localAIConfig.baseUrl, localAIConfig.model)
+        ? new OllamaAdapter(localAIConfig.baseUrl, resolvedAIModel)
         : new VLLMAdapter(
             localAIConfig.baseUrl,
-            localAIConfig.model,
+            resolvedAIModel,
             localAIConfig.apiKey,
           ),
     );
@@ -172,18 +201,37 @@ async function main(): Promise<void> {
       },
     });
   }
+  // Scheduler+Router+Breaker 共享实例（planner 与健康遥测共用）
+  const aiScheduledRouter = aiRouter && aiScheduler ? new ScheduledAIRouter(aiRouter, aiScheduler) : null;
+  if (aiScheduledRouter) {
+    const aiHealthTimer = setInterval(() => {
+      const health = aiScheduledRouter.healthSnapshot();
+      logger.info("coordinator_ai_health", {
+        queued: health.scheduler.queued,
+        running: health.scheduler.running,
+        maxConcurrency: health.scheduler.maxConcurrency,
+        maxQueue: health.scheduler.maxQueue,
+        perBotConcurrency: health.scheduler.perBotConcurrency,
+        bots: health.scheduler.bots.length,
+        breakerState: health.breaker.state,
+        breakerConsecutiveFailures: health.breaker.consecutiveFailures,
+        breakerRejected: health.breaker.rejectedCount,
+      });
+    }, 30_000);
+    aiHealthTimer.unref?.();
+  }
   // 自主生存链的全部目标都走确定性派发，模型只是非模板目标的兜底。所以
   // planner 在没有 Local AI 时也要构造：兜底换成一个永远诚實拒绝的桩
   // （AI_UNAVAILABLE），确定性目标照常 0 次模型调用地运转——这与
   // AGENTS.md §0.4"AI 宕机 fail-closed 到确定性层，而不是停下"一致。
   // 此前整个 AutonomousDirector 被装配在 Spark 配置块里，Spark 不可用
   // 时自主生存完全停摆，而它本来一步都不需要模型。
-  if (localAIConfig.enabled && localAIConfig.baseUrl && localAIConfig.model) {
+  if (localAIConfig.enabled && localAIConfig.baseUrl && resolvedAIModel) {
     const taskPersistence = await createTaskStateMachine();
     taskPool = taskPersistence.pool;
     const taskStateMachine = taskPersistence.stateMachine;
     localPlanner = new CoordinatorLocalPlanner({
-      ai: new ScheduledAIRouter(aiRouter!, aiScheduler!),
+      ai: aiScheduledRouter!,
       registry,
       assignment,
       verifyAssignmentLease: async (lease) => {

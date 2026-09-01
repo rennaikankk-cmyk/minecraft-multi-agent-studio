@@ -48,8 +48,15 @@ export const FAILURE_CODES = [
   "SERVER_PLUGIN_AUTH_FAILED",
   "SERVER_VERSION_MISMATCH",
   "NETWORK_DISCONNECTED",
+  "AI_NODE_UNREACHABLE",
+  "AI_MODEL_DISCOVERY_FAILED",
+  "AI_CONFIGURED_MODEL_NOT_FOUND",
+  "AI_MODEL_AMBIGUOUS",
+  "AI_QUEUE_FULL",
+  "AI_QUEUE_TIMEOUT",
   "LLM_REQUEST_TIMEOUT",
   "LLM_OUTPUT_INVALID",
+  "LLM_SCHEMA_VALIDATION_FAILED",
   "UNKNOWN_FAILURE",
 ] as const;
 export type FailureCode = (typeof FAILURE_CODES)[number];
@@ -61,6 +68,8 @@ export const FAILURE_CODE_ALIASES: Readonly<Record<string, FailureCode>> = {
   VERIFY_TIMEOUT: "SKILL_VERIFY_FAILED",
   PLACE_FAILED: "RUNTIME_PLACE_REJECTED",
   KICKED: "SERVER_KICKED",
+  LLM_TIMEOUT: "LLM_REQUEST_TIMEOUT",
+  LLM_INVALID_OUTPUT: "LLM_OUTPUT_INVALID",
   CRASHED: "BOT_PROCESS_EXITED",
 };
 
@@ -155,8 +164,15 @@ export const INCIDENT_TYPE_BY_CODE: Readonly<Partial<Record<FailureCode, Inciden
   SERVER_PLUGIN_AUTH_FAILED: "BOT_DISCONNECT",
   SERVER_VERSION_MISMATCH: "BOT_DISCONNECT",
   NETWORK_DISCONNECTED: "BOT_DISCONNECT",
+  AI_NODE_UNREACHABLE: "UNKNOWN_FAILURE",
+  AI_MODEL_DISCOVERY_FAILED: "UNKNOWN_FAILURE",
+  AI_CONFIGURED_MODEL_NOT_FOUND: "UNKNOWN_FAILURE",
+  AI_MODEL_AMBIGUOUS: "UNKNOWN_FAILURE",
+  AI_QUEUE_FULL: "UNKNOWN_FAILURE",
+  AI_QUEUE_TIMEOUT: "LLM_TIMEOUT",
   LLM_REQUEST_TIMEOUT: "LLM_TIMEOUT",
   LLM_OUTPUT_INVALID: "LLM_INVALID_OUTPUT",
+  LLM_SCHEMA_VALIDATION_FAILED: "LLM_INVALID_OUTPUT",
 };
 
 export interface Classification {
@@ -247,8 +263,15 @@ export function classifyIncident(input: ClassifyInput): Classification {
     case "BUILD_MISSING_BLOCK":
       matched.push(`failureCode=${input.failureCode}`);
       return { suspectedLayer: "BUILD", ruleId: "R-BUILD-1", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "medium", matchedEvidence: matched };
+    case "AI_NODE_UNREACHABLE":
+    case "AI_MODEL_DISCOVERY_FAILED":
+    case "AI_CONFIGURED_MODEL_NOT_FOUND":
+    case "AI_MODEL_AMBIGUOUS":
+    case "AI_QUEUE_FULL":
+    case "AI_QUEUE_TIMEOUT":
     case "LLM_REQUEST_TIMEOUT":
     case "LLM_OUTPUT_INVALID":
+    case "LLM_SCHEMA_VALIDATION_FAILED":
       matched.push(`failureCode=${input.failureCode}`);
       return { suspectedLayer: "LLM", ruleId: "R-LLM-2", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "medium", matchedEvidence: matched };
     case "SKILL_VERIFY_FAILED":

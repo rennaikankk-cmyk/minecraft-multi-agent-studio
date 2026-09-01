@@ -330,3 +330,37 @@ describe('AIRequestScheduler', () => {
     expect(scheduler.snapshot()).toMatchObject({ accepting: false, queued: 0, running: 0 });
   });
 });
+
+describe("multi-bot fair scheduling (Round 6)", () => {
+  it("same priority rotates across bots instead of letting one bot's FIFO flood starve others", async () => {
+    const gate = new Map<string, () => void>();
+    const order: string[] = [];
+    const scheduler = new AIRequestScheduler({ maxConcurrency: 1, maxQueue: 32, perBotConcurrency: 1 });
+    const releases: Array<Promise<void>> = [];
+    // bot A 灌 4 个请求，bot B 只有 1 个 —— 全部同优先级
+    for (let i = 0; i < 4; i += 1) {
+      releases.push(scheduler.schedule({
+        requestId: `a${i}`,
+        botId: "bot-a",
+        priority: 30,
+        execute: async () => { order.push(`a${i}`); await new Promise<void>((resolve) => gate.set(`a${i}`, resolve)); },
+      }).then(() => undefined, () => undefined));
+    }
+    const bDone = scheduler.schedule({
+      requestId: "b0",
+      botId: "bot-b",
+      priority: 30,
+      execute: async () => { order.push("b0"); },
+    });
+    // 第一个（a0）占住唯一并发位；等待队列稳定后放行
+    const releaseWhenReady = async (id: string) => {
+      while (!gate.get(id)) await new Promise((resolve) => setTimeout(resolve, 5));
+      gate.get(id)!();
+    };
+    await releaseWhenReady("a0");
+    await bDone; // bot-b 必须在 a1..a3 之前获得调度（最久未调度的 bot 优先）
+    expect(order).toEqual(["a0", "b0"]);
+    for (let i = 1; i < 4; i += 1) await releaseWhenReady(`a${i}`);
+    await Promise.all(releases);
+  });
+});

@@ -46,7 +46,6 @@ describe("loadLocalAIConfig", () => {
   });
 
   it.each([
-    { LOCAL_AI_HUB_URL: "http://192.168.100.2:8000" },
     { LOCAL_AI_MODEL: "model-only" },
     {
       LOCAL_AI_HUB_URL: "http://user:secret@192.168.100.2:8000/v1",

@@ -1358,7 +1358,7 @@ export class StudioLocalManager {
     }
     const selection = selectModel(probe.models, this.aiStatus.model ?? "");
   if (selection.error) {
-    return { state: "unavailable", message: selection.error, changedAt: new Date().toISOString() };
+    return { state: "misconfigured", message: selection.error, changedAt: new Date().toISOString() };
   }
   const model = selection.model;
     this.aiStatus = {

@@ -7,7 +7,9 @@ const timestampSchema = z.string().datetime({ offset: true });
 export const studioAiProviderSchema = z.enum(["vllm", "ollama"]);
 export const studioAiStateSchema = z.enum([
   "connected",
+  "degraded",
   "unavailable",
+  "misconfigured",
   "disabled",
 ]);
 
