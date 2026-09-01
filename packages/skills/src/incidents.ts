@@ -75,6 +75,8 @@ export type FailureCode = (typeof FAILURE_CODES)[number];
 /** 旧错误码别名（迁移期兼容，避免一次破坏既有路径）。 */
 export const FAILURE_CODE_ALIASES: Readonly<Record<string, FailureCode>> = {
   BLUEPRINT_STEP_BLOCKED: "BUILD_WRONG_BLOCK",
+  // 放置能力对实心/占用目标的诚实拒绝（server truth）——Build 家族稳定语义
+  PLACE_TARGET_OCCUPIED: "BUILD_PLACEMENT_REJECTED",
   BLUEPRINT_MATERIAL_INSUFFICIENT: "BUILD_MATERIAL_MISSING",
   ALL_CELLS_OUT_OF_REACH: "BUILD_CELL_UNREACHABLE",
   PATH_FAILED: "PATH_NO_PROGRESS",
