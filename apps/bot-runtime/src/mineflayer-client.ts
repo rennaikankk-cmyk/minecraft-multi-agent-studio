@@ -817,6 +817,10 @@ const COLLECT_SETTLE_BUDGET_MS = 25_000;
 const COLLECT_DIRECT_PATH_BUDGET_MS = 12_000;
 const COLLECT_DIRECT_PICKUP_PATH_BUDGET_MS = 6_000;
 const COLLECT_DIRECT_PICKUP_WAIT_MS = 2_000;
+// Round 6.2：挖后掉落物可能仍在下落（树冠原木落地要 1-3s）。追一个移动中的
+// 实体位置必然失败——每轮重读掉落物当前位置，有界重试，事件驱动提前成功。
+const COLLECT_PICKUP_ATTEMPTS = 3;
+const COLLECT_PICKUP_SETTLE_PROBE_MS = 300;
 
 const COLLECT_PRECHECK_BUDGET_MS = 1_500;
 
@@ -3451,6 +3455,24 @@ export class MineflayerBotClient implements BotClient {
       );
     }
 
+    await this.pickupDugItem(target, inventoryBefore, inventoryIncrease, signal);
+  }
+
+  /**
+   * 挖后方掉落物拾取（Round 6.2 修复）：
+   * - 第 1 拍 750ms 事件驱动等待（近距离挖掘时物品直接入包，多数情况到此为止）
+   * - 未入包 → 每轮：短探测等待（掉落实体继续下落/落定）→ **重读当前**掉落物
+   *   位置 → GoalNear(0) 走过去 → 再等事件入包
+   * - 行走失败不立即判死：下一轮实体位置更准（物品已落定）
+   * - 全部轮次耗尽仍无入包证据 → COLLECT_PICKUP_NOT_SETTLED（真实码保留，
+   *   上层 supervision 按其"有副作用"语义正确处理）
+   */
+  private async pickupDugItem(
+    target: NonNullable<ReturnType<Bot["blockAt"]>>,
+    inventoryBefore: number,
+    inventoryIncrease: InventorySyncWaiter,
+    signal: AbortSignal,
+  ): Promise<void> {
     if (
       await this.waitForCollectedInventoryIncrease(
         inventoryIncrease,
@@ -3461,57 +3483,74 @@ export class MineflayerBotClient implements BotClient {
     ) {
       return;
     }
-
-    const dropPosition = this.nearestDroppedItemPosition(target.position) ??
-      target.position;
-    // GoalNear(1) may stop on the neighboring path node, which is outside the
-    // pickup box when the item rests near the far edge of its block. Target the
-    // item's exact block node; entity coordinates are fractional, so floor them
-    // before using a zero-radius goal.
-    const pickupBlock = new Vec3(
-      Math.floor(dropPosition.x),
-      Math.floor(dropPosition.y),
-      Math.floor(dropPosition.z),
-    );
-    const pickupMovements = configureSafePathfinderMovements(
-      new Movements(this.bot),
-    );
-    this.bot.pathfinder.setMovements(pickupMovements);
-    try {
-      await this.boundedCollectGoto(
-        new goals.GoalNear(
-          pickupBlock.x,
-          pickupBlock.y,
-          pickupBlock.z,
-          0,
-        ),
-        signal,
-        COLLECT_DIRECT_PICKUP_PATH_BUDGET_MS,
-      );
-    } catch (error) {
+    let lastWalkError: unknown = null;
+    for (let attempt = 0; attempt < COLLECT_PICKUP_ATTEMPTS; attempt += 1) {
       if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
-      // The item can enter the inventory while Pathfinder is rejecting a stale
-      // item position, so inventory evidence gets the final say below.
-      if (this.countInventoryTotal() <= inventoryBefore) {
-        throw new SkillFault(
-          "COLLECT_PICKUP_NOT_SETTLED",
-          error instanceof Error ? error.message : undefined,
+      // 掉落实体可能仍在下落：先给一小拍让它落定，再读**当前位置**
+      await this.settleProbeDelay(signal);
+      const dropPosition = this.nearestDroppedItemPosition(target.position);
+      if (dropPosition === null) {
+        // 实体消失：可能恰好被吸收（最后一拍确认）或已 despawn
+        if (
+          await this.waitForCollectedInventoryIncrease(
+            inventoryIncrease,
+            inventoryBefore,
+            signal,
+            500,
+          )
+        ) {
+          return;
+        }
+        continue;
+      }
+      const pickupBlock = dropPosition.floored();
+      const pickupMovements = configureSafePathfinderMovements(
+        new Movements(this.bot),
+      );
+      this.bot.pathfinder.setMovements(pickupMovements);
+      try {
+        await this.boundedCollectGoto(
+          new goals.GoalNear(
+            pickupBlock.x,
+            pickupBlock.y,
+            pickupBlock.z,
+            0,
+          ),
+          signal,
+          COLLECT_DIRECT_PICKUP_PATH_BUDGET_MS,
         );
+        lastWalkError = null;
+      } catch (error) {
+        if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+        // 走不到不判死：物品可能在行走途中入包，或下一轮位置（落定后）更好
+        lastWalkError = error;
+      }
+      if (
+        await this.waitForCollectedInventoryIncrease(
+          inventoryIncrease,
+          inventoryBefore,
+          signal,
+          COLLECT_DIRECT_PICKUP_WAIT_MS,
+        )
+      ) {
+        return;
       }
     }
-    if (
-      !(await this.waitForCollectedInventoryIncrease(
-        inventoryIncrease,
-        inventoryBefore,
-        signal,
-        COLLECT_DIRECT_PICKUP_WAIT_MS,
-      ))
-    ) {
-      throw new SkillFault(
-        "COLLECT_PICKUP_NOT_SETTLED",
-        `No inventory increase was observed after collecting at ${target.position.x},${target.position.y},${target.position.z}.`,
-      );
-    }
+    throw new SkillFault(
+      "COLLECT_PICKUP_NOT_SETTLED",
+      `No inventory increase after ${COLLECT_PICKUP_ATTEMPTS} pickup attempts at ${target.position.x},${target.position.y},${target.position.z}${lastWalkError instanceof Error ? `; last walk: ${lastWalkError.message}` : ""}.`,
+    );
+  }
+
+  private async settleProbeDelay(signal: AbortSignal): Promise<void> {
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, COLLECT_PICKUP_SETTLE_PROBE_MS);
+      if (typeof timer.unref === "function") timer.unref();
+      signal.addEventListener("abort", () => {
+        clearTimeout(timer);
+        resolve();
+      }, { once: true });
+    });
   }
 
   private assertDimensionMatch(requestedDimension: string): void {

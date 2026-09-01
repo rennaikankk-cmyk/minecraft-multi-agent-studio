@@ -598,7 +598,7 @@ describe("MineflayerBotClient lifecycle", () => {
         targetsFound: 1,
         itemsCollected: 1,
       });
-      await vi.advanceTimersByTimeAsync(800);
+      await vi.advanceTimersByTimeAsync(1_200);
       await assertion;
       expect(pathfinder.goto).toHaveBeenCalledTimes(2);
       expect(pathfinder.goto.mock.calls[1]?.[0]).toMatchObject({
@@ -1191,7 +1191,7 @@ describe("MineflayerBotClient lifecycle", () => {
     );
 
     expect(digCalls).toBe(2);
-  });
+  }, 15_000);
 
   /**
    * `multi_block_change` records are packed varints from 1.16 on, not containers.
@@ -1330,7 +1330,7 @@ describe("MineflayerBotClient lifecycle", () => {
       targetsFound: 1,
       itemsCollected: 1,
     });
-  });
+  }, 15_000);
 
   it("uses observed pickups to finish a stuck entity-follow and continues the batch", async () => {
     const emitter = new EventEmitter();
@@ -1398,7 +1398,7 @@ describe("MineflayerBotClient lifecycle", () => {
     expect(collect.mock.calls.every(([targets]) => targets.length === 1)).toBe(true);
     // 租约归还触发的停止原语会多调一次幂等的 cancelTask。
     expect(cancelTask).toHaveBeenCalledTimes(3);
-  });
+  }, 15_000);
 
   it.each([
     ["NoPath", "COLLECT_TARGET_UNREACHABLE"],
