@@ -12,8 +12,11 @@ const E2E_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(E2E_DIR, "..", "..", "..");
 const secrets = JSON.parse(readFileSync(path.join(ROOT, "runtime-data", "local-control-secrets.json"), "utf8"));
 const MANAGER = `http://127.0.0.1:${process.env.STUDIO_MANAGER_PORT ?? "3230"}`;
+const CONTROL_API = `http://127.0.0.1:${process.env.CONTROL_API_PORT ?? "3210"}`;
 const HEADERS = { Authorization: `Bearer ${secrets.dashboardToken}`, "Content-Type": "application/json" };
-const BOT = "studio-bot-01";
+let BOT = "studio-bot-01"; // createBot 自分配槽位后覆盖
+const RUN_TAG = Date.now().toString(36).slice(-6);
+const USERNAME = `ES${RUN_TAG}`; // 每次唯一：避免上次中断留下的同名槽位 409
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (m) => console.log(`[${new Date().toISOString()}] ${m}`);
 
@@ -36,7 +39,9 @@ async function lifecycleCounts() {
 }
 
 async function botOnline() {
-  const { body } = await api(`/v1/bots`);
+  // registry 在 control-api（manager 无 /v1/bots 路由）
+  const response = await fetch(`${CONTROL_API}/v1/bots`, { headers: HEADERS });
+  const body = await response.json().catch(() => ({}));
   const bot = (body.data?.bots ?? []).find((b) => b.botId === BOT);
   return bot?.connectionState === "online" ? bot : null;
 }
@@ -55,9 +60,24 @@ const crashBefore = await crashCounts();
 const lifeBefore = await lifecycleCounts();
 log(`baseline BOT_CRASH occurrences=${crashBefore.total} BOT_LIFECYCLE occurrences=${lifeBefore}`);
 
-// —— create bot（真实进程）——
-const created = await api(`/v1/bots/${BOT}/start`, { method: "POST" });
-if (created.status !== 200) { log(`FATAL create: ${created.status} ${JSON.stringify(created.body).slice(0,200)}`); process.exit(1); }
+// —— create bot（真实进程；显式指向 local test server，避免复用 manifest 里
+// 残留的 e2e fixture 配置——fixture 端口在清理后是死端口）——
+const created = await api("/v1/bots", {
+  method: "POST",
+  body: JSON.stringify({ schemaVersion: "1.0", username: USERNAME, serverHost: "127.0.0.1", serverPort, minecraftVersion: "auto" }),
+});
+if (created.status === 409) {
+  const { body } = await api("/v1/studio/status");
+  const existing = (body.bots ?? []).find((b) => b.username === USERNAME);
+  if (!existing) { log("FATAL: 409 without existing slot"); process.exit(1); }
+  BOT = existing.botId;
+  log(`reusing existing slot ${BOT}`);
+} else if (created.status !== 201) { log(`FATAL create: ${created.status} ${JSON.stringify(created.body).slice(0,200)}`); process.exit(1); }
+else { BOT = created.body.bot.botId; }
+log(`bot created: ${BOT} (server ${serverPort})`);
+const started = await api(`/v1/bots/${BOT}/start`, { method: "POST" });
+if (started.status !== 200) { log(`FATAL start: ${started.status} ${JSON.stringify(started.body).slice(0,200)}`); process.exit(1); }
+let livePid = started.body?.bot?.pid ?? null; // manager 视角的进程 pid（registry 不带）
 let bot = null;
 for (let i = 0; i < 60 && !bot; i++) { await sleep(1_000); bot = await botOnline(); }
 if (!bot) { log("FATAL: bot never online"); process.exit(1); }
@@ -76,7 +96,8 @@ if (r1.status !== 200) { log(`FATAL restart: ${r1.status}`); process.exit(1); }
 bot = null;
 for (let i = 0; i < 60 && !bot; i++) { await sleep(1_000); bot = await botOnline(); }
 if (!bot) { log("FAIL: bot never online after restart"); process.exit(1); }
-log(`restart ONLINE pid=${bot.pid}`);
+livePid = r1.body?.bot?.pid ?? livePid;
+log(`restart ONLINE pid=${livePid}`);
 
 // —— normal stop again ——
 const s2 = await api(`/v1/bots/${BOT}/stop`, { method: "POST" });
@@ -94,10 +115,12 @@ log("normal stop + restart produce ZERO BOT_CRASH: PASS");
 
 // —— controlled external kill：启动 → taskkill ——
 const s3 = await api(`/v1/bots/${BOT}/start`, { method: "POST" });
+livePid = s3.body?.bot?.pid ?? livePid;
 bot = null;
 for (let i = 0; i < 60 && !bot; i++) { await sleep(1_000); bot = await botOnline(); }
 if (!bot) { log("FAIL: bot never online for kill phase"); process.exit(1); }
-const pid = bot.pid;
+const pid = livePid;
+if (!Number.isSafeInteger(pid)) { log("FAIL: no pid for kill phase"); process.exit(1); }
 log(`kill phase: bot ONLINE pid=${pid}; external taskkill`);
 execSync(`taskkill /PID ${pid} /F`, { stdio: "ignore" });
 await sleep(6_000);
