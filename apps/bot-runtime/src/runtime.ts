@@ -103,6 +103,7 @@ import {
 } from "./progress-watchdog.js";
 import { progressContractForAction } from "./progress-watchdog.js";
 import { IncidentReporter, watchdogEventToSignal } from "./incident-reporter.js";
+import { RuntimeEventBuffer } from "./runtime-event-buffer.js";
 import { loadRuntimeIdentity } from "./runtime-identity.js";
 import { WorldStateStore, type WorldStateSnapshot } from "./world-state.js";
 
@@ -305,7 +306,12 @@ export class SingleBotRuntime {
   private readonly progressWatchdog: ProgressWatchdog;
   /** monotonic 时钟（watchdog elapsed 计算用；wall clock 只做展示）。 */
   private readonly monotonicNow: () => number;
-  private incidentReporter!: IncidentReporter;
+  private readonly eventBuffer: RuntimeEventBuffer;
+  // P0-3：eventBuffer 的去重/阈值基线（movement owner / pathResets / 距离）
+  private lastBufferedMovementOwner: string | null = null;
+  private lastBufferedPathResets = 0;
+  private lastBufferedDistance: number | null = null;
+  private readonly incidentReporter
   private state: BotConnectionState = "offline";
   private client: BotClient | null = null;
   private generation = 0;
@@ -385,12 +391,19 @@ export class SingleBotRuntime {
     this.monotonicNow = dependencies.monotonicNow ?? (() => performance.now());
     const watchdogProfile = resolveWatchdogProfile();
     this.progressWatchdog = new ProgressWatchdog(resolveProgressWatchdogConfig());
+    this.eventBuffer = new RuntimeEventBuffer();
     this.incidentReporter = new IncidentReporter({
       botId: profile.botId,
       endpoint: process.env.STUDIO_INCIDENT_ENDPOINT?.trim() || undefined,
       token: process.env.STUDIO_INCIDENT_TOKEN?.trim() || undefined,
       spoolPath: process.env.STUDIO_INCIDENT_SPOOL_PATH?.trim() || undefined,
       logger: { warn: (message: string) => dependencies.logger?.warn?.(message) ?? console.warn(message) },
+      eventSink: (event) => this.eventBuffer.append({
+        kind: event.kind,
+        source: "reporter",
+        detail: event.detail,
+        correlationId: event.correlationId,
+      }),
     });
     this.randomId = dependencies.randomId ?? randomUUID;
     dependencies.logger?.warn?.(
@@ -671,6 +684,14 @@ export class SingleBotRuntime {
         result.payload.outcome === "completed"
           ? this.dependencies.logger.info.bind(this.dependencies.logger)
           : this.dependencies.logger.warn.bind(this.dependencies.logger);
+      this.eventBuffer.append({
+        kind: result.payload.outcome === "completed" ? "skill_result" : "skill_fault",
+        source: "skill",
+        correlationId: invocation.payload.invocationId,
+        taskId: invocation.taskId,
+        skillId: invocation.payload.skillId,
+        detail: `outcome=${result.payload.outcome}${"errorCode" in result.payload && result.payload.errorCode ? ` code=${result.payload.errorCode}` : ""} attempts=${result.payload.attempts}`,
+      });
       log(
         "bot_runtime_skill_result",
         this.logFields(
@@ -807,6 +828,21 @@ export class SingleBotRuntime {
     this.activeCoordinatorTasks.set(invocation.payload.invocationId, {
       task,
       order: this.coordinatorTaskOrder,
+    });
+    this.eventBuffer.append({
+      kind: "skill_started",
+      source: "skill",
+      correlationId: invocation.payload.invocationId,
+      taskId: invocation.taskId,
+      skillId: invocation.payload.skillId,
+      detail: `skill=${invocation.payload.skillId}@${invocation.payload.skillVersion} taskId=${invocation.taskId}`,
+    });
+    this.eventBuffer.append({
+      kind: "task_started",
+      source: "task",
+      correlationId: invocation.payload.invocationId,
+      taskId: invocation.taskId,
+      detail: `title=${invocation.payload.skillId}`,
     });
     this.currentTask = task;
     this.publishCurrentTaskState();
@@ -1167,6 +1203,11 @@ export class SingleBotRuntime {
       reason: info.reason,
       expected: info.expected,
     }));
+    this.eventBuffer.append({
+      kind: "connection_event",
+      source: "connection",
+      detail: `disconnected reason=${info.reason} expected=${info.expected ? "yes" : "no"}`,
+    });
 
     this.reportConnectionIncident(info);
 
@@ -1198,6 +1239,7 @@ export class SingleBotRuntime {
     const identity = loadRuntimeIdentity();
     const detailSuffix = info.detail ? `: ${String(info.detail).slice(0, 200)}` : "";
     this.incidentReporter.report({
+      eventWindow: this.eventBuffer.snapshot({ windowMs: 60_000 }).events as Array<{ at: string; kind: string; detail?: string }>,
       failureCode,
       incidentType,
       sourceComponent: "connection",
@@ -1226,6 +1268,7 @@ export class SingleBotRuntime {
       if (config.enabled && !this.stopping) {
         const identity = loadRuntimeIdentity();
         this.incidentReporter.report({
+          eventWindow: this.eventBuffer.snapshot({ windowMs: 60_000 }).events as Array<{ at: string; kind: string; detail?: string }>,
           failureCode: "SERVER_RECONNECT_LOOP",
           incidentType: "BOT_DISCONNECT",
           sourceComponent: "connection",
@@ -1582,6 +1625,7 @@ export class SingleBotRuntime {
           this.activeSkillTasks.size > 0 &&
           worldSnapshot.navigation.movementOwner !== null,
       });
+      this.bufferRuntimeSignals(worldSnapshot, position, events);
       for (const event of events) {
         if (event.kind === "stuck" || event.kind === "no-progress" || event.kind === "oscillation" || event.kind === "loop" || event.kind === "deadline-exceeded") {
           // 非阻塞 Incident 上报（有界队列；失败只计数，绝不打断恢复流程）
@@ -1616,6 +1660,7 @@ export class SingleBotRuntime {
             buildVersion: identity.buildVersion ?? undefined,
             dirtyBuild: identity.dirtyBuild ?? undefined,
             ...versionInfo,
+            eventWindow: this.eventBuffer.snapshot({ windowMs: 60_000 }).events as Array<{ at: string; kind: string; detail?: string }>,
             expectedProgress: worldSnapshot.navigation.target
               ? `target distance decreasing toward ${worldSnapshot.navigation.target.x},${worldSnapshot.navigation.target.z} (dimension ${worldSnapshot.navigation.target.dimension})`
               : undefined,
@@ -1649,6 +1694,76 @@ export class SingleBotRuntime {
     });
   }
 
+  /**
+   * P0-3：把 per-tick 观察折叠进有界事件缓冲（Incident eventWindow 数据源）。
+   * - movement_owner 从无到有 → movement_started（仅在技能活跃时）
+   * - pathResetCount 递增 → path_recalculated
+   * - 目标距离较上次记录改善 ≥1.0 → material_progress（coalesce 吸收高频）
+   * - watchdog 事件按语义入 buffer（warning/trigger 分类）
+   * 不记录每 tick 全量位置（仅距离数值进 detail，有界 redact）。
+   */
+  private bufferRuntimeSignals(
+    worldSnapshot: WorldStateSnapshot,
+    position: { x: number; y: number; z: number },
+    events: ReadonlyArray<{ kind: string }>,
+  ): void {
+    const activeTaskEntry = [...this.activeSkillTasks.values()][0];
+    const targetKey = worldSnapshot.navigation.target
+      ? `${worldSnapshot.navigation.target.x},${worldSnapshot.navigation.target.z}`
+      : "no-target";
+    const correlation = `${activeTaskEntry?.title ?? "no-skill"}@${targetKey}`;
+    const active = this.activeSkillTasks.size > 0;
+    const owner = worldSnapshot.navigation.movementOwner;
+    if (active && owner !== null && this.lastBufferedMovementOwner === null) {
+      this.eventBuffer.append({
+        kind: "movement_started",
+        source: "navigation",
+        correlationId: correlation,
+        detail: `owner=${owner} at ${Math.floor(position.x)},${Math.floor(position.y)},${Math.floor(position.z)}`,
+      });
+    }
+    this.lastBufferedMovementOwner = active ? owner : null;
+    if (worldSnapshot.navigation.pathResetCount > this.lastBufferedPathResets) {
+      this.eventBuffer.append({
+        kind: "path_recalculated",
+        source: "navigation",
+        correlationId: correlation,
+        detail: `pathResets=${worldSnapshot.navigation.pathResetCount}`,
+      });
+    }
+    this.lastBufferedPathResets = worldSnapshot.navigation.pathResetCount;
+    const target = worldSnapshot.navigation.target;
+    if (target !== null) {
+      const distance = Math.hypot(target.x - position.x, target.y - position.y, target.z - position.z);
+      if (this.lastBufferedDistance === null || distance <= this.lastBufferedDistance - 1.0) {
+        this.eventBuffer.append({
+          kind: "material_progress",
+          source: "navigation",
+          correlationId: correlation,
+          detail: `dist=${distance.toFixed(1)}`,
+        });
+        this.lastBufferedDistance = distance;
+      } else if (this.lastBufferedDistance !== null && distance > this.lastBufferedDistance) {
+        this.lastBufferedDistance = distance;
+      }
+    } else {
+      this.lastBufferedDistance = null;
+    }
+    for (const event of events) {
+      if (event.kind === "progress") continue;
+      this.eventBuffer.append({
+        kind:
+          event.kind === "no-progress" ? "no_progress_warning"
+          : event.kind === "oscillation" ? "oscillation_detected"
+          : event.kind === "loop" ? "replan_storm"
+          : event.kind === "deadline-exceeded" ? "deadline_exceeded"
+          : "watchdog_triggered",
+        source: "watchdog",
+        correlationId: correlation,
+      });
+    }
+  }
+
   private queueWatchdogRecovery(event: ProgressWatchdogEvent): void {
     if (this.watchdogRecovery !== null || event.kind === "progress") return;
     const client = this.client;
@@ -1669,6 +1784,12 @@ export class SingleBotRuntime {
       goalKey: event.goalKey,
       durationMs: event.kind === "stuck" ? 600 : 350,
     };
+    this.eventBuffer.append({
+      kind: "recover_started",
+      source: "watchdog",
+      correlationId: event.goalKey ?? undefined,
+      detail: `action=${action.kind} trigger=${action.trigger}`,
+    });
     const pending = Promise.resolve()
       .then(() => client.executeRecoveryAction!(action))
       .then((result) => {
@@ -1679,6 +1800,12 @@ export class SingleBotRuntime {
         ) {
           return;
         }
+        this.eventBuffer.append({
+          kind: "recover_result",
+          source: "watchdog",
+          correlationId: event.goalKey ?? undefined,
+          detail: `outcome=${result.outcome} action=${action.kind}`,
+        });
         if (result.outcome === "executed") {
           this.progressWatchdog.reset();
           this.metrics.increment("bot_watchdog_recoveries_total", {

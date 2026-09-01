@@ -273,6 +273,26 @@ const lastOccurrence = (detail.occurrences ?? []).at(-1);
 log(`last occurrence: mc=${lastOccurrence?.minecraftVersion} proto=${lastOccurrence?.protocolVersion} commit=${lastOccurrence?.gitCommit} dirty=${lastOccurrence?.dirtyBuild} skill=${lastOccurrence?.skillId} pos=${JSON.stringify(lastOccurrence?.position)}`);
 if (!lastOccurrence?.minecraftVersion || lastOccurrence?.position == null) throw new Error("occurrence missing runtime identity metadata");
 
+// P0-3：真实 watchdog eventWindow 必须非空，且包含完整关键时间线
+// goal→skill→movement→progress→no-progress→watchdog→report
+const window = lastOccurrence?.eventWindow ?? [];
+const windowKinds = window.map((entry) => entry.kind);
+log(`eventWindow (${window.length} entries): ${windowKinds.join(" → ")}`);
+if (window.length === 0) {
+  throw new Error("P0-3 regression: watchdog occurrence eventWindow is empty");
+}
+const requiredKinds = ["skill_started", "movement_started", "watchdog_triggered", "incident_report_enqueued"];
+for (const required of requiredKinds) {
+  if (!windowKinds.includes(required)) {
+    throw new Error(`P0-3 regression: eventWindow missing ${required} (have: ${windowKinds.join(",")})`);
+  }
+}
+const windowText = JSON.stringify(window);
+if (/api[_-]?key|bearer|authorization/iu.test(windowText)) {
+  throw new Error("P0-3 redaction failure: secret-shaped token leaked into eventWindow");
+}
+log("eventWindow timeline PASS (bounded, redacted, goal→skill→movement→watchdog→report)");
+
 const exportJson = await fetch(`http://127.0.0.1:${MANAGER_PORT}/v1/incidents/${slowIssue.incidentId}/export?format=json`, {
   headers: { Authorization: `Bearer ${secrets.dashboardToken}` },
 });

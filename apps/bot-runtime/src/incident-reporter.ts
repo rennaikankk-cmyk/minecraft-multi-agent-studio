@@ -68,6 +68,13 @@ export interface IncidentReporterOptions {
   /** 退避基线（测试注入用）；生产默认 500ms。 */
   readonly retryBaseDelayMs?: number | undefined;
   readonly logger?: { warn(message: string, meta?: unknown): void };
+  /**
+   * P0-3：reporter 生命周期事件进入运行时事件缓冲（Incident eventWindow 的
+   * incident_report_enqueued/sent/failed 条目）。回调必须非阻塞、绝不抛错。
+   */
+  readonly eventSink?: ((
+    event: { kind: "incident_report_enqueued" | "incident_report_sent" | "incident_report_failed"; detail: string; correlationId?: string | undefined },
+  ) => void) | undefined;
 }
 
 interface QueuedSignal {
@@ -91,6 +98,7 @@ export class IncidentReporter {
   private readonly spoolPath: string | undefined;
   private readonly retryBaseDelayMs: number;
   private readonly logger: IncidentReporterOptions["logger"];
+  private readonly eventSink: IncidentReporterOptions["eventSink"];
 
   constructor(options: IncidentReporterOptions) {
     this.endpoint = options.endpoint;
@@ -99,6 +107,7 @@ export class IncidentReporter {
     this.spoolPath = options.spoolPath;
     this.retryBaseDelayMs = options.retryBaseDelayMs ?? RETRY_BASE_DELAY_MS;
     this.logger = options.logger;
+    this.eventSink = options.eventSink;
     this.replaySpool();
   }
 
@@ -122,6 +131,7 @@ export class IncidentReporter {
       eventId: full.reporterEventId ?? randomEventId(),
       replayed: false,
     });
+    this.emitToSink("incident_report_enqueued", full.failureCode, full.correlationId);
     void this.drain();
   }
 
@@ -178,10 +188,27 @@ export class IncidentReporter {
     }
   }
 
+  /** 生命周期事件外发（P0-3）；sink 抛错绝不影响投递主流程。 */
+  private emitToSink(
+    kind: "incident_report_enqueued" | "incident_report_sent" | "incident_report_failed",
+    failureCode: string,
+    correlationId: string | undefined,
+  ): void {
+    if (this.eventSink === undefined) return;
+    try {
+      this.eventSink({
+        kind,
+        detail: `${failureCode}${correlationId ? ` corr=${correlationId}` : ""}`,
+        ...(correlationId !== undefined ? { correlationId } : {}),
+      });
+    } catch {
+      // sink 故障静默：缓冲是诊断辅助，绝不能反向破坏上报
+    }
+  }
+
   private async drain(): Promise<void> {
     if (this.draining) return;
-    this.draining = true;
-    try {
+    this.draining = true;    try {
       while (this.queue.length > 0) {
         const item = this.queue.shift()!;
         let delivered = false;
@@ -195,8 +222,10 @@ export class IncidentReporter {
         }
         if (delivered) {
           this.sentCount += 1;
+          this.emitToSink("incident_report_sent", item.signal.failureCode, item.signal.correlationId);
         } else {
           this.failedCount += 1;
+          this.emitToSink("incident_report_failed", item.signal.failureCode, item.signal.correlationId);
           // crash-safe spool：仅原生信号（重放失败不再 spool，防无限循环）
           if (!item.replayed) this.spool(item);
           this.logger?.warn("incident_reporter_delivery_failed", {
