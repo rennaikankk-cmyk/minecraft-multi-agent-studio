@@ -1085,6 +1085,83 @@ export class CoordinatorLocalPlanner {
    * task execution transitions, recovery — lives here once, so the two entry
    * points can never drift apart.
    */
+  /**
+   * Phase 2 —— 非幂等步骤 transport 失败的 server-truth reconcile。
+   *
+   * 判据（与 §五.3 对齐）：
+   * 1. dispatch 前记录 bot 盘内该步骤目标物品计数（registry 可信快照）；
+   * 2. 失败后 requestFreshStatus 拉取运行时新鲜状态；
+   * 3. 新鲜计数 > 快照 → 副作用已发生且后置条件（拿到物品）成立 →
+   *    步骤记成功（receipt 丢失但世界真值在），计划继续；
+   * 4. 计数不变 → 明确未发生 → 返回原 transport 码，交给 supervisor 的
+   *    有界重试阶梯（不吞错误、不盲目重试副作用）；
+   * 5. 新鲜状态不可得（runtime 不可达）→ 真不可判定 → NON_IDEMPOTENT
+   *    _RESULT_UNCERTAIN（PAUSED 语义由 supervisor 的升级路径承接）。
+   */
+  private async reconcileNonIdempotentTransportFailure(
+    request: LocalPlanRequest,
+    step: PlanStep,
+    initialRecord: BotRegistryRecord,
+    deadlineMs: number,
+    transportCode: string,
+  ): Promise<StepOutcome> {
+    const target = "itemName" in step ? step.itemName : null;
+    const beforeInventory = initialRecord.currentStatus?.inventory ?? [];
+    const beforeCount = target === null
+      ? null
+      : (beforeInventory.find((item) => item.itemName === target)?.count ?? 0);
+    const freshStatus = this.options.transport.requestFreshStatus;
+    if (freshStatus === undefined || target === null || beforeCount === null) {
+      return { ok: false, errorCode: NON_IDEMPOTENT_RESULT_UNCERTAIN };
+    }
+    let afterRecord: BotRegistryRecord | null = null;
+    try {
+      this.assertWithinDeadline(deadlineMs, request.signal);
+      const before = this.requireAvailableBot(request.botId);
+      await freshStatus(
+        request.botId,
+        before.runtimeInstanceId,
+        before.currentStatus!.sequence,
+        request.traceId,
+        request.taskId,
+        boundedAbortSignal(request.signal, Math.min(REOBSERVE_TIMEOUT_MS, Math.max(1, deadlineMs - this.validNow().getTime()))),
+      );
+      afterRecord = this.options.registry.get(request.botId, this.validNow());
+    } catch {
+      afterRecord = null;
+    }
+    if (afterRecord === null || afterRecord.currentStatus === null) {
+      return { ok: false, errorCode: NON_IDEMPOTENT_RESULT_UNCERTAIN };
+    }
+    const afterCount = afterRecord.currentStatus.inventory?.find(
+      (item) => item.itemName === target,
+    )?.count ?? 0;
+    if (afterCount > beforeCount) {
+      this.options.logger?.info?.("coordinator_step_reconciled_occurred", {
+        taskId: request.taskId,
+        botId: request.botId,
+        stepKind: step.kind,
+        itemName: target,
+        beforeCount,
+        afterCount,
+        transportCode,
+        note: "transport failure but server truth shows the side effect occurred; step recorded as succeeded",
+      });
+      return { ok: true };
+    }
+    this.options.logger?.info?.("coordinator_step_reconciled_not_occurred", {
+      taskId: request.taskId,
+      botId: request.botId,
+      stepKind: step.kind,
+      itemName: target,
+      beforeCount,
+      afterCount,
+      transportCode,
+      note: "server truth shows the side effect did not occur; supervisor retry ladder may retry safely",
+    });
+    return { ok: false, errorCode: transportCode };
+  }
+
   private async dispatchDirectSkillDecision({
     request,
     decision,
@@ -1563,17 +1640,22 @@ export class CoordinatorLocalPlanner {
           return guarded;
         } catch (cause) {
           if (!bound.idempotent) {
-            const guarded = {
-              ok: false as const,
-              errorCode: NON_IDEMPOTENT_RESULT_UNCERTAIN,
-            };
-            this.logMaskedStepFailure(
+            // Phase 2 reconcile：副作用是否真的发生，由 server-truth 判定，
+            // 不由"异常类型"猜测。见 reconcileNonIdempotentTransportFailure。
+            const reconciled = await this.reconcileNonIdempotentTransportFailure(
               request,
               step,
-              { ok: false, errorCode: transportFailureCode(cause) },
-              guarded,
+              initialRecord,
+              deadlineMs,
+              transportFailureCode(cause),
             );
-            return guarded;
+            this.logMaskedStepFailure(request, step, {
+              ok: reconciled.ok,
+              errorCode: reconciled.ok ? "SKILL_HANDLER_COMPLETED" : reconciled.errorCode,
+            }, reconciled.ok
+              ? { ok: true }
+              : { ok: false, errorCode: reconciled.errorCode });
+            return reconciled;
           }
           if (request.signal?.aborted) {
             return { ok: false, errorCode: "SKILL_CANCELLED" };
