@@ -8,7 +8,7 @@ export const SHELTER_DIG_TIMEOUT_MS = 30_000;
 const dimensionSchema = z.string().min(3).max(128).regex(/^[a-z0-9_.-]+:[a-z0-9_./-]+$/u);
 const positionSchema = z.object({ x: z.number().int().min(-30_000_000).max(30_000_000), y: z.number().int().min(-2048).max(2048), z: z.number().int().min(-30_000_000).max(30_000_000) }).strict();
 const scopedPositionSchema = positionSchema.extend({ dimension: dimensionSchema, serverProfileId: identifierSchema }).strict();
-const observedPositionSchema = z.object({ x: z.number().finite().min(-30_000_000).max(30_000_000), y: z.number().finite().min(-2048).max(2048), z: z.number().finite().min(-30_000_000).max(30_000_000), dimension: dimensionSchema, serverProfileId: identifierSchema }).strict();
+const observedPositionSchema = z.object({ x: z.number().finite().min(-30_000_000).max(30_000_000), y: z.number().finite().min(-2048).max(2048), z: z.number().finite().min(-30_000_000).max(30_000_000), dimension: dimensionSchema, serverProfileId: identifierSchema, yaw: z.number().finite().optional(), pitch: z.number().finite().optional() }).strict();
 const timestampSchema = z.string().min(1).max(64).refine((value) => Number.isFinite(Date.parse(value)), { message: "timestamp must be parseable" });
 
 export const siteRules = ["WORLD_FACTS_INCOMPLETE", "SPAWN_EXCLUSION", "AXIS_EXCLUSION", "HIGHWAY_EXCLUSION", "OVERWORLD_PORTAL_LINE", "CONSPICUOUS_GRID_COORDINATE", "SYMMETRIC_COORDINATE", "KNOWN_HAZARD_NEARBY", "OWN_HIDEOUT_TOO_CLOSE"] as const;
