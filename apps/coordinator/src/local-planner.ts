@@ -28,11 +28,14 @@ import {
 import {
   GoalPlanner,
   PlanSupervisor,
+  acquireWorkstation,
+  type FacilityFailureSignal,
   type GoalRequest,
   type PlanStep,
   type PlannerInventory,
   type StepOutcome,
   type SupervisionResult,
+  type WorkstationRegistryPort,
 } from "@minecraft-studio/skills";
 import {
   PersistentTaskStateMachine,
@@ -509,6 +512,13 @@ export class LocalPlannerError extends Error {
 export type CoordinatorLocalPlannerOptions = Readonly<{
   ai: Pick<ScheduledAIRouter, "generate">;
   registry: Pick<BotRegistry, "get">;
+  /**
+   * Round 6.2 真实 Facility 消费方：跨 bot 共享的工作站目录（与
+   * SharedStateServer 同一实例，main.ts 装配）。smelt.item 在模型直派
+   * （furnace=null）时经 acquireWorkstation 解析共享熔炉租约；
+   * world.scan 观测到的熔炉位置自动注册。正常 contention（busy）静默。
+   */
+  workstationRegistry?: WorkstationRegistryPort;
   assignment?: Pick<BotAssignmentService, "acquire" | "release">;
   /**
    * Durable lease authority used when a caller supplies a pre-acquired goal
@@ -1127,11 +1137,31 @@ export class CoordinatorLocalPlanner {
       ({ skillId, skillVersion, availability }) =>
         skillId === decision.skillId && skillVersion === decision.skillVersion,
     )!;
-    const trustedInput = injectTrustedServerProfile(
+    let trustedInput = injectTrustedServerProfile(
       modelInput,
       currentRecord.serverProfileId,
     );
     validateAdvertisedInput(currentSkill.inputSchema, trustedInput);
+
+    // Round 6.2 Facility 消费方：模型直派 smelt.item 且未指定熔炉时，
+    // 从共享工作站目录解析租约（busy/not_found 静默回退 null=Runtime 自放）。
+    const facilityLease = await this.resolveFacilityLeaseForDispatch(
+      request,
+      decision.skillId,
+      trustedInput,
+      currentRecord,
+    );
+    if (facilityLease !== null) {
+      trustedInput = {
+        ...(trustedInput as Record<string, SkillJsonValue>),
+        furnace: {
+          x: facilityLease.position.x,
+          y: facilityLease.position.y,
+          z: facilityLease.position.z,
+        },
+      } as typeof trustedInput;
+      validateAdvertisedInput(currentSkill.inputSchema, trustedInput);
+    }
 
     this.assertWithinDeadline(deadlineMs, request.signal);
     const activeExecution = await this.transitionTaskExecution(
@@ -1148,20 +1178,49 @@ export class CoordinatorLocalPlanner {
         worldStateVersion: execution.worldStateVersion,
       },
     );
+    let dispatchOutcome: Awaited<ReturnType<
+      CoordinatorLocalPlanner["dispatchSkillWithRecovery"]
+    >>;
+    try {
+      dispatchOutcome = await this.dispatchSkillWithRecovery({
+        request,
+        decision,
+        trustedInput,
+        initialRecord: currentRecord,
+        initialSkill: currentSkill,
+        deadlineMs,
+        execution: activeExecution,
+        claim: execution.claim,
+      });
+    } finally {
+      // 租约与派发结果同生命周期：失败也要归还（corruption 除外——那是注册表问题）
+      if (facilityLease !== null) {
+        try {
+          this.options.workstationRegistry?.release(
+            facilityLease.serverProfileId,
+            facilityLease.dimension,
+            facilityLease.position,
+            request.botId,
+          );
+        } catch {
+          // 归还失败只记录：下一次 TTL 过期自愈
+          this.options.logger?.warn?.("coordinator_facility_release_failed", {});
+        }
+      }
+    }
     const {
       invocation,
       result: skillResult,
       execution: completedExecution,
-    } = await this.dispatchSkillWithRecovery({
+    } = dispatchOutcome;
+    // world.scan 完成结果 → 熔炉位置注册进共享目录（后续 smelt 复用）
+    this.registerFacilitiesFromScan(
       request,
-      decision,
+      currentRecord,
+      decision.skillId,
       trustedInput,
-      initialRecord: currentRecord,
-      initialSkill: currentSkill,
-      deadlineMs,
-      execution: activeExecution,
-      claim: execution.claim,
-    });
+      skillResult,
+    );
     if (skillResult.payload.outcome === "completed") {
       if (dispatchChangedNothing(skillResult)) {
         // 空 dispatch（技能成功但什么都没产出）不再触发采集重问阶梯：可解析
@@ -1788,6 +1847,110 @@ export class CoordinatorLocalPlanner {
     // Villager trades still need facts the coordinator does not hold, so they
     // keep failing closed instead of guessing.
     return null;
+  }
+
+  /**
+   * Round 6.2 Facility 消费方：模型直派 smelt.item 且 furnace=null 时解析
+   * 共享熔炉租约。返回 null 表示无可用共享站（busy 或目录为空都回退
+   * furnace=null——Runtime 自放受守护的本地熔炉，行为与接入前一致）。
+   */
+  private async resolveFacilityLeaseForDispatch(
+    request: LocalPlanRequest,
+    skillId: string,
+    trustedInput: SkillJsonValue,
+    record: BotRegistryRecord,
+  ): Promise<{
+    position: { x: number; y: number; z: number };
+    serverProfileId: string;
+    dimension: string;
+  } | null> {
+    const registry = this.options.workstationRegistry;
+    if (registry === undefined || skillId !== "smelt.item") return null;
+    const input = trustedInput as { furnace?: unknown } | null;
+    if (input === null || typeof input !== "object" || input.furnace != null) {
+      return null;
+    }
+    const position = record.currentStatus?.position;
+    const dimension = position?.dimension;
+    if (!dimension) return null;
+    const acquired = await acquireWorkstation(registry, {
+      serverProfileId: record.serverProfileId,
+      dimension,
+      type: "furnace",
+      from: {
+        x: Math.floor(position.x),
+        y: Math.floor(position.y),
+        z: Math.floor(position.z),
+      },
+      botId: request.botId,
+      onFailureSignal: (signal: FacilityFailureSignal) => {
+        this.options.logger?.warn?.("coordinator_facility_failure_signal", {
+          botId: request.botId,
+          failureCode: signal.failureCode,
+          facilityType: signal.facilityType,
+          position: signal.position,
+          expected: signal.expected,
+          actual: signal.actual,
+        });
+      },
+    });
+    if (acquired.status !== "acquired") return null;
+    return {
+      position: {
+        x: acquired.entry.position.x,
+        y: acquired.entry.position.y,
+        z: acquired.entry.position.z,
+      },
+      serverProfileId: record.serverProfileId,
+      dimension,
+    };
+  }
+
+  /**
+   * Round 6.2 Facility 消费方：world.scan 完成且扫的是 furnace 时，把观测到
+   * 的位置（matches，distance 升序）注册进共享目录——目录内容全部来自真实
+   * server 观测，不预测。busy contention 语义由 registry 的 lease 承载。
+   */
+  private registerFacilitiesFromScan(
+    request: LocalPlanRequest,
+    record: BotRegistryRecord,
+    skillId: string,
+    trustedInput: SkillJsonValue,
+    skillResult: Readonly<{ payload: { outcome: string; output?: unknown } }>,
+  ): void {
+    const registry = this.options.workstationRegistry;
+    if (registry === undefined) return;
+    if (skillId !== "world.scan" || skillResult.payload.outcome !== "completed") return;
+    const input = trustedInput as { blockName?: unknown; dimension?: unknown } | null;
+    if (input === null || typeof input !== "object" || input.blockName !== "furnace") return;
+    const dimension =
+      typeof input.dimension === "string" ? input.dimension : "minecraft:overworld";
+    const output = skillResult.payload.output as { matches?: unknown } | undefined;
+    const matches = Array.isArray(output?.matches) ? output.matches : [];
+    let registered = 0;
+    for (const entry of matches) {
+      if (
+        entry !== null &&
+        typeof entry === "object" &&
+        typeof (entry as { x?: unknown }).x === "number" &&
+        typeof (entry as { y?: unknown }).y === "number" &&
+        typeof (entry as { z?: unknown }).z === "number"
+      ) {
+        const pos = entry as { x: number; y: number; z: number };
+        registry.register(record.serverProfileId, dimension, "furnace", {
+          x: Math.floor(pos.x),
+          y: Math.floor(pos.y),
+          z: Math.floor(pos.z),
+        });
+        registered += 1;
+      }
+    }
+    if (registered > 0) {
+      this.options.logger?.info?.("coordinator_facility_registered", {
+        botId: request.botId,
+        registered,
+      });
+    }
   }
 
   /**

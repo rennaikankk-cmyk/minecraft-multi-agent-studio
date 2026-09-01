@@ -33,6 +33,7 @@ import {
 } from "./control-link-config.js";
 import { ControlLinkServer } from "./control-link-server.js";
 import { SharedStateServer, loadSharedStateConfig } from "./shared-state-server.js";
+import { InMemoryWorkstationRegistry } from "@minecraft-studio/skills";
 import {
   RuntimeLinkConfigError,
   loadRuntimeLinkConfig,
@@ -94,6 +95,9 @@ async function main(): Promise<void> {
       "Local goal planning requires PostgreSQL or explicit desktop memory mode.",
     );
   }
+  // Round 6.2 Facility 消费方：跨 bot 共享工作站目录——planner 的 smelt 租约
+  // 解析与 SharedStateServer 的跨进程控制面共用同一实例。
+  const workstationRegistry = new InMemoryWorkstationRegistry();
   const registry = new BotRegistry({
     staleAfterMs: runtimeConfig.botStaleAfterMs,
   });
@@ -263,6 +267,7 @@ async function main(): Promise<void> {
       },
       transport: runtimeServer,
       coordinatorInstanceId: instanceId,
+      workstationRegistry,
       logger,
     });
   } else {
@@ -282,6 +287,7 @@ async function main(): Promise<void> {
         memoryGoalStore?.isAssignmentLeaseActive(lease) ?? false,
       transport: runtimeServer,
       coordinatorInstanceId: instanceId,
+      workstationRegistry,
       logger,
     });
     logger.warn("coordinator_planner_deterministic_only", {
@@ -414,6 +420,7 @@ async function main(): Promise<void> {
     await goalExecutionServer?.start();
     if (sharedStateConfig) {
       sharedStateServer = new SharedStateServer({
+        workstations: workstationRegistry,
         host: sharedStateConfig.host,
         port: sharedStateConfig.port,
         ...(sharedStateConfig.token ? { token: sharedStateConfig.token } : {}),

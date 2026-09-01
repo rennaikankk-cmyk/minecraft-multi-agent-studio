@@ -502,6 +502,7 @@ export {
 export {
   InMemoryWorkstationRegistry,
   acquireWorkstation,
+  type FacilityFailureSignal,
   type WorkstationEntry,
   type WorkstationRegistryOptions,
   type WorkstationAcquireResult,
