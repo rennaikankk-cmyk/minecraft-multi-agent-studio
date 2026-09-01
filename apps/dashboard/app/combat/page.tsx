@@ -8,10 +8,10 @@ export const metadata: Metadata = {
 
 export default function CombatPage() {
   return (
-    <main className="shell">
+    <main >
       <header className="pageHeader">
-        <p className="eyebrow">CONTROL PLANE · COMBAT</p>
-        <h2>作战指挥</h2>
+        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-subtle-foreground">CONTROL PLANE · COMBAT</p>
+        <h1 className="text-lg font-semibold tracking-tight">作战指挥</h1>
         <p>确定性战斗驱动器的只读运行态。</p>
       </header>
       <CombatDashboard />

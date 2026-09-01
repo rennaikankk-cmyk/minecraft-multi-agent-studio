@@ -161,6 +161,17 @@ export function PageHeader({ eyebrow, title, actions, children }: {
   );
 }
 
+/* ---------------- KeyValueRow ---------------- */
+
+export function KeyValueRow({ label, value, mono }: { label: string; value: React.ReactNode; mono?: boolean }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 border-b border-border-subtle/40 py-1.5 last:border-0">
+      <span className="shrink-0 text-[11.5px] text-subtle-foreground">{label}</span>
+      <span className={cn("min-w-0 truncate text-right text-[12.5px] text-foreground", mono !== false && "data-mono")}>{value ?? "—"}</span>
+    </div>
+  );
+}
+
 /* ---------------- Empty / Error（新 shell 版） ---------------- */
 
 export function UiEmptyState({ title, hint }: { title: string; hint?: string }) {

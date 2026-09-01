@@ -113,3 +113,93 @@
 .studio-ui ::-webkit-scrollbar { width: 8px; height: 8px; }
 .studio-ui ::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 4px; }
 .studio-ui ::-webkit-scrollbar-track { background: transparent; }
+
+/* ============================================================
+   Legacy 兼容层：旧 console 组件类（globals.css 定义）在新 shell 内
+   采用新 token 的中性深色外观 —— 迁移期视觉一致性，parity 后随旧组件删除。
+   优先级：作用域更高（.studio-ui 前缀）覆盖旧定义。
+   ============================================================ */
+.studio-ui .shell { max-width: none; padding: 0; }
+.studio-ui .pageHeader { margin-bottom: 1rem; }
+.studio-ui .stack { display: flex; flex-direction: column; gap: 1rem; }
+.studio-ui .panel,
+.studio-ui .subPanel {
+  background: var(--color-card);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-panel);
+  color: var(--color-foreground);
+}
+.studio-ui .subPanel { background: var(--color-elevated); }
+.studio-ui .panelHeader {
+  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  padding: 0.6rem 0.9rem; border-bottom: 1px solid var(--color-border-subtle);
+}
+.studio-ui .panelHeader h3 { font-size: 13px; font-weight: 600; color: var(--color-foreground); }
+.studio-ui .panel h3, .studio-ui .subPanel h3 { color: var(--color-foreground); font-size: 13px; }
+.studio-ui .hint { color: var(--color-muted-foreground); font-size: 12px; line-height: 1.55; }
+.studio-ui .muted { color: var(--color-subtle-foreground); }
+.studio-ui .metricRow { display: flex; gap: 0.75rem; flex-wrap: wrap; }
+.studio-ui .metricCard {
+  background: var(--color-card); border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-panel); padding: 0.7rem 0.9rem; min-width: 8.5rem;
+}
+.studio-ui .filterBar, .studio-ui .formRow {
+  display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap;
+}
+.studio-ui .filterBar label, .studio-ui .formRow label {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  font-size: 12px; color: var(--color-muted-foreground);
+}
+.studio-ui .filterBar input, .studio-ui .filterBar select,
+.studio-ui .formRow input, .studio-ui .formRow select {
+  height: 1.75rem; border-radius: var(--radius-control);
+  border: 1px solid var(--color-border-subtle); background: var(--color-elevated);
+  color: var(--color-foreground); padding: 0 0.45rem; font-size: 12.5px;
+}
+.studio-ui .filterBar button, .studio-ui .formRow button, .studio-ui .buttonLike {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  height: 1.75rem; padding: 0 0.7rem; border-radius: var(--radius-control);
+  border: 1px solid var(--color-border-subtle); background: var(--color-elevated);
+  color: var(--color-foreground); font-size: 12.5px; cursor: pointer;
+  text-decoration: none; transition: all 120ms ease;
+}
+.studio-ui .filterBar button:hover, .studio-ui .formRow button:hover, .studio-ui .buttonLike:hover {
+  background: var(--color-hover); border-color: var(--color-border-strong);
+}
+.studio-ui .buttonLike { color: var(--color-primary); }
+.studio-ui .danger { color: var(--color-danger); border-color: color-mix(in srgb, var(--color-danger) 40%, transparent); }
+.studio-ui .tableScroll { overflow-x: auto; }
+.studio-ui .dataTable { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.studio-ui .dataTable th {
+  position: sticky; top: 0; text-align: left; padding: 0.4rem 0.7rem;
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--color-subtle-foreground); background: var(--color-card);
+  border-bottom: 1px solid var(--color-border-subtle); white-space: nowrap;
+}
+.studio-ui .dataTable td {
+  padding: 0.35rem 0.7rem; border-bottom: 1px solid color-mix(in srgb, var(--color-border-subtle) 50%, transparent);
+  white-space: nowrap; color: var(--color-foreground);
+}
+.studio-ui .expectedActual { display: grid; gap: 0.75rem; grid-template-columns: 1fr 1fr; }
+.studio-ui .expectedActual pre {
+  background: var(--color-elevated); border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-control); padding: 0.6rem; font-size: 11.5px;
+  font-family: var(--font-mono); white-space: pre-wrap; word-break: break-word;
+  color: var(--color-muted-foreground); max-height: 14rem; overflow-y: auto;
+}
+.studio-ui .timeline { list-style: none; font-family: var(--font-mono); font-size: 11.5px; color: var(--color-muted-foreground); }
+.studio-ui .timeline li { padding: 0.15rem 0; border-bottom: 1px solid color-mix(in srgb, var(--color-border-subtle) 40%, transparent); }
+.studio-ui .logView {
+  background: var(--color-elevated); border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-control); padding: 0.6rem; max-height: 22rem; overflow-y: auto;
+  font-family: var(--font-mono); font-size: 11.5px; white-space: pre-wrap; word-break: break-all;
+  color: var(--color-muted-foreground);
+}
+.studio-ui .dialogBackdrop {
+  position: fixed; inset: 0; z-index: 60; background: rgb(0 0 0 / 0.6);
+  display: grid; place-items: center; padding: 1rem;
+}
+.studio-ui .drawerFacts { display: grid; grid-template-columns: 1fr; gap: 0.35rem; font-size: 12.5px; }
+.studio-ui .errorText { color: var(--color-danger); }
+.studio-ui pre { font-family: var(--font-mono); }

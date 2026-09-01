@@ -9,10 +9,10 @@ export const metadata: Metadata = {
 
 export default function TasksPage() {
   return (
-    <main className="shell">
+    <main >
       <header className="pageHeader">
-        <p className="eyebrow">CONTROL PLANE · TASKS</p>
-        <h2>任务控制</h2>
+        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-subtle-foreground">CONTROL PLANE · TASKS</p>
+        <h1 className="text-lg font-semibold tracking-tight">任务控制</h1>
       </header>
       <GoalConsole />
       <TaskHistory />

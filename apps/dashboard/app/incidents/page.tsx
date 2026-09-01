@@ -6,11 +6,13 @@ export const metadata: Metadata = { title: "Incidents · Minecraft Multi-Agent S
 
 export default function IncidentsPage() {
   return (
-    <main className="shell">
-      <header className="pageHeader">
-        <p className="eyebrow">CONTROL PLANE · INCIDENTS</p>
-        <h2>失败与卡住事故</h2>
-        <p>真实后端驱动的 Incident 聚合：崩溃、阈值卡住、假成功、重试耗尽。同 fingerprint 去重，suspectedLayer 来自确定性规则。</p>
+    <main>
+      <header className="mb-4">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-subtle-foreground">RELIABILITY · INCIDENTS</p>
+        <h1 className="text-lg font-semibold tracking-tight">Incidents</h1>
+        <p className="mt-1 max-w-3xl text-[12.5px] text-muted-foreground">
+          可靠性运维视图：Issue（fingerprint 聚合）→ Occurrence drill-down → 服务端导出。suspectedLayer 来自确定性规则，不默认归咎 Skill。
+        </p>
       </header>
       <IncidentsConsole />
     </main>

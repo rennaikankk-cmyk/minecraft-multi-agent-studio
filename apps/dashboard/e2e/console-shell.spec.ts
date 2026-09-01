@@ -8,15 +8,15 @@ const TASK_B_ID = "22222222-2222-4222-8222-222222222222";
 test("console navigation reaches every page", async ({ page }) => {
   await routeEmptyBots(page);
   await page.goto("/");
-  await expect(page.getByTestId("bot-overview-counts")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
 
-  await page.getByRole("link", { name: "任务" }).click();
+  await page.getByRole("link", { name: "Goals / Plans" }).click();
   await expect(page.getByTestId("goal-console")).toBeVisible();
 
-  await page.getByRole("link", { name: "作战" }).click();
+  await page.getByRole("link", { name: "Combat", exact: true }).click();
   await expect(page.getByTestId("combat-empty")).toBeVisible();
 
-  await page.getByRole("link", { name: "机器人" }).click();
+  await page.getByRole("link", { name: "Bots", exact: true }).click();
   await expect(page.getByTestId("stream-state-badge")).toBeVisible();
 });
 
@@ -446,7 +446,7 @@ test("bots page renders a bot pushed over the live stream", async ({ page }) => 
 
 test("theme switcher applies and persists the selected style", async ({ page }) => {
   await routeEmptyBots(page);
-  await page.goto("/");
+  await page.goto("/settings");
   // Default tactical theme has no data-theme attribute.
   await expect(page.locator("html")).not.toHaveAttribute("data-theme", /.+/);
 

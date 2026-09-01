@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
 
-import { ConsoleNav } from "@/components/console-nav";
+import { StudioShell } from "@/components/shell/studio-shell";
 
 import "./globals.css";
 import "./theme.css";
@@ -18,8 +18,7 @@ export default function RootLayout({ children }: Readonly<{ children: ReactNode 
     <html lang="zh-CN">
       <body>
         <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
-        <ConsoleNav />
-        {children}
+        <StudioShell>{children}</StudioShell>
       </body>
     </html>
   );
