@@ -281,11 +281,21 @@ log(`eventWindow (${window.length} entries): ${windowKinds.join(" → ")}`);
 if (window.length === 0) {
   throw new Error("P0-3 regression: watchdog occurrence eventWindow is empty");
 }
-const requiredKinds = ["skill_started", "movement_started", "watchdog_triggered", "incident_report_enqueued"];
+// 断言语义：慢速 STUCK 的 occurrence 可能是 PATH_NO_PROGRESS（watchdog_triggered）
+// 或 PATH_OSCILLATION（oscillation_detected）——任一 watchdog 信号即满足时间线。
+// incident_report_enqueued 不可能出现在自身 report 的快照里（快照构造先于入队
+// 事件落 buffer）；"report 发生"这一腿由该 Incident 本身存在即证明。
+const requiredKinds = ["skill_started", "movement_started", "material_progress"];
 for (const required of requiredKinds) {
   if (!windowKinds.includes(required)) {
     throw new Error(`P0-3 regression: eventWindow missing ${required} (have: ${windowKinds.join(",")})`);
   }
+}
+const watchdogSignalPresent = ["watchdog_triggered", "oscillation_detected", "no_progress_warning"].some(
+  (kind) => windowKinds.includes(kind),
+);
+if (!watchdogSignalPresent) {
+  throw new Error(`P0-3 regression: eventWindow has no watchdog signal (have: ${windowKinds.join(",")})`);
 }
 const windowText = JSON.stringify(window);
 if (/api[_-]?key|bearer|authorization/iu.test(windowText)) {
