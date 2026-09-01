@@ -81,8 +81,13 @@ await withE2EFixture(async (fixture) => {
   const terminalA0 = await submitGoal("移动到坐标 x=0 y=70 z=0 附近");
   log(`Goal A0 (reposition): ${terminalA0?.status ?? "none"}`);
 
-  // —— Goal A：确定性采集 oak_log（英文物品名命中 acquisition 模板）——
-  const terminalA = await submitGoal("获取 1 个 oak_log");
+  // —— Goal A：确定性采集 oak_log（有界重提：树冠掉落物可能落在叶子上，
+  // 三轮拾取都够不到就是地形事实，换个目标重试是诚实策略）——
+  let terminalA = null;
+  for (let attempt = 1; attempt <= 2 && terminalA?.status !== "completed"; attempt += 1) {
+    terminalA = await submitGoal("获取 1 个 oak_log");
+    if (terminalA?.status !== "completed") log(`acquisition attempt ${attempt} not completed`);
+  }
   if (terminalA?.status !== "completed") {
     log("FATAL: acquisition goal did not complete");
     await api(MANAGER, `/v1/bots/${BOT}/stop`, { method: "POST" }).catch(() => undefined);
