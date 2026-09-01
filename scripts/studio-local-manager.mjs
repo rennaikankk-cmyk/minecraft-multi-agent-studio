@@ -627,7 +627,7 @@ export class StudioLocalManager {
         BOT_RUNTIME_LINK_KEY_ID: slot.keyId,
         BOT_RUNTIME_LINK_SECRET: slot.secret,
         // Bot runtime 的非阻塞 Incident 上报入口（stuck/oscillation 等）
-        STUDIO_INCIDENT_ENDPOINT: `http://127.0.0.1:${this.options.managerPort}/v1/incidents`,
+        STUDIO_INCIDENT_ENDPOINT: `http://127.0.0.1:${this.options.port}/v1/incidents`,
         STUDIO_INCIDENT_TOKEN: this.options.token,
         ...(GIT_METADATA.commit ? { STUDIO_RUNTIME_COMMIT: GIT_METADATA.commit } : {}),
         ...(GIT_METADATA.branch ? { STUDIO_RUNTIME_BRANCH: GIT_METADATA.branch } : {}),

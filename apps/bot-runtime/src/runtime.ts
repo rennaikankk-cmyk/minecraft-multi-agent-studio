@@ -442,6 +442,44 @@ export class SingleBotRuntime {
             fault.skillId,
           ),
         );
+        // 技能终态失败 → Incident：pathfinder 快速失败（如基岩封死瞬时
+        // PATHFINDER_GOTO_FAILED）时 watchdog 没有观察窗口，onFault 是这条
+        // 失败链的可靠入口。非阻塞：有界队列，失败只计数。
+        let faultVersionInfo: {
+          minecraftVersion?: string | undefined;
+          protocolVersion?: number | undefined;
+        } = {};
+        try {
+          const compatibility = this.client?.versionCompatibility();
+          if (compatibility) {
+            faultVersionInfo = {
+              minecraftVersion: compatibility.resolvedVersion ?? undefined,
+              protocolVersion: compatibility.protocolVersion ?? undefined,
+            };
+          }
+        } catch {
+          // 版本未协商 → 缺省，不伪造
+        }
+        this.incidentReporter.report({
+          failureCode: "SKILL_RECOVERY_EXHAUSTED",
+          incidentType: "SKILL_FAILED",
+          sourceComponent: "skill-executor",
+          severity: "ERROR",
+          skillId: fault.skillId,
+          taskId: fault.taskId,
+          sessionId: fault.traceId,
+          serverProfileId: this.profile.id,
+          position: this.worldState.snapshot().position ?? undefined,
+          dimension: this.worldState.snapshot().position?.dimension ?? undefined,
+          gitCommit: process.env.STUDIO_RUNTIME_COMMIT === undefined ? undefined : process.env.STUDIO_RUNTIME_COMMIT,
+          branch: process.env.STUDIO_RUNTIME_BRANCH === undefined ? undefined : process.env.STUDIO_RUNTIME_BRANCH,
+          ...faultVersionInfo,
+          expected: "skill completes or fails with a recoverable code",
+          actual: `${fault.errorCode} after ${fault.attempts} attempt(s)${fault.reason ? `: ${fault.reason}` : ""}`,
+          normalizedErrorSignature: fault.errorCode,
+          actionFamily: "skill",
+          snapshots: {},
+        });
       },
     });
     // §4 的接线：目标分解与恢复阶梯从此走真实派发路径。invoke 直接绑到
