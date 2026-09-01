@@ -128,6 +128,12 @@ async function runAcceptance() {
         capabilities: ["bot.read", "bot.stop"],
       },
     ]),
+    // 本 fixture 是 offline quality 验收：无 PostgreSQL，也无 Local AI。
+    // planner（确定性兜底）无条件装配，因此必须显式声明 offline 内存 store
+    // 模式（COORDINATOR_LOCAL_MEMORY_MODE=1 是文档化的唯一 test/offline 通道）。
+    // production 不设此值：planner + 无 durable store 会被
+    // COORDINATOR_GOAL_STORE_REQUIRED fail-closed 拒绝启动。
+    COORDINATOR_LOCAL_MEMORY_MODE: "1",
   });
   await Promise.all([
     waitForTcpPort(runtimePort, coordinator, STARTUP_TIMEOUT_MS),

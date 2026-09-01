@@ -54,6 +54,11 @@ import {
   type TaskHistoryReader,
 } from "./task-history-reader.js";
 import { InMemoryGoalLifecycleStore } from "./in-memory-goal-store.js";
+import {
+  assertGoalStoreWiring,
+  GoalStoreWiringError,
+  resolveGoalStoreMode,
+} from "./goal-store-mode.js";
 import { ExpiredLeaseRecoveryController } from "./expired-lease-recovery.js";
 import { CoordinatorGoalExecutionServer } from "./goal-execution-server.js";
 import {
@@ -378,6 +383,20 @@ async function main(): Promise<void> {
       : {}),
     logger,
   });
+  // planner 装配而无 store → 结构化 fail closed（P1.3 根因：fixture 未声明模式）。
+  // 不放宽 ControlLinkServer 的构造守卫；这里只把诊断提前并给出明确修复指引。
+  const goalStoreMode = assertGoalStoreWiring({
+    mode: resolveGoalStoreMode({
+      hasPersistenceConfig: Boolean(goalPersistenceConfig),
+      localMemoryMode,
+    }),
+    hasPlanner: Boolean(localPlanner),
+  });
+  logger.info("coordinator_goal_store_started", {
+    mode: goalStoreMode,
+    queuedGoals: taskDeliveryConfig?.purpose === "production" ? "durable" : "off",
+    localMemoryMode,
+  });
   let staleTimer: ReturnType<typeof setInterval> | null = null;
 
   try {
@@ -587,7 +606,8 @@ void main().catch((cause: unknown) => {
       cause instanceof LocalAIConfigError ||
       cause instanceof GoalPersistenceConfigError
       || cause instanceof TaskDeliveryConfigError ||
-      cause instanceof AutonomousConfigError
+      cause instanceof AutonomousConfigError ||
+      cause instanceof GoalStoreWiringError
       ? cause.code
       : "COORDINATOR_START_FAILED";
   logger.error("coordinator_start_failed", {

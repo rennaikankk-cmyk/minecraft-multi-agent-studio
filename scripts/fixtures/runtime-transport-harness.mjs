@@ -188,6 +188,15 @@ async function main() {
     logger,
     handleStopCommand: (command, authorizationContext) =>
       runtime.handleStopCommand(command, authorizationContext),
+    // 与 runtime-host.ts 相同的真实路径。此前 fixture 漏接这对必填 handler：
+    // coordinator autonomy 派发 skill 时 handleSkillInvocation 为 undefined →
+    // TypeError → rejectSocket 杀掉已认证连接 → stop 落进重连窗口 502。
+    // 接上后确定性 client 的能力缺失走 SkillExecutor 结构化 failed result
+    // （SKILL_CAPABILITY_*），是应用层结果而非协议违规。
+    handleSkillInvocation: (invocation, coordinatorInstanceId) =>
+      runtime.handleCoordinatorSkillInvocation(invocation, coordinatorInstanceId),
+    handleSkillCancellation: (cancellation, coordinatorInstanceId) =>
+      runtime.handleCoordinatorSkillCancellation(cancellation, coordinatorInstanceId),
     publishCurrentState: () => runtime.publishCurrentState(),
     failClosed: async (error) => {
       failClosedError = error;
