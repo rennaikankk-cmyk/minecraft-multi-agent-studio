@@ -84,7 +84,7 @@ await withE2EFixture(async (fixture) => {
     // 非模板 goal（无"移动到坐标"等确定性模板 → planner 模型分支 → Spark）
     // LLM_GOAL_TEXT 可覆盖（Round 6.1：可控可完成目标——观察型目标的模型 plan
     // 在 fixture 世界里派发不可达 goto 属真实世界条件，按提示词换可控目标重验）
-    const goalText = process.env.LLM_GOAL_TEXT?.trim() || "向东方走 12 格然后停下";
+    const goalText = process.env.LLM_GOAL_TEXT?.trim() || "盘点当前背包里的物资并确认库存状态";
     const requestId = randomUUID();
     const goalPromise = fetch(`http://127.0.0.1:${CONTROL_API_PORT}/v1/goals`, {
       method: "POST",
