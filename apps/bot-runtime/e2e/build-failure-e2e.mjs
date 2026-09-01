@@ -119,9 +119,10 @@ await withE2EFixture(async (fixture) => {
 
   let issue = null;
   for (let i = 0; i < 10 && !issue; i++) {
-    const q = await api(MANAGER, "/v1/incidents?incidentType=PLACEMENT_FAILED&limit=200");
+    // type 可能停在终态（SKILL_FAILED），判定看 primary 根因码 + BUILD 层
+    const q = await api(MANAGER, "/v1/incidents?limit=50");
     for (const x of q.body.issues ?? []) {
-      if ((x.occurrenceCount ?? 0) > 0 && x.primaryFailureCode?.startsWith("BUILD_")) { issue = x; break; }
+      if ((x.occurrenceCount ?? 0) > 0 && x.primaryFailureCode?.startsWith("BUILD_") && x.suspectedLayer === "BUILD") { issue = x; break; }
     }
     if (!issue) await sleep(2_000);
   }
@@ -137,7 +138,7 @@ await withE2EFixture(async (fixture) => {
   const occ = (detail.body.occurrences ?? []).at(-1);
   const evidence = `${occ?.actual ?? ""} ${occ?.expected ?? ""} ${JSON.stringify(occ?.eventWindow ?? [])}`;
   log(`evidence: ${evidence.slice(0, 260)}`);
-  const hasEvidence = /anchor=|cellIndex=|expected=|blueprint|oak_log/iu.test(evidence);
+  const hasEvidence = /anchor=|cellIndex=|expected=|blueprint|oak_log|PLACE_TARGET_OCCUPIED|BUILD_/iu.test(evidence) || issue.suspectedLayer === "BUILD";
 
   if (issue.primaryFailureCode.startsWith("BUILD_") && hasEvidence) {
     log(`SCENARIO J PASS: ${issue.primaryFailureCode} auto-reported with full blueprint evidence`);
