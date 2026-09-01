@@ -1,5 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { createWriteStream } from "node:fs";
+import { createWriteStream, existsSync, readFileSync } from "node:fs";
 import {
   mkdir,
   readFile,
@@ -381,7 +381,7 @@ export class StudioLocalManager {
     return {
       schemaVersion: "1.0",
       generatedAt: new Date().toISOString(),
-      ai: structuredClone(this.aiStatus),
+      ai: { ...structuredClone(this.aiStatus), concurrency: this.buildAiConcurrencyInfo() },
       bots: [...this.configs.values()]
         .sort((left, right) => left.botId.localeCompare(right.botId))
         .map((config) => this.publicBot(config)),
@@ -1443,6 +1443,44 @@ export class StudioLocalManager {
     };
   }
 
+  /**
+   * P0-5 并发可观测性：configured（显式 env 值）/ effective（实际生效）/
+   * capacityProfileSource（measured@N 实测 | explicit-config | conservative-default）。
+   * capacity profile 由 scripts/benchmark-spark-capacity.mjs 写入（非秘密）。
+   */
+  buildAiConcurrencyInfo() {
+    const raw = this.options.environment.AI_MAX_CONCURRENCY?.trim() ?? '';
+    const configured = Number.isSafeInteger(Number(raw)) && Number(raw) >= 1 && Number(raw) <= 64
+      ? Number(raw)
+      : 2; // 与 coordinator DEFAULT_MAX_CONCURRENCY 一致：唯一实测安全值
+    let profile = null;
+    try {
+      const profilePath = this.options.environment.STUDIO_AI_CAPACITY_PROFILE_PATH?.trim()
+        || path.join(this.options.repositoryRoot, 'runtime-data', 'ai-capacity-profile.json');
+      if (existsSync(profilePath)) {
+        profile = JSON.parse(readFileSync(profilePath, 'utf8'));
+      }
+    } catch {
+      profile = null; // profile 损坏不影响状态主链路
+    }
+    const explicit = raw.length > 0;
+    let source;
+    if (Number.isSafeInteger(profile?.testedConcurrency) && profile.testedConcurrency >= 1) {
+      source = 'measured@' + profile.testedConcurrency + (profile.testedModel ? ':' + profile.testedModel : '');
+    } else if (explicit) {
+      source = 'explicit-config';
+    } else {
+      source = 'conservative-default: only concurrency=2 measured-safe (Round 6); benchmark before raising';
+    }
+    return {
+      configuredMaxConcurrency: configured,
+      effectiveMaxConcurrency: configured,
+      capacityProfileSource: source,
+      testedConcurrency: Number.isSafeInteger(profile?.testedConcurrency) ? profile.testedConcurrency : null,
+      testedAt: typeof profile?.testedAt === 'string' ? profile.testedAt : null,
+      testedModel: typeof profile?.testedModel === 'string' ? profile.testedModel : null,
+    };
+  }
   async refreshAIStatus() {
     const provider = this.aiStatus.provider;
     const baseUrl = this.aiStatus.baseUrl;

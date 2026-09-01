@@ -21,6 +21,14 @@ interface AiStatusView {
   latencyMs: number | null;
   lastCheckedAt: string;
   message: string;
+  concurrency?: {
+    configuredMaxConcurrency: number;
+    effectiveMaxConcurrency: number;
+    capacityProfileSource: string;
+    testedConcurrency: number | null;
+    testedAt: string | null;
+    testedModel: string | null;
+  } | undefined;
 }
 
 export default function AiSparkPage() {
@@ -87,6 +95,17 @@ export default function AiSparkPage() {
               <KeyValueRow label="探测延迟" value={status.latencyMs !== null ? `${status.latencyMs} ms` : "—"} />
               <KeyValueRow label="上次探测" value={status.lastCheckedAt} />
               <KeyValueRow label="消息" value={status.message} />
+              {status.concurrency ? (
+                <KeyValueRow
+                  label="并发（configured / effective）"
+                  value={
+                    <span className="data-mono">
+                      {status.concurrency.configuredMaxConcurrency} / {status.concurrency.effectiveMaxConcurrency}
+                      <span className="ml-2 text-subtle-foreground">{status.concurrency.capacityProfileSource}</span>
+                    </span>
+                  }
+                />
+              ) : null}
             </CardContent>
           </Card>
 

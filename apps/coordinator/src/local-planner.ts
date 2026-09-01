@@ -2430,27 +2430,53 @@ export class CoordinatorLocalPlanner {
     }
   }
 
+  /**
+   * P0-4 语义 revalidation：响应回来时不比较 wall-clock，也不要求世界版本
+   * 冻结——真实高层规划（Spark 实测 ~13s）期间 bot 的 worldStateVersion 必然
+   * 前进（inventory/nearby 变化），相等断言会把所有"慢而有效"的响应构造性
+   * 判死（PLANNER_STALE_RESPONSE 假阳性）。
+   *
+   * 仍然拒绝（真正的过期语义）：
+   * - task 已消失 / 非 PLAN 态 / 已取消 / 执行 claim 已易主（被 supersede）
+   * - planVersion 变化（另一个 planner 已介入）
+   * - bot 已离线（会话失效）
+   * - 世界版本回退（注册表损坏信号，fail closed）
+   *
+   * 世界版本前进（drift）被接受：计划分发的每一步 Skill 都有自己的
+   * precondition/capability 检查与 server 验证，材质不匹配会走结构化
+   * skill 失败 → replan，而不是在这里执行未经检验的旧世界假设。
+   */
   private async assertTaskExecutionFresh(
     request: LocalPlanRequest,
     captured: PlannerExecutionContext,
   ): Promise<void> {
     const current = await this.taskStateMachine.get(request.taskId);
     const currentBot = this.options.registry.get(request.botId);
+    const worldDriftAccepted =
+      current !== null && current.worldStateVersion !== captured.task.worldStateVersion;
+    const botWorldVersion = currentBot !== null ? worldStateVersion(currentBot) : 0;
     if (
       current === null ||
       current.state !== "PLAN" ||
       current.cancellationToken.cancelled ||
       !this.hasActiveExecutionClaim(current, captured.claim) ||
       current.planVersion !== captured.task.planVersion ||
-      current.worldStateVersion !== captured.worldStateVersion ||
-      (currentBot !== null &&
-        worldStateVersion(currentBot) !== 0 &&
-        worldStateVersion(currentBot) !== captured.worldStateVersion)
+      (currentBot === null || currentBot.connectionState !== "online") ||
+      (botWorldVersion !== 0 && botWorldVersion < captured.worldStateVersion)
     ) {
       throw new LocalPlannerError(
         "PLANNER_STALE_RESPONSE",
-        "Local planner response no longer matches the persistent task or world state.",
+        "Local planner response no longer matches the active task, claim, or Bot session.",
       );
+    }
+    if (worldDriftAccepted || botWorldVersion > captured.worldStateVersion) {
+      this.options.logger?.info?.("coordinator_planner_world_drift_accepted", {
+        taskId: request.taskId,
+        botId: request.botId,
+        taskWorldDrift: current.worldStateVersion - captured.task.worldStateVersion,
+        botWorldDrift: botWorldVersion - captured.worldStateVersion,
+        note: "slow-but-valid planning response revalidated semantically; per-skill preconditions remain the safety boundary",
+      });
     }
   }
 
@@ -2935,8 +2961,10 @@ export class CoordinatorLocalPlanner {
       current.taskCancelled === true ||
       current.taskCompleted === true ||
       current.planVersion !== expected.task.planVersion ||
-      current.worldStateVersion !== expected.worldStateVersion
+      current.worldStateVersion < expected.task.worldStateVersion
     ) {
+      // 世界版本前进不再判死（语义 revalidation，见 assertTaskExecutionFresh）；
+      // 取消/完成/换 planner/版本回退仍然拒绝。
       throw new LocalPlannerError(
         "PLANNER_STALE_RESPONSE",
         "Local planner response no longer matches the active task or world version.",

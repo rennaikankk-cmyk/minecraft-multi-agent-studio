@@ -364,3 +364,68 @@ describe("multi-bot fair scheduling (Round 6)", () => {
     await Promise.all(releases);
   });
 });
+
+describe("purpose-aware deadline ceilings (Round 6.1 P0-4)", () => {
+  it("caps a caller-given generous timeout by the purpose ceiling", async () => {
+    vi.useFakeTimers();
+    // planning 档 45s 顶：调用方给了 10 分钟也会被封顶
+    const scheduler = new AIRequestScheduler({ maxConcurrency: 1 });
+    const scheduled = scheduler.schedule(
+      request(
+        "planning-capped",
+        "bot-a",
+        async () => new Promise<string>(() => undefined),
+        { timeoutMs: 10 * 60_000 },
+      ),
+    );
+    const rejection = expect(scheduled).rejects.toMatchObject({ code: "AI_REQUEST_TIMEOUT" });
+    await vi.advanceTimersByTimeAsync(45_001);
+    await rejection;
+  });
+
+  it("keeps the caller's tighter deadline intact under a loose ceiling", async () => {
+    vi.useFakeTimers();
+    const scheduler = new AIRequestScheduler({ maxConcurrency: 1 });
+    const scheduled = scheduler.schedule(
+      request(
+        "planning-tight",
+        "bot-a",
+        async () => new Promise<string>(() => undefined),
+        { timeoutMs: 5_000 },
+      ),
+    );
+    const rejection = expect(scheduled).rejects.toMatchObject({ code: "AI_REQUEST_TIMEOUT" });
+    await vi.advanceTimersByTimeAsync(5_001);
+    await rejection;
+  });
+
+  it("never lets a chat request hold a slot beyond its purpose ceiling", async () => {
+    vi.useFakeTimers();
+    const scheduler = new AIRequestScheduler({ maxConcurrency: 1, defaultTimeoutMs: 120_000 });
+    const scheduled = scheduler.schedule(
+      request(
+        "chat-capped",
+        "bot-a",
+        async () => new Promise<string>(() => undefined),
+        { priority: aiRequestPriorities.chat },
+      ),
+    );
+    const rejection = expect(scheduled).rejects.toMatchObject({ code: "AI_REQUEST_TIMEOUT" });
+    await vi.advanceTimersByTimeAsync(15_001);
+    await rejection;
+  });
+
+  it("accepts a realistic 13s planning response well inside the ceiling", async () => {
+    vi.useFakeTimers();
+    const scheduler = new AIRequestScheduler({ maxConcurrency: 1, defaultTimeoutMs: 45_000 });
+    const scheduled = scheduler.schedule(
+      request("planning-slow-real", "bot-a", async () => {
+        await new Promise((resolve) => setTimeout(resolve, 13_000));
+        return "plan";
+      }),
+    );
+    const resolution = expect(scheduled).resolves.toMatchObject({ value: "plan" });
+    await vi.advanceTimersByTimeAsync(13_100);
+    await resolution;
+  });
+});

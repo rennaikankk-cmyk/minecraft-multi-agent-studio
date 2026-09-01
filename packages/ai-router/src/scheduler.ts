@@ -8,6 +8,40 @@ export const aiRequestPriorities = {
   background: 100,
 } as const;
 
+/**
+ * P0-4 purpose-aware deadline ceilings（单一事实源）。
+ *
+ * 语义：effective timeout = min(调用方显式 timeout ?? defaultTimeoutMs, 本档上限)。
+ * - 调用方更紧的 deadline 永远生效（安全反射不等 LLM）。
+ * - 档位是"按用途永不超时"的硬顶：chat 不该占住并发槽 10 分钟，即使调用方没写。
+ * - planning 档刻意宽（真实 Spark 高层规划实测 ~13s；45s 顶仍是有界承诺，
+ *   绝不无限调大单一全局 timeout——过期/取消/被替代的响应由 planner 的
+ *   语义 revalidation 拒绝，而不是靠超短 deadline 碰运气）。
+ */
+export const aiDeadlineProfileCeilingsMs: Readonly<Record<keyof typeof aiRequestPriorities, number>> = {
+  systemCritical: 3_000,
+  combat: 5_000,
+  recovery: 8_000,
+  planning: 45_000,
+  exploration: 20_000,
+  chat: 15_000,
+  background: 120_000,
+};
+
+/** 就近档位（priority 数值最接近且不超过的档；超过 background 归 background）。 */
+export function deadlineCeilingForPriority(priority: number): number {
+  let ceiling = aiDeadlineProfileCeilingsMs.background;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const [name, value] of Object.entries(aiRequestPriorities) as Array<[keyof typeof aiRequestPriorities, number]>) {
+    const distance = Math.abs(value - priority);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      ceiling = aiDeadlineProfileCeilingsMs[name];
+    }
+  }
+  return ceiling;
+}
+
 export type AIRequestPriority = number;
 
 export type AISchedulerErrorCode =
@@ -353,7 +387,11 @@ export class AIRequestScheduler {
       reject,
     };
 
-    const timeoutMs = request.timeoutMs ?? this.defaultTimeoutMs;
+    // P0-4：purpose-aware 硬顶——调用方显式值/default 中较紧者，再被档位上限封顶。
+    const timeoutMs = Math.min(
+      request.timeoutMs ?? this.defaultTimeoutMs,
+      deadlineCeilingForPriority(request.priority),
+    );
     entry.timeout = setTimeout(() => {
       this.cancelEntry(
         entry as AnyQueueEntry,

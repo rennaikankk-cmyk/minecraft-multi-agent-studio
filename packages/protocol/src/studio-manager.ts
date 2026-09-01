@@ -24,6 +24,22 @@ export const studioAiStatusV1Schema = z
     latencyMs: z.number().int().nonnegative().max(120_000).nullable(),
     lastCheckedAt: timestampSchema,
     message: z.string().trim().min(1).max(300),
+    /**
+     * P0-5 并发可观测性（可选，向后兼容）：configured = 显式配置值；
+     * effective = 实际生效值；capacityProfileSource 说明依据
+     * （measured@N 实测 / explicit-config 显式 / conservative-default 保守默认）。
+     */
+    concurrency: z
+      .object({
+        configuredMaxConcurrency: z.number().int().min(1).max(64),
+        effectiveMaxConcurrency: z.number().int().min(1).max(64),
+        capacityProfileSource: z.string().trim().min(1).max(120),
+        testedConcurrency: z.number().int().min(0).max(64).nullable(),
+        testedAt: timestampSchema.nullable(),
+        testedModel: z.string().trim().min(1).max(256).nullable(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

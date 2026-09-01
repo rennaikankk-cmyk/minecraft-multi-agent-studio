@@ -975,9 +975,10 @@ describe("CoordinatorLocalPlanner", () => {
     }
   });
 
-  it("drops a stale response when the captured world version changes", async () => {
+  it("accepts a slow-but-valid response when only the world version drifted (P0-4 semantic revalidation)", async () => {
     let worldStateVersion = 7;
     const planner = plannerWith(async (options) => {
+      // 模型 13s 级延迟期间世界版本前进（inventory/nearby 变化是常态）
       worldStateVersion = 8;
       return aiResult(
         JSON.stringify({
@@ -990,22 +991,47 @@ describe("CoordinatorLocalPlanner", () => {
       );
     });
 
+    const result = await planner.planAndDispatch({
+      ...planRequest(),
+      planVersion: 0,
+      worldStateVersion: 7,
+      currentVersions: () => ({
+        planVersion: 0,
+        worldStateVersion,
+      }),
+    });
+    expect(result.action).toBe("noop");
+    // noop 决策按契约落为 ABORT 终态（区别于被丢弃的过期响应）
+    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
+      state: "ABORT",
+      failureReason: "PLANNER_NOOP:NO_SAFE_SKILL",
+    });
+  });
+
+  it("still drops the response when the world version rolled back (corruption signal)", async () => {
+    const planner = plannerWith(async (options) =>
+      aiResult(
+        JSON.stringify({
+          action: "noop",
+          botId: BOT_ID,
+          taskId: "task-01",
+          reasonCode: "NO_SAFE_SKILL",
+        }),
+        options.requestId,
+      ),
+    );
+
     await expect(
       planner.planAndDispatch({
         ...planRequest(),
         planVersion: 0,
-        worldStateVersion: 7,
+        worldStateVersion: 9,
         currentVersions: () => ({
           planVersion: 0,
-          worldStateVersion,
+          worldStateVersion: 7,
         }),
       }),
     ).rejects.toMatchObject({ code: "PLANNER_STALE_RESPONSE" });
-    await expect(planner.getTaskExecution("task-01")).resolves.toMatchObject({
-      state: "ABORT",
-      worldStateVersion: 7,
-      failureReason: "PLANNER_STALE_RESPONSE",
-    });
   });
 
   it("drops a stale response when the persistent task is replanned concurrently", async () => {

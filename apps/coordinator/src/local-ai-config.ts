@@ -12,6 +12,15 @@ export type LocalAIConfig = Readonly<{
 
 export type LocalAIProvider = "ollama" | "vllm";
 
+/**
+ * P0-5：保守并发默认。12 从未有 capacity 证据；唯一实测安全值是 2
+ * （Round 6 真实 6 路流测试在 maxConcurrency=2 下 3 bot 公平受服）。
+ * 更高值必须显式配置 AI_MAX_CONCURRENCY 或经 benchmark-spark-capacity
+ * 实测后写入 capacity profile。
+ */
+export const DEFAULT_MAX_CONCURRENCY = 2;
+export const CONSERVATIVE_DEFAULT_NOTE = "conservative-default: only concurrency=2 is measured-safe (Round 6 six-stream test); set AI_MAX_CONCURRENCY explicitly or benchmark first";
+
 export type LocalAIConfigErrorCode =
   | "LOCAL_AI_CONFIG_INCOMPLETE"
   | "LOCAL_AI_URL_INVALID"
@@ -46,7 +55,7 @@ export function loadLocalAIConfig(
       baseUrl: null,
       model: null,
       apiKey: null,
-      maxConcurrency: 12,
+      maxConcurrency: DEFAULT_MAX_CONCURRENCY,
       maxQueue: 64,
       perBotConcurrency: 1,
       requestTimeoutMs: 30_000,
@@ -89,7 +98,7 @@ export function loadLocalAIConfig(
     );
   }
 
-  const maxConcurrency = integer(env.AI_MAX_CONCURRENCY, 12, 1, 64);
+  const maxConcurrency = integer(env.AI_MAX_CONCURRENCY, DEFAULT_MAX_CONCURRENCY, 1, 64);
   const maxQueue = integer(env.AI_MAX_QUEUE, 64, 1, 10_000);
   const perBotConcurrency = integer(
     env.AI_PER_BOT_CONCURRENCY,

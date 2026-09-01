@@ -13,7 +13,7 @@ describe("loadLocalAIConfig", () => {
       baseUrl: null,
       model: null,
       apiKey: null,
-      maxConcurrency: 12,
+      maxConcurrency: 2,
       maxQueue: 64,
       perBotConcurrency: 1,
       requestTimeoutMs: 30_000,

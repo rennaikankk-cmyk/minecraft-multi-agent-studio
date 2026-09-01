@@ -39,7 +39,7 @@ import {
 } from "./runtime-link-config.js";
 import { RuntimeLinkServer } from "./runtime-link-server.js";
 import { InMemoryStopAuditSink, StopController } from "./stop-controller.js";
-import { LocalAIConfigError, loadLocalAIConfig } from "./local-ai-config.js";
+import { CONSERVATIVE_DEFAULT_NOTE, LocalAIConfigError, loadLocalAIConfig } from "./local-ai-config.js";
 import { CoordinatorLocalPlanner } from "./local-planner.js";
 import {
   GoalPersistenceConfigError,
@@ -204,6 +204,15 @@ async function main(): Promise<void> {
           errorCode: event.errorCode,
         });
       },
+    });
+    // P0-5：configured/effective 并发语义在启动日志显式可查
+    logger.info("coordinator_ai_concurrency", {
+      configuredMaxConcurrency: localAIConfig.maxConcurrency,
+      effectiveMaxConcurrency: localAIConfig.maxConcurrency,
+      explicitConfig: process.env.AI_MAX_CONCURRENCY?.trim() ? true : false,
+      note: process.env.AI_MAX_CONCURRENCY?.trim()
+        ? "explicit AI_MAX_CONCURRENCY"
+        : CONSERVATIVE_DEFAULT_NOTE,
     });
   }
   // Scheduler+Router+Breaker 共享实例（planner 与健康遥测共用）
