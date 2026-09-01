@@ -101,6 +101,7 @@ import {
 } from "./progress-watchdog.js";
 import { progressContractForAction } from "./progress-watchdog.js";
 import { IncidentReporter, watchdogEventToSignal } from "./incident-reporter.js";
+import { loadRuntimeIdentity } from "./runtime-identity.js";
 import { WorldStateStore, type WorldStateSnapshot } from "./world-state.js";
 
 type TimerHandle = ReturnType<typeof setTimeout>;
@@ -379,6 +380,7 @@ export class SingleBotRuntime {
       botId: profile.botId,
       endpoint: process.env.STUDIO_INCIDENT_ENDPOINT?.trim() || undefined,
       token: process.env.STUDIO_INCIDENT_TOKEN?.trim() || undefined,
+      spoolPath: process.env.STUDIO_INCIDENT_SPOOL_PATH?.trim() || undefined,
       logger: { warn: (message: string) => dependencies.logger?.warn?.(message) ?? console.warn(message) },
     });
     this.randomId = dependencies.randomId ?? randomUUID;
@@ -445,6 +447,8 @@ export class SingleBotRuntime {
         // 技能终态失败 → Incident：pathfinder 快速失败（如基岩封死瞬时
         // PATHFINDER_GOTO_FAILED）时 watchdog 没有观察窗口，onFault 是这条
         // 失败链的可靠入口。非阻塞：有界队列，失败只计数。
+        // 因果模型：fault.errorCode 是根因；SKILL_RECOVERY_EXHAUSTED 是终态
+        // Outcome（store 端 R-CAUSAL-1 会按根因层分类，不默认归咎 SKILL）。
         let faultVersionInfo: {
           minecraftVersion?: string | undefined;
           protocolVersion?: number | undefined;
@@ -460,19 +464,26 @@ export class SingleBotRuntime {
         } catch {
           // 版本未协商 → 缺省，不伪造
         }
+        const identity = loadRuntimeIdentity();
         this.incidentReporter.report({
           failureCode: "SKILL_RECOVERY_EXHAUSTED",
-          incidentType: "SKILL_FAILED",
+          terminalFailureCode: "SKILL_RECOVERY_EXHAUSTED",
+          causedByFailureCodes: [fault.errorCode],
+          incidentType: skillFaultIncidentType(fault.errorCode),
           sourceComponent: "skill-executor",
           severity: "ERROR",
           skillId: fault.skillId,
           taskId: fault.taskId,
-          sessionId: fault.traceId,
+          sessionId: this.runtimeInstanceId,
+          correlationId: fault.traceId,
           serverProfileId: this.profile.id,
           position: this.worldState.snapshot().position ?? undefined,
           dimension: this.worldState.snapshot().position?.dimension ?? undefined,
-          gitCommit: process.env.STUDIO_RUNTIME_COMMIT === undefined ? undefined : process.env.STUDIO_RUNTIME_COMMIT,
-          branch: process.env.STUDIO_RUNTIME_BRANCH === undefined ? undefined : process.env.STUDIO_RUNTIME_BRANCH,
+          gitCommit: identity.gitCommit ?? undefined,
+          branch: identity.branch ?? undefined,
+          buildVersion: identity.buildVersion ?? undefined,
+          dirtyBuild: identity.dirtyBuild ?? undefined,
+          runtimeInstanceId: this.runtimeInstanceId,
           ...faultVersionInfo,
           expected: "skill completes or fails with a recoverable code",
           actual: `${fault.errorCode} after ${fault.attempts} attempt(s)${fault.reason ? `: ${fault.reason}` : ""}`,
@@ -1499,10 +1510,11 @@ export class SingleBotRuntime {
           worldSnapshot.navigation.movementOwner !== null,
       });
       for (const event of events) {
-        if (event.kind === "stuck" || event.kind === "no-progress" || event.kind === "oscillation" || event.kind === "loop") {
+        if (event.kind === "stuck" || event.kind === "no-progress" || event.kind === "oscillation" || event.kind === "loop" || event.kind === "deadline-exceeded") {
           // 非阻塞 Incident 上报（有界队列；失败只计数，绝不打断恢复流程）
           const activeTask = [...this.activeSkillTasks.values()][0];
           const telemetryTask = this.currentTaskTelemetry();
+          const identity = loadRuntimeIdentity();
           let versionInfo: { minecraftVersion?: string | undefined; protocolVersion?: number | undefined } = {};
           try {
             const compatibility = this.client?.versionCompatibility();
@@ -1524,9 +1536,12 @@ export class SingleBotRuntime {
             taskId: telemetryTask?.taskId,
             goal: telemetryTask?.title,
             sessionId: this.runtimeInstanceId,
+            runtimeInstanceId: this.runtimeInstanceId,
             serverProfileId: this.profile.id,
-            gitCommit: process.env.STUDIO_RUNTIME_COMMIT === undefined ? undefined : process.env.STUDIO_RUNTIME_COMMIT,
-            branch: process.env.STUDIO_RUNTIME_BRANCH === undefined ? undefined : process.env.STUDIO_RUNTIME_BRANCH,
+            gitCommit: identity.gitCommit ?? undefined,
+            branch: identity.branch ?? undefined,
+            buildVersion: identity.buildVersion ?? undefined,
+            dirtyBuild: identity.dirtyBuild ?? undefined,
             ...versionInfo,
             expectedProgress: worldSnapshot.navigation.target
               ? `target distance decreasing toward ${worldSnapshot.navigation.target.x},${worldSnapshot.navigation.target.z} (dimension ${worldSnapshot.navigation.target.dimension})`
@@ -2657,4 +2672,15 @@ function syntheticCombatReceipt(
       targetEntityId: null,
     },
   };
+}
+
+/**
+ * 技能终态失败的 IncidentType 推导：根因码属于 pathfinder 家族时用
+ * PATH_FAILED/UNREACHABLE（快慢两种故障在 type/fingerprint 上必须可区分），
+ * 其余保持 SKILL_FAILED。
+ */
+function skillFaultIncidentType(rootErrorCode: string): string {
+  if (rootErrorCode === "PATHFINDER_GOTO_FAILED" || rootErrorCode === "PATH_NO_PROGRESS") return "PATH_FAILED";
+  if (rootErrorCode === "PATH_UNREACHABLE") return "UNREACHABLE";
+  return "SKILL_FAILED";
 }

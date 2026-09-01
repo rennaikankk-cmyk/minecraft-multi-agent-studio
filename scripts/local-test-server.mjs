@@ -145,3 +145,84 @@ export async function resetLocalTestWorld({ sessionId } = {}) {
   await docker(["volume", "rm", "-f", LOCAL_TEST_VOLUME], 30_000).catch(() => undefined);
   return { status: "reset", note: "world volume removed; next start creates a fresh world" };
 }
+
+/**
+ * 完整 observed state（Servers 页 Local Test 卡片数据源）。
+ * 全部来自 docker inspect / rcon 事实，不读 session 配置猜状态。
+ */
+export async function observeLocalTestServer() {
+  const format = "{{.State.Running}}|{{.State.StartedAt}}|{{index .Config.Labels \"studio.serverKind\"}}|{{index .Config.Labels \"studio.ownerSessionId\"}}|{{index .Config.Labels \"studio.resourceId\"}}|{{index .Config.Labels \"studio.lifecycle\"}}|{{.Id}}";
+  const raw = await docker(["inspect", "-f", format, LOCAL_TEST_CONTAINER], 10_000).catch(() => null);
+  if (!raw) {
+    return {
+      status: "not_running",
+      desiredState: "unknown",
+      managedByStudio: false,
+      ownerSessionId: null,
+      containerId: null,
+      hostPort: null,
+      players: null,
+      uptimeMs: null,
+      world: { volumeName: LOCAL_TEST_VOLUME, identity: `${LOCAL_TEST_VOLUME} (docker volume)` },
+      minecraftVersion: null,
+      protocolVersion: null,
+      mode: null,
+      seed: null,
+    };
+  }
+  const [running, startedAt, serverKind, ownerSessionId, resourceId, lifecycle, containerId] = raw.split("|");
+  const envFormat = "{{range .Config.Env}}{{println .}}{{end}}";
+  const envRaw = await docker(["inspect", "-f", envFormat, LOCAL_TEST_CONTAINER], 10_000).catch(() => "");
+  const env = Object.fromEntries(
+    envRaw.split("\n").filter((line) => line.includes("=")).map((line) => {
+      const index = line.indexOf("=");
+      return [line.slice(0, index), line.slice(index + 1)];
+    }),
+  );
+  const port = await docker(["port", LOCAL_TEST_CONTAINER, "25565/tcp"], 10_000).catch(() => "");
+  const hostPort = port ? Number.parseInt(port.split(":").pop() ?? "", 10) : null;
+  const portOpen = hostPort !== null ? await tcpProbe(hostPort) : false;
+  const players = running === "true" ? await readPlayerList() : null;
+  const uptimeMs = running === "true" && startedAt ? Date.now() - Date.parse(startedAt) : null;
+  return {
+    status: running !== "true" ? "not_running" : portOpen ? "online" : "starting",
+    desiredState: "unknown", // 由 manager 根据 startup plan/最近操作补充
+    managedByStudio: serverKind === "local_test",
+    ownerSessionId: ownerSessionId ?? null,
+    resourceId: resourceId ?? "local-test-mc-01",
+    lifecycle: lifecycle ?? null,
+    containerId: containerId ? containerId.slice(0, 12) : null,
+    hostPort: Number.isFinite(hostPort) ? hostPort : LOCAL_TEST_PORT,
+    hostPortOpen: portOpen,
+    players,
+    uptimeMs,
+    world: { volumeName: LOCAL_TEST_VOLUME, identity: `${LOCAL_TEST_VOLUME} (docker volume)` },
+    minecraftVersion: env.VERSION ?? null,
+    protocolVersion: null, // 握手后由 bot 连接事实补充（不伪造）
+    mode: env.MODE ?? null,
+    seed: env.SEED ?? null,
+    onlineMode: env.ONLINE_MODE ?? null,
+    startedAt: startedAt ?? null,
+  };
+}
+
+/** rcon `list`（bounded；失败返回 null —— 玩家数不是关键路径）。 */
+async function readPlayerList() {
+  const raw = await docker(["exec", LOCAL_TEST_CONTAINER, "rcon-cli", "list"], 10_000).catch(() => null);
+  if (!raw) return null;
+  const match = raw.match(/There are (\d+) of a max(?:imum)? of (\d+) players online(?::\s*(.*))?/i);
+  if (!match) return null;
+  return {
+    online: Number.parseInt(match[1], 10),
+    max: Number.parseInt(match[2], 10),
+    names: (match[3] ?? "").split(/,\s*/u).filter((name) => name.length > 0).slice(0, 20),
+  };
+}
+
+/** bounded 日志读取（docker logs --tail；调用方再做脱敏）。 */
+export async function readLocalTestServerLog(tailLines = 200) {
+  const bounded = Math.min(500, Math.max(1, tailLines));
+  const logs = await docker(["logs", "--tail", String(bounded), LOCAL_TEST_CONTAINER], 15_000).catch(() => null);
+  if (logs === null) return { available: false, reason: "container not present or docker unavailable" };
+  return { available: true, tail: bounded, logs: logs.slice(-64_000) };
+}

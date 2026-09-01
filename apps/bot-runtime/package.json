@@ -5,7 +5,7 @@
   "type": "module",
   "main": "./dist/index.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node ../../scripts/write-build-manifest.mjs apps/bot-runtime/dist @minecraft-studio/bot-runtime",
     "start": "node dist/index.js",
     "start:supervisor": "node dist/supervisor-main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",

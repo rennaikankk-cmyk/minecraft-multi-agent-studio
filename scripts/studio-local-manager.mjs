@@ -8,7 +8,16 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { createServer } from "node:http";
-import { IncidentStore } from "../packages/skills/dist/incidents.js";
+import { IncidentStore, occurrenceToMarkdown, buildRepairPrompt, safeExportText, redactSecrets } from "../packages/skills/dist/incidents.js";
+import { buildZip } from "./zip-writer.mjs";
+import {
+  observeLocalTestServer,
+  startLocalTestServer,
+  stopLocalTestServer,
+  resetLocalTestWorld,
+  readLocalTestServerLog,
+  LOCAL_TEST_VOLUME,
+} from "./local-test-server.mjs";
 import { execFileSync } from "node:child_process";
 
 function readGitMetadata() {
@@ -268,6 +277,15 @@ export class StudioLocalManager {
     this.logRoot = path.join(this.runtimeRoot, "logs");
     this.slots = new Map(options.slots.map((slot) => [slot.botId, slot]));
     this.aiStatus = structuredClone(options.aiStatus);
+    // 本 manager 进程的 ownership 身份（local test server labels / incident 元数据）
+    this.sessionId = process.env.STUDIO_SESSION_ID?.trim() || `studio-manager-${Date.now().toString(36)}`;
+    this.localTestDesired = process.env.STUDIO_STARTUP_LOCAL_TEST_DESIRED === "session" ? "on" : "off";
+    this.localTestShutdownPolicy = process.env.STUDIO_LOCAL_TEST_SHUTDOWN_POLICY?.trim() === "stop" ? "stop" : "keep";
+    // lifecycle operation registry：start/stop/restart/reset 返回 operationId，
+    // 前端轮询最终 observed result（不做乐观成功）
+    this.operations = new Map();
+    // reporterEventId → 已记录结果（spool 重放幂等去重；有界 LRU）
+    this.incidentEventCache = new Map();
   }
 
   async start() {
@@ -324,6 +342,36 @@ export class StudioLocalManager {
     await Promise.allSettled(
       [...this.processes.keys()].map((botId) => this.stopBot(botId)),
     );
+    // IncidentStore graceful shutdown：有 deadline 的 flush（超时记录未写盘事实）
+    if (this.incidents) {
+      const flushDeadline = 3_000;
+      try {
+        await Promise.race([
+          this.incidents.flush(),
+          new Promise((resolve) => setTimeout(resolve, flushDeadline)),
+        ]);
+        const health = this.incidents.writerHealth();
+        if (health.dirty) {
+          console.warn(JSON.stringify({
+            timestamp: new Date().toISOString(), level: "warn", service: "studio-local-manager",
+            event: "incident_flush_deadline_exceeded", dirty: health.dirty,
+            droppedWriteCount: health.droppedWriteCount,
+          }));
+        }
+      } catch {
+        // flush 失败不阻塞关闭（store 内部已计数）
+      }
+    }
+    // 本 manager 拥有的 local test server：按 shutdownPolicy 处理（keep=保留供手工调试）
+    if (this.localTestShutdownPolicy === "stop") {
+      const result = await stopLocalTestServer({ sessionId: this.sessionId }).catch(() => null);
+      if (result?.status === "refused") {
+        console.warn(JSON.stringify({
+          timestamp: new Date().toISOString(), level: "warn", service: "studio-local-manager",
+          event: "local_test_stop_refused", detail: result.error,
+        }));
+      }
+    }
   }
 
   status() {
@@ -334,10 +382,16 @@ export class StudioLocalManager {
       bots: [...this.configs.values()]
         .sort((left, right) => left.botId.localeCompare(right.botId))
         .map((config) => this.publicBot(config)),
+      sessionId: this.sessionId,
       capabilities: {
         createBot: this.configs.size < this.slots.size,
         maxBots: this.slots.size,
+        // capability honesty：前端按这里声明渲染，不自行猜测
+        incidentExport: { json: true, markdown: true, zipBundle: true, repairPrompt: true },
+        localTestServer: { start: true, stop: true, restart: true, resetWorld: true, logs: true },
+        incidentQuery: { filters: true, issueOccurrences: true, occurrenceDetail: true, statusTransition: true },
       },
+      incidents: this.incidents ? this.incidents.writerHealth() : null,
     };
   }
 
@@ -367,83 +421,92 @@ export class StudioLocalManager {
       return;
     }
     try {
-      if (request.method === "GET" && url.pathname === "/v1/incidents") {
-        const issues = this.incidents.listIssues();
-        const q = url.searchParams;
-        const limit = Math.min(200, Math.max(1, Number.parseInt(q.get("limit") ?? "50", 10) || 50));
-        const offset = Math.max(0, Number.parseInt(q.get("offset") ?? "0", 10) || 0);
-        const status = q.get("status");
-        const severity = q.get("severity");
-        const suspectedLayer = q.get("suspectedLayer");
-        const botId = q.get("botId");
-        const failureCode = q.get("failureCode");
-        const since = q.get("since");
-        const filtered = issues.filter((issue) => {
-          if (status && issue.status !== status) return false;
-          if (severity && issue.maxSeverity !== severity) return false;
-          if (suspectedLayer && issue.suspectedLayer !== suspectedLayer) return false;
-          if (failureCode && issue.primaryFailureCode !== failureCode) return false;
-          if (botId && !issue.affectedBotIds.includes(botId)) return false;
-          if (since && issue.lastSeenAt < since) return false;
-          return true;
-        });
+      // -----------------------------------------------------------------
+      // Incidents：查询 API（Issue 聚合 + Occurrence drill-down）
+      // -----------------------------------------------------------------
+      if (request.method === "GET" && url.pathname === "/v1/incidents/health") {
         this.writeJson(response, 200, {
           schemaVersion: "1.0",
           generatedAt: new Date().toISOString(),
-          total: filtered.length,
-          limit,
-          offset,
-          issues: filtered.slice(offset, offset + limit),
+          writer: this.incidents.writerHealth(),
         });
         return;
       }
+      if (request.method === "GET" && url.pathname === "/v1/incidents/export") {
+        await this.handleIncidentExport(request, response, url);
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/v1/incidents") {
+        await this.handleIncidentList(request, response, url);
+        return;
+      }
       if (request.method === "POST" && url.pathname === "/v1/incidents") {
-        // Bot runtime 上报入口（stuck/oscillation/deadline 等）；token 已在上面统一校验
-        let body;
-        try {
-          body = JSON.parse(await this.readRequestBody(request));
-        } catch {
-          this.writeError(response, 400, "INVALID_REQUEST", "请求正文不是有效 JSON。");
+        await this.handleIncidentReport(request, response);
+        return;
+      }
+      const exportMatch = url.pathname.match(/^\/v1\/incidents\/(INC-[0-9]{4,})\/export$/u);
+      if (request.method === "GET" && exportMatch) {
+        await this.handleIncidentExport(request, response, url, exportMatch[1]);
+        return;
+      }
+      const occurrenceMatch = url.pathname.match(/^\/v1\/incidents\/(INC-[0-9]{4,})\/occurrences\/(OCC-[0-9]{4,})$/u);
+      if (request.method === "GET" && occurrenceMatch) {
+        const occurrence = this.incidents.getOccurrence(occurrenceMatch[1], occurrenceMatch[2]);
+        if (!occurrence) {
+          this.writeError(response, 404, "OCCURRENCE_NOT_FOUND", "未找到该 Occurrence。");
           return;
         }
-        try {
-          const result = this.incidents.report({
-            subject: body.subject === "process_group" || body.subject === "server" || body.subject === "service" ? body.subject : "bot",
-            botId: typeof body.botId === "string" ? body.botId : null,
-            sessionId: typeof body.sessionId === "string" ? body.sessionId : null,
-            serverProfileId: typeof body.serverProfileId === "string" ? body.serverProfileId : null,
-            minecraftVersion: typeof body.minecraftVersion === "string" ? body.minecraftVersion : null,
-            protocolVersion: typeof body.protocolVersion === "number" ? body.protocolVersion : null,
-            gitCommit: typeof body.gitCommit === "string" ? body.gitCommit : null,
-            branch: typeof body.branch === "string" ? body.branch : null,
-            goal: typeof body.goal === "string" ? body.goal.slice(0, 300) : null,
-            skillId: typeof body.skillId === "string" ? body.skillId : null,
-            skillStep: typeof body.skillStep === "string" ? body.skillStep : null,
-            phase: typeof body.phase === "string" ? body.phase : null,
-            position: body.position && Number.isFinite(body.position.x) ? body.position : null,
-            dimension: typeof body.dimension === "string" ? body.dimension : null,
-            failureCode: typeof body.failureCode === "string" ? body.failureCode : "UNKNOWN_FAILURE",
-            incidentType: typeof body.incidentType === "string" ? body.incidentType : "UNKNOWN_FAILURE",
-            sourceComponent: typeof body.sourceComponent === "string" ? body.sourceComponent.slice(0, 120) : "bot-runtime",
-            severity: body.severity === "INFO" || body.severity === "WARNING" || body.severity === "CRITICAL" ? body.severity : "ERROR",
-            expected: typeof body.expected === "string" ? body.expected.slice(0, 600) : null,
-            actual: typeof body.actual === "string" ? body.actual.slice(0, 600) : null,
-            eventWindow: Array.isArray(body.eventWindow) ? body.eventWindow.slice(-60) : [],
-            snapshots: body.snapshots && typeof body.snapshots === "object" ? body.snapshots : {},
-            normalizedErrorSignature: typeof body.normalizedErrorSignature === "string" ? body.normalizedErrorSignature.slice(0, 200) : undefined,
-            actionFamily: typeof body.actionFamily === "string" ? body.actionFamily.slice(0, 120) : undefined,
-          });
-          this.writeJson(response, 201, {
-            schemaVersion: "1.0",
-            generatedAt: new Date().toISOString(),
-            incidentId: result.issue.incidentId,
-            occurrenceId: result.occurrence.occurrenceId,
-            createdIssue: result.createdIssue,
-            occurrenceCount: result.issue.occurrenceCount,
-          });
-        } catch (error) {
-          this.writeError(response, 400, "INVALID_REQUEST", error instanceof Error ? error.message.slice(0, 200) : "invalid incident");
+        this.writeJson(response, 200, {
+          schemaVersion: "1.0",
+          generatedAt: new Date().toISOString(),
+          occurrence: structuredClone(occurrence),
+        });
+        return;
+      }
+      const statusMatch = url.pathname.match(/^\/v1\/incidents\/(INC-[0-9]{4,})\/status$/u);
+      if (request.method === "POST" && statusMatch) {
+        const body = await readJson(request);
+        const to = typeof body?.status === "string" ? body.status : null;
+        const allowed = ["open", "investigating", "known_issue", "fixed", "ignored"];
+        if (!allowed.includes(to)) {
+          this.writeError(response, 400, "INVALID_STATUS", `status 必须是 ${allowed.join("/")}`);
+          return;
         }
+        const result = this.incidents.transitionStatus(statusMatch[1], to, {
+          fixedByCommit: typeof body?.fixedByCommit === "string" ? body.fixedByCommit.slice(0, 40) : undefined,
+          actor: typeof body?.actor === "string" ? body.actor.slice(0, 60) : "dashboard-operator",
+        });
+        if (!result.ok) {
+          this.writeError(response, 409, "STATUS_TRANSITION_REJECTED", result.reason ?? "非法状态迁移。");
+          return;
+        }
+        this.writeJson(response, 200, {
+          schemaVersion: "1.0",
+          generatedAt: new Date().toISOString(),
+          issue: structuredClone(this.incidents.getIssue(statusMatch[1])),
+        });
+        return;
+      }
+      const verificationMatch = url.pathname.match(/^\/v1\/incidents\/(INC-[0-9]{4,})\/verification$/u);
+      if (request.method === "POST" && verificationMatch) {
+        const body = await readJson(request);
+        let ok = false;
+        if (body?.action === "request") ok = this.incidents.requestVerification(verificationMatch[1]);
+        else if (body?.action === "record" && (body?.result === "passed" || body?.result === "failed")) {
+          ok = this.incidents.recordVerificationResult(verificationMatch[1], body.result);
+        } else {
+          this.writeError(response, 400, "INVALID_REQUEST", "action 必须是 request 或 record(result=passed|failed)。");
+          return;
+        }
+        if (!ok) {
+          this.writeError(response, 409, "VERIFICATION_REJECTED", "验证请求被拒绝（Issue 不存在或状态不允许）。");
+          return;
+        }
+        this.writeJson(response, 200, {
+          schemaVersion: "1.0",
+          generatedAt: new Date().toISOString(),
+          issue: structuredClone(this.incidents.getIssue(verificationMatch[1])),
+        });
         return;
       }
       const incidentMatch = url.pathname.match(/^\/v1\/incidents\/(INC-[0-9]{4,})$/u);
@@ -456,8 +519,60 @@ export class StudioLocalManager {
         this.writeJson(response, 200, {
           schemaVersion: "1.0",
           generatedAt: new Date().toISOString(),
-          issue,
-          occurrences: this.incidents.listOccurrences(issue.incidentId),
+          issue: structuredClone(issue),
+          occurrences: structuredClone(this.incidents.listOccurrences(issue.incidentId)),
+        });
+        return;
+      }
+      // -----------------------------------------------------------------
+      // Local Test Server lifecycle（ownership 守卫 + operationId 异步语义）
+      // -----------------------------------------------------------------
+      if (request.method === "GET" && url.pathname === "/v1/servers/local-test") {
+        const observed = await observeLocalTestServer();
+        observed.desiredState = this.localTestDesired === "on" || this.localTestRunningOps() ? "on" : "off";
+        observed.shutdownPolicy = this.localTestShutdownPolicy;
+        observed.ownerManagerSessionId = this.sessionId;
+        observed.capabilities = { start: true, stop: true, restart: true, resetWorld: true, logs: true };
+        this.writeJson(response, 200, {
+          schemaVersion: "1.0",
+          generatedAt: new Date().toISOString(),
+          resource: observed,
+        });
+        return;
+      }
+      const localTestAction = url.pathname.match(/^\/v1\/servers\/local-test\/(start|stop|restart|reset)$/u);
+      if (request.method === "POST" && localTestAction) {
+        await this.handleLocalTestAction(request, response, localTestAction[1]);
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/v1/servers/local-test/logs") {
+        const q = url.searchParams;
+        const tail = Math.min(500, Math.max(1, Number.parseInt(q.get("tail") ?? "200", 10) || 200));
+        const result = await readLocalTestServerLog(tail);
+        if (!result.available) {
+          this.writeError(response, 404, "LOCAL_TEST_LOGS_UNAVAILABLE", result.reason);
+          return;
+        }
+        this.writeJson(response, 200, {
+          schemaVersion: "1.0",
+          generatedAt: new Date().toISOString(),
+          tail: result.tail,
+          logs: redactServerLogText(result.logs),
+        });
+        return;
+      }
+      const operationMatch = url.pathname.match(/^\/v1\/operations\/(op-[0-9a-z-]+)$/u);
+      if (request.method === "GET" && operationMatch) {
+        const operation = this.operations.get(operationMatch[1]);
+        if (!operation || Date.now() - operation.createdAt > 10 * 60_000) {
+          this.operations.delete(operationMatch[1]);
+          this.writeError(response, 404, "OPERATION_NOT_FOUND", "未找到该操作（或已过期）。");
+          return;
+        }
+        this.writeJson(response, 200, {
+          schemaVersion: "1.0",
+          generatedAt: new Date().toISOString(),
+          operation: { ...operation },
         });
         return;
       }
@@ -507,6 +622,413 @@ export class StudioLocalManager {
       const error = managerError(cause);
       this.writeError(response, error.status, error.code, error.message);
     }
+  }
+
+  // -------------------------------------------------------------------
+  // Incident query/report/export handlers
+  // -------------------------------------------------------------------
+
+  async handleIncidentList(request, response, url) {
+    void request;
+    const q = url.searchParams;
+    const limit = Math.min(200, Math.max(1, Number.parseInt(q.get("limit") ?? "50", 10) || 50));
+    const offset = Math.max(0, Number.parseInt(q.get("offset") ?? "0", 10) || 0);
+    const filters = {};
+    for (const key of ["status", "severity", "suspectedLayer", "failureCode", "botId", "serverProfileId", "skillId", "incidentType", "fingerprint", "minecraftVersion"]) {
+      const value = q.get(key);
+      if (value !== null && value.length > 0) filters[key] = value.slice(0, 200);
+    }
+    const from = q.get("from");
+    const to = q.get("to");
+    const since = q.get("since");
+    for (const [name, value] of [["from", from], ["to", to], ["since", since]]) {
+      if (value === null) continue;
+      if (!/^\d{4}-\d{2}-\d{2}(T[\d:.]+Z?)?$/u.test(value)) {
+        this.writeError(response, 400, "INVALID_TIME_FILTER", `${name} 必须是 ISO 时间（YYYY-MM-DD 或完整 ISO）。`);
+        return;
+      }
+    }
+    // 超大时间范围上限（from-to ≤ 366 天）
+    if (from && to) {
+      const span = Date.parse(to.endsWith("Z") ? to : `${to}T23:59:59Z`) - Date.parse(from);
+      if (span > 366 * 86_400_000) {
+        this.writeError(response, 400, "TIME_RANGE_TOO_LARGE", "时间范围不能超过 366 天。");
+        return;
+      }
+    }
+    const filtered = this.incidents.listIssues().filter((issue) => {
+      if (filters.status && issue.status !== filters.status) return false;
+      if (filters.severity && issue.maxSeverity !== filters.severity) return false;
+      if (filters.suspectedLayer && issue.suspectedLayer !== filters.suspectedLayer) return false;
+      if (filters.failureCode && issue.primaryFailureCode !== filters.failureCode) return false;
+      if (filters.incidentType && issue.type !== filters.incidentType) return false;
+      if (filters.fingerprint && issue.fingerprint !== filters.fingerprint) return false;
+      if (filters.botId && !issue.affectedBotIds.includes(filters.botId)) return false;
+      if (filters.serverProfileId && !issue.affectedServerProfileIds.includes(filters.serverProfileId)) return false;
+      if (since && issue.lastSeenAt < since) return false;
+      if (from && issue.lastSeenAt < from) return false;
+      if (to && issue.lastSeenAt > `${to}T23:59:59.999Z`.replace(" T", "T") && issue.lastSeenAt.slice(0, 10) > to) return false;
+      return true;
+    });
+    // skillId filter 需要看 occurrences（issue 行不存 skillId 列表）
+    if (filters.skillId) {
+      const matchingIds = new Set();
+      for (const issue of filtered) {
+        if (this.incidents.listOccurrences(issue.incidentId).some((occurrence) => occurrence.skillId === filters.skillId)) {
+          matchingIds.add(issue.incidentId);
+        }
+      }
+      for (const issue of filtered) {
+        if (!matchingIds.has(issue.incidentId)) filtered.splice(filtered.indexOf(issue), 1);
+      }
+    }
+    const page = filtered.slice(offset, offset + limit);
+    this.writeJson(response, 200, {
+      schemaVersion: "1.0",
+      generatedAt: new Date().toISOString(),
+      total: filtered.length,
+      limit,
+      offset,
+      nextOffset: offset + page.length < filtered.length ? offset + page.length : null,
+      filters,
+      issues: structuredClone(page),
+    });
+  }
+
+  async handleIncidentReport(request, response) {
+    // Bot runtime 上报入口；token 已在上面统一校验
+    let body;
+    try {
+      body = JSON.parse(await this.readRequestBody(request));
+    } catch {
+      this.writeError(response, 400, "INVALID_REQUEST", "请求正文不是有效 JSON。");
+      return;
+    }
+    // 幂等：reporterEventId 去重（spool 重放不产生重复 occurrence）
+    const eventId = typeof body?.reporterEventId === "string" ? body.reporterEventId.slice(0, 64) : null;
+    if (eventId) {
+      const cached = this.incidentEventCache.get(eventId);
+      if (cached) {
+        this.writeJson(response, 200, {
+          schemaVersion: "1.0",
+          generatedAt: new Date().toISOString(),
+          replayed: true,
+          ...cached,
+        });
+        return;
+      }
+    }
+    try {
+      const result = this.incidents.report({
+        subject: body.subject === "process_group" || body.subject === "server" || body.subject === "service" ? body.subject : "bot",
+        botId: typeof body.botId === "string" ? body.botId : null,
+        sessionId: typeof body.sessionId === "string" ? body.sessionId.slice(0, 120) : null,
+        runtimeInstanceId: typeof body.runtimeInstanceId === "string" ? body.runtimeInstanceId.slice(0, 120) : null,
+        correlationId: typeof body.correlationId === "string" ? body.correlationId.slice(0, 120) : null,
+        goalId: typeof body.goalId === "string" ? body.goalId.slice(0, 120) : null,
+        taskId: typeof body.taskId === "string" ? body.taskId.slice(0, 120) : null,
+        serverProfileId: typeof body.serverProfileId === "string" ? body.serverProfileId.slice(0, 120) : null,
+        minecraftVersion: typeof body.minecraftVersion === "string" ? body.minecraftVersion.slice(0, 40) : null,
+        protocolVersion: typeof body.protocolVersion === "number" ? body.protocolVersion : null,
+        gitCommit: typeof body.gitCommit === "string" ? body.gitCommit.slice(0, 40) : null,
+        branch: typeof body.branch === "string" ? body.branch.slice(0, 120) : null,
+        buildVersion: typeof body.buildVersion === "string" ? body.buildVersion.slice(0, 40) : null,
+        dirtyBuild: typeof body.dirtyBuild === "boolean" ? body.dirtyBuild : null,
+        goal: typeof body.goal === "string" ? body.goal.slice(0, 300) : null,
+        skillId: typeof body.skillId === "string" ? body.skillId.slice(0, 120) : null,
+        skillStep: typeof body.skillStep === "string" ? body.skillStep.slice(0, 120) : null,
+        phase: typeof body.phase === "string" ? body.phase.slice(0, 120) : null,
+        position: body.position && Number.isFinite(body.position.x) ? body.position : null,
+        dimension: typeof body.dimension === "string" ? body.dimension.slice(0, 120) : null,
+        failureCode: typeof body.failureCode === "string" ? body.failureCode : "UNKNOWN_FAILURE",
+        terminalFailureCode: typeof body.terminalFailureCode === "string" ? body.terminalFailureCode : null,
+        causedByFailureCodes: Array.isArray(body.causedByFailureCodes)
+          ? body.causedByFailureCodes.filter((code) => typeof code === "string").slice(0, 8)
+          : undefined,
+        incidentType: typeof body.incidentType === "string" ? body.incidentType : "UNKNOWN_FAILURE",
+        sourceComponent: typeof body.sourceComponent === "string" ? body.sourceComponent.slice(0, 120) : "bot-runtime",
+        severity: body.severity === "INFO" || body.severity === "WARNING" || body.severity === "CRITICAL" ? body.severity : "ERROR",
+        expected: typeof body.expected === "string" ? body.expected.slice(0, 600) : null,
+        actual: typeof body.actual === "string" ? body.actual.slice(0, 600) : null,
+        eventWindow: Array.isArray(body.eventWindow) ? body.eventWindow.slice(-60) : [],
+        snapshots: body.snapshots && typeof body.snapshots === "object" ? body.snapshots : {},
+        normalizedErrorSignature: typeof body.normalizedErrorSignature === "string" ? body.normalizedErrorSignature.slice(0, 200) : undefined,
+        actionFamily: typeof body.actionFamily === "string" ? body.actionFamily.slice(0, 120) : undefined,
+      });
+      const payload = {
+        incidentId: result.issue.incidentId,
+        occurrenceId: result.occurrence.occurrenceId,
+        createdIssue: result.createdIssue,
+        occurrenceCount: result.issue.occurrenceCount,
+      };
+      if (eventId) {
+        this.incidentEventCache.set(eventId, payload);
+        if (this.incidentEventCache.size > 512) {
+          const oldest = this.incidentEventCache.keys().next().value;
+          this.incidentEventCache.delete(oldest);
+        }
+      }
+      this.writeJson(response, 201, {
+        schemaVersion: "1.0",
+        generatedAt: new Date().toISOString(),
+        ...payload,
+      });
+    } catch (error) {
+      this.writeError(response, 400, "INVALID_REQUEST", error instanceof Error ? error.message.slice(0, 200) : "invalid incident");
+    }
+  }
+
+  /**
+   * 导出（服务端生成 + redaction + secret scan fail-closed + 正确 headers）。
+   * 单 Incident：format=json|markdown|zip|repair-prompt
+   * 批量：scope=open|last24h|bot:<botId>|skill:<skillId>|selected:<INC-...,INC-...>
+   */
+  async handleIncidentExport(request, response, url, singleIncidentId = null) {
+    void request;
+    const format = url.searchParams.get("format") ?? "json";
+    const scope = url.searchParams.get("scope");
+    const MAX_EXPORT_ISSUES = 200;
+    let issues;
+    if (singleIncidentId) {
+      const issue = this.incidents.getIssue(singleIncidentId);
+      if (!issue) {
+        this.writeError(response, 404, "INCIDENT_NOT_FOUND", "未找到该 Incident。");
+        return;
+      }
+      issues = [issue];
+    } else if (!scope) {
+      this.writeError(response, 400, "INVALID_REQUEST", "缺少 scope（open|last24h|bot:<id>|skill:<id>|selected:<INC-...>）。");
+      return;
+    } else if (scope === "open") {
+      issues = this.incidents.listIssues().filter((issue) => issue.status === "open" || issue.status === "investigating");
+    } else if (scope === "last24h") {
+      const cutoff = new Date(Date.now() - 86_400_000).toISOString();
+      issues = this.incidents.listIssues().filter((issue) => issue.lastSeenAt >= cutoff);
+    } else if (scope.startsWith("bot:")) {
+      const botId = scope.slice(4);
+      issues = this.incidents.listIssues().filter((issue) => issue.affectedBotIds.includes(botId));
+    } else if (scope.startsWith("skill:")) {
+      const skillId = scope.slice(6);
+      issues = this.incidents.listIssues().filter((issue) =>
+        this.incidents.listOccurrences(issue.incidentId).some((occurrence) => occurrence.skillId === skillId));
+    } else if (scope.startsWith("selected:")) {
+      const ids = scope.slice(9).split(",").map((id) => id.trim()).filter((id) => /^INC-[0-9]{4,}$/u.test(id)).slice(0, MAX_EXPORT_ISSUES);
+      issues = ids.map((id) => this.incidents.getIssue(id)).filter(Boolean);
+    } else {
+      this.writeError(response, 400, "INVALID_SCOPE", "不支持的导出范围。");
+      return;
+    }
+    issues = issues.slice(0, MAX_EXPORT_ISSUES);
+    if (issues.length === 0) {
+      this.writeError(response, 404, "NOTHING_TO_EXPORT", "范围内没有可导出的 Issue。");
+      return;
+    }
+
+    if (format === "zip") {
+      // 单 Incident bundle（多 issue 时打包为 issues-<n>.zip 同结构）
+      const files = [];
+      const manifestEntries = [];
+      for (const issue of issues) {
+        const occurrences = this.incidents.listOccurrences(issue.incidentId);
+        const occurrence = occurrences[occurrences.length - 1] ?? null;
+        const incidentJson = JSON.stringify({ issue: redactSecrets(structuredClone(issue)), occurrences: redactSecrets(structuredClone(occurrences)) }, null, 2);
+        if (!safeExportText(incidentJson)) {
+          this.writeError(response, 500, "EXPORT_SECRET_SCAN_FAILED", `导出 ${issue.incidentId} 的 JSON 未通过 secret 扫描（fail closed）。`);
+          return;
+        }
+        files.push({ name: `${issue.incidentId}.incident.json`, content: incidentJson });
+        if (occurrence) {
+          const { markdown } = occurrenceToMarkdown(issue, occurrence);
+          const safeMarkdown = safeExportText(markdown);
+          if (!safeMarkdown) {
+            this.writeError(response, 500, "EXPORT_SECRET_SCAN_FAILED", `导出 ${issue.incidentId} 的 Markdown 未通过 secret 扫描（fail closed）。`);
+            return;
+          }
+          files.push({ name: `${issue.incidentId}.summary.md`, content: safeMarkdown });
+          const { prompt, promptVersion } = buildRepairPrompt(issue, occurrence, {
+            repository: "rennaikankk-cmyk/minecraft-multi-agent-studio",
+            bundleFiles: ["incident.json", "summary.md", "repair-prompt.txt", "events.jsonl", "manifest.json"],
+          });
+          const safePrompt = safeExportText(prompt);
+          if (!safePrompt) {
+            this.writeError(response, 500, "EXPORT_SECRET_SCAN_FAILED", `导出 ${issue.incidentId} 的 repair prompt 未通过 secret 扫描（fail closed）。`);
+            return;
+          }
+          files.push({ name: `${issue.incidentId}.repair-prompt.txt`, content: `${safePrompt}\n(promptVersion=${promptVersion})\n` });
+          if (occurrence.eventWindow.length > 0) {
+            const eventsJsonl = occurrence.eventWindow.map((entry) => JSON.stringify(redactSecrets(entry))).join("\n");
+            if (!safeExportText(eventsJsonl)) {
+              this.writeError(response, 500, "EXPORT_SECRET_SCAN_FAILED", `导出 ${issue.incidentId} 的事件窗口未通过 secret 扫描（fail closed）。`);
+              return;
+            }
+            files.push({ name: `${issue.incidentId}.events.jsonl`, content: `${eventsJsonl}\n` });
+          }
+          manifestEntries.push({
+            incidentId: issue.incidentId,
+            occurrenceId: occurrence.occurrenceId,
+            fingerprint: issue.fingerprint,
+            evidenceStripped: occurrence.evidenceStripped,
+            eventWindowEvents: occurrence.eventWindow.length,
+          });
+        } else {
+          manifestEntries.push({ incidentId: issue.incidentId, occurrenceId: null, note: "no retained occurrences (retention)" });
+        }
+      }
+      const exportManifest = JSON.stringify({
+        exportSchemaVersion: "1.0",
+        repairPromptVersion: "repair-v1",
+        generatedAt: new Date().toISOString(),
+        scope: singleIncidentId ? `incident:${singleIncidentId}` : scope,
+        issueCount: issues.length,
+        issues: manifestEntries,
+        sourceGitCommit: GIT_METADATA.commit,
+        redactionVersion: "redact-v1",
+        unavailable: [
+          { file: "bot.log", reason: "per-bot logs not included in bundle export (bounded tail available via bot log files)" },
+          { file: "screenshot.png", reason: "screenshot capability not implemented" },
+        ],
+        secretScan: "pass",
+      }, null, 2);
+      if (!safeExportText(exportManifest)) {
+        this.writeError(response, 500, "EXPORT_SECRET_SCAN_FAILED", "manifest 未通过 secret 扫描（fail closed）。");
+        return;
+      }
+      files.push({ name: "manifest.json", content: exportManifest });
+      let zip;
+      try {
+        zip = buildZip(files);
+      } catch (error) {
+        this.writeError(response, 500, "EXPORT_ZIP_FAILED", error instanceof Error ? error.message : "zip build failed");
+        return;
+      }
+      response.statusCode = 200;
+      response.setHeader("Content-Type", "application/zip");
+      response.setHeader("Content-Disposition", `attachment; filename="${singleIncidentId ? `incident-${singleIncidentId}` : `studio-incidents-${issues.length}`}.zip"`);
+      response.end(zip);
+      return;
+    }
+
+    // json / markdown / repair-prompt（文本导出）
+    let text;
+    let contentType = "application/json; charset=utf-8";
+    let filename;
+    if (format === "json") {
+      text = JSON.stringify({
+        exportSchemaVersion: "1.0",
+        generatedAt: new Date().toISOString(),
+        scope: singleIncidentId ? `incident:${singleIncidentId}` : scope,
+        redactionVersion: "redact-v1",
+        issues: issues.map((issue) => ({
+          issue: redactSecrets(structuredClone(issue)),
+          occurrences: redactSecrets(structuredClone(this.incidents.listOccurrences(issue.incidentId))),
+        })),
+      }, null, 2);
+      filename = `incidents-${singleIncidentId ?? scope.replace(/[^a-z0-9-]/giu, "-")}.json`;
+    } else if (format === "markdown") {
+      const parts = [];
+      for (const issue of issues) {
+        const occurrences = this.incidents.listOccurrences(issue.incidentId);
+        const occurrence = occurrences[occurrences.length - 1];
+        if (occurrence) parts.push(occurrenceToMarkdown(issue, occurrence).markdown);
+        else parts.push(`# ${issue.incidentId} — ${issue.type}\n\n(no retained occurrences)\n`);
+      }
+      text = parts.join("\n\n---\n\n");
+      contentType = "text/markdown; charset=utf-8";
+      filename = `incidents-${singleIncidentId ?? scope.replace(/[^a-z0-9-]/giu, "-")}.md`;
+    } else if (format === "repair-prompt") {
+      const parts = [];
+      for (const issue of issues) {
+        const occurrences = this.incidents.listOccurrences(issue.incidentId);
+        const occurrence = occurrences[occurrences.length - 1];
+        if (occurrence) parts.push(buildRepairPrompt(issue, occurrence, { repository: "rennaikankk-cmyk/minecraft-multi-agent-studio" }).prompt);
+      }
+      text = parts.join("\n\n====\n\n");
+      contentType = "text/plain; charset=utf-8";
+      filename = `repair-prompts-${singleIncidentId ?? scope.replace(/[^a-z0-9-]/giu, "-")}.txt`;
+    } else {
+      this.writeError(response, 400, "INVALID_FORMAT", "format 必须是 json|markdown|zip|repair-prompt。");
+      return;
+    }
+    // 最终 secret scan：fail closed（宁可拒绝导出也不泄漏）
+    const safe = safeExportText(text);
+    if (safe === null) {
+      this.writeError(response, 500, "EXPORT_SECRET_SCAN_FAILED", "导出内容未通过最终 secret 扫描，已拒绝（fail closed）。");
+      return;
+    }
+    response.statusCode = 200;
+    response.setHeader("Content-Type", contentType);
+    response.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    response.end(safe);
+  }
+
+  // -------------------------------------------------------------------
+  // Local Test Server lifecycle operations（operationId 异步语义）
+  // -------------------------------------------------------------------
+
+  localTestRunningOps() {
+    for (const operation of this.operations.values()) {
+      if (operation.kind === "local-test" && operation.status === "running") return true;
+    }
+    return false;
+  }
+
+  async handleLocalTestAction(request, response, action) {
+    const body = await readJson(request).catch(() => ({}));
+    const operationId = `op-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const operation = {
+      operationId,
+      kind: "local-test",
+      action,
+      status: "running",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      result: null,
+      error: null,
+    };
+    this.operations.set(operationId, operation);
+    // Reset World 二次确认：必须携带精确 world identity（卷名）
+    if (action === "reset") {
+      const confirm = typeof body?.confirmWorldIdentity === "string" ? body.confirmWorldIdentity : null;
+      if (confirm !== LOCAL_TEST_VOLUME) {
+        operation.status = "failed";
+        operation.error = "RESET_CONFIRMATION_REQUIRED";
+        this.writeError(response, 400, "RESET_CONFIRMATION_REQUIRED",
+          `Reset World 需要二次确认：confirmWorldIdentity 必须精确等于 "${LOCAL_TEST_VOLUME}"。`);
+        return;
+      }
+    }
+    this.writeJson(response, 202, {
+      schemaVersion: "1.0",
+      generatedAt: new Date().toISOString(),
+      operationId,
+      status: "running",
+      note: "轮询 GET /v1/operations/<operationId> 获取最终 observed result。",
+    });
+    // 后台执行（不阻塞 HTTP；operation 状态由后台更新）
+    void (async () => {
+      try {
+        let result;
+        if (action === "start" || action === "restart") {
+          if (action === "restart") {
+            await stopLocalTestServer({ sessionId: this.sessionId });
+          }
+          result = await startLocalTestServer({ sessionId: this.sessionId, reason: `ui:${action}` });
+        } else if (action === "stop") {
+          result = await stopLocalTestServer({ sessionId: this.sessionId });
+        } else {
+          result = await resetLocalTestWorld({ sessionId: this.sessionId });
+        }
+        operation.status = result?.status === "refused" ? "failed" : "succeeded";
+        operation.result = result;
+        if (result?.status === "refused") operation.error = result.error;
+        operation.updatedAt = new Date().toISOString();
+        if (action === "start" || action === "restart") this.localTestDesired = result?.status === "ready" ? "on" : "off";
+      } catch (cause) {
+        operation.status = "failed";
+        operation.error = cause instanceof Error ? cause.message.slice(0, 300) : String(cause);
+        operation.updatedAt = new Date().toISOString();
+      }
+    })();
   }
 
   async createBot(input) {
@@ -629,6 +1151,8 @@ export class StudioLocalManager {
         // Bot runtime 的非阻塞 Incident 上报入口（stuck/oscillation 等）
         STUDIO_INCIDENT_ENDPOINT: `http://127.0.0.1:${this.options.port}/v1/incidents`,
         STUDIO_INCIDENT_TOKEN: this.options.token,
+        // crash-safe spool：manager 不可达时的有界本地缓冲（重放幂等）
+        STUDIO_INCIDENT_SPOOL_PATH: path.join(this.runtimeRoot, "incident-spool", `${botId}.jsonl`),
         ...(GIT_METADATA.commit ? { STUDIO_RUNTIME_COMMIT: GIT_METADATA.commit } : {}),
         ...(GIT_METADATA.branch ? { STUDIO_RUNTIME_BRANCH: GIT_METADATA.branch } : {}),
       },
@@ -687,6 +1211,8 @@ export class StudioLocalManager {
           severity: "CRITICAL",
           expected: "bot runtime keeps running or exits 0 after graceful stop",
           actual: `exit code=${code ?? "none"} signal=${signal ?? "none"}`,
+          ...(GIT_METADATA.commit ? { gitCommit: GIT_METADATA.commit } : {}),
+          ...(GIT_METADATA.branch ? { branch: GIT_METADATA.branch } : {}),
           snapshots: { username: config.username, serverHost: config.serverHost, serverPort: config.serverPort },
         });
       }
@@ -1125,8 +1651,7 @@ function validatePersistedBot(input, slots) {
 }
 
 async function readJson(request) {
-  const declared = request.headers["content-length"];
-  if (declared && (!/^\d+$/u.test(declared) || Number(declared) > MAX_REQUEST_BYTES)) {
+  const declared = request.headers["content-length"];  if (declared && (!/^\d+$/u.test(declared) || Number(declared) > MAX_REQUEST_BYTES)) {
     throw managedError("INVALID_REQUEST", "请求正文过大。", 413);
   }
   const chunks = [];
@@ -1290,4 +1815,10 @@ function boundedError(cause) {
   return (cause instanceof Error ? cause.message : String(cause))
     .replace(/[\r\n\t]+/gu, " ")
     .slice(0, 500);
+}
+
+/** local test server 日志脱敏：服务器输出按 UNTRUSTED_EXTERNAL_TEXT 处理，secret 模式统一遮蔽。 */
+function redactServerLogText(text) {
+  const marked = `[UNTRUSTED_EXTERNAL_TEXT] ${text}`;
+  return redactSecrets(marked);
 }

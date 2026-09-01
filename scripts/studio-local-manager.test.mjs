@@ -441,3 +441,219 @@ test("selectModel fail-closed semantics", async () => {
   // 零模型 → NOT_AVAILABLE
   assert.equal(selectModel([], undefined).error, "MODEL_NOT_AVAILABLE");
 });
+
+// ---------------------------------------------------------------------------
+// Round 6：Incident 查询/幂等/状态机/导出 + lifecycle operation 端点
+// ---------------------------------------------------------------------------
+
+async function startIncidentManager(context, extraEnv = {}) {
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "studio-manager-incidents-"));
+  context.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  const manager = new StudioLocalManager({
+    repositoryRoot: process.cwd(),
+    runtimeRoot,
+    port: 0,
+    token: TOKEN,
+    slots: createLocalBotSlots(SECRET, 1),
+    aiStatus: unavailableStatus(),
+    environment: { STUDIO_SPARK_AUTO_DISCOVERY: "0", ...extraEnv },
+    runtimeLinkPort: 3220,
+    packagedMode: false,
+  });
+  manager.startBot = fakeStart(manager);
+  const address = await manager.start();
+  context.after(() => manager.stop());
+  const base = `http://127.0.0.1:${address.port}`;
+  const headers = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
+  return { manager, base, headers };
+}
+
+test("incident query API: filters, pagination tie-breaker, occurrence drill-down", async (context) => {
+  const { base, headers } = await startIncidentManager(context);
+  const report = (body) => fetch(`${base}/v1/incidents`, { method: "POST", headers, body: JSON.stringify(body) });
+  await report({ subject: "bot", botId: "studio-bot-01", failureCode: "PATH_NO_PROGRESS", incidentType: "STUCK", sourceComponent: "progress-watchdog", serverProfileId: "sp-local", skillId: "movement.goto", minecraftVersion: "1.21.11", protocolVersion: 774, gitCommit: "abc1234" });
+  await report({ subject: "bot", botId: "studio-bot-01", failureCode: "SKILL_RECOVERY_EXHAUSTED", incidentType: "SKILL_FAILED", sourceComponent: "skill-executor", terminalFailureCode: "SKILL_RECOVERY_EXHAUSTED", causedByFailureCodes: ["PATHFINDER_GOTO_FAILED"] });
+  await report({ subject: "bot", botId: "studio-bot-02", failureCode: "SERVER_KICKED", incidentType: "SERVER_KICK", sourceComponent: "connection" });
+
+  // filter: failureCode（注意 fast-fail 链的主码已被 causal swap 为 PATHFINDER_GOTO_FAILED）
+  const pathList = await (await fetch(`${base}/v1/incidents?failureCode=PATHFINDER_GOTO_FAILED`, { headers })).json();
+  assert.equal(pathList.total, 1);
+  assert.equal(pathList.issues[0].suspectedLayer, "PATHFINDING");
+  assert.equal(pathList.issues[0].terminalFailureCode, "SKILL_RECOVERY_EXHAUSTED");
+
+  // filter: serverProfileId / botId
+  const byServer = await (await fetch(`${base}/v1/incidents?serverProfileId=sp-local`, { headers })).json();
+  assert.equal(byServer.total, 1);
+  const byBot = await (await fetch(`${base}/v1/incidents?botId=studio-bot-02`, { headers })).json();
+  assert.equal(byBot.total, 1);
+
+  // 非法时间 filter → 结构化 4xx
+  const badTime = await fetch(`${base}/v1/incidents?from=not-a-date`, { headers });
+  assert.equal(badTime.status, 400);
+  assert.equal((await badTime.json()).error.code, "INVALID_TIME_FILTER");
+
+  // 分页 + nextOffset
+  const page1 = await (await fetch(`${base}/v1/incidents?limit=2`, { headers })).json();
+  assert.equal(page1.issues.length, 2);
+  assert.equal(typeof page1.nextOffset, "number");
+  const page2 = await (await fetch(`${base}/v1/incidents?limit=2&offset=${page1.nextOffset}`, { headers })).json();
+  assert.equal(page2.issues.length, 1);
+  const ids = [...page1.issues.map((i) => i.incidentId), ...page2.issues.map((i) => i.incidentId)];
+  assert.equal(new Set(ids).size, 3, "分页不重复");
+
+  // occurrence drill-down
+  const detail = await (await fetch(`${base}/v1/incidents/${page1.issues[0].incidentId}`, { headers })).json();
+  assert.ok(Array.isArray(detail.occurrences));
+  const occurrence = detail.occurrences[0];
+  const occurrenceDetail = await (await fetch(`${base}/v1/incidents/${detail.issue.incidentId}/occurrences/${occurrence.occurrenceId}`, { headers })).json();
+  assert.equal(occurrenceDetail.occurrence.occurrenceId, occurrence.occurrenceId);
+  // 身份字段透传：定位 studio-bot-01 在 sp-local 上的 issue
+  const localIssue = (await (await fetch(`${base}/v1/incidents?botId=studio-bot-01&serverProfileId=sp-local`, { headers })).json()).issues[0];
+  const localDetail = await (await fetch(`${base}/v1/incidents/${localIssue.incidentId}`, { headers })).json();
+  assert.equal(localDetail.occurrences[0].minecraftVersion, "1.21.11");
+  assert.equal(localDetail.occurrences[0].protocolVersion, 774);
+  assert.equal(localDetail.occurrences[0].gitCommit, "abc1234");
+});
+
+test("incident POST idempotency: reporterEventId replay does not duplicate", async (context) => {
+  const { base, headers, manager } = await startIncidentManager(context);
+  const body = {
+    subject: "bot", botId: "studio-bot-01", failureCode: "PATH_NO_PROGRESS", incidentType: "STUCK",
+    sourceComponent: "progress-watchdog", reporterEventId: "evt-fixed-1",
+  };
+  const first = await fetch(`${base}/v1/incidents`, { method: "POST", headers, body: JSON.stringify(body) });
+  assert.equal(first.status, 201);
+  const second = await fetch(`${base}/v1/incidents`, { method: "POST", headers, body: JSON.stringify(body) });
+  assert.equal(second.status, 200);
+  assert.equal((await second.json()).replayed, true);
+  const list = await (await fetch(`${base}/v1/incidents`, { headers })).json();
+  assert.equal(list.total, 1);
+  assert.equal(list.issues[0].occurrenceCount, 1);
+  assert.equal(manager.incidents.listOccurrences(list.issues[0].incidentId).length, 1);
+});
+
+test("incident status transition requires passed verification before fixed", async (context) => {
+  const { base, headers } = await startIncidentManager(context);
+  await fetch(`${base}/v1/incidents`, {
+    method: "POST", headers,
+    body: JSON.stringify({ subject: "bot", botId: "studio-bot-01", failureCode: "PATH_NO_PROGRESS", incidentType: "STUCK", sourceComponent: "pf" }),
+  });
+  const list = await (await fetch(`${base}/v1/incidents`, { headers })).json();
+  const incidentId = list.issues[0].incidentId;
+
+  const direct = await fetch(`${base}/v1/incidents/${incidentId}/status`, { method: "POST", headers, body: JSON.stringify({ status: "fixed" }) });
+  assert.equal(direct.status, 409);
+  assert.equal((await direct.json()).error.code, "STATUS_TRANSITION_REJECTED");
+
+  await fetch(`${base}/v1/incidents/${incidentId}/status`, { method: "POST", headers, body: JSON.stringify({ status: "investigating" }) });
+  const noVerify = await fetch(`${base}/v1/incidents/${incidentId}/status`, { method: "POST", headers, body: JSON.stringify({ status: "fixed", fixedByCommit: "abc" }) });
+  assert.equal(noVerify.status, 409);
+
+  await fetch(`${base}/v1/incidents/${incidentId}/verification`, { method: "POST", headers, body: JSON.stringify({ action: "request" }) });
+  await fetch(`${base}/v1/incidents/${incidentId}/verification`, { method: "POST", headers, body: JSON.stringify({ action: "record", result: "passed" }) });
+  const fixed = await fetch(`${base}/v1/incidents/${incidentId}/status`, { method: "POST", headers, body: JSON.stringify({ status: "fixed", fixedByCommit: "abc1234" }) });
+  assert.equal(fixed.status, 200);
+  const issue = (await fixed.json()).issue;
+  assert.equal(issue.status, "fixed");
+  assert.equal(issue.fixedByCommit, "abc1234");
+  assert.ok(issue.statusHistory.length >= 2);
+});
+
+test("incident export: json/markdown/repair-prompt/zip download with secret scan fail-closed", async (context) => {
+  const { base, headers } = await startIncidentManager(context);
+  await fetch(`${base}/v1/incidents`, {
+    method: "POST", headers,
+    body: JSON.stringify({
+      subject: "bot", botId: "studio-bot-01", failureCode: "SKILL_RECOVERY_EXHAUSTED", incidentType: "SKILL_FAILED",
+      sourceComponent: "skill-executor", terminalFailureCode: "SKILL_RECOVERY_EXHAUSTED",
+      causedByFailureCodes: ["PATHFINDER_GOTO_FAILED"], gitCommit: "abc1234",
+      expected: "reaches target", actual: "no path after retries",
+      eventWindow: [{ at: new Date().toISOString(), kind: "path_reset", detail: "replan" }],
+    }),
+  });
+  const list = await (await fetch(`${base}/v1/incidents`, { headers })).json();
+  const incidentId = list.issues[0].incidentId;
+
+  const jsonExport = await fetch(`${base}/v1/incidents/${incidentId}/export?format=json`, { headers });
+  assert.equal(jsonExport.status, 200);
+  assert.match(jsonExport.headers.get("content-type"), /application\/json/);
+  assert.match(jsonExport.headers.get("content-disposition"), /attachment/);
+  assert.ok((await jsonExport.text()).includes("PATHFINDER_GOTO_FAILED"));
+
+  const mdExport = await fetch(`${base}/v1/incidents/${incidentId}/export?format=markdown`, { headers });
+  assert.equal(mdExport.status, 200);
+  assert.match(mdExport.headers.get("content-type"), /text\/markdown/);
+  assert.ok((await mdExport.text()).includes(`# Incident ${incidentId}`));
+
+  const promptExport = await fetch(`${base}/v1/incidents/${incidentId}/export?format=repair-prompt`, { headers });
+  assert.equal(promptExport.status, 200);
+  const promptText = await promptExport.text();
+  assert.ok(promptText.includes("terminal outcome, NOT the root cause"));
+  assert.ok(promptText.includes("movement ownership"));
+
+  const zipExport = await fetch(`${base}/v1/incidents/${incidentId}/export?format=zip`, { headers });
+  assert.equal(zipExport.status, 200);
+  assert.match(zipExport.headers.get("content-type"), /application\/zip/);
+  const zipBuffer = Buffer.from(await zipExport.arrayBuffer());
+  assert.ok(zipBuffer.length > 100);
+  assert.equal(zipBuffer.readUInt32LE(0), 0x04034b50, "ZIP local file header signature");
+
+  const batch = await fetch(`${base}/v1/incidents/export?scope=open&format=json`, { headers });
+  assert.equal(batch.status, 200);
+
+  const noScope = await fetch(`${base}/v1/incidents/export`, { headers });
+  assert.equal(noScope.status, 400);
+});
+
+test("incident export secret scan fails closed on leaked credentials", async (context) => {
+  const { base, headers } = await startIncidentManager(context);
+  await fetch(`${base}/v1/incidents`, {
+    method: "POST", headers,
+    body: JSON.stringify({
+      subject: "bot", botId: "studio-bot-01", failureCode: "UNKNOWN_FAILURE", incidentType: "UNKNOWN_FAILURE",
+      sourceComponent: "x", actual: "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+    }),
+  });
+  const secretList = await (await fetch(`${base}/v1/incidents?failureCode=UNKNOWN_FAILURE`, { headers })).json();
+  const secretId = secretList.issues[0].incidentId;
+  // redact-first 设计：JWT 被统一 redaction 遮蔽后导出成功，原文绝不出现
+  const redacted = await fetch(`${base}/v1/incidents/${secretId}/export?format=json`, { headers });
+  assert.equal(redacted.status, 200);
+  const exportBody = await redacted.text();
+  assert.ok(!exportBody.includes("dozjgNryP4J3jVmNHl0w5N"), "JWT 不得原样导出");
+  assert.ok(exportBody.includes("[REDACTED]"), "secret 被脱敏标记");
+});
+
+test("incident health endpoint exposes writer health", async (context) => {
+  const { base, headers } = await startIncidentManager(context);
+  const health = await (await fetch(`${base}/v1/incidents/health`, { headers })).json();
+  assert.equal(typeof health.writer.flushCount, "number");
+  assert.equal(typeof health.writer.approxStoreBytes, "number");
+  assert.equal(typeof health.writer.maxDiskBytes, "number");
+});
+
+test("status endpoint declares incident + local-test capabilities", async (context) => {
+  const { base, headers } = await startIncidentManager(context);
+  const status = await (await fetch(`${base}/v1/status`, { headers })).json();
+  assert.equal(status.capabilities.incidentExport.zipBundle, true);
+  assert.equal(status.capabilities.localTestServer.resetWorld, true);
+  assert.ok(status.incidents, "writer health embedded in status");
+});
+
+test("local-test reset requires exact world identity confirmation", async (context) => {
+  const { base, headers } = await startIncidentManager(context);
+  const refused = await fetch(`${base}/v1/servers/local-test/reset`, { method: "POST", headers, body: JSON.stringify({}) });
+  assert.equal(refused.status, 400);
+  assert.equal((await refused.json()).error.code, "RESET_CONFIRMATION_REQUIRED");
+  const wrong = await fetch(`${base}/v1/servers/local-test/reset`, { method: "POST", headers, body: JSON.stringify({ confirmWorldIdentity: "wrong-volume" }) });
+  assert.equal(wrong.status, 400);
+});
+
+test("local-test observed state endpoint reports facts and capabilities", async (context) => {
+  const { base, headers } = await startIncidentManager(context, { STUDIO_LOCAL_TEST_SHUTDOWN_POLICY: "keep" });
+  const observed = await (await fetch(`${base}/v1/servers/local-test`, { headers })).json();
+  assert.ok(["not_running", "online", "starting"].includes(observed.resource.status));
+  assert.equal(observed.resource.world.volumeName, "studio-local-test-data");
+  assert.equal(observed.resource.shutdownPolicy, "keep");
+  assert.deepEqual(observed.resource.capabilities, { start: true, stop: true, restart: true, resetWorld: true, logs: true });
+});
