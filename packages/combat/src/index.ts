@@ -291,3 +291,49 @@ export {
   generatePassword,
   type StoredCredential,
 } from "./auth-store.js";
+
+// ---------------------------------------------------------------------------
+// tactics/ —— 战术决策核心（研究轮产物，见 ./tactics/index.ts）。
+// 生产接线是 advisory-only shadow（bot-runtime 的 STUDIO_TACTICS_CORE 闸，
+// 默认关）；未校准 profile（tactics-v0-uncalibrated）只允许在 PvP Lab 生效。
+// ---------------------------------------------------------------------------
+export {
+  DEFAULT_TACTICS_PROFILE,
+  TACTICAL_ACTION_IDS,
+  applyConfirmedHit,
+  applyDecay,
+  applyObservedHeal,
+  applyTotemPop,
+  applyTrustedScoreboardHealth,
+  buildDecisionEvidence,
+  deriveRiskBudget,
+  escapeProbability,
+  evaluateKillSecureGate,
+  initialEnemyBelief,
+  isEmergency,
+  netDamageInterval,
+  ourTtkMs,
+  ourTtdMs,
+  probabilityHealthBelow,
+  scoreTacticalActions,
+  selectTacticalAction,
+  snapshotStalenessMs,
+  validateTacticsProfile,
+  type AllyObservation,
+  type CombatSnapshot,
+  type CombatWorldFacts,
+  type DecisionEvidence,
+  type EmergencySignal,
+  type EnemyBeliefState,
+  type EnemyProfileTag,
+  type EscapeRoute,
+  type HealthBelief,
+  type InventoryValueBand,
+  type OurCombatState,
+  type PolicyContext,
+  type RiskBudgetMode,
+  type TacticalActionId,
+  type TacticalDecision,
+  type TacticsProfile,
+  type UtilityVerdict,
+} from "./tactics/index.js";
