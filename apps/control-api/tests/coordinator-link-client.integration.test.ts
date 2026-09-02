@@ -306,6 +306,36 @@ describe("Control API Coordinator Link client", () => {
 
   it("submits one authenticated goal and reuses an identical pending operation", async () => {
     const registry = new BotRegistry({ staleAfterMs: 15_000, now: () => NOW });
+    // Round 6.6：goal 提交要求 bot goal-ready（online+status+catalog）。
+    registry.ingest({
+      schemaVersion: "1.0", messageId: crypto.randomUUID(),
+      traceId: "trace-goal-test", timestamp: NOW.toISOString(),
+      source: { service: "bot-runtime", instanceId: "runtime-goal-test" },
+      botId: "worker-01", type: "bot.status.v1",
+      payload: {
+        serverProfileId: "isolated-test", runtimeInstanceId: "runtime-goal-test",
+        sequence: 1, observedAt: NOW.toISOString(), connectionState: "online",
+        health: { current: 20, maximum: 20 }, food: { level: 20, saturation: 5 },
+        armorPoints: 0, position: { x: 1, y: 64, z: 2, dimension: "minecraft:overworld" },
+        latencyMs: 10, currentTask: null,
+      },
+    });
+    registry.ingest({
+      schemaVersion: "1.0", messageId: crypto.randomUUID(),
+      traceId: "trace-goal-test", timestamp: NOW.toISOString(),
+      source: { service: "bot-runtime", instanceId: "runtime-goal-test" },
+      botId: "worker-01", type: "bot.skill-catalog.v1",
+      payload: {
+        serverProfileId: "isolated-test", runtimeInstanceId: "runtime-goal-test",
+        sequence: 2, observedAt: NOW.toISOString(),
+        minecraftVersion: "1.21.11", protocolVersion: 774,
+        skills: [{
+          skillId: "movement.goto", skillVersion: "1.0.0", availability: "available",
+          verification: "unverified", inputSchema: { type: "object", additionalProperties: false },
+          timeoutMs: 30_000, idempotent: true, selectedVariantId: "portable", unavailableReasons: [],
+        }],
+      },
+    });
     const planAndDispatch = vi.fn(async (request: any) => ({
       action: "noop" as const,
       reasonCode: "NO_SAFE_SKILL",
