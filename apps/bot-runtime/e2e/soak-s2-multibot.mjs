@@ -123,6 +123,10 @@ await withE2EFixture(async (fixture) => {
     await fixture.rcon(`give ${bot.username} minecraft:oak_log 32`).catch(() => "");
   }
   await fixture.rcon(`give ${lead.username} minecraft:furnace 4`).catch(() => "");
+  for (const bot of bots) {
+    await fixture.rcon(`give ${bot.username} minecraft:iron_pickaxe 1`).catch(() => "");
+    await fixture.rcon(`give ${bot.username} minecraft:bread 16`).catch(() => "");
+  }
   await sleep(4_000);
 
   const rconPos = await fixture.rcon(`data get entity ${lead.username} Pos`).catch(() => "");

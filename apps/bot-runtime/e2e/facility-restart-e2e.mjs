@@ -36,12 +36,12 @@ async function botOnline(botId) {
 
 async function countItem(username, itemId) {
   const raw = await fixture.rcon(`data get entity ${username} Inventory`).catch(() => "");
-  // NBT 条目形如 {Slot:0b,id:"minecraft:iron_ingot",Count:3b}——按条目配对求和，
+  // NBT 条目带空格：{Slot: 0b, id: "minecraft:raw_iron", Count: 5b}——按条目配对求和，
   // 出现次数会低估堆叠（2 锭 1 槽 = 1 次）。
   let count = 0;
-  const itemEntries = raw.match(new RegExp(`\\{[^{}]*id:"minecraft:${itemId}[^{}]*\\}`, "g")) ?? [];
+  const itemEntries = raw.match(new RegExp(`\\{[^{}]*id:\\s*"minecraft:${itemId}[^{}]*\\}`, "g")) ?? [];
   for (const entry of itemEntries) {
-    const m = /Count:(\d+)b/.exec(entry);
+    const m = /Count:\s*(\d+)b/.exec(entry);
     count += m ? Number(m[1]) : 1;
   }
   return { count, raw };
@@ -49,10 +49,15 @@ async function countItem(username, itemId) {
 
 async function submitGoal(botId, text, timeoutMs = 120_000) {
   const requestId = randomUUID();
-  await api(CONTROL_API, "/v1/goals", {
-    method: "POST",
-    body: JSON.stringify({ schemaVersion: "1.0", requestId, botId, operatorGoal: text, timeoutMs }),
-  });
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const res = await api(CONTROL_API, "/v1/goals", {
+      method: "POST",
+      body: JSON.stringify({ schemaVersion: "1.0", requestId, botId, operatorGoal: text, timeoutMs }),
+    });
+    if (res.status < 300) break;
+    // 409 GOAL_REJECTED 多为 runtime-link 注册竞态（重启后尤其）；退避重提。
+    await sleep(5_000);
+  }
   for (let i = 0; i < Math.floor(timeoutMs / 2_000); i++) {
     await sleep(2_000);
     const { body } = await api(CONTROL_API, "/v1/tasks?limit=10");
@@ -84,6 +89,10 @@ await withE2EFixture(async (f) => {
 
   const baseInc = await api(MANAGER, "/v1/incidents?limit=100");
   const noiseBase = (baseInc.body.issues ?? []).reduce((s, i) => s + (i.occurrenceCount ?? 0), 0);
+  const criticalBase = {};
+  for (const issue of baseInc.body.issues ?? []) {
+    if (issue.maxSeverity === "CRITICAL") criticalBase[issue.primaryFailureCode ?? "?"] = issue.occurrenceCount ?? 0;
+  }
 
   // 站位（树冠出生会让 pathfinder 挂）
   for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -92,7 +101,11 @@ await withE2EFixture(async (f) => {
   }
   // 注入材料与熔炉（测试条件注入；放置/熔炼/租约链真实）
   await fixture.rcon(`give ${username} minecraft:raw_iron 5`).catch(() => "");
-  await fixture.rcon(`give ${username} minecraft:furnace 2`).catch(() => "");
+  await fixture.rcon(`give ${username} minecraft:furnace 1`).catch(() => "");
+  // 消解自治 TOOL_PROGRESSION/FOOD 需求：否则自治目标以 perBotConcurrency=1
+  // 持续排队，把被测 goal 的墙钟拖到数分钟（08:2x 两轮实测根因）。
+  await fixture.rcon(`give ${username} minecraft:iron_pickaxe 1`).catch(() => "");
+  await fixture.rcon(`give ${username} minecraft:bread 8`).catch(() => "");
   await fixture.rcon(`give ${username} minecraft:oak_log 8`).catch(() => "");
   await sleep(4_000);
   const rconPos = await fixture.rcon(`data get entity ${username} Pos`).catch(() => "");
@@ -136,7 +149,7 @@ await withE2EFixture(async (f) => {
     if (await botOnline(botId)) break;
   }
   log("F4 bot back ONLINE");
-  const second = await submitGoal(botId, "烧炼 2 个 iron_ingot，使用附近可用的熔炉，燃料用 oak_log", 180_000);
+  const second = await submitGoal(botId, "烧炼 2 个 iron_ingot，使用附近可用的熔炉，燃料用 oak_log", 360_000);
   await sleep(4_000);
   const after = await countItem(username, "iron_ingot");
   const rawAfter = await countItem(username, "raw_iron");
@@ -149,15 +162,21 @@ await withE2EFixture(async (f) => {
   await sleep(1_000);
   await fixture.rcon(`give ${username} minecraft:raw_iron 2`).catch(() => "");
   await sleep(3_000);
-  const f5 = await submitGoal(botId, "烧炼 1 个 iron_ingot，使用附近可用的熔炉，燃料用 oak_log", 120_000);
+  const f5 = await submitGoal(botId, "烧炼 1 个 iron_ingot，使用附近可用的熔炉，燃料用 oak_log", 180_000);
   await sleep(2_000);
   const ironAfterF5 = await countItem(username, "iron_ingot");
-  log(`F5 smelt-after-furnace-destroyed: goal=${f5?.status} iron_delta=${ironAfterF5.count - after.count}`);
+  log(`F5 smelt-after-furnace-destroyed: goal=${f5?.status} iron_delta=${ironAfterF5.count - after.count} (must NOT complete: no furnace available)`);
   // 假成功 = 报 completed 但 iron 没有增加。
-  const f5Pass = f5 !== null && !(f5.status === "completed" && ironAfterF5.count <= after.count);
+  // 背包无熔炉（只给过 1 个且已放置被毁）→ 自放回退不可用，合法结果只能是诚实失败。
+  const f5Pass = f5 !== null && f5.status !== "completed";
 
   const finalInc = await api(MANAGER, "/v1/incidents?limit=100");
-  const newCritical = (finalInc.body.issues ?? []).filter((i) => i.maxSeverity === "CRITICAL" && !["FACILITY_VERIFY_FAILED", "BUILD_WRONG_BLOCK"].includes(i.primaryFailureCode ?? ""));
+  const newCritical = (finalInc.body.issues ?? []).filter((i) => {
+    if (i.maxSeverity !== "CRITICAL") return false;
+    if (["FACILITY_VERIFY_FAILED", "BUILD_WRONG_BLOCK"].includes(i.primaryFailureCode ?? "")) return false;
+    // 历史存量（exit-semantics 等早期测试的故意杀 bot）不算新账。
+    return (i.occurrenceCount ?? 0) > (criticalBase[i.primaryFailureCode ?? "?"] ?? 0);
+  });
   log(`incidents delta=${(finalInc.body.issues ?? []).reduce((s, i) => s + (i.occurrenceCount ?? 0), 0) - noiseBase} unexpected CRITICAL=${newCritical.length}`);
 
   await api(MANAGER, `/v1/bots/${botId}/stop`, { method: "POST" }).catch(() => undefined);

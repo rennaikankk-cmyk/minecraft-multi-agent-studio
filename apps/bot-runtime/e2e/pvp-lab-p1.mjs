@@ -78,6 +78,12 @@ await withE2EFixture(async (f) => {
   const subject = await makeBot("PA");
   const opponent = await makeBot("PB");
   log(`subject=${subject.username} opponent=${opponent.username}`);
+  // 消解自治需求：否则 TOOL_PROGRESSION 会让双方走开采矿，无法形成对峙。
+  for (const b of [subject, opponent]) {
+    await fixture.rcon(`give ${b.username} minecraft:iron_pickaxe 1`).catch(() => "");
+    await fixture.rcon(`give ${b.username} minecraft:bread 8`).catch(() => "");
+    await fixture.rcon(`give ${b.username} minecraft:wooden_sword 1`).catch(() => "");
+  }
 
   const baseStatus = await api(MANAGER, "/v1/status");
   const crashBase = (baseStatus.body?.metrics?.bot_crash_total ?? baseStatus.body?.crashes ?? 0);

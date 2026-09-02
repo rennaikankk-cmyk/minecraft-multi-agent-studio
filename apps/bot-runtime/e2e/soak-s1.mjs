@@ -111,6 +111,8 @@ await withE2EFixture(async (fixture) => {
   await fixture.rcon(`give ${username} minecraft:furnace 8`).catch(() => "");
   await fixture.rcon(`give ${username} minecraft:oak_log 64`).catch(() => "");
   await fixture.rcon(`give ${username} minecraft:chest 2`).catch(() => "");
+  await fixture.rcon(`give ${username} minecraft:iron_pickaxe 1`).catch(() => "");
+  await fixture.rcon(`give ${username} minecraft:bread 16`).catch(() => "");
   await sleep(4_000);
 
   const rconPos = await fixture.rcon(`data get entity ${username} Pos`).catch(() => "");
