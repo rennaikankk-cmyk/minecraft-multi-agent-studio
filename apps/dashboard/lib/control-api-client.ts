@@ -11,7 +11,7 @@ import {
   type ControlApiErrorCode,
   type DashboardApiErrorCode,
   type PublicBotDetailV1,
-  type GoalDispatchResultV1,
+  type GoalDispatchResultV1, type GoalDispatchWaitingV1,
   type StopBotHttpResponseV1,
   type PublicTaskDetailV1,
   type TaskHistoryListPageV1,
@@ -182,7 +182,7 @@ export async function requestDashboardGoal(
     operatorGoal: string;
   }>,
   fetchImplementation: typeof fetch = fetch,
-): Promise<GoalDispatchResultV1> {
+): Promise<GoalDispatchResultV1 | GoalDispatchWaitingV1> {
   const value = await requestJson(
     config,
     "/v1/goals",

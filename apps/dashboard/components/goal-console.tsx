@@ -6,6 +6,7 @@ import {
   dashboardGoalResponseV1Schema,
   type DashboardApiErrorCode,
   type GoalDispatchResultV1,
+  type GoalDispatchWaitingV1,
   type PublicBotDetailV1,
 } from "@minecraft-studio/protocol";
 import {
@@ -39,7 +40,7 @@ type RecentGoal = Readonly<{
   botId: string;
   operatorGoal: string;
   submittedAt: string;
-  result: GoalDispatchResultV1 | null;
+  result: GoalDispatchResultV1 | GoalDispatchWaitingV1 | null;
   error: string | null;
   retryPending: boolean;
 }>;
@@ -53,7 +54,7 @@ export function GoalConsole() {
   const [botError, setBotError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [retryPending, setRetryPending] = useState(false);
-  const [result, setResult] = useState<GoalDispatchResultV1 | null>(null);
+  const [result, setResult] = useState<GoalDispatchResultV1 | GoalDispatchWaitingV1 | null>(null);
   const [recentGoals, setRecentGoals] = useState<RecentGoal[]>([]);
   const pendingGoal = useRef<PendingGoal | null>(null);
 
@@ -221,11 +222,13 @@ export function GoalConsole() {
 
   const resultTone = result === null
     ? ""
-    : result.action === "noop"
+    : result.action === "waiting_for_bot"
       ? "unknown"
-      : result.outcome === "completed"
-        ? "available"
-        : "unavailable";
+      : result.action === "noop"
+        ? "unknown"
+        : result.outcome === "completed"
+          ? "available"
+          : "unavailable";
   const resultLabel = result?.action === "skill_result" ? result.outcome : result?.action;
   const latestGoal = recentGoals[0] ?? null;
   const latestBot = latestGoal === null
@@ -306,8 +309,12 @@ export function GoalConsole() {
             </div>
             <div><dt>结果</dt><dd>{result.action === "skill_result" ? result.outcome : "noop"}</dd></div>
             <div><dt>错误码</dt><dd>{result.action === "skill_result" ? result.errorCode ?? "无" : "无"}</dd></div>
-            <div><dt>AI 排队</dt><dd>{result.ai.queueTimeMs} ms</dd></div>
-            <div><dt>AI 执行</dt><dd>{result.ai.executionTimeMs} ms</dd></div>
+            {result.action === "skill_result" || result.action === "noop" ? (
+              <>
+                <div><dt>AI 排队</dt><dd>{result.ai.queueTimeMs} ms</dd></div>
+                <div><dt>AI 执行</dt><dd>{result.ai.executionTimeMs} ms</dd></div>
+              </>
+            ) : null}
           </dl>
         ) : null}
       </section>
@@ -405,7 +412,7 @@ function lifecycleDisplay(
       : "未执行";
     return {
       label,
-      tone: goalResultTone(goal.result),
+      tone: goalResultTone(goal.result.action === "waiting_for_bot" ? null : goal.result),
       botTask: liveTask === null
         ? botTask === null
           ? "当前快照无任务"
@@ -475,8 +482,8 @@ function taskStatusTone(status: CurrentTask["status"]): LifecycleDisplay["tone"]
   return "available";
 }
 
-function goalResultTone(goal: GoalDispatchResultV1): LifecycleDisplay["tone"] {
-  if (goal.action === "noop") return "unknown";
+function goalResultTone(goal: GoalDispatchResultV1 | null): LifecycleDisplay["tone"] {
+  if (goal === null || goal.action === "noop") return "unknown";
   return goal.outcome === "completed" ? "available" : "unavailable";
 }
 
