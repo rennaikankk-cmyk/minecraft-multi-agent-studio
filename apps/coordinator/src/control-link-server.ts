@@ -43,6 +43,7 @@ import {
 import { WebSocket, WebSocketServer } from "ws";
 
 import { BotRegistry, type BotRegistryRecord } from "./bot-registry.js";
+import { DurableWaitingGoalQueue } from "./durable-waiting-queue.js";
 import {
   BotAssignmentError,
   type BotAssignmentService,
@@ -209,6 +210,7 @@ export class ControlLinkServer {
    */
   private readonly waitingGoals = new Map<string, WaitingGoalEntry[]>();
   private readonly parkedOperationIds = new Set<string>();
+  private readonly durableWaitingQueue: DurableWaitingGoalQueue;
   private readonly httpServer: HttpServer;
   private readonly webSocketServer: WebSocketServer;
   private readonly unsubscribeRegistry: () => void;
@@ -288,6 +290,7 @@ export class ControlLinkServer {
     }
 
     this.now = options.now ?? (() => new Date());
+    this.durableWaitingQueue = new DurableWaitingGoalQueue();
     this.randomId = options.randomId ?? randomUUID;
     this.randomNonce =
       options.randomNonce ?? (() => randomBytes(32).toString("base64url"));
@@ -1285,6 +1288,48 @@ export class ControlLinkServer {
     }
     const request = pending.request;
     const controller = pending.controller;
+
+    // Phase 1b：durable waiting——bot 未 ready 时，goal 先进入磁盘持久化队列，
+    // 不调 goalStore.begin()（不产生 running task/lease）。ready 后从队列取出
+    // 走正常 begin→execute 流程。协调器重启后 initialize() 恢复未过期条目。
+    if (!this.options.registry.goalExecutionReady(request.payload.botId)) {
+      const enqueueResult = this.durableWaitingQueue.enqueue({
+        operationId: request.payload.operationId,
+        botId: request.payload.botId,
+        taskId: request.payload.taskId,
+        clientId: request.payload.clientId,
+        controlApiInstanceId: request.payload.controlApiInstanceId,
+        actorId: request.payload.actorId,
+        operatorGoal: request.payload.operatorGoal,
+        timeoutMs: request.payload.timeoutMs,
+        issuedAtMs: validNow(this.now()).getTime(),
+        expiresAtMs: validNow(this.now()).getTime() + request.payload.timeoutMs,
+      });
+      if (!enqueueResult.accepted) {
+        for (const responder of pending.responders.values()) {
+          this.sendGoalFailure(responder.session, request, "CONTROL_LINK_BACKPRESSURE", responder.requestMessageId);
+        }
+        if (this.pendingGoals.get(request.payload.operationId) === pending) {
+          this.pendingGoals.delete(request.payload.operationId);
+        }
+        return;
+      }
+      for (const responder of pending.responders.values()) {
+        this.sendGoalWaiting(
+          responder,
+          request,
+          validNow(this.now()).getTime() + request.payload.timeoutMs,
+        );
+      }
+      safeLog(this.options.logger, "info", "coordinator_goal_durable_waiting", {
+        traceId: request.payload.operationId,
+        botId: request.payload.botId,
+        queueSize: this.durableWaitingQueue.size,
+        diskDegraded: this.durableWaitingQueue.diskDegraded,
+      });
+      return; // pendingGoals 条目保留（幂等多路复用），唤醒时从队列取出重建
+    }
+
     let lease: GoalExecutionLease | null = null;
     let timedOut = false;
     const timer = setTimeout(() => {
