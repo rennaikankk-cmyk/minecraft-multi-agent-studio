@@ -1066,6 +1066,7 @@ export class StudioLocalManager {
       serverHost: input.serverHost,
       serverPort: input.serverPort,
       minecraftVersion: input.minecraftVersion,
+      ...(input.purpose === "anarchy" ? { purpose: "anarchy" } : {}),
       createdAt: now,
       updatedAt: now,
       processState: "stopped",
@@ -1818,6 +1819,7 @@ function validatePersistedBot(input, slots) {
     serverHost: input?.serverHost,
     serverPort: input?.serverPort,
     minecraftVersion: input?.minecraftVersion,
+    ...(input?.purpose === "anarchy" ? { purpose: "anarchy" } : {}),
   });
   if (!createdAt || typeof input?.botId !== "string" || !slots.has(input.botId)) {
     throw new Error("Persisted local Bot entry is invalid.");
