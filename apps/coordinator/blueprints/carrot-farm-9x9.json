@@ -1,0 +1,107 @@
+{
+  "schemaVersion": "1.0",
+  "name": "carrot-farm-9x9",
+  "description": "9×9 胡萝卜农场（结构最小集）：8 根围栏柱（四角+四边中点，后续插火把）。耕地/水源/围栏环为后续扩展。",
+  "batchSize": 2,
+  "staging": [
+    {
+      "batch": 1,
+      "offset": {
+        "x": 2,
+        "y": 0,
+        "z": 2
+      }
+    },
+    {
+      "batch": 2,
+      "offset": {
+        "x": -2,
+        "y": 0,
+        "z": 2
+      }
+    },
+    {
+      "batch": 3,
+      "offset": {
+        "x": 2,
+        "y": 0,
+        "z": -2
+      }
+    },
+    {
+      "batch": 4,
+      "offset": {
+        "x": -2,
+        "y": 0,
+        "z": -2
+      }
+    }
+  ],
+  "cells": [
+    {
+      "offset": {
+        "x": 4,
+        "y": 0,
+        "z": 4
+      },
+      "item": "oak_fence"
+    },
+    {
+      "offset": {
+        "x": 0,
+        "y": 0,
+        "z": 4
+      },
+      "item": "oak_fence"
+    },
+    {
+      "offset": {
+        "x": -4,
+        "y": 0,
+        "z": 4
+      },
+      "item": "oak_fence"
+    },
+    {
+      "offset": {
+        "x": -4,
+        "y": 0,
+        "z": 0
+      },
+      "item": "oak_fence"
+    },
+    {
+      "offset": {
+        "x": 4,
+        "y": 0,
+        "z": 0
+      },
+      "item": "oak_fence"
+    },
+    {
+      "offset": {
+        "x": 4,
+        "y": 0,
+        "z": -4
+      },
+      "item": "oak_fence"
+    },
+    {
+      "offset": {
+        "x": 0,
+        "y": 0,
+        "z": -4
+      },
+      "item": "oak_fence"
+    },
+    {
+      "offset": {
+        "x": -4,
+        "y": 0,
+        "z": -4
+      },
+      "item": "oak_fence"
+    }
+  ],
+  "notes": "来源：minecraft.wiki Tutorials/Crop farming。v1 最小集=8 根围栏柱（后续插火把覆盖 9×9 田）。4 批×2 格、四象限站位 (±2,0,±2) 距最远格 (±4,0,±4)=√8≈2.83<3.5 ✅。耕地/水源/围栏环待 farm 能力。"
+}
