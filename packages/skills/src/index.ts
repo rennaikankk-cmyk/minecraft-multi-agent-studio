@@ -601,3 +601,5 @@ export {
 } from "./compat/index.js";
 export * from "./facility-platform.js";
 export * from "./base-master-plan.js";
+export * from "./skill-gap.js";
+export * from "./gap-bundle.js";
