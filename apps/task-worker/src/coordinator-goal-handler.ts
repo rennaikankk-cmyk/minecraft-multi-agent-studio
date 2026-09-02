@@ -2,7 +2,7 @@ import {
   coordinatorGoalExecutionResponseV1Schema,
   COORDINATOR_GOAL_EXECUTION_PATH,
   identifierSchema,
-  type GoalDispatchResultV1,
+  type GoalDispatchTerminalResultV1,
   type SkillJsonValue,
 } from "@minecraft-studio/protocol";
 import {
@@ -91,7 +91,7 @@ export function createCoordinatorGoalRegistry(
   return registry;
 }
 
-function terminalForResult(result: GoalDispatchResultV1): TaskHandlerResult {
+function terminalForResult(result: GoalDispatchTerminalResultV1): TaskHandlerResult {
   const safeResult = result as unknown as SkillJsonValue;
   if (result.action === "noop") {
     return {
