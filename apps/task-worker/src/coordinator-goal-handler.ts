@@ -78,6 +78,11 @@ export function createCoordinatorGoalHandler(
       if (!body.ok) {
         return terminalForError(body.errorCode);
       }
+      if (body.result.action === "waiting_for_bot") {
+        // waiting 是 direct admission 层的状态，BullMQ worker 不经此路径——
+        // 出现即收窄为内部错误（防御性 guard）。
+        return terminalForError("CONTROL_LINK_INTERNAL_ERROR");
+      }
       return terminalForResult(body.result);
     },
   };
@@ -91,7 +96,7 @@ export function createCoordinatorGoalRegistry(
   return registry;
 }
 
-function terminalForResult(result: GoalDispatchTerminalResultV1): TaskHandlerResult {
+function terminalForResult(result: Exclude<GoalDispatchTerminalResultV1, { action: "waiting_for_bot" }>): TaskHandlerResult {
   const safeResult = result as unknown as SkillJsonValue;
   if (result.action === "noop") {
     return {
