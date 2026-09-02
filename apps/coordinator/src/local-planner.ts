@@ -992,6 +992,7 @@ export class CoordinatorLocalPlanner {
         execution,
         deadlineMs,
         ai: null,
+        skipModelGrounding: true,
       });
     }
 
@@ -1234,6 +1235,7 @@ export class CoordinatorLocalPlanner {
     execution,
     deadlineMs,
     ai,
+    skipModelGrounding = false,
   }: {
     request: LocalPlanRequest;
     decision:
@@ -1246,6 +1248,8 @@ export class CoordinatorLocalPlanner {
     execution: PlannerExecutionContext;
     deadlineMs: number;
     ai: AIScheduledResult<GenerateResult> | null;
+    /** 确定性模板派发为 true：输入由协调器受控语法构造，跳过模型输出的坐标接地校验。 */
+    skipModelGrounding?: boolean;
   }): Promise<LocalPlanResult> {
     const advertisedSkill = availableSkills.find(
       ({ skillId, skillVersion, availability }) =>
@@ -1262,7 +1266,9 @@ export class CoordinatorLocalPlanner {
       plannerInputSchema(advertisedSkill.inputSchema),
       decision.input,
     );
-    assertGroundedSensitiveInput(modelInput, operatorGoal, record);
+    if (!skipModelGrounding) {
+      assertGroundedSensitiveInput(modelInput, operatorGoal, record);
+    }
 
     const currentRecord = await this.waitForSafetyClear({
       request,

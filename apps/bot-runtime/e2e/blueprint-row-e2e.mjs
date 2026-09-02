@@ -87,14 +87,9 @@ await withE2EFixture(async (fixture) => {
     log(`reposition attempt ${attempt}: ${r?.status ?? "rejected"}`);
   }
 
-  // 材料：8 个 oak_log（有界重提）
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    const r = await submitGoal(`获取 ${CELLS} 个 oak_log`);
-    if (r?.status === "completed") break;
-    log(`acquisition attempt ${attempt}: ${r?.status ?? "rejected"}`);
-    await fixture.rcon(`give ${USERNAME} minecraft:oak_log 8`).catch(() => "");
-    await sleep(3_000);
-  }
+  // 材料：rcon give 测试条件注入（F1 同款；本场景验证蓝图确定性通道而非采集）
+  await fixture.rcon(`give ${USERNAME} minecraft:oak_log 8`).catch(() => "");
+  await sleep(4_000);
 
   // 锚点：rcon 扫一行 air-on-solid（8 格连续沿 +x）
   const rconPos = await fixture.rcon(`data get entity ${USERNAME} Pos`).catch(() => "");
@@ -102,20 +97,28 @@ await withE2EFixture(async (fixture) => {
     ?? /X: (-?[\d.]+),? Y: (-?[\d.]+),? Z: (-?[\d.]+)/.exec(rconPos);
   if (!m) { log("FATAL: no position"); process.exit(1); }
   const bx = Math.floor(Number(m[1])), by = Math.floor(Number(m[2])), bz = Math.floor(Number(m[3]));
-  // 找连续 8 格 air 且每格下方 solid 的 +x 行（从 bot 面前起）
+  // 找连续 8 格 air 且每格下方 solid 的 +x 行（三维扫描：y ±1、z ±6、x 偏移）
   let anchor = null;
-  for (const base of [bz - 2, bz - 1, bz, bz + 1, bz + 2]) {
-    let ok = true;
-    for (let i = 0; i < CELLS; i += 1) {
-      const x = bx + 1 + i;
-      const air = await fixture.rcon(`execute if block ${x} ${by} ${base} minecraft:air`).catch(() => "");
-      if (!air.includes("Test passed")) { ok = false; break; }
-      const solid = await fixture.rcon(`execute unless block ${x} ${by - 1} ${base} minecraft:air`).catch(() => "");
-      if (!solid.includes("Test passed")) { ok = false; break; }
+  outer:
+  for (const dy of [0, 1, -1]) {
+    for (const dz of [0, -1, 1, -2, 2, -3, 3, -4, 4, -5, 5, -6, 6]) {
+      for (const dx of [1, 2, 0, 3, -1]) {
+        const y = by + dy, z = bz + dz, x0 = bx + dx;
+        let ok = true;
+        for (let i = 0; i < CELLS; i += 1) {
+          const x = x0 + i;
+          const air = await fixture.rcon(`execute if block ${x} ${y} ${z} minecraft:air`).catch(() => "");
+          if (!air.includes("Test passed")) { ok = false; break; }
+          const solid = await fixture.rcon(`execute unless block ${x} ${y - 1} ${z} minecraft:air`).catch(() => "");
+          if (!solid.includes("Test passed")) { ok = false; break; }
+        }
+        if (ok) { anchor = { x: x0, y, z }; break outer; }
+      }
     }
-    if (ok) { anchor = { x: bx + 1, y: by, z: base }; break; }
   }
   if (!anchor) { log("FATAL: no 8-cell air-on-solid +x row found"); process.exit(1); }
+  // place 不移动：bot 站行中点（8 格行最远 3.5 < reach 3.8）
+  await submitGoal(`移动到坐标 x=${anchor.x + 3} y=${anchor.y} z=${anchor.z} 附近`);
   log(`anchor row @(${anchor.x},${anchor.y},${anchor.z}) +x ×${CELLS}`);
 
   async function verifyCell(index) {
