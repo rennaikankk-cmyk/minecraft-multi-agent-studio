@@ -1630,6 +1630,7 @@ export class StudioLocalManager {
         serverHost: config.serverHost,
         serverPort: config.serverPort,
         minecraftVersion: config.minecraftVersion,
+        ...(config.purpose === "anarchy" ? { purpose: "anarchy" } : {}),
         createdAt: config.createdAt,
       })),
     };
