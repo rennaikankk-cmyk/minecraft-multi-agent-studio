@@ -40,6 +40,7 @@ import {
   type ControlLinkTaskListResponseV1,
   type ControlLinkTaskReadErrorCode,
   type GoalDispatchResultV1,
+  type GoalDispatchWaitingV1,
   type PublicBotDetailV1,
   type TaskHistoryListPageV1,
 } from "@minecraft-studio/protocol";
@@ -150,8 +151,8 @@ type PendingGoal = {
   serialized: string;
   sent: boolean;
   timer: ReturnType<typeof setTimeout>;
-  promise: Promise<GoalDispatchResultV1>;
-  resolve: (result: GoalDispatchResultV1) => void;
+  promise: Promise<GoalDispatchResultV1 | GoalDispatchWaitingV1>;
+  resolve: (result: GoalDispatchResultV1 | GoalDispatchWaitingV1) => void;
   reject: (error: Error) => void;
 };
 
@@ -355,7 +356,7 @@ export class CoordinatorLinkClient
     return promise;
   }
 
-  submitGoal(request: SubmitGoalRequest): Promise<GoalDispatchResultV1> {
+  submitGoal(request: SubmitGoalRequest): Promise<GoalDispatchResultV1 | GoalDispatchWaitingV1> {
     const fingerprint = goalFingerprint(request);
     const existing = this.pendingGoals.get(request.operationId);
     if (existing) {
@@ -400,9 +401,9 @@ export class CoordinatorLinkClient
         expiresAt: request.expiresAt.toISOString(),
       },
     });
-    let resolve!: (result: GoalDispatchResultV1) => void;
+    let resolve!: (result: GoalDispatchResultV1 | GoalDispatchWaitingV1) => void;
     let reject!: (error: Error) => void;
-    const promise = new Promise<GoalDispatchResultV1>((resolveValue, rejectValue) => {
+    const promise = new Promise<GoalDispatchResultV1 | GoalDispatchWaitingV1>((resolveValue, rejectValue) => {
       resolve = resolveValue;
       reject = rejectValue;
     });

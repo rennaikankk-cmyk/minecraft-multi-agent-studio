@@ -27,6 +27,7 @@ import {
   taskListResponseV1Schema,
   type ControlApiErrorCode,
   type GoalDispatchResultV1,
+  type GoalDispatchWaitingV1,
   type TaskHistoryListQueryV1,
 } from "@minecraft-studio/protocol";
 import { WebSocket, WebSocketServer } from "ws";
@@ -86,7 +87,7 @@ export type SubmitGoalRequest = Readonly<{
 }>;
 
 export type GoalSubmitter = Readonly<{
-  submitGoal(request: SubmitGoalRequest): Promise<GoalDispatchResultV1>;
+  submitGoal(request: SubmitGoalRequest): Promise<GoalDispatchResultV1 | GoalDispatchWaitingV1>;
 }>;
 
 export type ControlApiServerOptions = Readonly<{
@@ -902,7 +903,7 @@ export class ControlApiServer {
       });
       // Round 6.6：waiting_for_bot 是 202 已受理（等待 Bot 就绪自动派发），
       // 不是 409 拒绝——提交方不需要重试。
-      this.writeJson(response, result.action === "waiting_for_bot" ? 202 : 200, body);
+      this.writeJson(response, (result as { action?: string }).action === "waiting_for_bot" ? 202 : 200, body);
     } catch (cause) {
       this.writeGoalError(
         response,

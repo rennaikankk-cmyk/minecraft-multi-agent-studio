@@ -251,6 +251,8 @@ export type GoalDispatchTerminalResultV1 = z.infer<
   typeof goalDispatchTerminalResultV1Schema
 >;
 
+export type GoalDispatchWaitingV1 = z.infer<typeof goalDispatchWaitingV1Schema>;
+
 export const goalDispatchResultV1Schema = z.union([
   goalDispatchTerminalResultV1Schema,
   goalDispatchWaitingV1Schema,
