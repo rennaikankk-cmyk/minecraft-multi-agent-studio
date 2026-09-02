@@ -42,20 +42,42 @@ export function withFixtureLock(task) {
 
 /** @typedef {{runId: string, containerName: string, port: number, volumeName: string, waitReady(timeoutMs?: number): Promise<void>, rcon(command: string): Promise<string>, cleanup(): Promise<void>}} E2EFixture */
 
-/** 回收历史遗留的 e2e fixture 容器（label 识别，绝不碰 external/local_test）。 */
+/**
+ * Round 6.6 fixture ownership 隔离：回收只针对**确认无主且超龄**的容器——
+ * ownerSessionId 与当前进程相同（活跃）、或容器启动不足 RECLAIM_AGE_MS 的
+ * 一律不动（09:50 实测宽泛 label 回收把并行场景的活 fixture 互杀）。
+ */
+const RECLAIM_AGE_MS = Number(process.env.STUDIO_E2E_RECLAIM_AGE_MS ?? "600000");
+
+/** 回收历史遗留的 e2e fixture 容器（owner+超龄双条件，绝不碰活跃 fixture）。 */
 export async function reclaimStaleFixtures() {
   const removed = [];
+  const skipped = [];
   try {
     const list = await docker(["ps", "-aq", "--filter", `label=${FIXTURE_LABEL}`], 20_000);
+    const now = Date.now();
     for (const id of list.split("\n").filter(Boolean)) {
-      const name = await docker(["inspect", "-f", "{{.Name}}", id], 10_000).catch(() => id);
+      const info = await docker(
+        ["inspect", "-f", "{{.Name}}|{{.State.StartedAt}}|{{index .Config.Labels \"studio.ownerSessionId\"}}", id],
+        10_000,
+      ).catch(() => null);
+      if (info === null) continue; // inspect 失败：不动未知容器
+      const [rawName, startedAt, ownerSession] = info.split("|");
+      const name = rawName.replace(/^\//, "");
+      const startedMs = Date.parse(startedAt ?? "");
+      const ageOk = Number.isFinite(startedMs) && now - startedMs >= RECLAIM_AGE_MS;
+      const ownerAlive = ownerSession === String(process.pid);
+      if (ownerAlive || !ageOk) {
+        skipped.push(name);
+        continue;
+      }
       await docker(["rm", "-f", id], 30_000).catch(() => undefined);
-      removed.push(name.replace(/^\//, ""));
+      removed.push(name);
     }
   } catch {
     // 无 docker / 无遗留：忽略
   }
-  return removed;
+  return { removed, skipped };
 }
 
 export async function createE2EFixture() {

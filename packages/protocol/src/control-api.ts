@@ -225,10 +225,37 @@ const goalSkillResultV1Schema = z.discriminatedUnion("outcome", [
   goalSkillResultTimedOutV1Schema,
 ]);
 
-export const goalDispatchResultV1Schema = z.union([
+/**
+ * Round 6.6 注册屏障：Bot 尚未 goal-ready（runtime-link 未注册 / MC 未上线 /
+ * skill catalog 未达）时，goal 不是被拒绝，而是**持久等待**——提交方拿到
+ * 202 + waiting_for_bot（含截止时间），Bot ready 后自动派发一次。
+ * 这是状态/事件语义，不是失败；真正超时走 GOAL_EXPIRED_WAITING_FOR_BOT。
+ */
+const goalDispatchWaitingV1Schema = z
+  .object({
+    action: z.literal("waiting_for_bot"),
+    botId: identifierSchema,
+    taskId: identifierSchema,
+    reasonCode: z.literal("GOAL_WAITING_FOR_BOT"),
+    /** 等待截止（epoch ms）= 提交时间 + 提交方 timeoutMs；到期诚实终态。 */
+    expiresAtMs: z.number().int().min(0),
+  })
+  .strict();
+
+/** 可持久化的终态结果（waiting 回执绝不落库）。 */
+export const goalDispatchTerminalResultV1Schema = z.union([
   goalDispatchNoopV1Schema,
   goalSkillResultV1Schema,
 ]);
+export type GoalDispatchTerminalResultV1 = z.infer<
+  typeof goalDispatchTerminalResultV1Schema
+>;
+
+export const goalDispatchResultV1Schema = z.union([
+  goalDispatchTerminalResultV1Schema,
+  goalDispatchWaitingV1Schema,
+]);
+
 
 export const submitGoalHttpRequestV1Schema = z
   .object({

@@ -106,6 +106,19 @@ function versionCatalogConflict(
   );
 }
 
+/** goal_execution_ready 判据（Round 6.6 单一定义；纯函数可单测）。 */
+export function botGoalExecutionReady(
+  record: Readonly<
+    Pick<BotRegistryRecord, "connectionState" | "currentStatus" | "skillCatalog">
+  >,
+): boolean {
+  return (
+    record.connectionState === "online" &&
+    record.currentStatus !== null &&
+    record.skillCatalog !== null
+  );
+}
+
 type InternalRecord = {
   botId: string;
   serverProfileId: string;
@@ -394,6 +407,36 @@ export class BotRegistry {
   subscribe(listener: BotRegistryListener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /**
+   * Round 6.6 注册屏障：goal_execution_ready 的**单一定义**（与 planner 的
+   * requireAvailableBot 同一判据——online + 有 currentStatus + 有 skill
+   * catalog）。所有调用方（goal 准入、调度唤醒、对外投影）禁止各自再推断。
+   */
+  goalExecutionReady(botId: string, at = this.now()): boolean {
+    const record = this.get(botId, at);
+    return record !== null && botGoalExecutionReady(record);
+  }
+
+  /**
+   * 就绪翻沿回调（幂等：只在 ready 布尔翻转时触发；首见即 ready 也触发，
+   * 覆盖"goal 先 park、bot 后注册"的主场景）。订阅者异常不破坏 registry。
+   */
+  onReadinessChange(handler: (botId: string, ready: boolean) => void): () => void {
+    const lastReady = new Map<string, boolean>();
+    return this.subscribe((record) => {
+      const ready = botGoalExecutionReady(record);
+      const previous = lastReady.get(record.botId);
+      if (previous === ready) return;
+      lastReady.set(record.botId, ready);
+      if (previous === undefined && !ready) return;
+      try {
+        handler(record.botId, ready);
+      } catch {
+        // 订阅者故障不得影响权威 registry。
+      }
+    });
   }
 
   get(botId: string, at = this.now()): BotRegistryRecord | null {

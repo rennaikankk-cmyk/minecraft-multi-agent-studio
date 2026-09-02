@@ -82,6 +82,8 @@ const MAX_SOCKET_BUFFERED_BYTES = 256 * 1_024;
 const MAX_RESPONDERS_PER_STOP = 4;
 const MAX_RESPONDERS_PER_GOAL = 4;
 const COMPLETED_GOAL_TTL_MS = 5 * 60_000;
+// Round 6.6 停车场上限（bounded；溢出 = BACKPRESSURE 诚实拒绝）。
+const WAITING_GOALS_PER_BOT_MAX = 8;
 const MAX_COMPLETED_GOALS = 512;
 const MAX_TRACKED_GOALS = 1_000;
 const GOAL_RECOVERY_INTERVAL_MS = 5_000;
@@ -157,6 +159,14 @@ type PendingGoal = {
   execution: Promise<void> | null;
 };
 
+type WaitingGoalEntry = {
+  pending: PendingGoal;
+  lease: GoalExecutionLease;
+  /** 停车死线（epoch ms）= park 时刻 + 剩余 timeout；到期诚实终态。 */
+  deadlineMs: number;
+  deadlineTimer: ReturnType<typeof setTimeout>;
+};
+
 type CompletedGoal = Readonly<{
   fingerprint: string;
   expiresAtMs: number;
@@ -191,9 +201,18 @@ export class ControlLinkServer {
   private readonly pendingTaskReads = new Set<symbol>();
   private readonly completedGoals = new Map<string, CompletedGoal>();
   private readonly trackedGoals = new Map<string, TrackedGoalTask>();
+  /**
+   * Round 6.6 注册屏障：bot 未 goal-ready 时 parked 的 goal（FIFO per bot）。
+   * store lease 已持有（task 已持久化为 running + timeoutMs 死线）；就绪翻沿
+   * 逐个唤醒执行，停车超时走 GOAL_EXPIRED_WAITING_FOR_BOT 诚实终态。
+   * bounded：每 bot 上限 + 全局上限，溢出 = BACKPRESSURE 拒绝。
+   */
+  private readonly waitingGoals = new Map<string, WaitingGoalEntry[]>();
+  private readonly parkedOperationIds = new Set<string>();
   private readonly httpServer: HttpServer;
   private readonly webSocketServer: WebSocketServer;
   private readonly unsubscribeRegistry: () => void;
+  private readonly unsubscribeReadiness: () => void;
   private readonly maxSessions: number;
   private readonly maxPendingStops: number;
   private readonly maxPendingTaskReads: number;
@@ -343,6 +362,10 @@ export class ControlLinkServer {
     this.unsubscribeRegistry = options.registry.subscribe((record) => {
       this.publishRecord(record);
     });
+    // Round 6.6 注册屏障唤醒：就绪翻沿 → 逐个恢复该 bot 的停车 goal。
+    this.unsubscribeReadiness = options.registry.onReadinessChange((botId, ready) => {
+      if (ready) this.resumeWaitingGoals(botId);
+    });
     this.unsubscribeAutonomous = options.autonomousTaskSource?.subscribe((botId) => {
       try {
         const record = this.options.registry.get(botId, validNow(this.now()));
@@ -394,7 +417,17 @@ export class ControlLinkServer {
     if (this.stopped) return;
     this.stopped = true;
     this.unsubscribeRegistry();
+    this.unsubscribeReadiness();
     this.unsubscribeAutonomous();
+    // 停车 goal 的死线定时器全部清掉；store 的 task 恢复路径会诚实过期
+    // 残留 lease（不丢、不悬挂）。
+    for (const [botId, queue] of this.waitingGoals) {
+      for (const entry of queue) {
+        clearTimeout(entry.deadlineTimer);
+      }
+      this.waitingGoals.delete(botId);
+    }
+    this.parkedOperationIds.clear();
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.pingTimer = null;
     if (this.goalRecoveryTimer) clearInterval(this.goalRecoveryTimer);
@@ -1253,12 +1286,12 @@ export class ControlLinkServer {
     const request = pending.request;
     const controller = pending.controller;
     let lease: GoalExecutionLease | null = null;
-    let assignmentLeaseId: string | null = null;
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
       controller.abort(new Error("goal_timeout"));
     }, request.payload.timeoutMs);
+    let parked = false;
     try {
       const begin = await this.options.goalStore!.begin(request);
       this.applyGoalSnapshots([begin.snapshot], validNow(this.now()));
@@ -1302,6 +1335,40 @@ export class ControlLinkServer {
         return;
       }
       lease = begin.lease;
+      // Round 6.6 注册屏障：bot 未 goal-ready 时**停车等待**而非永久拒绝。
+      // store lease 已持久化（task=running，timeoutMs 死线）；就绪翻沿唤醒。
+      if (!this.options.registry.goalExecutionReady(request.payload.botId)) {
+        clearTimeout(timer);
+        this.parkWaitingGoal(pending, lease);
+        parked = true;
+        return;
+      }
+      if (timedOut || controller.signal.aborted) {
+        throw new Error(timedOut ? "goal_timeout" : "goal_aborted");
+      }
+      await this.executeAcquiredGoal(pending, lease, timer);
+    } finally {
+      // parked goal 的 pendingGoals 条目是幂等多路复用与唤醒的锚点，不能清。
+      if (!parked && this.pendingGoals.get(request.payload.operationId) === pending) {
+        this.pendingGoals.delete(request.payload.operationId);
+      }
+    }
+  }
+
+  /**
+   * 已取得 store lease 的执行段（assignment → planner → 结果/失败/清理）。
+   * 停车唤醒路径以剩余时间重建 timer 后复用同一段，保证语义完全一致。
+   */
+  private async executeAcquiredGoal(
+    pending: PendingGoal,
+    lease: GoalExecutionLease,
+    timer: ReturnType<typeof setTimeout>,
+  ): Promise<void> {
+    const request = pending.request;
+    const controller = pending.controller;
+    let assignmentLeaseId: string | null = null;
+    let timedOut = false;
+    try {
       assignmentLeaseId = await this.acquireExecutionAssignment(request);
       if (timedOut || controller.signal.aborted) {
         throw new Error(timedOut ? "goal_timeout" : "goal_aborted");
@@ -1346,37 +1413,35 @@ export class ControlLinkServer {
         controller.signal.aborted,
       );
       let terminalPersisted = false;
-      if (lease) {
-        const status = errorCode === "AI_TIMEOUT"
-          ? "expired"
-          : controller.signal.aborted
-            ? "cancelled"
-            : "failed";
-        try {
-          const terminal = await this.options.goalStore!.recordError(
-            lease,
-            errorCode,
-            status,
-          );
-          this.applyGoalSnapshots([terminal], validNow(this.now()));
-          terminalPersisted = true;
-        } catch (persistenceCause) {
-          errorCode = "CONTROL_LINK_INTERNAL_ERROR";
-          safeLog(
-            this.options.logger,
-            "error",
-            "coordinator_control_link_goal_persistence_failed",
-            {
-              traceId: request.payload.operationId,
-              taskId: request.payload.taskId,
-              botId: request.payload.botId,
-              code:
-                persistenceCause instanceof GoalLifecycleStoreError
-                  ? persistenceCause.code
-                  : "CONTROL_LINK_INTERNAL_ERROR",
-            },
-          );
-        }
+      const status = errorCode === "AI_TIMEOUT"
+        ? "expired"
+        : controller.signal.aborted
+          ? "cancelled"
+          : "failed";
+      try {
+        const terminal = await this.options.goalStore!.recordError(
+          lease,
+          errorCode,
+          status,
+        );
+        this.applyGoalSnapshots([terminal], validNow(this.now()));
+        terminalPersisted = true;
+      } catch (persistenceCause) {
+        errorCode = "CONTROL_LINK_INTERNAL_ERROR";
+        safeLog(
+          this.options.logger,
+          "error",
+          "coordinator_control_link_goal_persistence_failed",
+          {
+            traceId: request.payload.operationId,
+            taskId: request.payload.taskId,
+            botId: request.payload.botId,
+            code:
+              persistenceCause instanceof GoalLifecycleStoreError
+                ? persistenceCause.code
+                : "CONTROL_LINK_INTERNAL_ERROR",
+          },
+        );
       }
       if (terminalPersisted) {
         this.rememberCompletedGoal(request.payload.operationId, {
@@ -1411,10 +1476,186 @@ export class ControlLinkServer {
     } finally {
       this.releaseExecutionAssignment(assignmentLeaseId);
       clearTimeout(timer);
+      this.unparkOperation(request.payload.operationId);
       if (this.pendingGoals.get(request.payload.operationId) === pending) {
         this.pendingGoals.delete(request.payload.operationId);
       }
     }
+  }
+
+  /**
+   * Round 6.6 停车场：goal 持 store lease 等待 bot 就绪。提交方立即收到
+   * waiting_for_bot（含死线）；就绪翻沿逐个唤醒（FIFO，同一 bot 串行）。
+   */
+  private parkWaitingGoal(pending: PendingGoal, lease: GoalExecutionLease): void {
+    const botId = pending.request.payload.botId;
+    const queue = this.waitingGoals.get(botId) ?? [];
+    if (queue.length >= WAITING_GOALS_PER_BOT_MAX) {
+      safeLog(this.options.logger, "warn", "coordinator_goal_waiting_backpressure", {
+        botId,
+        queued: queue.length,
+      });
+      void this.expireParkedGoal(botId, pending.request.payload.operationId, {
+        cause: "backpressure",
+        lease,
+      });
+      return;
+    }
+    const deadlineMs = validNow(this.now()).getTime() + pending.request.payload.timeoutMs;
+    const entry: WaitingGoalEntry = {
+      pending,
+      lease,
+      deadlineMs,
+      deadlineTimer: setTimeout(() => {
+        void this.expireParkedGoal(botId, pending.request.payload.operationId, {
+          cause: "deadline",
+        });
+      }, pending.request.payload.timeoutMs),
+    };
+    queue.push(entry);
+    this.waitingGoals.set(botId, queue);
+    this.parkedOperationIds.add(pending.request.payload.operationId);
+    for (const responder of pending.responders.values()) {
+      this.sendGoalWaiting(responder, pending.request, deadlineMs);
+    }
+    safeLog(this.options.logger, "info", "coordinator_goal_waiting_for_bot", {
+      traceId: pending.request.payload.operationId,
+      taskId: pending.request.payload.taskId,
+      botId,
+      position: queue.length,
+      expiresAtMs: deadlineMs,
+    });
+  }
+
+  /** 就绪翻沿驱动的唤醒（FIFO；唤醒后由 per-bot assignment 保证串行）。 */
+  private resumeWaitingGoals(botId: string): void {
+    if (this.stopped) return;
+    const queue = this.waitingGoals.get(botId);
+    if (queue === undefined || queue.length === 0) return;
+    const entry = queue.shift()!;
+    if (queue.length === 0) this.waitingGoals.delete(botId);
+    clearTimeout(entry.deadlineTimer);
+    const remainingMs = Math.max(
+      1_000,
+      Math.min(entry.deadlineMs - validNow(this.now()).getTime(), entry.pending.request.payload.timeoutMs),
+    );
+    const controller = entry.pending.controller;
+    const timer = setTimeout(() => {
+      controller.abort(new Error("goal_timeout"));
+    }, remainingMs);
+    safeLog(this.options.logger, "info", "coordinator_goal_waiting_resumed", {
+      traceId: entry.pending.request.payload.operationId,
+      botId,
+      remainingMs,
+    });
+    entry.pending.execution = this.executeAcquiredGoal(entry.pending, entry.lease, timer);
+    void entry.pending.execution.finally(() => {
+      // 链式恢复：当前 goal 终态后若 bot 仍就绪，唤醒该 bot 下一个停车 goal。
+      if (!this.stopped && this.options.registry.goalExecutionReady(botId)) {
+        this.resumeWaitingGoals(botId);
+      }
+    }).catch(() => undefined);
+  }
+
+  /** 停车 goal 的诚实终态：死线到期或队列溢出。 */
+  private async expireParkedGoal(
+    botId: string,
+    operationId: string,
+    detail: { cause: "deadline" | "backpressure"; lease?: GoalExecutionLease },
+  ): Promise<void> {
+    const queue = this.waitingGoals.get(botId);
+    let entry: WaitingGoalEntry | undefined;
+    if (queue !== undefined) {
+      const index = queue.findIndex((candidate) => candidate.pending.request.payload.operationId === operationId);
+      if (index >= 0) {
+        entry = queue.splice(index, 1)[0];
+        if (queue.length === 0) this.waitingGoals.delete(botId);
+      }
+    }
+    const pending = entry?.pending ?? this.pendingGoals.get(operationId);
+    const lease = entry?.lease ?? detail.lease ?? null;
+    if (entry !== undefined) clearTimeout(entry.deadlineTimer);
+    const errorCode: ControlLinkGoalErrorCode =
+      detail.cause === "backpressure" ? "CONTROL_LINK_BACKPRESSURE" : "GOAL_EXPIRED_WAITING_FOR_BOT";
+    if (lease !== null) {
+      try {
+        const terminal = await this.options.goalStore!.recordError(lease, errorCode, "failed");
+        this.applyGoalSnapshots([terminal], validNow(this.now()));
+      } catch {
+        // 持久化失败也要把终态回给提交方；store 恢复路径会过期残留 task。
+      }
+    }
+    if (pending !== undefined) {
+      this.rememberCompletedGoal(operationId, {
+        fingerprint: pending.fingerprint,
+        result: null,
+        errorCode,
+        expiresAtMs: validNow(this.now()).getTime() + COMPLETED_GOAL_TTL_MS,
+      });
+      if (!this.stopped) {
+        for (const responder of pending.responders.values()) {
+          this.sendGoalFailure(
+            responder.session,
+            pending.request,
+            errorCode,
+            responder.requestMessageId,
+          );
+        }
+      }
+    }
+    this.unparkOperation(operationId);
+    if (this.pendingGoals.get(operationId) === pending) {
+      this.pendingGoals.delete(operationId);
+    }
+    safeLog(this.options.logger, "warn", "coordinator_goal_waiting_expired", {
+      traceId: operationId,
+      botId,
+      cause: detail.cause,
+      code: errorCode,
+    });
+  }
+
+  private unparkOperation(operationId: string): void {
+    this.parkedOperationIds.delete(operationId);
+  }
+
+  /** 提交方收到的 waiting 回执（HTTP 层映射 202，不是 409 拒绝）。 */
+  private sendGoalWaiting(
+    responder: GoalResponder,
+    request: ControlLinkGoalRequestV1,
+    expiresAtMs: number,
+  ): void {
+    if (responder.session.closing) return;
+    let response: ReturnType<typeof controlLinkGoalResponseV1Schema.parse>;
+    try {
+      response = controlLinkGoalResponseV1Schema.parse({
+        schemaVersion: "1.0",
+        messageId: this.randomId(),
+        timestamp: validNow(this.now()).toISOString(),
+        type: "control.link.goal-response.v1",
+        ok: true,
+        payload: {
+          coordinatorInstanceId: this.options.instanceId,
+          requestMessageId: responder.requestMessageId,
+          operationId: request.payload.operationId,
+          taskId: request.payload.taskId,
+          botId: request.payload.botId,
+          result: {
+            action: "waiting_for_bot",
+            botId: request.payload.botId,
+            taskId: request.payload.taskId,
+            reasonCode: "GOAL_WAITING_FOR_BOT",
+            expiresAtMs,
+          },
+        },
+      });
+    } catch {
+      this.closeSession(responder.session, 1011, "goal_response_invalid");
+      return;
+    }
+    this.sendFrame(responder.session.socket, response, (error) => {
+      if (error) this.closeSession(responder.session, 1013, "goal_response_failed");
+    });
   }
 
   private async executeQueuedGoal(pending: PendingGoal): Promise<void> {

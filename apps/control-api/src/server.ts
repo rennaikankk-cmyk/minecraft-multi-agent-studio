@@ -900,7 +900,9 @@ export class ControlApiServer {
         modelName: null,
         action: result.action,
       });
-      this.writeJson(response, 200, body);
+      // Round 6.6：waiting_for_bot 是 202 已受理（等待 Bot 就绪自动派发），
+      // 不是 409 拒绝——提交方不需要重试。
+      this.writeJson(response, result.action === "waiting_for_bot" ? 202 : 200, body);
     } catch (cause) {
       this.writeGoalError(
         response,

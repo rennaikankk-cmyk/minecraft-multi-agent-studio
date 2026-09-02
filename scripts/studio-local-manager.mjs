@@ -1209,14 +1209,45 @@ export class StudioLocalManager {
       config.lastError = boundedError(cause);
       config.updatedAt = new Date().toISOString();
     });
+    // Round 6.6 desired/observed reconciler：exit 事件在 Windows 外部树杀下
+    // 可能永不触发；周期轮询 child 事实兜底收敛（单写者=manager 主循环）。
+    managed.reconcileTimer = setInterval(() => {
+      const current = this.processes.get(botId);
+      if (current?.child !== child) {
+        clearInterval(managed.reconcileTimer);
+        return;
+      }
+      if (child.exitCode === null && !child.killed) return; // 进程事实=存活
+      clearInterval(managed.reconcileTimer);
+      // child 已死但 exit 事件未到：手工触发同一分类路径（幂等——正常
+      // exit 事件先到时 processes 里已无该 child，上面 current 判空短路）。
+      try {
+        managed.log.write(
+          JSON.stringify({
+            timestamp: new Date().toISOString(),
+            level: "warn",
+            event: "bot_process_exit_reconciled",
+            botId,
+            pid: child.pid ?? null,
+            exitCode: child.exitCode,
+            killed: child.killed,
+            hadExpectedExit: managed.expectedExit !== null,
+          }) + "\n",
+        );
+      } catch {
+        // 日志失败不阻断状态收敛。
+      }
+      child.emit("exit", child.exitCode, null);
+    }, 5_000);
+    managed.reconcileTimer.unref?.();
     child.once("exit", (code, signal) => {
       const current = this.processes.get(botId);
       const isCurrent = current?.child === child;
       if (isCurrent) this.processes.delete(botId);
       closeManagedLog(managed);
-      // A forced stop can be followed by a delayed exit event. A newer
-      // Runtime must remain authoritative when that old event arrives.
-      if (!isCurrent && managed.stopping) return;
+      // Round 6.6：旧 generation 的迟到退出事件不再静默吞掉——新实例
+      // 仍是权威（isCurrent 判定不变），但旧进程的退出事实必须写进它自己
+      // 的 config.exit（否则 Manager 永远显示 running 与事实分叉）。
       config.updatedAt = new Date().toISOString();
       const classification = this.classifyBotExit(managed, code, signal);
       config.exit = {

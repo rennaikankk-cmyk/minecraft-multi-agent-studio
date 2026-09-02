@@ -12,6 +12,7 @@ import {
   controlLinkTaskListRequestV1Schema,
   parseControlLinkServerMessage,
   type BotHeartbeatV1,
+  BotSkillCatalogV1,
   type BotStatusV1,
   type ControlLinkChallengeV1,
   type ControlLinkGoalErrorCode,
@@ -330,6 +331,7 @@ describe("Coordinator Control Link server", () => {
     }));
     const { registry, url } = await startServer({ stopController: { requestStop } });
     registry.ingest(statusMessage(1), NOW);
+    registry.ingest(catalogMessage(2), NOW);
     const { socket, reader } = await authenticate(url);
     await readSnapshot(reader);
 
@@ -388,6 +390,7 @@ describe("Coordinator Control Link server", () => {
       stopController: { requestStop },
     });
     registry.ingest(statusMessage(1), NOW);
+    registry.ingest(catalogMessage(2), NOW);
     const { socket, reader } = await authenticate(url);
     await readSnapshot(reader);
     const operationId = testUuid(916);
@@ -496,6 +499,7 @@ describe("Coordinator Control Link server", () => {
       stopController: { requestStop },
     });
     registry.ingest(statusMessage(1), NOW);
+    registry.ingest(catalogMessage(2), NOW);
     const { socket, reader } = await authenticate(url);
     await readSnapshot(reader);
 
@@ -524,6 +528,7 @@ describe("Coordinator Control Link server", () => {
       stopController: { requestStop },
     });
     registry.ingest(statusMessage(1), NOW);
+    registry.ingest(catalogMessage(2), NOW);
     const { socket, reader } = await authenticate(url);
     await readSnapshot(reader);
     await expect(rejectedWebSocketStatus(url)).resolves.toBe(503);
@@ -590,10 +595,12 @@ describe("Coordinator Control Link server", () => {
         },
       };
     });
-    const { url } = await startServer({
+    const { registry, url } = await startServer({
       goalPlanner: { planAndDispatch },
       goalStore: { ...baseStore, begin, recordResult },
     });
+    registry.ingest(statusMessage(1), NOW);
+    registry.ingest(catalogMessage(2), NOW);
     const { socket, reader } = await authenticate(url);
     await readSnapshot(reader);
     const operationId = testUuid(980);
@@ -618,7 +625,7 @@ describe("Coordinator Control Link server", () => {
         });
     socket.send(JSON.stringify(goalMessage));
 
-    await expect(reader.next()).resolves.toMatchObject({
+    await expect(nextGoalResponse(reader)).resolves.toMatchObject({
       type: "control.link.goal-response.v1",
       ok: true,
       payload: {
@@ -732,6 +739,7 @@ describe("Coordinator Control Link server", () => {
       queuedGoalStore,
     });
     registry.ingest(statusMessage(1), NOW);
+    registry.ingest(catalogMessage(2), NOW);
     const { socket, reader } = await authenticate(url);
     await readSnapshot(reader);
     socket.send(JSON.stringify(request));
@@ -804,6 +812,7 @@ describe("Coordinator Control Link server", () => {
       queuedGoalStore,
     });
     registry.ingest(statusMessage(1), NOW);
+    registry.ingest(catalogMessage(2), NOW);
     const { socket, reader } = await authenticate(url);
     await readSnapshot(reader);
     socket.send(JSON.stringify(request));
@@ -851,6 +860,7 @@ describe("Coordinator Control Link server", () => {
       queuedGoalStore,
     });
     registry.ingest(statusMessage(1), NOW);
+    registry.ingest(catalogMessage(2), NOW);
     const { socket, reader } = await authenticate(url);
     await readSnapshot(reader);
     socket.send(JSON.stringify(request));
@@ -898,10 +908,12 @@ describe("Coordinator Control Link server", () => {
         totalTimeMs: 100,
       },
     }));
-    const { url } = await startServer({
+    const { registry, url } = await startServer({
       goalPlanner: { planAndDispatch },
       goalStore: { ...baseStore, recordResult, recordError },
     });
+    registry.ingest(statusMessage(1), NOW);
+    registry.ingest(catalogMessage(2), NOW);
     const { socket, reader } = await authenticate(url);
     await readSnapshot(reader);
     const operationId = testUuid(975);
@@ -925,7 +937,7 @@ describe("Coordinator Control Link server", () => {
       },
     })));
 
-    await expect(reader.next()).resolves.toMatchObject({
+    await expect(nextGoalResponse(reader)).resolves.toMatchObject({
       type: "control.link.goal-response.v1",
       ok: false,
       payload: {
@@ -967,6 +979,7 @@ describe("Coordinator Control Link server", () => {
       goalPlanner: { planAndDispatch },
     });
     registry.ingest(statusMessage(1), NOW);
+    registry.ingest(catalogMessage(2), NOW);
     const { socket, reader } = await authenticate(url);
     await readSnapshot(reader);
     const operationId = testUuid(987);
@@ -1022,8 +1035,19 @@ describe("Coordinator Control Link server", () => {
       goalPlanner: { planAndDispatch },
     });
     registry.ingest(statusMessage(1), NOW);
+    registry.ingest(catalogMessage(2), NOW);
     const { socket, reader } = await authenticate(url);
     await readSnapshot(reader);
+    if (process.env.DEBUG_READY) {
+      const record = registry.get(BOT_ID, NOW);
+      console.error("[ready-check]", JSON.stringify({
+        hasRecord: record !== null,
+        state: record?.connectionState,
+        hasStatus: record?.currentStatus !== null && record?.currentStatus !== undefined,
+        hasCatalog: record?.skillCatalog !== null && record?.skillCatalog !== undefined,
+        ready: registry.goalExecutionReady(BOT_ID),
+      }));
+    }
     const operationId = testUuid(985);
     const goalMessage = controlLinkGoalRequestV1Schema.parse({
       schemaVersion: "1.0",
@@ -1047,7 +1071,11 @@ describe("Coordinator Control Link server", () => {
     socket.send(JSON.stringify(goalMessage));
 
     await vi.waitFor(() => expect(planAndDispatch).toHaveBeenCalledTimes(1));
-    const running = await reader.next();
+    let running: any;
+    for (let i = 0; i < 10; i += 1) {
+      running = await reader.next();
+      if (running.type === "control.link.state-upsert.v1" && running.payload?.bot?.currentTask?.taskId === operationId) break;
+    }
     expect(running).toMatchObject({
       type: "control.link.state-upsert.v1",
       payload: {
@@ -1132,6 +1160,7 @@ describe("Coordinator Control Link server", () => {
       goalPlanner: { planAndDispatch },
     });
     registry.ingest(statusMessage(1), NOW);
+    registry.ingest(catalogMessage(2), NOW);
     const { socket, reader } = await authenticate(url);
     await readSnapshot(reader);
     const operationId = testUuid(987);
@@ -1182,6 +1211,7 @@ describe("Coordinator Control Link server", () => {
       goalPlanner: { planAndDispatch },
     });
     registry.ingest(statusMessage(1), NOW);
+    registry.ingest(catalogMessage(2), NOW);
     const { socket, reader } = await authenticate(url);
     await readSnapshot(reader);
     const operationId = testUuid(989);
@@ -1520,6 +1550,18 @@ async function authenticate(
   return { socket, reader };
 }
 
+
+/** 读取 goal 响应：跳过沿途的 registry state-upsert（Round 6.6 readiness
+ * ingest 的合法副产物），直到拿到第一个 goal-response。 */
+async function nextGoalResponse(reader: MessageReader): Promise<any> {
+  for (let i = 0; i < 10; i += 1) {
+    const message = await reader.next();
+    if (process.env.DEBUG_GOAL_READER) console.error("[reader]", i, message.type, "ok" in message ? message.ok : "");
+    if (message.type === "control.link.goal-response.v1") return message;
+  }
+  throw new Error("No goal response found after 10 messages.");
+}
+
 async function readSnapshot(reader: MessageReader): Promise<void> {
   const begin = await reader.next();
   if (begin.type !== "control.link.snapshot-begin.v1") {
@@ -1603,6 +1645,39 @@ function statusMessage(
           denial: "NO_PROBE_DATA",
         },
       },
+    },
+  };
+}
+
+function catalogMessage(sequence: number): BotSkillCatalogV1 {
+  return {
+    schemaVersion: "1.0",
+    messageId: testUuid(700 + sequence),
+    traceId: "trace-control-link",
+    timestamp: NOW.toISOString(),
+    source: { service: "bot-runtime", instanceId: RUNTIME_ID },
+    botId: BOT_ID,
+    type: "bot.skill-catalog.v1",
+    payload: {
+      serverProfileId: "isolated-test",
+      runtimeInstanceId: RUNTIME_ID,
+      sequence,
+      observedAt: NOW.toISOString(),
+      minecraftVersion: "1.21.11",
+      protocolVersion: 774,
+      skills: [
+        {
+          skillId: "movement.goto",
+          skillVersion: "1.0.0",
+          availability: "available",
+          verification: "unverified",
+          inputSchema: { type: "object", additionalProperties: false },
+          timeoutMs: 30_000,
+          idempotent: true,
+          selectedVariantId: "portable",
+          unavailableReasons: [],
+        },
+      ],
     },
   };
 }

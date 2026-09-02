@@ -2,11 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 
 import {
   controlLinkGoalErrorCodeSchema,
-  goalDispatchResultV1Schema,
+  goalDispatchTerminalResultV1Schema,
   identifierSchema,
   type ControlLinkGoalErrorCode,
   type ControlLinkGoalRequestV1,
-  type GoalDispatchResultV1,
+  type GoalDispatchTerminalResultV1,
 } from "@minecraft-studio/protocol";
 import {
   PostgresTaskRepository,
@@ -61,7 +61,7 @@ export type GoalLifecycleSnapshot = Readonly<{
   status: TaskStatus;
   startedAt: string | null;
   updatedAt: string;
-  result: GoalDispatchResultV1 | null;
+  result: GoalDispatchTerminalResultV1 | null;
   errorCode: ControlLinkGoalErrorCode | null;
 }>;
 
@@ -73,7 +73,7 @@ export type GoalLifecycleBeginResult =
     }>
   | Readonly<{
       kind: "result";
-      result: GoalDispatchResultV1;
+      result: GoalDispatchTerminalResultV1;
       snapshot: GoalLifecycleSnapshot;
     }>
   | Readonly<{
@@ -89,7 +89,7 @@ export interface GoalLifecycleStore {
   begin(request: ControlLinkGoalRequestV1): Promise<GoalLifecycleBeginResult>;
   recordResult(
     lease: GoalExecutionLease,
-    result: GoalDispatchResultV1,
+    result: GoalDispatchTerminalResultV1,
   ): Promise<GoalLifecycleSnapshot>;
   recordError(
     lease: GoalExecutionLease,
@@ -313,9 +313,9 @@ export class PostgresGoalLifecycleStore implements GoalLifecycleStore {
 
   async recordResult(
     lease: GoalExecutionLease,
-    resultInput: GoalDispatchResultV1,
+    resultInput: GoalDispatchTerminalResultV1,
   ): Promise<GoalLifecycleSnapshot> {
-    const result = goalDispatchResultV1Schema.parse(resultInput);
+    const result = goalDispatchTerminalResultV1Schema.parse(resultInput);
     const status = goalResultStatus(result);
     try {
       const task = await this.options.repository.transition({
@@ -594,7 +594,7 @@ function snapshot(
 ): GoalLifecycleSnapshot {
   const result = task.result === null
     ? null
-    : goalDispatchResultV1Schema.parse(task.result);
+    : goalDispatchTerminalResultV1Schema.parse(task.result);
   if (
     result !== null &&
     (result.taskId !== task.taskId || result.botId !== input.botId)
@@ -650,8 +650,13 @@ function terminalErrorCode(task: TaskRecord): ControlLinkGoalErrorCode {
 }
 
 function goalResultStatus(
-  result: GoalDispatchResultV1,
+  result: GoalDispatchTerminalResultV1,
 ): "completed" | "failed" | "cancelled" | "expired" {
+  if ((result as { action?: string }).action === "waiting_for_bot") {
+    // waiting 是回执专用 action，绝不是终态结果——持久层收到即代码 bug。
+    // （输入类型已收窄为 terminal；此分支是对越界输入的运行时防御。）
+    throw new Error("waiting_for_bot result must never be persisted as terminal.");
+  }
   if (result.action === "noop") return "failed";
   if (result.outcome === "completed") return "completed";
   if (result.outcome === "cancelled") return "cancelled";

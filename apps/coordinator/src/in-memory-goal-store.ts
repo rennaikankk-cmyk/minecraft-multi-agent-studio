@@ -2,13 +2,13 @@ import { createHash } from "node:crypto";
 
 import {
   controlLinkGoalErrorCodeSchema,
-  goalDispatchResultV1Schema,
+  goalDispatchTerminalResultV1Schema,
   publicTaskDetailV1Schema,
   taskHistoryListPageV1Schema,
   taskHistoryListQueryV1Schema,
   type ControlLinkGoalErrorCode,
   type ControlLinkGoalRequestV1,
-  type GoalDispatchResultV1,
+  type GoalDispatchTerminalResultV1,
   type PublicTaskDetailV1,
   type PublicTaskSummaryV1,
   type TaskHistoryListPageV1,
@@ -54,7 +54,7 @@ type MemoryGoalRecord = {
   input: PersistedGoalInput;
   fingerprint: string;
   status: PublicTaskSummaryV1["status"];
-  result: GoalDispatchResultV1 | null;
+  result: GoalDispatchTerminalResultV1 | null;
   errorCode: ControlLinkGoalErrorCode | null;
   failureReason: string | null;
   createdAt: string;
@@ -160,9 +160,9 @@ export class InMemoryGoalLifecycleStore
 
   async recordResult(
     lease: GoalExecutionLease,
-    resultInput: GoalDispatchResultV1,
+    resultInput: GoalDispatchTerminalResultV1,
   ): Promise<GoalLifecycleSnapshot> {
-    const result = goalDispatchResultV1Schema.parse(resultInput);
+    const result = goalDispatchTerminalResultV1Schema.parse(resultInput);
     const record = this.requireLease(lease);
     if (
       result.taskId !== record.input.taskId ||
@@ -292,7 +292,7 @@ export class InMemoryGoalLifecycleStore
   private finish(
     record: MemoryGoalRecord,
     status: "completed" | "failed" | "cancelled" | "expired",
-    result: GoalDispatchResultV1 | null,
+    result: GoalDispatchTerminalResultV1 | null,
     errorCode: ControlLinkGoalErrorCode | null,
     failureReason: string | null = null,
   ): void {
@@ -401,8 +401,13 @@ function projectSummary(record: MemoryGoalRecord): PublicTaskSummaryV1 {
 }
 
 function resultStatus(
-  result: GoalDispatchResultV1,
+  result: GoalDispatchTerminalResultV1,
 ): "completed" | "failed" | "cancelled" | "expired" {
+  if ((result as { action?: string }).action === "waiting_for_bot") {
+    // waiting 是回执专用 action，绝不是终态结果——持久层收到即代码 bug。
+    // （输入类型已收窄为 terminal；此分支是对越界输入的运行时防御。）
+    throw new Error("waiting_for_bot result must never be persisted as terminal.");
+  }
   if (result.action === "noop") return "failed";
   if (result.outcome === "completed") return "completed";
   if (result.outcome === "cancelled") return "cancelled";

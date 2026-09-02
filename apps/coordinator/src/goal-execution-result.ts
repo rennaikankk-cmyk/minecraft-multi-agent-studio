@@ -1,8 +1,9 @@
 import { AISchedulerError } from "@minecraft-studio/ai-router";
 import {
+  goalDispatchTerminalResultV1Schema,
   goalResultSummaryFromOutput,
   type ControlLinkGoalErrorCode,
-  type GoalDispatchResultV1,
+  type GoalDispatchTerminalResultV1,
 } from "@minecraft-studio/protocol";
 
 import { GoalLifecycleStoreError } from "./goal-lifecycle-store.js";
@@ -15,7 +16,7 @@ import {
 export function projectGoalDispatchResult(
   identity: Readonly<{ taskId: string; botId: string }>,
   result: LocalPlanResult,
-): GoalDispatchResultV1 {
+): GoalDispatchTerminalResultV1 {
   // Deterministic decisions carry no AI usage record; the projection reports
   // zeroed counters instead of pretending a model round-trip happened.
   const ai = result.ai === null
@@ -46,11 +47,14 @@ export function projectGoalDispatchResult(
     outcome: payload.outcome,
     ai,
   } as const;
-  if (payload.outcome !== "completed") {
-    return { ...base, errorCode: payload.errorCode };
-  }
-  const summary = goalResultSummaryFromOutput(payload.output);
-  return summary === undefined ? base : { ...base, summary };
+  const summary = payload.outcome === "completed"
+    ? goalResultSummaryFromOutput(payload.output)
+    : undefined;
+  const candidate = payload.outcome !== "completed"
+    ? { ...base, errorCode: payload.errorCode }
+    : (summary === undefined ? { ...base } : { ...base, summary });
+  // 终态出口统一经 schema 收窄（判别联合的手工构造不再依赖推断细节）。
+  return goalDispatchTerminalResultV1Schema.parse(candidate);
 }
 
 export function mapGoalExecutionError(

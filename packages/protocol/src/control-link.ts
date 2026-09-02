@@ -319,6 +319,8 @@ export const controlLinkGoalErrorCodeSchema = z.enum([
   "CONTROL_LINK_BACKPRESSURE",
   "CONTROL_LINK_STOPPED",
   "CONTROL_LINK_INTERNAL_ERROR",
+  // Round 6.6 生命周期：等待窗到期是诚实终态，不是注册期永久拒绝。
+  "GOAL_EXPIRED_WAITING_FOR_BOT",
 ]);
 
 const goalResponseIdentityShape = {

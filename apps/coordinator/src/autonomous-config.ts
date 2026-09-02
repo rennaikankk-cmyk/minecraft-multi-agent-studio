@@ -60,13 +60,16 @@ function booleanFlag(
   raw: string | undefined,
   fallback: boolean,
 ): boolean {
-  const value = raw?.trim();
+  // Round 6.6 配置 SSOT：兼容 0/1 与 true/false（大小写/空白不敏感）。
+  // 场景脚本习惯 =false 被拒启（11:16 实测 AUTONOMY_CONFIG_INVALID）——
+  // 标准布尔词形必须等价于 0/1；garbage 仍 fail-closed。
+  const value = raw?.trim().toLowerCase();
   if (!value) return fallback;
-  if (value === "1") return true;
-  if (value === "0") return false;
+  if (value === "1" || value === "true") return true;
+  if (value === "0" || value === "false") return false;
   throw new AutonomousConfigError(
     "AUTONOMY_CONFIG_INVALID",
-    "STUDIO_AUTONOMY_ENABLED must be 0 or 1.",
+    "STUDIO_AUTONOMY_ENABLED must be 0/1/true/false.",
   );
 }
 

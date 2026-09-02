@@ -38,6 +38,8 @@ export {
   controlApiErrorV1Schema,
   controlApiPermissionSchema,
   goalDispatchResultV1Schema,
+  goalDispatchTerminalResultV1Schema,
+  type GoalDispatchTerminalResultV1,
   goalResultSummaryFromOutput,
   publicBotDetailV1Schema,
   publicBotSummaryV1Schema,

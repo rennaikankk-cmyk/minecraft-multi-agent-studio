@@ -35,11 +35,23 @@ describe("loadAutonomousConfig", () => {
   });
 
   it.each([
-    { STUDIO_AUTONOMY_ENABLED: "true" },
+    // Round 6.6 配置 SSOT：true/false 是 1/0 的等价词形（合法），
+    // 只有真正的 garbage（如 "enabled"/"nope"）才 fail-closed。
+    { STUDIO_AUTONOMY_ENABLED: "enabled" },
+    { STUDIO_AUTONOMY_ENABLED: "nope" },
     { STUDIO_AUTONOMY_INTERVAL_MS: "999" },
     { STUDIO_AUTONOMY_GOAL_TIMEOUT_MS: "120001" },
     { STUDIO_AUTONOMY_FAILURE_COOLDOWN_MS: "not-a-number" },
   ])("rejects an invalid autonomy setting", (env) => {
     expect(() => loadAutonomousConfig(env)).toThrow(AutonomousConfigError);
+  });
+
+  it.each([
+    { STUDIO_AUTONOMY_ENABLED: "true" },
+    { STUDIO_AUTONOMY_ENABLED: "FALSE" },
+    { STUDIO_AUTONOMY_ENABLED: "0" },
+    { STUDIO_AUTONOMY_ENABLED: "1" },
+  ])("accepts standard boolean spellings (config SSOT)", (env) => {
+    expect(() => loadAutonomousConfig(env)).not.toThrow();
   });
 });
