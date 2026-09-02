@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 
 import {
   AIRouter,
@@ -60,6 +61,7 @@ import {
   GoalStoreWiringError,
   resolveGoalStoreMode,
 } from "./goal-store-mode.js";
+import { FilePlanJournalStore } from "./plan-journal.js";
 import { ExpiredLeaseRecoveryController } from "./expired-lease-recovery.js";
 import { CoordinatorGoalExecutionServer } from "./goal-execution-server.js";
 import {
@@ -268,6 +270,9 @@ async function main(): Promise<void> {
       transport: runtimeServer,
       coordinatorInstanceId: instanceId,
       workstationRegistry,
+      planJournalStore: new FilePlanJournalStore({
+        dir: path.join(process.env.STUDIO_PLAN_JOURNAL_DIR?.trim() || path.join("runtime-data", "plan-journals"), instanceId),
+      }),
       logger,
     });
   } else {
@@ -288,6 +293,9 @@ async function main(): Promise<void> {
       transport: runtimeServer,
       coordinatorInstanceId: instanceId,
       workstationRegistry,
+      planJournalStore: new FilePlanJournalStore({
+        dir: path.join(process.env.STUDIO_PLAN_JOURNAL_DIR?.trim() || path.join("runtime-data", "plan-journals"), instanceId),
+      }),
       logger,
     });
     logger.warn("coordinator_planner_deterministic_only", {

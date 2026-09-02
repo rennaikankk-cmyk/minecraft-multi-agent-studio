@@ -45,6 +45,14 @@ import {
 import { z } from "zod";
 
 import type { BotRegistry, BotRegistryRecord } from "./bot-registry.js";
+import { InMemoryGoalLifecycleStore } from "./in-memory-goal-store.js";
+import {
+  applyStepResult,
+  newPlanJournal,
+  recordDispatch,
+  type PlanExecutionJournal,
+  type PlanJournalStore,
+} from "./plan-journal.js";
 import {
   BotAssignmentError,
   type BotAssignmentService,
@@ -519,6 +527,11 @@ export type CoordinatorLocalPlannerOptions = Readonly<{
    * world.scan 观测到的熔炉位置自动注册。正常 contention（busy）静默。
    */
   workstationRegistry?: WorkstationRegistryPort;
+  /**
+   * Round 6.4 P0c/P0d：durable plan/step journal。未注入时 build 派发
+   * 仍可运行但 resume 语义退化为 skill 自身 nextIndex（诚实降级）。
+   */
+  planJournalStore?: PlanJournalStore;
   assignment?: Pick<BotAssignmentService, "acquire" | "release">;
   /**
    * Durable lease authority used when a caller supplies a pre-acquired goal
@@ -1086,6 +1099,55 @@ export class CoordinatorLocalPlanner {
    * points can never drift apart.
    */
   /**
+   * Round 6.4 J3：build.blueprint 派发的 durable journal 打开/复用。
+   * 同一 build（按 anchor 识别）跨 goal 复用同一 planId——restart 后
+   * 已完成 batch 的 SUCCEEDED 步骤是 resume 边界，对应 cell 零重放。
+   */
+  private openBuildJournal(
+    request: LocalPlanRequest,
+    skillId: string,
+    trustedInput: SkillJsonValue,
+    record: BotRegistryRecord,
+  ): PlanExecutionJournal | null {
+    const store = this.options.planJournalStore;
+    if (store === undefined || skillId !== "build.blueprint") return null;
+    const input = trustedInput as {
+      blueprint?: { anchor?: { x: number; y: number; z: number }; dimension?: string; cells?: unknown[] };
+      startIndex?: number;
+      maxPlacements?: number;
+    } | null;
+    const anchor = input?.blueprint?.anchor;
+    if (!anchor || !input.blueprint?.dimension) return null;
+    const buildKey = `${record.serverProfileId}|${input.blueprint.dimension}|${Math.floor(anchor.x)},${Math.floor(anchor.y)},${Math.floor(anchor.z)}`;
+    const existing = store.load().find(
+      (j) => j.status === "ACTIVE" && j.correlationId === buildKey,
+    );
+    if (existing !== undefined) return existing;
+    const cells = Array.isArray(input.blueprint.cells) ? (input.blueprint.cells as Array<{ itemName?: unknown }>) : [];
+    return newPlanJournal({
+      goalId: request.taskId,
+      botId: request.botId,
+      serverProfileId: record.serverProfileId,
+      correlationId: buildKey,
+      plannerVersion: "local-planner",
+      steps: [
+        {
+          skillId: "build.blueprint",
+          actionFamily: "build",
+          sideEffectClass: "NON_IDEMPOTENT",
+          expectedPostcondition: {
+            kind: "build-cell",
+            buildId: buildKey,
+            cellIndex: (input.startIndex ?? 0) + Math.max(1, input.maxPlacements ?? cells.length) - 1,
+            position: { x: Math.floor(anchor.x), y: Math.floor(anchor.y), z: Math.floor(anchor.z) },
+            blockName: String(cells[0]?.itemName ?? "unknown"),
+          },
+        },
+      ],
+    });
+  }
+
+  /**
    * Phase 2 —— 非幂等步骤 transport 失败的 server-truth reconcile。
    *
    * 判据（与 §五.3 对齐）：
@@ -1255,9 +1317,14 @@ export class CoordinatorLocalPlanner {
         worldStateVersion: execution.worldStateVersion,
       },
     );
+    // Round 6.4 J3：build.blueprint 派发进 durable journal（cell 级零重放判据）
+    const buildJournal = this.openBuildJournal(request, decision.skillId, trustedInput, currentRecord);
+    if (buildJournal !== null) {
+      this.options.planJournalStore?.save(recordDispatch(buildJournal, buildJournal.steps[0]!.stepId));
+    }
     let dispatchOutcome: Awaited<ReturnType<
       CoordinatorLocalPlanner["dispatchSkillWithRecovery"]
-    >>;
+    >> | undefined;
     try {
       dispatchOutcome = await this.dispatchSkillWithRecovery({
         request,
@@ -1270,6 +1337,18 @@ export class CoordinatorLocalPlanner {
         claim: execution.claim,
       });
     } finally {
+      if (buildJournal !== null) {
+        const completed = dispatchOutcome !== undefined && dispatchOutcome.result.payload.outcome === "completed";
+        this.options.planJournalStore?.save(
+          applyStepResult(buildJournal, buildJournal.steps[0]!.stepId, {
+            status: completed ? "SUCCEEDED" : "FAILED",
+            failureCode: completed ? null : "BUILD_DISPATCH_FAILED",
+            verification: completed
+              ? { outcome: "confirmed", evidence: "skill result completed with placements output" }
+              : { outcome: "unverifiable", evidence: "dispatch did not complete" },
+          }),
+        );
+      }
       // 租约与派发结果同生命周期：失败也要归还（corruption 除外——那是注册表问题）
       if (facilityLease !== null) {
         try {
@@ -1284,6 +1363,13 @@ export class CoordinatorLocalPlanner {
           this.options.logger?.warn?.("coordinator_facility_release_failed", {});
         }
       }
+    }
+    if (dispatchOutcome === undefined) {
+      // dispatch 抛出且 finally 已记 journal——这里如实上抛，不编造结果
+      throw new LocalPlannerError(
+        "PLANNER_GOAL_EXECUTION_FAILED",
+        "build dispatch threw before producing a result",
+      );
     }
     const {
       invocation,
