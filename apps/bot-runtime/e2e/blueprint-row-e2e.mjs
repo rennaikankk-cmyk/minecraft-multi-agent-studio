@@ -62,7 +62,9 @@ await withE2EFixture(async (fixture) => {
     return false;
   }
   if (!(await startBot())) { log("FATAL: bot never online"); process.exit(1); }
-  log(`bot ${BOT} ONLINE`);
+  // bot 日志 append 模式：以当前计数为基线，之后只看增量（跨 run 同 botId 不虚增）
+  const dispatchBaseline = placeDispatchCount(BOT);
+  log(`bot ${BOT} ONLINE (dispatch baseline: ${dispatchBaseline})`);
 
   async function submitGoal(text) {
     const requestId = randomUUID();
@@ -91,19 +93,13 @@ await withE2EFixture(async (fixture) => {
   await fixture.rcon(`give ${USERNAME} minecraft:oak_log 8`).catch(() => "");
   await sleep(4_000);
 
-  // 锚点：rcon 扫一行 air-on-solid（8 格连续沿 +x）
-  const rconPos = await fixture.rcon(`data get entity ${USERNAME} Pos`).catch(() => "");
-  const m = /\[(-?[\d.]+)d, ?(-?[\d.]+)d, ?(-?[\d.]+)d\]/.exec(rconPos)
-    ?? /X: (-?[\d.]+),? Y: (-?[\d.]+),? Z: (-?[\d.]+)/.exec(rconPos);
-  if (!m) { log("FATAL: no position"); process.exit(1); }
-  const bx = Math.floor(Number(m[1])), by = Math.floor(Number(m[2])), bz = Math.floor(Number(m[3]));
-  // 找连续 8 格 air 且每格下方 solid 的 +x 行（三维扫描：y ±1、z ±6、x 偏移）
+  // 锚点：rcon 服务器真值扫描固定出生区（0..8 x、70±1 y、z -6..6）——
+  // 不依赖 bot 当前站位（reposition 偶发失败时 bot 还在树上，站位周边没有 8 格平地）
   let anchor = null;
   outer:
-  for (const dy of [0, 1, -1]) {
-    for (const dz of [0, -1, 1, -2, 2, -3, 3, -4, 4, -5, 5, -6, 6]) {
-      for (const dx of [1, 2, 0, 3, -1]) {
-        const y = by + dy, z = bz + dz, x0 = bx + dx;
+  for (const y of [70, 71, 69]) {
+    for (const z of [0, -1, 1, -2, 2, -3, 3, -4, 4, -5, 5, -6, 6]) {
+      for (const x0 of [1, 0, 2, 3]) {
         let ok = true;
         for (let i = 0; i < CELLS; i += 1) {
           const x = x0 + i;
@@ -116,9 +112,13 @@ await withE2EFixture(async (fixture) => {
       }
     }
   }
-  if (!anchor) { log("FATAL: no 8-cell air-on-solid +x row found"); process.exit(1); }
+  if (!anchor) { log("FATAL: no 8-cell air-on-solid +x row near spawn"); process.exit(1); }
   // place 不移动：bot 站行中点（8 格行最远 3.5 < reach 3.8）
-  await submitGoal(`移动到坐标 x=${anchor.x + 3} y=${anchor.y} z=${anchor.z} 附近`);
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const r = await submitGoal(`移动到坐标 x=${anchor.x + 3} y=${anchor.y} z=${anchor.z} 附近`);
+    if (r?.status === "completed") break;
+    log(`row-middle move attempt ${attempt}: ${r?.status ?? "rejected"}`);
+  }
   log(`anchor row @(${anchor.x},${anchor.y},${anchor.z}) +x ×${CELLS}`);
 
   async function verifyCell(index) {
@@ -133,7 +133,7 @@ await withE2EFixture(async (fixture) => {
     const task = await submitGoal(goal);
     const cells = [];
     for (let i = 0; i < CELLS; i += 1) cells.push(await verifyCell(i));
-    const dispatches = placeDispatchCount(BOT);
+    const dispatches = placeDispatchCount(BOT) - dispatchBaseline;
     log(`cells=[${cells.join(",")}] dispatches=${dispatches}`);
     await api(MANAGER, `/v1/bots/${BOT}/stop`, { method: "POST" }).catch(() => undefined);
     if (task?.status === "completed" && cells.every(Boolean)) {
@@ -149,7 +149,7 @@ await withE2EFixture(async (fixture) => {
   const t1 = await submitGoal(g1);
   const first4 = [];
   for (let i = 0; i < 4; i += 1) first4.push(await verifyCell(i));
-  const dispatchesBeforeStop = placeDispatchCount(BOT);
+  const dispatchesBeforeStop = placeDispatchCount(BOT) - dispatchBaseline;
   log(`batch1: goal=${t1?.status} cells[0..3]=[${first4.join(",")}] dispatches=${dispatchesBeforeStop}`);
 
   // 硬停（journal 边界）
@@ -168,7 +168,7 @@ await withE2EFixture(async (fixture) => {
   const t2 = await submitGoal(g2);
   const all = [];
   for (let i = 0; i < CELLS; i += 1) all.push(await verifyCell(i));
-  const dispatchesAfter = placeDispatchCount(BOT);
+  const dispatchesAfter = placeDispatchCount(BOT) - dispatchBaseline;
   log(`batch2: goal=${t2?.status} cells[0..7]=[${all.join(",")}] dispatches=${dispatchesAfter}`);
 
   await api(MANAGER, `/v1/bots/${BOT}/stop`, { method: "POST" }).catch(() => undefined);
