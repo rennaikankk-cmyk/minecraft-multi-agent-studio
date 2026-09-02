@@ -188,8 +188,7 @@ if (!present) {
   process.exit(2);
 }
 
-const baseStatus = await api(MANAGER, "/v1/status");
-const crashBase = countCrashes(baseStatus.body);
+const crashBase = await countCrashes();
 log(`baseline crash counter=${crashBase}`);
 
 // ===== 2) soak 循环 =====
@@ -228,8 +227,8 @@ while (Date.now() < deadline) {
     const s = await slp(SERVER_HOST, SERVER_PORT);
     stats.slpChecks += 1;
     if (s?.players?.sample?.some((p) => p.name === username)) stats.slpPresent += 1;
+    stats.crashDeltas.push((await countCrashes()) - crashBase);
     const st = await api(MANAGER, "/v1/status");
-    stats.crashDeltas.push(countCrashes(st.body) - crashBase);
     stats.compatSignals = st.body?.compatibility ?? stats.compatSignals;
   } catch (error) {
     jlog({ t: new Date().toISOString(), event: "cycle-error", message: String(error).slice(0, 300) });
@@ -241,8 +240,7 @@ await api(MANAGER, `/v1/bots/${botId}/stop`, { method: "POST" }).catch(() => und
 await sleep(8_000);
 const finalState = await botState(botId);
 stats.cleanStop = finalState?.connectionState !== "online";
-const finalStatus = await api(MANAGER, "/v1/status");
-stats.crashDeltaFinal = countCrashes(finalStatus.body) - crashBase;
+stats.crashDeltaFinal = (await countCrashes()) - crashBase;
 
 stats.endedAt = new Date().toISOString();
 stats.presentRatio = stats.slpChecks > 0 ? stats.slpPresent / stats.slpChecks : 0;
@@ -255,8 +253,10 @@ log(JSON.stringify({
 }));
 process.exit(stats.cleanStop && stats.crashDeltaFinal === 0 ? 0 : 3);
 
-function countCrashes(statusBody) {
-  // manager status 的 crash 计数字段名以现网为准（bot_crash_total / crashes）。
-  const raw = statusBody?.metrics?.bot_crash_total ?? statusBody?.crashes ?? statusBody?.bots?.crashTotal;
-  return typeof raw === "number" ? raw : 0;
+async function countCrashes() {
+  // manager 无聚合 crash 计数器；唯一映射 BOT_CRASH 的退出分类在 Incident 侧。
+  const inc = await api(MANAGER, '/v1/incidents?limit=200');
+  return (inc.body.issues ?? [])
+    .filter((i) => ['BOT_PROCESS_EXITED', 'UNEXPECTED_CRASH', 'BOT_STARTUP_FAILED'].includes(i.primaryFailureCode ?? ''))
+    .reduce((sum, i) => sum + (i.occurrenceCount ?? 0), 0);
 }
