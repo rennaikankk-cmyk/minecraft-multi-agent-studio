@@ -69,6 +69,19 @@ export const FAILURE_CODES = [
   "LLM_OUTPUT_INVALID",
   "LLM_SCHEMA_VALIDATION_FAILED",
   "UNKNOWN_FAILURE",
+  // Round 7 兼容层（SERVER 层证据优先，不默认归咎 Skill）
+  "SERVER_POSITION_CORRECTION",
+  "SERVER_ACTION_REJECTED",
+  "SERVER_BLOCK_STATE_DIVERGENCE",
+  "SERVER_INVENTORY_TRANSACTION_REJECTED",
+  "ACTION_POLICY_RATE_LIMITED",
+  "ACTION_POLICY_DEGRADED",
+  "FEATURE_GATE_DISABLED",
+  "COMPAT_PROFILE_UNKNOWN",
+  "COMPAT_PROFILE_EXPIRED",
+  "REPEATED_SETBACK",
+  "REPEATED_ACTION_REJECTION",
+  "VERSION_BEHAVIOR_MISMATCH",
 ] as const;
 export type FailureCode = (typeof FAILURE_CODES)[number];
 
@@ -77,6 +90,19 @@ export const FAILURE_CODE_ALIASES: Readonly<Record<string, FailureCode>> = {
   BLUEPRINT_STEP_BLOCKED: "BUILD_WRONG_BLOCK",
   // 放置能力对实心/占用目标的诚实拒绝（server truth）——Build 家族稳定语义
   PLACE_TARGET_OCCUPIED: "BUILD_PLACEMENT_REJECTED",
+  // Round 7 兼容层：evidence 优先，不臆断反作弊
+  SERVER_POSITION_CORRECTION: "UNKNOWN_FAILURE",
+  SERVER_ACTION_REJECTED: "UNKNOWN_FAILURE",
+  SERVER_BLOCK_STATE_DIVERGENCE: "WORLD_OBSERVATION_FAILED",
+  SERVER_INVENTORY_TRANSACTION_REJECTED: "INVENTORY_STATE_MISMATCH",
+  ACTION_POLICY_RATE_LIMITED: "UNKNOWN_FAILURE",
+  ACTION_POLICY_DEGRADED: "UNKNOWN_FAILURE",
+  FEATURE_GATE_DISABLED: "UNKNOWN_FAILURE",
+  COMPAT_PROFILE_UNKNOWN: "UNKNOWN_FAILURE",
+  COMPAT_PROFILE_EXPIRED: "UNKNOWN_FAILURE",
+  REPEATED_SETBACK: "UNKNOWN_FAILURE",
+  REPEATED_ACTION_REJECTION: "UNKNOWN_FAILURE",
+  VERSION_BEHAVIOR_MISMATCH: "UNKNOWN_FAILURE",
   BLUEPRINT_MATERIAL_INSUFFICIENT: "BUILD_MATERIAL_MISSING",
   ALL_CELLS_OUT_OF_REACH: "BUILD_CELL_UNREACHABLE",
   PATH_FAILED: "PATH_NO_PROGRESS",
@@ -281,6 +307,25 @@ export function classifyIncident(input: ClassifyInput): Classification {
     case "SERVER_VERSION_MISMATCH":
       matched.push(`failureCode=${input.failureCode}`);
       return { suspectedLayer: "SERVER", ruleId: "R-SERVER-1", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "medium", matchedEvidence: matched };
+    case "SERVER_POSITION_CORRECTION":
+    case "SERVER_ACTION_REJECTED":
+    case "REPEATED_SETBACK":
+    case "REPEATED_ACTION_REJECTION":
+      matched.push(`failureCode=${input.failureCode}`);
+      return { suspectedLayer: "SERVER", ruleId: "R-COMPAT-1", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "medium", matchedEvidence: matched };
+    case "ACTION_POLICY_RATE_LIMITED":
+    case "ACTION_POLICY_DEGRADED":
+    case "FEATURE_GATE_DISABLED":
+    case "COMPAT_PROFILE_UNKNOWN":
+    case "COMPAT_PROFILE_EXPIRED":
+      matched.push(`failureCode=${input.failureCode}`);
+      return { suspectedLayer: "RUNTIME", ruleId: "R-COMPAT-2", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "medium", matchedEvidence: matched };
+    case "SERVER_BLOCK_STATE_DIVERGENCE":
+      matched.push(`failureCode=${input.failureCode}`);
+      return { suspectedLayer: "WORLD_STATE", ruleId: "R-COMPAT-3", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "medium", matchedEvidence: matched };
+    case "SERVER_INVENTORY_TRANSACTION_REJECTED":
+      matched.push(`failureCode=${input.failureCode}`);
+      return { suspectedLayer: "RUNTIME", ruleId: "R-COMPAT-4", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "medium", matchedEvidence: matched };
     case "NETWORK_DISCONNECTED":
       matched.push("failureCode=NETWORK_DISCONNECTED");
       return { suspectedLayer: "NETWORK", ruleId: "R-NET-1", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "medium", matchedEvidence: matched };
