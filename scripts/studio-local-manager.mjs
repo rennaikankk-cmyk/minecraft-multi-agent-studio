@@ -1579,9 +1579,11 @@ export class StudioLocalManager {
   }
 
   async writeProfile(config) {
-    const networkScope = loopbackHost(config.serverHost)
-      ? "loopback"
-      : "private-lan";
+    const networkScope = config.purpose === "anarchy" && !loopbackHost(config.serverHost) && !privateHost(config.serverHost)
+      ? "public"
+      : loopbackHost(config.serverHost)
+        ? "loopback"
+        : "private-lan";
     const profile = {
       schemaVersion: "1.0",
       id: `local-${config.botId}`,
@@ -1589,7 +1591,9 @@ export class StudioLocalManager {
       // Manager-created profiles are real-server targets. Keeping this
       // separate from isolated-test prevents test-only boundary probing from
       // being enabled by a Dashboard-created Bot.
-      purpose: "managed",
+      purpose: config.purpose === "anarchy" ? "anarchy" : "managed",
+      // 章程 §6：anarchy purpose 默认导航档（沿途挖掘/疾跑/跑酷/搭高）
+      ...(config.purpose === "anarchy" ? { navigation: "anarchy" } : {}),
       networkScope,
       host: config.serverHost,
       port: config.serverPort,
@@ -1771,7 +1775,10 @@ function validateCreateBotRequest(input) {
     throw managedError("INVALID_REQUEST", "Bot 创建请求必须是对象。", 400);
   }
   const keys = Object.keys(input).sort().join(",");
-  if (keys !== "minecraftVersion,schemaVersion,serverHost,serverPort,username") {
+  const allowed = input.purpose === "anarchy"
+    ? "minecraftVersion,purpose,schemaVersion,serverHost,serverPort,username"
+    : "minecraftVersion,schemaVersion,serverHost,serverPort,username";
+  if (keys !== allowed) {
     throw managedError("INVALID_REQUEST", "Bot 创建请求包含未知或缺失字段。", 400);
   }
   const serverHost = String(input.serverHost ?? "").trim();
@@ -1780,7 +1787,7 @@ function validateCreateBotRequest(input) {
     input.schemaVersion !== "1.0" ||
     typeof input.username !== "string" ||
     !USERNAME_PATTERN.test(input.username) ||
-    (!loopbackHost(serverHost) && !privateHost(serverHost) && serverHost !== "host.docker.internal") ||
+    (input.purpose !== "anarchy" && !loopbackHost(serverHost) && !privateHost(serverHost) && serverHost !== "host.docker.internal") ||
     !Number.isSafeInteger(input.serverPort) ||
     input.serverPort < 1 ||
     input.serverPort > 65_535 ||
@@ -1797,6 +1804,7 @@ function validateCreateBotRequest(input) {
     serverHost,
     serverPort: input.serverPort,
     minecraftVersion,
+    ...(input.purpose === "anarchy" ? { purpose: "anarchy" } : {}),
   };
 }
 
