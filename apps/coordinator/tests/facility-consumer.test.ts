@@ -270,6 +270,25 @@ function facilityPlanner(
   });
 }
 
+/** F3 后租约验证会先派一次只读 world.scan：mock 里把候选熔炉报为存在。 */
+function scanThenResultTransport(
+  extra: Record<string, unknown> = {},
+): SkillInvocationTransport["sendSkillInvocation"] {
+  return async (invocation) => {
+    if (invocation.payload.skillId === "world.scan") {
+      return skillResult(invocation, {
+        blockName: "furnace",
+        dimension: "minecraft:overworld",
+        complete: true,
+        matches: [{ x: 1235, y: 64, z: -4320, distance: 1.5 }],
+        totalFound: 1,
+        ...extra,
+      });
+    }
+    return skillResult(invocation, {});
+  };
+}
+
 describe("Round 6.2 facility consumer (shared furnace lease)", () => {
   it("fills furnace from a shared-registry lease and releases it after dispatch", async () => {
     const workstationRegistry = new InMemoryWorkstationRegistry();
@@ -280,7 +299,7 @@ describe("Round 6.2 facility consumer (shared furnace lease)", () => {
     });
     const generate = vi.fn(async () => smeltDecision(null));
     const sendSkillInvocation = vi.fn<SkillInvocationTransport["sendSkillInvocation"]>(
-      async (invocation) => skillResult(invocation, {}),
+      scanThenResultTransport(),
     );
     const planner = facilityPlanner(generate, workstationRegistry, sendSkillInvocation);
 
@@ -291,7 +310,9 @@ describe("Round 6.2 facility consumer (shared furnace lease)", () => {
     });
     expect(result).toMatchObject({ action: "skill_result" });
 
-    const invocation = sendSkillInvocation.mock.calls[0]![0];
+    const invocation = sendSkillInvocation.mock.calls
+      .map(([call]) => call)
+      .find((call) => call.payload.skillId === "smelt.item")!;
     expect(invocation.payload.input).toMatchObject({
       furnace: { x: 1235, y: 64, z: -4320 },
       serverProfileId: "isolated-test",
@@ -318,7 +339,9 @@ describe("Round 6.2 facility consumer (shared furnace lease)", () => {
       requestId: "req-smelt",
       operatorGoal: "Use the shared furnace to smelt the raw iron.",
     });
-    const invocation = sendSkillInvocation.mock.calls[0]![0];
+    const invocation = sendSkillInvocation.mock.calls
+      .map(([call]) => call)
+      .find((call) => call.payload.skillId === "smelt.item")!;
     expect((invocation.payload.input as { furnace: unknown }).furnace).toBeNull();
   });
 
@@ -340,7 +363,7 @@ describe("Round 6.2 facility consumer (shared furnace lease)", () => {
     ).toBe(true);
     const generate = vi.fn(async () => smeltDecision(null));
     const sendSkillInvocation = vi.fn<SkillInvocationTransport["sendSkillInvocation"]>(
-      async (invocation) => skillResult(invocation, {}),
+      scanThenResultTransport(),
     );
     const planner = facilityPlanner(generate, workstationRegistry, sendSkillInvocation);
 
@@ -349,8 +372,56 @@ describe("Round 6.2 facility consumer (shared furnace lease)", () => {
       requestId: "req-smelt",
       operatorGoal: "Use the shared furnace to smelt the raw iron.",
     });
-    const invocation = sendSkillInvocation.mock.calls[0]![0];
-    expect((invocation.payload.input as { furnace: unknown }).furnace).toBeNull();
+    const invocation = sendSkillInvocation.mock.calls
+      .map(([call]) => call)
+      .find((call) => call.payload.skillId === "smelt.item");
+    expect(invocation).toBeDefined();
+    expect((invocation!.payload.input as { furnace: unknown }).furnace).toBeNull();
+  });
+
+  it("F3: verifies the leased furnace against server truth and invalidates a destroyed one", async () => {
+    const workstationRegistry = new InMemoryWorkstationRegistry();
+    workstationRegistry.register("isolated-test", "minecraft:overworld", "furnace", {
+      x: 1235,
+      y: 64,
+      z: -4320,
+    });
+    const generate = vi.fn(async () => smeltDecision(null));
+    // 世界扫描报告熔炉已不存在（被破坏）
+    const sendSkillInvocation = vi.fn<SkillInvocationTransport["sendSkillInvocation"]>(
+      async (invocation) => {
+        if (invocation.payload.skillId === "world.scan") {
+          return skillResult(invocation, {
+            blockName: "furnace",
+            dimension: "minecraft:overworld",
+            complete: true,
+            matches: [],
+            totalFound: 0,
+          });
+        }
+        return skillResult(invocation, {});
+      },
+    );
+    const planner = facilityPlanner(generate, workstationRegistry, sendSkillInvocation);
+
+    await planner.planAndDispatch({
+      ...planRequest(),
+      requestId: "req-smelt",
+      operatorGoal: "Use the shared furnace to smelt the raw iron.",
+    });
+    const smeltInvocation = sendSkillInvocation.mock.calls
+      .map(([call]) => call)
+      .find((call) => call.payload.skillId === "smelt.item")!;
+    // 证伪后回退 furnace=null（Runtime 自放），不把幽灵熔炉写进输入
+    expect((smeltInvocation.payload.input as { furnace: unknown }).furnace).toBeNull();
+    // 注册表条目被 invalidate（下一轮不会再用它）
+    expect(
+      workstationRegistry.get("isolated-test", "minecraft:overworld", {
+        x: 1235,
+        y: 64,
+        z: -4320,
+      }),
+    ).toBeNull();
   });
 
   it("registers furnace positions from a completed world.scan", async () => {

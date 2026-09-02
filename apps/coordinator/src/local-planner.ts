@@ -2087,6 +2087,43 @@ export class CoordinatorLocalPlanner {
     const position = record.currentStatus?.position;
     const dimension = position?.dimension;
     if (!dimension) return null;
+    // F3：租约接受前 server 真值验证——注册表条目可能已被世界变化证伪
+    // （熔炉被破坏/替换）。验证用一次真实的 world.scan 派发（只读、幂等），
+    // matches 里没有候选位置即证伪：发信号 + invalidate + 回退 null。
+    const verifyFurnaceStillExists = async (
+      entry: Readonly<{ position: { x: number; y: number; z: number } }>,
+    ): Promise<boolean> => {
+      try {
+        const scanOutput = await this.dispatchObservation(
+          request,
+          record,
+          record.skillCatalog!.skills,
+          "world.scan",
+          {
+            blockName: "furnace",
+            maxCount: 16,
+            maxDistance: 64,
+            dimension,
+            serverProfileId: record.serverProfileId,
+          },
+          this.validNow().getTime() + 15_000,
+        );
+        const matches = Array.isArray(
+          (scanOutput as { matches?: unknown } | null)?.matches,
+        )
+          ? ((scanOutput as { matches: Array<{ x: number; y: number; z: number }> }).matches)
+          : [];
+        return matches.some(
+          (m) =>
+            Math.floor(m.x) === entry.position.x &&
+            Math.floor(m.y) === entry.position.y &&
+            Math.floor(m.z) === entry.position.z,
+        );
+      } catch {
+        // 世界观测不可得：fail-closed 拒绝该租约（不猜存在）
+        return false;
+      }
+    };
     const acquired = await acquireWorkstation(registry, {
       serverProfileId: record.serverProfileId,
       dimension,
@@ -2097,6 +2134,7 @@ export class CoordinatorLocalPlanner {
         z: Math.floor(position.z),
       },
       botId: request.botId,
+      verifyFn: verifyFurnaceStillExists,
       onFailureSignal: (signal: FacilityFailureSignal) => {
         this.options.logger?.warn?.("coordinator_facility_failure_signal", {
           botId: request.botId,
