@@ -112,6 +112,50 @@ export type ParsedBlueprintGoal = Readonly<{
   startIndex: number;
 }>;
 
+/**
+ * 蓝图文件模板（多行/3D 结构的确定性通道）：
+ *
+ *   "使用蓝图文件 {name} 施工：锚点 x={ax} y={ay} z={az}[，从第 {s} 格开始]"
+ *
+ * cell 结构来自 apps/coordinator/blueprints/{name}.json（加载期 zod 校验+
+ * 批次几何校验，见 blueprint-files.ts）；goal 只携带锚点（grounded，逐字）。
+ * 文件不存在/未加载 → 返回 null 走模型分支（fail-closed：模型不可能转写
+ * 512 格，必然诚实失败，不会误建）。
+ */
+export type ParsedBlueprintFileGoal = Readonly<{
+  kind: "build-blueprint-file";
+  name: string;
+  anchor: Readonly<{ x: number; y: number; z: number }>;
+  startIndex: number;
+}>;
+
+export function parseBlueprintFileGoal(
+  operatorGoal: string,
+  knownBlueprintNames: ReadonlySet<string>,
+): ParsedBlueprintFileGoal | null {
+  if (!/使用蓝图文件/.test(operatorGoal)) return null;
+  const nameMatch = /使用蓝图文件\s+([a-z0-9][a-z0-9-]{0,63})\s*施工/u.exec(operatorGoal);
+  if (nameMatch === null) return null;
+  const name = nameMatch[1]!;
+  if (!knownBlueprintNames.has(name)) return null;
+  const anchorMatch = /锚点\s*x\s*[:=]?\s*(-?\d+)\s*y\s*[:=]?\s*(-?\d+)\s*z\s*[:=]?\s*(-?\d+)/u.exec(
+    operatorGoal,
+  );
+  if (anchorMatch === null) return null;
+  const startMatch = /从第\s*(\d{1,3})\s*格开始/u.exec(operatorGoal);
+  const startIndex = startMatch !== null ? Math.max(0, Number(startMatch[1]!)) : 0;
+  return {
+    kind: "build-blueprint-file",
+    name,
+    anchor: {
+      x: Number(anchorMatch[1]!),
+      y: Number(anchorMatch[2]!),
+      z: Number(anchorMatch[3]!),
+    },
+    startIndex,
+  };
+}
+
 export type DeterministicGoal =
   | ParsedAcquisitionGoal
   | ParsedMovementGoal
@@ -120,7 +164,8 @@ export type DeterministicGoal =
   | ParsedShelterGoal
   | ParsedEquipGoal
   | ParsedStanceGoal
-  | ParsedBlueprintGoal;
+  | ParsedBlueprintGoal
+  | ParsedBlueprintFileGoal;
 
 /**
  * 解析一条目标文本。识别顺序刻意固定：先看采集动词+唯一物品（这是自由

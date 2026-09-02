@@ -58,11 +58,17 @@ import {
   type BotAssignmentService,
 } from "./bot-assignment.js";
 import {
+  parseBlueprintFileGoal,
   parseDeterministicGoal,
   type DeterministicGoal,
   type DeterministicPlanItemsDecision,
   type DeterministicSkillDecision,
 } from "./deterministic-goals.js";
+import {
+  blueprintCellsForDispatch,
+  loadBlueprintFiles,
+  type BlueprintFile,
+} from "./blueprint-files.js";
 import {
   buildLocalPlannerPrompt,
   LOCAL_PLANNER_PROMPT_VERSION,
@@ -532,6 +538,11 @@ export type CoordinatorLocalPlannerOptions = Readonly<{
    * 仍可运行但 resume 语义退化为 skill 自身 nextIndex（诚实降级）。
    */
   planJournalStore?: PlanJournalStore;
+  /**
+   * 蓝图文件目录（默认 apps/coordinator/blueprints）。测试可注入临时目录；
+   * 缺省在构造期加载，schema/几何不合法直接抛（协调器拒启，fail-closed）。
+   */
+  blueprintDirectory?: string;
   assignment?: Pick<BotAssignmentService, "acquire" | "release">;
   /**
    * Durable lease authority used when a caller supplies a pre-acquired goal
@@ -854,6 +865,7 @@ export class CoordinatorLocalPlanner {
   private readonly coordinatorInstanceId: string;
   private readonly actorId: string;
   private readonly goalPlanner: GoalPlanner;
+  private readonly blueprintFiles: ReadonlyMap<string, BlueprintFile>;
   private readonly planSupervisor: PlanSupervisor;
   private readonly taskStateMachine: PersistentTaskStateMachine;
   private readonly safetyRecoveryPollIntervalMs: number;
@@ -883,6 +895,7 @@ export class CoordinatorLocalPlanner {
     this.randomId = options.randomId ?? randomUUID;
     this.goalPlanner = new GoalPlanner();
     this.planSupervisor = new PlanSupervisor(this.goalPlanner);
+    this.blueprintFiles = loadBlueprintFiles(options.blueprintDirectory);
   }
 
   async planAndDispatch(request: LocalPlanRequest): Promise<LocalPlanResult> {
@@ -1437,7 +1450,9 @@ export class CoordinatorLocalPlanner {
     planItems: DeterministicPlanItemsDecision | null;
     skill: DeterministicSkillDecision | null;
   }> | null {
-    const parsed = parseDeterministicGoal(operatorGoal, plannedItemNames);
+    const parsed: DeterministicGoal | null =
+      parseDeterministicGoal(operatorGoal, plannedItemNames) ??
+      parseBlueprintFileGoal(operatorGoal, new Set(this.blueprintFiles.keys()));
     if (parsed === null) return null;
     if (parsed.kind === "acquire-item") {
       return {
@@ -1458,6 +1473,7 @@ export class CoordinatorLocalPlanner {
       request,
       dimension,
       availableSkills,
+      this.blueprintFiles,
     );
     if (decision === null) return null;
     return { planItems: null, skill: decision };
@@ -3954,6 +3970,7 @@ function deterministicSkillDecision(
   request: LocalPlanRequest,
   dimension: string,
   availableSkills: readonly BotSkillCatalogEntryV1[],
+  blueprintFilesForDecision: ReadonlyMap<string, BlueprintFile>,
 ): DeterministicSkillDecision | null {
   const advertisedVersion = (skillId: string): string | null => {
     const entry = availableSkills.find(
@@ -4049,6 +4066,32 @@ function deterministicSkillDecision(
         serverProfileId: TRUSTED_SERVER_PROFILE_PLACEHOLDER,
       },
       reasonCode: "DETERMINISTIC_EQUIP",
+    };
+  }
+  if (parsed.kind === "build-blueprint-file") {
+    const blueprintVersion = advertisedVersion("build.blueprint");
+    if (blueprintVersion === null) return null;
+    // 文件蓝图：cells 全部来自加载期校验过的 JSON（模型零转写），goal 只贡献
+    // 锚点。批界/站位由文件声明；批间移动由编排层显式 movement goal 完成。
+    const blueprint = blueprintFilesForDecision.get(parsed.name);
+    if (blueprint === undefined) return null;
+    return {
+      action: "invoke_skill",
+      botId: request.botId,
+      taskId: request.taskId,
+      skillId: "build.blueprint",
+      skillVersion: blueprintVersion,
+      input: {
+        blueprint: {
+          anchor: parsed.anchor,
+          dimension,
+          serverProfileId: TRUSTED_SERVER_PROFILE_PLACEHOLDER,
+          cells: blueprintCellsForDispatch(blueprint),
+        },
+        ...(parsed.startIndex > 0 ? { startIndex: parsed.startIndex } : {}),
+        maxPlacements: blueprint.batchSize,
+      },
+      reasonCode: "DETERMINISTIC_BLUEPRINT_FILE",
     };
   }
   if (parsed.kind === "build-blueprint-row") {

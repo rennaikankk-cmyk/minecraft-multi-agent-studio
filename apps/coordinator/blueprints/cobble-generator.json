@@ -1,0 +1,38 @@
+{
+  "schemaVersion": "1.0",
+  "name": "cobble-generator",
+  "description": "5 槽活塞无关刷石机（固体部分）：y=0 地板 5 + 侧墙（y=0 与 y=1 各 z=±1）；流体（岩浆源 x=-2、水源 x=+2，交会缺口 x=0 出圆石）由流体能力/引导步骤注入，不在本蓝图。",
+  "batchSize": 15,
+  "staging": [
+    { "batch": 1, "offset": { "x": -1, "y": 1, "z": 2 } },
+    { "batch": 2, "offset": { "x": 1, "y": 1, "z": 2 } }
+  ],
+  "cells": [
+    { "offset": { "x": -2, "y": 0, "z": 0 }, "item": "cobblestone" },
+    { "offset": { "x": -1, "y": 0, "z": 0 }, "item": "cobblestone" },
+    { "offset": { "x": 0, "y": 0, "z": 0 }, "item": "cobblestone" },
+    { "offset": { "x": -2, "y": 0, "z": -1 }, "item": "cobblestone" },
+    { "offset": { "x": -1, "y": 0, "z": -1 }, "item": "cobblestone" },
+    { "offset": { "x": 0, "y": 0, "z": -1 }, "item": "cobblestone" },
+    { "offset": { "x": -2, "y": 0, "z": 1 }, "item": "cobblestone" },
+    { "offset": { "x": -1, "y": 0, "z": 1 }, "item": "cobblestone" },
+    { "offset": { "x": 0, "y": 0, "z": 1 }, "item": "cobblestone" },
+    { "offset": { "x": -2, "y": 1, "z": -1 }, "item": "cobblestone" },
+    { "offset": { "x": -1, "y": 1, "z": -1 }, "item": "cobblestone" },
+    { "offset": { "x": 0, "y": 1, "z": -1 }, "item": "cobblestone" },
+    { "offset": { "x": -2, "y": 1, "z": 1 }, "item": "cobblestone" },
+    { "offset": { "x": -1, "y": 1, "z": 1 }, "item": "cobblestone" },
+    { "offset": { "x": 0, "y": 1, "z": 1 }, "item": "cobblestone" },
+    { "offset": { "x": 1, "y": 0, "z": 0 }, "item": "cobblestone" },
+    { "offset": { "x": 2, "y": 0, "z": 0 }, "item": "cobblestone" },
+    { "offset": { "x": 1, "y": 0, "z": -1 }, "item": "cobblestone" },
+    { "offset": { "x": 2, "y": 0, "z": -1 }, "item": "cobblestone" },
+    { "offset": { "x": 1, "y": 0, "z": 1 }, "item": "cobblestone" },
+    { "offset": { "x": 2, "y": 0, "z": 1 }, "item": "cobblestone" },
+    { "offset": { "x": 1, "y": 1, "z": -1 }, "item": "cobblestone" },
+    { "offset": { "x": 2, "y": 1, "z": -1 }, "item": "cobblestone" },
+    { "offset": { "x": 1, "y": 1, "z": 1 }, "item": "cobblestone" },
+    { "offset": { "x": 2, "y": 1, "z": 1 }, "item": "cobblestone" }
+  ],
+  "notes": "来源：minecraft.wiki Tutorials/Cobblestone farming（5 槽设计，2026-09-03 查证）。流体注入：生产路径=流体放置能力（待实现），测试路径=RCON setblock（引导注记）。挖圆石：铁镐 0.5s/块，破后立即再生。禁忌：水源接触岩浆源=黑曜石（毁机）。"
+}
