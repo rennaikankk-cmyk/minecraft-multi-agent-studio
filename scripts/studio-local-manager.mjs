@@ -10,6 +10,12 @@ import {
 import { createServer } from "node:http";
 import { IncidentStore, occurrenceToMarkdown, buildRepairPrompt, safeExportText, redactSecrets } from "../packages/skills/dist/incidents.js";
 import { GameplayPolicyError, resolveGameplayPolicy } from "../packages/protocol/dist/gameplay-policy.js";
+import {
+  evaluateAdaptation,
+  evaluateFeatureGates,
+  newBehaviorProfile,
+  resolveCompatibilityMode,
+} from "../packages/skills/dist/compat/index.js";
 import { buildZip } from "./zip-writer.mjs";
 import {
   observeLocalTestServer,
@@ -391,6 +397,7 @@ export class StudioLocalManager {
       generatedAt: new Date().toISOString(),
       ai: { ...structuredClone(this.aiStatus), concurrency: this.buildAiConcurrencyInfo() },
       gameplayPolicy: this.gameplayPolicyInfo(),
+      compatibility: this.compatibilityStatus(),
       bots: [...this.configs.values()]
         .sort((left, right) => left.botId.localeCompare(right.botId))
         .map((config) => this.publicBot(config)),
@@ -1501,6 +1508,56 @@ export class StudioLocalManager {
       return { desired: policy.profile, effective: policy.profile, source: policy.source, policy };
     } catch (cause) {
       return { desired: "invalid", effective: "invalid", source: "invalid", error: String(cause?.message ?? cause) };
+    }
+  }
+
+  /**
+   * Round 7: anti-cheat compatibility status (SSOT read from the compat layer).
+   * Per-bot desired modes come from profile purpose (anarchy -> operator
+   * EXPLICIT_UNRESTRICTED desire; managed/其他 -> default UNKNOWN fail-closed).
+   * Observer/机器在本进程为演示性空窗口——真实信号由 bot-runtime 上报链
+   * 接入后填充（如实暴露，不伪造样本）。
+   */
+  compatibilityStatus() {
+    try {
+      const global = resolveCompatibilityMode({
+        operatorConfigured: this.options.environment.STUDIO_SERVER_COMPATIBILITY ?? null,
+      });
+      const profiles = [...this.configs.values()].map((config) => {
+        const operatorExplicit = config.purpose === "anarchy";
+        const perBot = operatorExplicit
+          ? resolveCompatibilityMode({
+              operatorConfigured: "EXPLICIT_UNRESTRICTED",
+              operatorAllowsUnrestricted: true,
+            })
+          : resolveCompatibilityMode({});
+        const profile = newBehaviorProfile({
+          serverProfileId: `local-${config.botId}`,
+          desired: perBot.desired,
+          effective: perBot.effective,
+          source: perBot.source,
+          minecraftVersion: config.minecraftVersion ?? null,
+          featureGates: [
+            { feature: "NO_HUNGER", desiredState: operatorExplicit },
+            { feature: "PACKET_MINE", desiredState: operatorExplicit },
+          ],
+        });
+        const gated = evaluateFeatureGates(profile);
+        return {
+          botId: config.botId,
+          desiredMode: perBot.desired,
+          effectiveMode: perBot.effective,
+          modeSource: perBot.source,
+          featureGates: gated.map((gate) => ({ feature: gate.feature, effective: gate.effectiveState, disableReason: gate.disableReason })),
+        };
+      });
+      return {
+        global: { desired: global.desired, effective: global.effective, source: global.source },
+        bots: profiles,
+        observer: { state: "wiring-pending", note: "signals report from bot-runtime; no fabricated samples" },
+      };
+    } catch (cause) {
+      return { error: String(cause?.message ?? cause).slice(0, 200) };
     }
   }
 
