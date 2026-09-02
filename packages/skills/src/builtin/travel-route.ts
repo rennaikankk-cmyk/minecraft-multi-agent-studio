@@ -241,6 +241,7 @@ function auditStatus(
 export const travelRouteSkill = defineSkill({
   id: "travel.route",
   version: "1.0.0",
+  progressContract: "MOVE_TO_TARGET",
   inputSchema: travelRouteInputSchema,
   outputSchema: travelRouteOutputSchema,
   stateSchema: travelRouteStateSchema,

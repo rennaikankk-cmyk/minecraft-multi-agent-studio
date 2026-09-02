@@ -195,7 +195,7 @@ export const storeSortSkill = defineSkill({
 
 export const packShulkerSkill = defineSkill({
   id: "pack.shulker",
-  version: "1.0.0",
+  version: "1.0.0", progressContract: "INVENTORY_CHANGE",
   inputSchema: packShulkerInputSchema,
   outputSchema: packShulkerOutputSchema,
   stateSchema: storageStateSchema,
@@ -228,7 +228,7 @@ export const packShulkerSkill = defineSkill({
 
 export const stockLevelSkill = defineSkill({
   id: "stock.levels",
-  version: "1.0.0",
+  version: "1.0.0", progressContract: "INVENTORY_CHANGE",
   inputSchema: stockLevelInputSchema,
   outputSchema: stockLevelOutputSchema,
   stateSchema: z.object({}).strip(),

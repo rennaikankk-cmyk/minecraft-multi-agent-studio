@@ -87,3 +87,28 @@ describe("contract gate G8 — no test-only skills leak into the production cata
     }
   });
 });
+
+describe("contract gate G9 — 23/23 typed progress contracts (no production title guessing)", () => {
+  it("every production skill declares a progressContract", () => {
+    const missing = builtinSkills
+      .filter((skill) => skill.progressContract === undefined)
+      .map((skill) => skill.id);
+    expect(missing).toEqual([]);
+  });
+
+  it("declared values are members of the stable vocabulary", () => {
+    const vocabulary = new Set([
+      "MOVE_TO_TARGET",
+      "SMELTING_WAIT",
+      "PLACE_AND_VERIFY",
+      "RECOVERING",
+      "WAITING_EXTERNAL",
+      "INVENTORY_CHANGE",
+    ]);
+    for (const skill of builtinSkills) {
+      if (skill.progressContract !== undefined) {
+        expect(vocabulary.has(skill.progressContract)).toBe(true);
+      }
+    }
+  });
+});

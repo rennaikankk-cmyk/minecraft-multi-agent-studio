@@ -102,6 +102,7 @@ export const scanBlocksCapabilityOutputSchema = scanBlocksOutputSchema;
 export const scanBlocksSkill = defineSkill({
   id: "world.scan",
   version: "1.0.0",
+  progressContract: "WAITING_EXTERNAL",
   inputSchema: scanBlocksInputSchema,
   outputSchema: scanBlocksOutputSchema,
   stateSchema: scanBlocksStateSchema,

@@ -91,6 +91,7 @@ export const craftItemCapabilityOutputSchema = craftItemOutputSchema;
 export const craftItemSkill = defineSkill({
   id: "craft.item",
   version: "1.0.0",
+  progressContract: "INVENTORY_CHANGE",
   inputSchema: craftItemInputSchema,
   outputSchema: craftItemOutputSchema,
   stateSchema: craftItemStateSchema,

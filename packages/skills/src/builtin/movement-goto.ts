@@ -81,6 +81,7 @@ function distance(
 export const movementGotoSkill = defineSkill({
   id: "movement.goto",
   version: "1.0.0",
+  progressContract: "MOVE_TO_TARGET",
   inputSchema: safeMovementGotoInputSchema,
   outputSchema: safeMovementGotoOutputSchema,
   stateSchema: safeMovementGotoStateSchema,

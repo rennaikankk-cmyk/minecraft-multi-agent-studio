@@ -179,6 +179,7 @@ export function decideSlot(slot: {
 export const equipArmorSkill = defineSkill({
   id: "inventory.equip-armor",
   version: "1.0.0",
+  progressContract: "INVENTORY_CHANGE",
   inputSchema: equipArmorInputSchema,
   outputSchema: equipArmorOutputSchema,
   stateSchema: equipArmorStateSchema,

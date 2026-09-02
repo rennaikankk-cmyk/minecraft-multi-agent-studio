@@ -43,6 +43,7 @@ export const combatStanceCapabilityOutputSchema = combatStanceOutputSchema;
 export const combatStanceSkill = defineSkill({
   id: "combat.stance",
   version: "1.0.0",
+  progressContract: "WAITING_EXTERNAL",
   inputSchema: combatStanceInputSchema,
   outputSchema: combatStanceOutputSchema,
   stateSchema: combatStanceStateSchema,

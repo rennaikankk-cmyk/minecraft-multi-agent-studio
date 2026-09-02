@@ -218,6 +218,7 @@ function parseCombatReceipt<T>(
 export const combatEngageSkill = defineSkill({
   id: "combat.engage",
   version: "1.0.0",
+  progressContract: "WAITING_EXTERNAL",
   inputSchema: combatControlInputSchema,
   outputSchema: combatEngageOutputSchema,
   stateSchema: combatControlStateSchema,
@@ -248,7 +249,7 @@ export const combatEngageSkill = defineSkill({
 
 export const combatDisengageSkill = defineSkill({
   id: "combat.disengage",
-  version: "1.0.0",
+  version: "1.0.0", progressContract: "WAITING_EXTERNAL",
   inputSchema: combatControlInputSchema,
   outputSchema: combatDisengageOutputSchema,
   stateSchema: combatControlStateSchema,

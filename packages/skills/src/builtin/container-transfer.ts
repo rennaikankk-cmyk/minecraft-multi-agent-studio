@@ -103,6 +103,7 @@ export const containerTransferCapabilityOutputSchema =
 export const containerTransferSkill = defineSkill({
   id: "container.transfer",
   version: "1.0.0",
+  progressContract: "INVENTORY_CHANGE",
   inputSchema: containerTransferInputSchema,
   outputSchema: containerTransferOutputSchema,
   stateSchema: containerTransferStateSchema,

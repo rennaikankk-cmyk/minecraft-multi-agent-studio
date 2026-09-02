@@ -76,6 +76,7 @@ export const secureFoodCapabilityOutputSchema = secureFoodOutputSchema;
 export const secureFoodSkill = defineSkill({
   id: "food.secure",
   version: "1.0.0",
+  progressContract: "INVENTORY_CHANGE",
   inputSchema: secureFoodInputSchema,
   outputSchema: secureFoodOutputSchema,
   stateSchema: secureFoodStateSchema,
