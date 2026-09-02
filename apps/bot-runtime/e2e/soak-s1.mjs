@@ -103,10 +103,9 @@ await withE2EFixture(async (fixture) => {
   for (const issue of baseInc.body.issues ?? []) baseByCode[issue.primaryFailureCode ?? "?"] = issue.occurrenceCount ?? 0;
 
   // 站位与初始物资
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    const r = await submitGoal(botId, "移动到坐标 x=0 y=70 z=0 附近");
-    if (r?.status === "completed") break;
-  }
+  // RCON tp 到平地（树冠出生+寻路会冻结事件循环→keep-alive 超时，实测两轮）。
+  await fixture.rcon(`tp ${username} 0 70 0`).catch(() => "");
+  await sleep(3_000);
   await fixture.rcon(`give ${username} minecraft:raw_iron 32`).catch(() => "");
   await fixture.rcon(`give ${username} minecraft:furnace 8`).catch(() => "");
   await fixture.rcon(`give ${username} minecraft:oak_log 64`).catch(() => "");

@@ -111,12 +111,11 @@ await withE2EFixture(async (fixture) => {
 
   // 站位（分散：三人各占一角，减少路径冲突）
   const spots = [{ x: 0, z: 0 }, { x: 6, z: 0 }, { x: 0, z: 6 }];
+  // RCON tp 到平地（树冠出生+寻路会冻结事件循环→keep-alive 超时，实测两轮）。
   for (let i = 0; i < bots.length; i += 1) {
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
-      const s = await submitGoal(bots[i].botId, `移动到坐标 x=${spots[i].x} y=70 z=${spots[i].z} 附近`, 90_000);
-      if (s === "completed") break;
-    }
+    await fixture.rcon(`tp ${bots[i].username} ${spots[i].x} 70 ${spots[i].z}`).catch(() => "");
   }
+  await sleep(3_000);
   // 材料注入
   for (const bot of bots) {
     await fixture.rcon(`give ${bot.username} minecraft:raw_iron 32`).catch(() => "");

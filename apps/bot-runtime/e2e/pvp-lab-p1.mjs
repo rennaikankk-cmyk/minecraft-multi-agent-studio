@@ -89,9 +89,10 @@ await withE2EFixture(async (f) => {
   const crashBase = (baseStatus.body?.metrics?.bot_crash_total ?? baseStatus.body?.crashes ?? 0);
 
   // 双方站位：相距 ~3 格（reach 内）
-  await submitGoalRaw(subject.botId, "移动到坐标 x=0 y=70 z=0 附近");
-  await submitGoalRaw(opponent.botId, "移动到坐标 x=3 y=70 z=0 附近");
-  await sleep(2_000);
+  // RCON tp 到平地对峙（树冠出生+寻路冻结事件循环；站位是服务器侧测试条件）。
+  await fixture.rcon(`tp ${subject.username} 0 70 0`).catch(() => "");
+  await fixture.rcon(`tp ${opponent.username} 3 70 0`).catch(() => "");
+  await sleep(3_000);
   const pa = await posOf(subject.username);
   const pb = await posOf(opponent.username);
   log(`positions subject=${JSON.stringify(pa)} opponent=${JSON.stringify(pb)}`);

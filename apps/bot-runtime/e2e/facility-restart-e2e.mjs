@@ -49,14 +49,15 @@ async function countItem(username, itemId) {
 
 async function submitGoal(botId, text, timeoutMs = 120_000) {
   const requestId = randomUUID();
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  // 重启后 runtime-link/catalog 就绪前，coordinator 会 PLANNER_REJECTED/BOT_UNAVAILABLE
+  // 拒绝（实测 08:41 三连拒后 script 却轮询 360s 空 task）。12×10s 全状态码重试。
+  for (let attempt = 0; attempt < 12; attempt += 1) {
     const res = await api(CONTROL_API, "/v1/goals", {
       method: "POST",
       body: JSON.stringify({ schemaVersion: "1.0", requestId, botId, operatorGoal: text, timeoutMs }),
     });
     if (res.status < 300) break;
-    // 409 GOAL_REJECTED 多为 runtime-link 注册竞态（重启后尤其）；退避重提。
-    await sleep(5_000);
+    await sleep(10_000);
   }
   for (let i = 0; i < Math.floor(timeoutMs / 2_000); i++) {
     await sleep(2_000);
@@ -94,11 +95,10 @@ await withE2EFixture(async (f) => {
     if (issue.maxSeverity === "CRITICAL") criticalBase[issue.primaryFailureCode ?? "?"] = issue.occurrenceCount ?? 0;
   }
 
-  // 站位（树冠出生会让 pathfinder 挂）
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    const r = await submitGoal(botId, "移动到坐标 x=0 y=70 z=0 附近");
-    if (r?.status === "completed") break;
-  }
+  // 树冠出生+寻路会让客户端事件循环冻结（keep-alive 丢失→服务器 Timed out，
+  // 08:08/09:01 两轮实测）。RCON tp 到平地是服务器侧测试条件，不经 goal 链。
+  await fixture.rcon(`tp ${username} 0 70 0`).catch(() => "");
+  await sleep(3_000);
   // 注入材料与熔炉（测试条件注入；放置/熔炼/租约链真实）
   await fixture.rcon(`give ${username} minecraft:raw_iron 5`).catch(() => "");
   await fixture.rcon(`give ${username} minecraft:furnace 1`).catch(() => "");
@@ -149,6 +149,7 @@ await withE2EFixture(async (f) => {
     if (await botOnline(botId)) break;
   }
   log("F4 bot back ONLINE");
+  await sleep(10_000);
   const second = await submitGoal(botId, "烧炼 2 个 iron_ingot，使用附近可用的熔炉，燃料用 oak_log", 360_000);
   await sleep(4_000);
   const after = await countItem(username, "iron_ingot");
