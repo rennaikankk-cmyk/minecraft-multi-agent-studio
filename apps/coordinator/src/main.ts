@@ -61,6 +61,7 @@ import {
   GoalStoreWiringError,
   resolveGoalStoreMode,
 } from "./goal-store-mode.js";
+import { resolveGameplayPolicy } from "@minecraft-studio/protocol";
 import { FilePlanJournalStore } from "./plan-journal.js";
 import { ExpiredLeaseRecoveryController } from "./expired-lease-recovery.js";
 import { CoordinatorGoalExecutionServer } from "./goal-execution-server.js";
@@ -415,6 +416,25 @@ async function main(): Promise<void> {
     }),
     hasPlanner: Boolean(localPlanner),
   });
+  // Round 8: Gameplay Policy SSOT — resolve once at startup and log it;
+  // invalid STUDIO_GAMEPLAY_PROFILE fails closed (refuses to start).
+  try {
+    const gameplayPolicy = resolveGameplayPolicy({});
+    logger.info("coordinator_gameplay_policy", {
+      profile: gameplayPolicy.profile,
+      unknownPlayerDisposition: gameplayPolicy.unknownPlayerDisposition,
+      proactiveCombat: gameplayPolicy.proactiveCombat,
+      source: gameplayPolicy.source,
+      revision: gameplayPolicy.revision,
+    });
+  } catch (cause) {
+    logger.error("coordinator_start_failed", {
+      code: "GAMEPLAY_POLICY_INVALID",
+      detail: (cause instanceof Error ? cause.message : String(cause)).slice(0, 300),
+    });
+    process.exitCode = 1;
+    return;
+  }
   logger.info("coordinator_goal_store_started", {
     mode: goalStoreMode,
     queuedGoals: taskDeliveryConfig?.purpose === "production" ? "durable" : "off",

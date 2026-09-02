@@ -4,6 +4,10 @@
 
 ## 0. 项目定位与作战约束
 
+> 产品定位的持久化章程与 Gameplay Policy 单一事实源：
+> [docs/anarchy-charter.md](./docs/anarchy-charter.md)（默认 STUDIO_GAMEPLAY_PROFILE=anarchy_first；
+> 未知玩家=敌对；BotSurvivalSafety 与 OperationalSecurity 永久保留，GameplayRestraint 已迁移）。
+
 本项目的最终目标是：**在无规则（anarchy）服务器上运行一个多智能体作战集群**——侦察、突袭、防御、PvP 战斗、建造、自动化农场、后勤协同。完整设计见：
 
 - `docs/anarchy-combat-design-2026-08-08.pdf`（作战体系设计 v2，主蓝图：六类角色、三层调度、正式服约束、M0~M6 路线）

@@ -1,6 +1,6 @@
 # Minecraft Multi-Agent Studio
 
-面向 Minecraft Java 版多智能体机器人的硬件无关控制平台。
+**产品定位：Anarchy-First / 无规则服务器优先**——面向无规则（anarchy）服务器上与外挂玩家对抗的多智能体作战集群（见 [docs/anarchy-charter.md](./docs/anarchy-charter.md)）。默认 Gameplay Profile 为 `anarchy_first`（未知玩家=敌对、主动战斗、财产/资源自由交互）；和平/保守行为仅作 standard 对照 profile 存在。以下为平台工程能力清单：
 
 当前已完成项目基线、真实环境检测、版本化 Bot 状态协议、单 Bot 隔离联机验收、Bot Process Supervisor、Minecraft 版本自适应、多版本 Skill 可用性解析、Runtime ↔ Coordinator 认证链路、Control API/Dashboard 四进程服务链路、确定性 L0 安全层、受限 Pathfinder 技能，以及 P1.3 任务持久化基础：
 

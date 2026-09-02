@@ -161,3 +161,32 @@ describe("CombatIdentityRegistry", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Round 8 —— Anarchy-First 身份契约（章程 §4：UNKNOWN=HOSTILE 是确定性默认）
+// ---------------------------------------------------------------------------
+describe("anarchy-first identity contract", () => {
+  it("UNKNOWN players default to hostile even with no prior observation (charter §4)", () => {
+    const registry = CombatIdentityRegistry.fromOperatorConfig(source({ usernames: [], uuids: [] }));
+    // 一个从未见过的玩家：非白名单 → hostile（ANARCHY_FIRST 的核心默认）
+    expect(registry.classify(entity({ uuid: "8f5a1c2e-3b4d-4e5f-8a9b-0c1d2e3f4a5f", username: "Stranger" }), SERVER)).toBe("hostile");
+  });
+
+  it("whitelisted players and own bots are never classified hostile", () => {
+    const registry = CombatIdentityRegistry.fromOperatorConfig(
+      source({ usernames: ["Ally"], uuids: ["8f5a1c2e-3b4d-4e5f-8a9b-0c1d2e3f4a5c"], selfUsername: "Self" }),
+    );
+    expect(registry.classify(entity({ uuid: "8f5a1c2e-3b4d-4e5f-8a9b-0c1d2e3f4a5c", username: "SomeoneElse" }), SERVER)).toBe("whitelisted");
+    expect(registry.classify(entity({ uuid: "8f5a1c2e-3b4d-4e5f-8a9b-0c1d2e3f4a5d", username: "Self" }), SERVER)).toBe("self");
+  });
+
+  it("renamed or duplicated usernames cannot bypass identity (uuid is authoritative)", () => {
+    const registry = CombatIdentityRegistry.fromOperatorConfig(
+      source({ usernames: ["Ally"], uuids: ["8f5a1c2e-3b4d-4e5f-8a9b-0c1d2e3f4a5c"], selfUsername: "Self" }),
+    );
+    // 白名单外玩家改名/复用白名单名：UUID 不匹配 → 仍然 hostile
+    expect(
+      registry.classify(entity({ uuid: "8f5a1c2e-3b4d-4e5f-8a9b-0c1d2e3f4a5e", username: "Ally" }), SERVER),
+    ).toBe("hostile");
+  });
+});

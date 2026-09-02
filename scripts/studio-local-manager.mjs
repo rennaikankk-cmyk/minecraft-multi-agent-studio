@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { createServer } from "node:http";
 import { IncidentStore, occurrenceToMarkdown, buildRepairPrompt, safeExportText, redactSecrets } from "../packages/skills/dist/incidents.js";
+import { GameplayPolicyError, resolveGameplayPolicy } from "../packages/protocol/dist/gameplay-policy.js";
 import { buildZip } from "./zip-writer.mjs";
 import {
   observeLocalTestServer,
@@ -294,6 +295,13 @@ export class StudioLocalManager {
       mkdir(this.logRoot, { recursive: true }),
     ]);
     await this.loadManifest();
+    // Round 8: gameplay profile fails closed — an invalid value refuses to start.
+    try {
+      resolveGameplayPolicy({ environment: this.options.environment });
+    } catch (cause) {
+      if (cause instanceof GameplayPolicyError) throw cause;
+      throw new GameplayPolicyError(String(cause?.message ?? cause));
+    }
     this.incidents = new IncidentStore({
       persistPath: process.env.STUDIO_INCIDENT_STORE_PATH?.trim() || path.join(this.runtimeRoot, "incidents.json"),
     });
@@ -382,6 +390,7 @@ export class StudioLocalManager {
       schemaVersion: "1.0",
       generatedAt: new Date().toISOString(),
       ai: { ...structuredClone(this.aiStatus), concurrency: this.buildAiConcurrencyInfo() },
+      gameplayPolicy: this.gameplayPolicyInfo(),
       bots: [...this.configs.values()]
         .sort((left, right) => left.botId.localeCompare(right.botId))
         .map((config) => this.publicBot(config)),
@@ -1481,6 +1490,19 @@ export class StudioLocalManager {
       testedModel: typeof profile?.testedModel === 'string' ? profile.testedModel : null,
     };
   }
+  /**
+   * Round 8: Gameplay Policy SSOT (desired==effective==single-process resolution).
+   * Invalid STUDIO_GAMEPLAY_PROFILE fails closed in start(); this path is post-validation.
+   */
+  gameplayPolicyInfo() {
+    try {
+      const policy = resolveGameplayPolicy({ environment: this.options.environment });
+      return { desired: policy.profile, effective: policy.profile, source: policy.source, policy };
+    } catch (cause) {
+      return { desired: "invalid", effective: "invalid", source: "invalid", error: String(cause?.message ?? cause) };
+    }
+  }
+
   async refreshAIStatus() {
     const provider = this.aiStatus.provider;
     const baseUrl = this.aiStatus.baseUrl;

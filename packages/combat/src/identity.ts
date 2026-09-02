@@ -158,8 +158,14 @@ export class CombatIdentityRegistry {
     if (folded !== null && folded === this.selfUsername) return "self";
 
     const normalized = entity.uuid === null ? null : normalizeUuid(entity.uuid);
-    if (folded !== null && this.usernames.has(folded)) return "whitelisted";
-    if (normalized !== null && this.uuids.has(normalized)) return "whitelisted";
+    // UUID 优先（章程 §4）：实体携带 UUID 时只按 UUID 判定——冒名者复用白名单
+    // 用户名不得获得友军待遇。用户名匹配仅在实体无 UUID（离线观测受限）时
+    // 作为回退；此时由 operator 保证白名单用户名的唯一性。
+    if (normalized !== null) {
+      if (this.uuids.has(normalized)) return "whitelisted";
+    } else if (folded !== null && this.usernames.has(folded)) {
+      return "whitelisted";
+    }
 
     if (entity.kind === "player") return "hostile";
 

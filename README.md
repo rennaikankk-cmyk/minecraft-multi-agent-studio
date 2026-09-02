@@ -1,6 +1,6 @@
 # Minecraft Multi-Agent Studio
 
-The primary project documentation is [README_CN.md](./README_CN.md).
+**Product positioning: Anarchy-First** — a multi-agent combat cluster for no-rules (anarchy) Minecraft servers. See [docs/anarchy-charter.md](./docs/anarchy-charter.md). The primary project documentation is [README_CN.md](./README_CN.md).
 
 For local development, `pnpm start` builds the workspace and runs
 `scripts/start-studio.mjs`, the automatic local wiring path for the control
