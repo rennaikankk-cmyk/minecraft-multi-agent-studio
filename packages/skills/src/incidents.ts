@@ -82,6 +82,30 @@ export const FAILURE_CODES = [
   "REPEATED_SETBACK",
   "REPEATED_ACTION_REJECTION",
   "VERSION_BEHAVIOR_MISMATCH",
+  // Skill System v1：技能前置拒绝码（契约层正常拒绝路径，非故障）。入册的目的是
+  // 消灭 UNKNOWN_FAILURE 盲区——这些码出现在终态结果里时必须能被分类与恢复阶梯
+  // 识别，而不是落进 UNKNOWN 后被当作可重试抖动刷任务。
+  "BOT_NOT_ONLINE",
+  "BOT_POSITION_UNAVAILABLE",
+  "NORMAL_ACTIONS_PAUSED",
+  "TARGET_DIMENSION_MISMATCH",
+  "TARGET_OUT_OF_SAFE_RANGE",
+  "TARGET_SERVER_PROFILE_MISMATCH",
+  "POLICY_ROUTE_SEGMENT_LIMIT",
+  "POLICY_STRAIGHT_DOWN_FORBIDDEN",
+  "POLICY_PARKOUR_FORBIDDEN",
+  "COMBAT_DRIVER_UNAVAILABLE",
+  "COMBAT_OBSERVATION_UNAVAILABLE",
+  "INVENTORY_FULL",
+  "CRAFTING_TABLE_OUT_OF_REACH",
+  "TARGET_OUT_OF_REACH",
+  "CONTAINER_OUT_OF_REACH",
+  "FURNACE_OUT_OF_REACH",
+  "SHULKER_OUT_OF_REACH",
+  "ALL_SORT_TARGETS_OUT_OF_REACH",
+  "MINE_LAVA_ADJACENT",
+  "BLUEPRINT_ANCHOR_INVALID",
+  "RETREAT_IN_PROGRESS",
 ] as const;
 export type FailureCode = (typeof FAILURE_CODES)[number];
 
@@ -370,6 +394,35 @@ export function classifyIncident(input: ClassifyInput): Classification {
     case "INVENTORY_STATE_MISMATCH":
       matched.push(`failureCode=${input.failureCode}`);
       return { suspectedLayer: "SKILL", ruleId: "R-SKILL-1", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "low", matchedEvidence: matched };
+    // Skill System v1 前置拒绝码：正常运行中的拒绝不是故障；只有它们罕见地出现在
+    // 终态结果里才走到这里，按其证据来源分层（运行态 vs 世界事实）。
+    case "BOT_NOT_ONLINE":
+    case "BOT_POSITION_UNAVAILABLE":
+    case "NORMAL_ACTIONS_PAUSED":
+    case "COMBAT_DRIVER_UNAVAILABLE":
+    case "COMBAT_OBSERVATION_UNAVAILABLE":
+    case "MINE_LAVA_ADJACENT":
+    case "POLICY_ROUTE_SEGMENT_LIMIT":
+    case "POLICY_STRAIGHT_DOWN_FORBIDDEN":
+    case "POLICY_PARKOUR_FORBIDDEN":
+    case "TARGET_SERVER_PROFILE_MISMATCH":
+      matched.push(`failureCode=${input.failureCode}`);
+      return { suspectedLayer: "RUNTIME", ruleId: "R-PRECOND-RUNTIME-1", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "medium", matchedEvidence: matched };
+    case "TARGET_DIMENSION_MISMATCH":
+    case "TARGET_OUT_OF_SAFE_RANGE":
+    case "TARGET_OUT_OF_REACH":
+    case "CRAFTING_TABLE_OUT_OF_REACH":
+    case "CONTAINER_OUT_OF_REACH":
+    case "FURNACE_OUT_OF_REACH":
+    case "SHULKER_OUT_OF_REACH":
+    case "ALL_SORT_TARGETS_OUT_OF_REACH":
+    case "BLUEPRINT_ANCHOR_INVALID":
+    case "INVENTORY_FULL":
+      matched.push(`failureCode=${input.failureCode}`);
+      return { suspectedLayer: "WORLD_STATE", ruleId: "R-PRECOND-WORLD-1", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "medium", matchedEvidence: matched };
+    case "RETREAT_IN_PROGRESS":
+      matched.push(`failureCode=${input.failureCode}`);
+      return { suspectedLayer: "RUNTIME", ruleId: "R-PRECOND-SAFETY-1", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "medium", matchedEvidence: matched };
     default:
       matched.push(`failureCode=${input.failureCode}`);
       return { suspectedLayer: "UNKNOWN", ruleId: "R-DEFAULT-0", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "low", matchedEvidence: matched };

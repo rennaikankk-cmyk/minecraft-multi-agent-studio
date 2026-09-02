@@ -1,0 +1,970 @@
+{
+  "schemaVersion": "1.0",
+  "generatedFrom": "packages/skills/src/v1-manifest.ts",
+  "totalSkills": 23,
+  "maturitySummary": {
+    "L0": 0,
+    "L1": 0,
+    "L2": 1,
+    "L3": 22,
+    "L4": 0,
+    "L5": 0
+  },
+  "skills": [
+    {
+      "skillId": "movement.goto",
+      "schemaVersion": "1.0.0",
+      "family": "movement",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "both",
+      "runtimeCapabilities": [
+        "bot.move"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "MOVE_TO_TARGET",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "REOBSERVE_THEN_RETRY",
+        "MOVE_CLOSER_THEN_RETRY",
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "BOT_POSITION_UNAVAILABLE",
+        "NORMAL_ACTIONS_PAUSED",
+        "TARGET_DIMENSION_MISMATCH",
+        "TARGET_OUT_OF_SAFE_RANGE",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [
+        "完成半径 ~4 格（模板锚点按停点动态折算）",
+        "死亡掉落回收依赖 coordinator DEATH_RECOVERY goal（同维度、15 分钟窗口）"
+      ],
+      "ownerModule": "packages/skills/src/builtin/movement-goto.ts"
+    },
+    {
+      "skillId": "travel.route",
+      "schemaVersion": "1.0.0",
+      "family": "movement",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "llm",
+      "runtimeCapabilities": [
+        "bot.move"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "MOVE_TO_TARGET",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "REOBSERVE_THEN_RETRY",
+        "SLOW_DOWN_THEN_RETRY",
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "BOT_POSITION_UNAVAILABLE",
+        "NORMAL_ACTIONS_PAUSED",
+        "POLICY_ROUTE_SEGMENT_LIMIT",
+        "TARGET_DIMENSION_MISMATCH",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [],
+      "ownerModule": "packages/skills/src/builtin/travel-route.ts"
+    },
+    {
+      "skillId": "inventory.equip-armor",
+      "schemaVersion": "1.0.0",
+      "family": "logistics",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "both",
+      "runtimeCapabilities": [
+        "inventory.read",
+        "inventory.write"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "INVENTORY_CHANGE",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "NORMAL_ACTIONS_PAUSED",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [],
+      "ownerModule": "packages/skills/src/builtin/equip-armor.ts"
+    },
+    {
+      "skillId": "combat.engage",
+      "schemaVersion": "1.0.0",
+      "family": "combat",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "llm",
+      "runtimeCapabilities": [
+        "combat.control"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "WAITING_EXTERNAL",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "REOBSERVE_THEN_RETRY",
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "COMBAT_DRIVER_UNAVAILABLE",
+        "COMBAT_OBSERVATION_UNAVAILABLE",
+        "NORMAL_ACTIONS_PAUSED",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [
+        "战术比较层（belief/utility）在战术核心落地前仍为固定闸门（见 docs/research/PVP_SYSTEM_RESEARCH.md §2）",
+        "L0 低血暂停会拒绝交战（NORMAL_ACTIONS_PAUSED）——anarchy 场景由 combatIntensity 分档"
+      ],
+      "ownerModule": "packages/skills/src/builtin/combat-control.ts"
+    },
+    {
+      "skillId": "combat.disengage",
+      "schemaVersion": "1.0.0",
+      "family": "combat",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "llm",
+      "runtimeCapabilities": [
+        "combat.control"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "WAITING_EXTERNAL",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "COMBAT_DRIVER_UNAVAILABLE",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [
+        "撤退必 suppressOffense；边打边撤组合待战术核心"
+      ],
+      "ownerModule": "packages/skills/src/builtin/combat-control.ts"
+    },
+    {
+      "skillId": "combat.stance",
+      "schemaVersion": "1.0.0",
+      "family": "combat",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "both",
+      "runtimeCapabilities": [
+        "combat.control"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "WAITING_EXTERNAL",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "COMBAT_DRIVER_UNAVAILABLE",
+        "NORMAL_ACTIONS_PAUSED",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [],
+      "ownerModule": "packages/skills/src/builtin/combat-stance.ts"
+    },
+    {
+      "skillId": "world.scan",
+      "schemaVersion": "1.0.0",
+      "family": "observation",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "both",
+      "runtimeCapabilities": [
+        "world.read"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "WAITING_EXTERNAL",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "NORMAL_ACTIONS_PAUSED",
+        "TARGET_DIMENSION_MISMATCH",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [],
+      "ownerModule": "packages/skills/src/builtin/scan-blocks.ts"
+    },
+    {
+      "skillId": "collect.block",
+      "schemaVersion": "1.0.0",
+      "family": "resource",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "both",
+      "runtimeCapabilities": [
+        "world.interact"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "INVENTORY_CHANGE",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "REOBSERVE_THEN_RETRY",
+        "FREE_INVENTORY_THEN_RETRY",
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "INVENTORY_FULL",
+        "NORMAL_ACTIONS_PAUSED",
+        "TARGET_DIMENSION_MISMATCH",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [],
+      "ownerModule": "packages/skills/src/builtin/collect-block.ts"
+    },
+    {
+      "skillId": "craft.item",
+      "schemaVersion": "1.0.0",
+      "family": "production",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "both",
+      "runtimeCapabilities": [
+        "craft.execute"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "INVENTORY_CHANGE",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "REOBSERVE_THEN_RETRY",
+        "MOVE_CLOSER_THEN_RETRY",
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "CRAFTING_TABLE_OUT_OF_REACH",
+        "NORMAL_ACTIONS_PAUSED",
+        "TARGET_DIMENSION_MISMATCH",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [],
+      "ownerModule": "packages/skills/src/builtin/craft-item.ts"
+    },
+    {
+      "skillId": "world.place-block",
+      "schemaVersion": "1.0.0",
+      "family": "build",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "llm",
+      "runtimeCapabilities": [
+        "world.interact"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "PLACE_AND_VERIFY",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "REOBSERVE_THEN_RETRY",
+        "MOVE_CLOSER_THEN_RETRY",
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "NORMAL_ACTIONS_PAUSED",
+        "TARGET_DIMENSION_MISMATCH",
+        "TARGET_OUT_OF_REACH",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [
+        "放置不移动；目标被占时 PLACE_TARGET_OCCUPIED"
+      ],
+      "ownerModule": "packages/skills/src/builtin/place-block.ts"
+    },
+    {
+      "skillId": "container.transfer",
+      "schemaVersion": "1.0.0",
+      "family": "logistics",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "llm",
+      "runtimeCapabilities": [
+        "container.write"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "INVENTORY_CHANGE",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "REOBSERVE_THEN_RETRY",
+        "MOVE_CLOSER_THEN_RETRY",
+        "FREE_INVENTORY_THEN_RETRY",
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "CONTAINER_OUT_OF_REACH",
+        "INVENTORY_FULL",
+        "NORMAL_ACTIONS_PAUSED",
+        "TARGET_DIMENSION_MISMATCH",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [
+        "读写统一走授权通道（transfer-safe）"
+      ],
+      "ownerModule": "packages/skills/src/builtin/container-transfer.ts"
+    },
+    {
+      "skillId": "smelt.item",
+      "schemaVersion": "1.0.0",
+      "family": "production",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "both",
+      "runtimeCapabilities": [
+        "craft.execute"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "SMELTING_WAIT",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "REOBSERVE_THEN_RETRY",
+        "MOVE_CLOSER_THEN_RETRY",
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "FURNACE_OUT_OF_REACH",
+        "NORMAL_ACTIONS_PAUSED",
+        "TARGET_DIMENSION_MISMATCH",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [
+        "F1-F3 真实验证过；F4/F5（重启 reconcile/false-success）本轮补齐"
+      ],
+      "ownerModule": "packages/skills/src/builtin/smelt-item.ts"
+    },
+    {
+      "skillId": "food.secure",
+      "schemaVersion": "1.0.0",
+      "family": "survival",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "both",
+      "runtimeCapabilities": [
+        "world.interact"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "INVENTORY_CHANGE",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "NORMAL_ACTIONS_PAUSED",
+        "TARGET_DIMENSION_MISMATCH",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [
+        "依赖 hasSafeFood 判定与采集回退链"
+      ],
+      "ownerModule": "packages/skills/src/builtin/secure-food.ts"
+    },
+    {
+      "skillId": "trade.villager",
+      "schemaVersion": "1.0.0",
+      "family": "trade",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "llm",
+      "runtimeCapabilities": [
+        "world.interact",
+        "inventory.write"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "WAITING_EXTERNAL",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "NORMAL_ACTIONS_PAUSED",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [
+        "真实村民交易（≤3.8 格、报价上限校验、读回核对）；entity 不存在时诚实拒绝"
+      ],
+      "ownerModule": "packages/skills/src/builtin/trade-villager.ts"
+    },
+    {
+      "skillId": "mine.branch",
+      "schemaVersion": "1.0.0",
+      "family": "resource",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "llm",
+      "runtimeCapabilities": [
+        "world.interact"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "INVENTORY_CHANGE",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "MINE_LAVA_ADJACENT",
+        "NORMAL_ACTIONS_PAUSED",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [
+        "分支挖掘受安全前置（岩浆邻接/虚空风险）拒绝"
+      ],
+      "ownerModule": "packages/skills/src/planning/mine-planner.ts"
+    },
+    {
+      "skillId": "mine.vein",
+      "schemaVersion": "1.0.0",
+      "family": "resource",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "llm",
+      "runtimeCapabilities": [
+        "world.interact"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "INVENTORY_CHANGE",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "MINE_LAVA_ADJACENT",
+        "NORMAL_ACTIONS_PAUSED",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [
+        "同 mine.branch 安全前置"
+      ],
+      "ownerModule": "packages/skills/src/planning/mine-planner.ts"
+    },
+    {
+      "skillId": "site.assess",
+      "schemaVersion": "1.0.0",
+      "family": "observation",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "llm",
+      "runtimeCapabilities": [
+        "world.read"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "WAITING_EXTERNAL",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "REOBSERVE_THEN_RETRY",
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "BOT_POSITION_UNAVAILABLE",
+        "NORMAL_ACTIONS_PAUSED",
+        "TARGET_DIMENSION_MISMATCH",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [],
+      "ownerModule": "packages/skills/src/planning/site-assessor.ts"
+    },
+    {
+      "skillId": "shelter.dig",
+      "schemaVersion": "1.0.0",
+      "family": "build",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "both",
+      "runtimeCapabilities": [
+        "world.interact"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "PLACE_AND_VERIFY",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "SLOW_DOWN_THEN_RETRY",
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "NORMAL_ACTIONS_PAUSED",
+        "POLICY_STRAIGHT_DOWN_FORBIDDEN",
+        "TARGET_DIMENSION_MISMATCH",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [],
+      "ownerModule": "packages/skills/src/planning/site-assessor.ts"
+    },
+    {
+      "skillId": "build.blueprint",
+      "schemaVersion": "1.0.0",
+      "family": "build",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "both",
+      "runtimeCapabilities": [
+        "world.interact"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "PLACE_AND_VERIFY",
+      "postconditionKind": "build-cell",
+      "recoveryStrategies": [
+        "REOBSERVE_THEN_RETRY",
+        "MOVE_CLOSER_THEN_RETRY",
+        "ACQUIRE_RESOURCES_THEN_RETRY",
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BLUEPRINT_ANCHOR_INVALID",
+        "BUILD_CELL_UNREACHABLE",
+        "BUILD_MATERIAL_MISSING",
+        "NORMAL_ACTIONS_PAUSED",
+        "RETREAT_IN_PROGRESS"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [
+        "确定性通道为单行模板（≤64 格/行）；更大结构需多行 goal 或文件蓝图（未实现）",
+        "place-block 不移动：bot 必须站在行中点可达范围（≤3.8 格）"
+      ],
+      "ownerModule": "packages/skills/src/planning/blueprint-planner.ts"
+    },
+    {
+      "skillId": "stock.levels",
+      "schemaVersion": "1.0.0",
+      "family": "logistics",
+      "status": "Experimental",
+      "maturityLevel": "L2",
+      "plannerReachability": "llm",
+      "runtimeCapabilities": [],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "INVENTORY_CHANGE",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "REOBSERVE_THEN_RETRY"
+      ],
+      "failureCodes": [],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": false,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [],
+      "ownerModule": "packages/skills/src/planning/stock-levels.ts"
+    },
+    {
+      "skillId": "store.sort",
+      "schemaVersion": "1.0.0",
+      "family": "logistics",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "llm",
+      "runtimeCapabilities": [
+        "container.write"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "INVENTORY_CHANGE",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "REOBSERVE_THEN_RETRY",
+        "MOVE_CLOSER_THEN_RETRY",
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "ALL_SORT_TARGETS_OUT_OF_REACH",
+        "BOT_NOT_ONLINE",
+        "NORMAL_ACTIONS_PAUSED"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [
+        "依赖 container.transfer 通道"
+      ],
+      "ownerModule": "packages/skills/src/planning/stock-levels.ts"
+    },
+    {
+      "skillId": "pack.shulker",
+      "schemaVersion": "1.0.0",
+      "family": "logistics",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "llm",
+      "runtimeCapabilities": [
+        "container.write"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "INVENTORY_CHANGE",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "REOBSERVE_THEN_RETRY",
+        "MOVE_CLOSER_THEN_RETRY",
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "NORMAL_ACTIONS_PAUSED",
+        "SHULKER_OUT_OF_REACH",
+        "TARGET_DIMENSION_MISMATCH",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [
+        "依赖 container.transfer 通道与潜影盒在场"
+      ],
+      "ownerModule": "packages/skills/src/planning/stock-levels.ts"
+    },
+    {
+      "skillId": "movement.profile",
+      "schemaVersion": "1.0.0",
+      "family": "movement",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "llm",
+      "runtimeCapabilities": [],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "RECOVERING",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "SLOW_DOWN_THEN_RETRY",
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "NORMAL_ACTIONS_PAUSED",
+        "POLICY_PARKOUR_FORBIDDEN",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [
+        "safe 档禁跑酷/沿途挖掘；anarchy 档全开（防活埋/防引液例外保留）"
+      ],
+      "ownerModule": "packages/skills/src/planning/movement-profile.ts"
+    }
+  ]
+}

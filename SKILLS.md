@@ -26,7 +26,7 @@
 - 自相矛盾的证据组合**拒绝装载**，例如"真实服跑过但运行时没接线"。
 - 只有四道闸全绿才允许对外称"已验证"（`evidenceSupportsVerifiedClaim`）。
 
-当前注册表包含 23 个技能；已接入 Runtime 的条目保持 **Partial**，其余规划/策略条目标为 **Experimental**。所有技能仍缺 `isolated-server-scenarios` 与 `cross-version-matrix` 两道真实环境闸。
+当前注册表包含 23 个技能；已接入 Runtime 的条目保持 **Partial**，其余条目标为 **Experimental**（当前仅 `stock.levels`：纯确定性计算、无 capability，L0 暂停对它按设计不生效，`runtime-wiring` 在为只读计算技能定义豁免语义前保持缺失）。所有技能仍缺 `isolated-server-scenarios` 与 `cross-version-matrix` 两道真实环境闸。
 真实隔离服六类场景与 1.21.8 跨版本矩阵一次没跑过。这与编译产物里的
 `verification=unverified` 是同一个事实的两种表述（AGENTS.md §8：无隔离测试服时不得声称联机测试通过）。
 
@@ -383,13 +383,14 @@
 
 ## `mine.branch@1.0.0`
 
-- 状态：**Experimental**（待 `runtime-wiring`、`isolated-server-scenarios`、`cross-version-matrix`）
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
 - 权限：`world.interact`
+- 适配器操作：`mine.branch-safe`（有界执行已校验计划）
 - 约束：规划输出有界主隧道和分支，y 层由调用方提供；岩浆、虚空风险和排除区确定性拒绝，回填默认开启。
 
 ## `mine.vein@1.0.0`
 
-- 状态：**Experimental**（待 `runtime-wiring`、`isolated-server-scenarios`、`cross-version-matrix`）
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
 - 权限：`world.interact`
 - 约束：只跟随已观测矿脉并限制 `maxBlocks`，无目标或危险状态 fail-closed；矿层提示标记为未实测。
 
@@ -407,7 +408,7 @@
 
 ## `build.blueprint@1.0.0`
 
-- 状态：**Experimental**（待 `runtime-wiring`、`isolated-server-scenarios`、`cross-version-matrix`）
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
 - 权限：`world.interact`
 - 适配器操作：逐块复用 `block.place-safe`
 - 约束：相对坐标锚点、结构优先排序、分批续建；材料、范围和中间态均由 Schema/Policy 限制。
@@ -416,23 +417,23 @@
 
 - 状态：**Experimental**（待 `runtime-wiring`、`isolated-server-scenarios`、`cross-version-matrix`）
 - 权限：无外部能力（纯确定性计数）
-- 约束：按 `low ≤ target ≤ ceiling` 派生补产/停产决策，食物不进入战略水位。
+- 约束：按 `low ≤ target ≤ ceiling` 派生补产/停产决策，食物不进入战略水位。纯函数且无前置条件，L0 暂停对它按设计不生效；`runtime-wiring` 待只读豁免语义定义（见 `apps/bot-runtime/tests/v1-l0-wiring-matrix.test.ts` 固定的豁免事实）。
 
 ## `store.sort@1.0.0`
 
-- 状态：**Experimental**（待 `runtime-wiring`、`isolated-server-scenarios`、`cross-version-matrix`）
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
 - 权限：`container.read` + `container.write`
 - 适配器操作：分批复用 `container.transfer-safe`；每批回报实际 `movedCount`，不可幂等重放。
 
 ## `pack.shulker@1.0.0`
 
-- 状态：**Experimental**（待 `runtime-wiring`、`isolated-server-scenarios`、`cross-version-matrix`）
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
 - 权限：`container.read` + `container.write`
 - 适配器操作：复用 `container.transfer-safe`
 - 约束：支持分批续传，目标维度、服务器和伸手范围必须实时匹配。
 
 ## `movement.profile@1.0.0`
 
-- 状态：**Experimental**（待 `runtime-wiring`、`isolated-server-scenarios`、`cross-version-matrix`）
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
 - 权限：策略只读
 - 约束：`SAFE` 默认关闭跑酷；`PARKOUR` 仅隔离测试服且必须同时通过 sprint/jump、空中移动和坠落限制，所有数值仍标记未实测。
