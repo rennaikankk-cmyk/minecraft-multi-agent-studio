@@ -263,7 +263,6 @@ export class MineflayerCombatAdapter {
   >();
   private readonly onEntityStatus = (packet: unknown): void => {
     this.recordTotemPop(packet);
-    this.recordEntityStatusHurt(packet);
   };
   private readonly onEntityStatusBeforeMineflayer = (packet: unknown): void => {
     const entityId = entityStatusEntityId(packet);
@@ -282,7 +281,6 @@ export class MineflayerCombatAdapter {
       }
     }
     this.recordTotemPop(packet);
-    this.recordEntityStatusHurt(packet);
   };
   private readonly onEntityStatusAfterMineflayer = (packet: unknown): void => {
     const record = asRecord(packet);
@@ -296,6 +294,9 @@ export class MineflayerCombatAdapter {
     (this.bot as unknown as CombatBotHeldItemState).usingHeldItem = previous;
   };
   private readonly onDamageEvent = (packet: unknown): void => {
+    // Entity Status 2 不是受击：per minecraft.wiki Entity statuses，2 是三叉戟
+    // 蓄力（trident charge）动画。受击的权威信号是 clientbound damage_event
+    // 包（1.19.3+，字段 entityId），HitWindowTracker 的 i-frame 只从这里喂。
     this.recordEntityHurt(entityStatusEntityId(packet));
   };
   private readonly onAnimation = (packet: unknown): void => {
@@ -987,12 +988,6 @@ export class MineflayerCombatAdapter {
       // Packet data is untrusted. A malformed or out-of-order event must not
       // take down the Runtime or invent a combat fact.
     }
-  }
-
-  private recordEntityStatusHurt(packet: unknown): void {
-    const record = asRecord(packet);
-    if (record?.entityStatus !== 2) return;
-    this.recordEntityHurt(entityStatusEntityId(packet));
   }
 
   private recordEntityHurt(entityId: number | null): void {

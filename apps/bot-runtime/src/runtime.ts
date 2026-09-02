@@ -80,6 +80,7 @@ import type {
   BotDamageInfo,
   BotDisconnectInfo,
   BotRecoveryAction,
+  CompatSignalsSnapshot,
 } from "./client.js";
 import type { ServerProfile } from "./server-profile.js";
 import {
@@ -88,6 +89,7 @@ import {
   type CombatPrimitiveAction,
 } from "./combat-driver.js";
 import type { CombatReflexProbeReport } from "@minecraft-studio/combat";
+import type { CombatReflexProbeSource } from "./combat-reflex-probe.js";
 import type {
   BotConnectionState,
   BotMessageSink,
@@ -105,6 +107,18 @@ import { progressContractForAction } from "./progress-watchdog.js";
 import { IncidentReporter, watchdogEventToSignal } from "./incident-reporter.js";
 import { RuntimeEventBuffer } from "./runtime-event-buffer.js";
 import { loadRuntimeIdentity } from "./runtime-identity.js";
+import {
+  buildTacticsShadowSnapshot,
+  emergencySignalFromObservation,
+  resolveTacticsCoreEnabled,
+} from "./tactics-shadow.js";
+import type { TacticalDecision } from "@minecraft-studio/combat";
+import {
+  DEFAULT_TACTICS_PROFILE,
+  buildDecisionEvidence,
+  scoreTacticalActions,
+  selectTacticalAction,
+} from "@minecraft-studio/combat";
 import { WorldStateStore, type WorldStateSnapshot } from "./world-state.js";
 
 type TimerHandle = ReturnType<typeof setTimeout>;
@@ -173,8 +187,15 @@ export type RuntimeDependencies = {
   /** 单调时钟（watchdog elapsed 计算注入用；缺省 performance.now()）。 */
   monotonicNow?: () => number;
   randomId?: () => string;
-  /** Optional measured probe report; absent is deliberately NO_PROBE_DATA. */
-  combatReflexProbe?: CombatReflexProbeReport | null;
+  /**
+   * 反射级时序探针。两种形态：
+   *   - 静态 CombatReflexProbeReport（操作员在代表性负载下的实测报告）；
+   *   - CombatReflexProbeSource（live 探针：runtime 的战斗反应循环逐步回填
+   *     实测步长，spawn 时读取最新报告）。live 探针在首个样本前 report()
+   *     返回 null——仍是 NO_PROBE_DATA fail-closed，不假装测过。
+   * 缺省不注入 = 维持 NO_PROBE_DATA（诚实拒绝）。
+   */
+  combatReflexProbe?: CombatReflexProbeReport | CombatReflexProbeSource | null;
   /**
    * 运行时完整停止后的通知（含停止原因）。宿主用它实现 L0 断线保号的
    * 退避重启：直接重启会被同一群怪再打一次，形成分钟级循环。
@@ -382,6 +403,17 @@ export class SingleBotRuntime {
   >();
   private readonly serverPolicyStore: ServerPolicyStore;
   private readonly combatDriver: CombatDriver | null;
+  /** live 反射探针（有则战斗反应循环逐步回填实测步长）。 */
+  private readonly combatReflexProbeSource: CombatReflexProbeSource | null;
+  /**
+   * 战术核心 advisory shadow（STUDIO_TACTICS_CORE，默认关）。关 = 零行为
+   * 变化、零事件；开 = 每步战斗反应额外产出一条 bot_tactics_decision 证据
+   * 事件，绝不驱动动作。
+   */
+  private readonly tacticsCoreEnabled: boolean;
+  /** 当前战斗反应 epoch 内上一步的战术裁决（滞回/承诺输入）。 */
+  private tacticsShadowPreviousDecision: TacticalDecision | null = null;
+  private tacticsShadowLastStepMonotonicMs: number | null = null;
 
   constructor(
     private readonly profile: ServerProfile,
@@ -389,7 +421,26 @@ export class SingleBotRuntime {
   ) {
     this.now = dependencies.now ?? (() => new Date());
     this.monotonicNow = dependencies.monotonicNow ?? (() => performance.now());
+    const reflexProbeDependency = dependencies.combatReflexProbe ?? null;
+    this.combatReflexProbeSource =
+      reflexProbeDependency !== null &&
+      typeof (reflexProbeDependency as CombatReflexProbeSource).recordStepDurationMs === "function"
+        ? (reflexProbeDependency as CombatReflexProbeSource)
+        : null;
     const watchdogProfile = resolveWatchdogProfile();
+    // 战术核心 shadow 开关在启动时读一次（与 STUDIO_WATCHDOG_PROFILE 同一
+    // fail-closed 语义：垃圾值抛错拒绝启动，运行期不再变）。
+    this.tacticsCoreEnabled = resolveTacticsCoreEnabled();
+    if (this.tacticsCoreEnabled) {
+      dependencies.logger?.warn?.(
+        "bot_runtime_tactics_core_shadow_enabled",
+        this.logFields({
+          tacticsProfileVersion: DEFAULT_TACTICS_PROFILE.schemaVersion,
+          advisoryOnly: true,
+          evidenceQuality: "partial-wiring",
+        }),
+      );
+    }
     this.progressWatchdog = new ProgressWatchdog(resolveProgressWatchdogConfig());
     this.eventBuffer = new RuntimeEventBuffer();
     this.incidentReporter = new IncidentReporter({
@@ -439,7 +490,7 @@ export class SingleBotRuntime {
           ),
           policyGateProvider: () =>
             new ServerPolicyGate(this.serverPolicyStore.resolve(profile.id)),
-          reflexProbe: dependencies.combatReflexProbe ?? null,
+          reflexProbe: this.resolveCombatReflexProbe(),
         })
       : null;
     this.skillExecutor = new SkillExecutor(skillRegistry, {
@@ -544,6 +595,19 @@ export class SingleBotRuntime {
     return this.state;
   }
 
+  /**
+   * 读取当前可用的反射探针报告：live 源现取（零样本 → null），静态报告原样。
+   * 构造期调用时 live 探针必然零样本 → NO_PROBE_DATA（fail-closed）。
+   */
+  private resolveCombatReflexProbe(): CombatReflexProbeReport | null {
+    const probe = this.dependencies.combatReflexProbe ?? null;
+    if (probe === null) return null;
+    if (typeof (probe as CombatReflexProbeSource).recordStepDurationMs === "function") {
+      return (probe as CombatReflexProbeSource).report(this.profile.id);
+    }
+    return probe as CombatReflexProbeReport;
+  }
+
   getRuntimeInstanceId(): string {
     return this.runtimeInstanceId;
   }
@@ -562,6 +626,15 @@ export class SingleBotRuntime {
 
   getProgressWatchdogSnapshot(): ProgressWatchdogSnapshot {
     return this.progressWatchdog.snapshot();
+  }
+
+  /**
+   * Round 7 兼容层信号快照（本地控制面读取；与 getSafetyStatus 同级）。
+   * 协议 bot.status.v1 是 strict schema——把该快照挂上线上状态需要先扩
+   * protocol 契约，扩契约前宿主/运维从这里取（wiring-pending：线上状态字段）。
+   */
+  getCompatSignals(): CompatSignalsSnapshot | null {
+    return this.client?.compatSignals?.() ?? null;
   }
 
   canAcceptNormalActions(): boolean {
@@ -1106,7 +1179,7 @@ export class SingleBotRuntime {
     // A probe report is connection-scoped. Install it only after the new
     // Mineflayer session has spawned; reset() deliberately clears the prior
     // session's clearance so reconnects cannot inherit a stale pass.
-    this.combatDriver?.setReflexProbe(this.dependencies.combatReflexProbe ?? null);
+    this.combatDriver?.setReflexProbe(this.resolveCombatReflexProbe());
     try {
       const versionCompatibility = this.client.versionCompatibility();
       const compatibilityEnvironment =
@@ -2540,6 +2613,9 @@ export class SingleBotRuntime {
     // releases an in-flight movement/attack ACK without carrying stale target
     // or rate-window state into the reaction.
     this.combatDriver.reset(false);
+    // 战术 shadow 的滞回/承诺状态同样不跨 epoch：新遭遇从 INITIAL 开始。
+    this.tacticsShadowPreviousDecision = null;
+    this.tacticsShadowLastStepMonotonicMs = null;
 
     const taskId = `combat-reaction-${this.randomId()}`;
     const task: RuntimeCurrentTask = {
@@ -2620,11 +2696,17 @@ export class SingleBotRuntime {
       }
 
       const requestedAtMs = this.now().getTime();
+      // 反射探针步长测量：monotonic 差值覆盖 observation→engage→log 全步，
+      // 事件循环被挤占会直接体现在这里（见 combat-reflex-probe.ts 文件头）。
+      const stepStartedAtMonotonicMs = this.monotonicNow();
       const receipt = await this.runCombatEngage(
         requestedAtMs,
         activeClient,
         controller.signal,
         true,
+      );
+      this.combatReflexProbeSource?.recordStepDurationMs(
+        this.monotonicNow() - stepStartedAtMonotonicMs,
       );
       this.dependencies.logger.info(
         "bot_runtime_damage_reaction_step",
@@ -2639,6 +2721,10 @@ export class SingleBotRuntime {
           targetEntityId: receipt.actual.targetEntityId,
         }, this.traceId, taskId),
       );
+      // Advisory-only：默认关（零行为/零事件）；开启时每步一条证据事件。
+      if (this.tacticsCoreEnabled) {
+        this.runTacticsShadowStep(activeClient, step, taskId, anarchy);
+      }
       if (controller.signal.aborted) return "cancelled";
       if (combatReactionShouldStop(receipt, anarchy)) return "completed";
       if (
@@ -2672,6 +2758,83 @@ export class SingleBotRuntime {
       this.client === activeClient &&
       this.combatReaction?.taskId === taskId
     );
+  }
+
+  /**
+   * 战术核心 shadow 单步：装配 CombatSnapshot → score → select → evidence，
+   * 发一条 `bot_tactics_decision` 事件。绝不执行动作（advisory-only）；
+   * 装配或评估异常只降级为 warn，不反向影响反应循环。
+   */
+  private runTacticsShadowStep(
+    activeClient: BotClient,
+    step: number,
+    taskId: string,
+    anarchy: boolean,
+  ): void {
+    try {
+      const nowMonotonicMs = this.monotonicNow();
+      const stepMs = this.tacticsShadowLastStepMonotonicMs === null
+        ? (anarchy ? ANARCHY_COMBAT_REACTION_TICK_MS : COMBAT_REACTION_TICK_MS)
+        : Math.max(1, nowMonotonicMs - this.tacticsShadowLastStepMonotonicMs);
+      this.tacticsShadowLastStepMonotonicMs = nowMonotonicMs;
+      const observation = activeClient.combatObservation?.(this.now().getTime()) ?? null;
+      if (observation === null) return;
+      const clientSnapshot = activeClient.snapshot();
+      // 近窗服务器拒绝/回拉信号（compat observer）作为 uncertainty 惩罚输入；
+      // client 不采集（如测试替身）就按 0，不臆断。
+      const compat = this.client === activeClient
+        ? (this.getCompatSignals() ?? null)
+        : null;
+      let serverRejectionSignals = 0;
+      if (compat !== null) {
+        for (const familyStats of Object.values(compat.familyStats)) {
+          serverRejectionSignals += familyStats.corrections + familyStats.rejections;
+        }
+      }
+      const combatSnapshot = buildTacticsShadowSnapshot({
+        nowMonotonicMs,
+        stepMs,
+        observation,
+        snapshot: clientSnapshot,
+        gameplayProfile: anarchy ? "anarchy_first" : "standard",
+        stance: this.profile.combat?.stance ?? "preserve-life",
+        compatMode: this.serverPolicyStore.resolve(this.profile.id).profile,
+        serverRejectionSignals,
+      });
+      const verdict = scoreTacticalActions(combatSnapshot, DEFAULT_TACTICS_PROFILE);
+      const decision = selectTacticalAction({
+        verdict,
+        snapshot: combatSnapshot,
+        profile: DEFAULT_TACTICS_PROFILE,
+        previous: this.tacticsShadowPreviousDecision,
+        emergencySignal: emergencySignalFromObservation(observation),
+      });
+      this.tacticsShadowPreviousDecision = decision;
+      const evidence = buildDecisionEvidence({
+        snapshot: combatSnapshot,
+        profile: DEFAULT_TACTICS_PROFILE,
+        verdict,
+        decision,
+      });
+      // Evidence 是确定性数值/动作名（无凭据、无自由文本），不引入秘密面。
+      this.dependencies.logger.info(
+        "bot_tactics_decision",
+        this.logFields({
+          advisoryOnly: true,
+          evidenceQuality: "partial-wiring",
+          step: step + 1,
+          decision: decision.action,
+          evidence,
+        }, this.traceId, taskId),
+      );
+    } catch (error) {
+      this.dependencies.logger.warn(
+        "bot_tactics_decision_failed",
+        this.logFields({
+          error: error instanceof Error ? error.message : String(error),
+        }, this.traceId, taskId),
+      );
+    }
   }
 
   private safetyAllowsDefensiveCombat(): boolean {

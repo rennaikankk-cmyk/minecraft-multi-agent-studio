@@ -98,6 +98,31 @@ describe("deterministic classification (不默认归咎 Skill)", () => {
     expect(result.suspectedLayer).toBe("SKILL");
     expect(result.confidenceBand).toBe("low");
   });
+
+  it("tactics-core terminal combat codes classify to RUNTIME R-COMBAT-1 (medium)", () => {
+    for (const code of [
+      "COMBAT_ENGAGE_REFUSED",
+      "COMBAT_PRESS_FAILED",
+      "KILL_SECURE_FAILED",
+      "DISENGAGE_FAILED",
+      "HEAL_INTERRUPTED",
+      "SUPPORT_UNAVAILABLE",
+    ] as const) {
+      const result = classifyIncident({ failureCode: code, incidentType: "SKILL_FAILED" });
+      expect(result.suspectedLayer, code).toBe("RUNTIME");
+      expect(result.ruleId, code).toBe("R-COMBAT-1");
+      expect(result.confidenceBand, code).toBe("medium");
+    }
+  });
+
+  it("CHASE_ABANDONED stays informational under its own rule, BELIEF_STALE_INVALIDATED maps WORLD_STATE", () => {
+    const chase = classifyIncident({ failureCode: "CHASE_ABANDONED", incidentType: "SKILL_FAILED" });
+    expect(chase.suspectedLayer).toBe("RUNTIME");
+    expect(chase.ruleId).toBe("R-COMBAT-2");
+    const stale = classifyIncident({ failureCode: "BELIEF_STALE_INVALIDATED", incidentType: "WORLD_OBSERVATION_FAILURE" });
+    expect(stale.suspectedLayer).toBe("WORLD_STATE");
+    expect(stale.ruleId).toBe("R-COMBAT-3");
+  });
 });
 
 describe("fingerprint", () => {

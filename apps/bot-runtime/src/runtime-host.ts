@@ -2,6 +2,7 @@ import type { AppLogger } from "@minecraft-studio/observability";
 import type { BotTelemetryMessageV1 } from "@minecraft-studio/protocol";
 
 import type { BotClientFactory } from "./client.js";
+import { CombatReactionLoopProbe } from "./combat-reflex-probe.js";
 import { createMineflayerClient } from "./mineflayer-client.js";
 import {
   RuntimeLinkClient,
@@ -54,6 +55,10 @@ export class BotRuntimeHost {
 
   constructor(private readonly options: BotRuntimeHostOptions) {
     let runtimeLink: RuntimeLinkClient | null = null;
+    // 生产反射探针：测量本 runtime 战斗反应循环的实测步长（见
+    // combat-reflex-probe.ts 文件头的诚实边界——它把 NO_PROBE_DATA 升级为
+    // 实测拒绝，但代表性负载未自证前不单凭它放行）。
+    const combatReflexProbe = new CombatReactionLoopProbe();
     this.runtime = new SingleBotRuntime(options.profile, {
       createClient: options.createClient ?? createMineflayerClient,
       messageSink: (message) => {
@@ -61,6 +66,7 @@ export class BotRuntimeHost {
         runtimeLink?.publishTelemetry(message);
       },
       logger: options.logger,
+      combatReflexProbe,
       onStopped: (reason) => this.handleRuntimeStopped(reason),
     });
     this.emergencyRestartCooldownMs = boundedEnvInteger(

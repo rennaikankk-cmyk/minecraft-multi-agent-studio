@@ -106,6 +106,17 @@ export const FAILURE_CODES = [
   "MINE_LAVA_ADJACENT",
   "BLUEPRINT_ANCHOR_INVALID",
   "RETREAT_IN_PROGRESS",
+  // 战术核心（tactics/）接线期登记码：registry-first——先入册并接好分类与恢复
+  // 阶梯，生产发射端（combat reaction loop 的终态拒绝）随后逐步接上。此刻
+  // 除证据链外尚无发射方，入册消灭的是"码出现时落进 UNKNOWN"的盲区。
+  "COMBAT_ENGAGE_REFUSED",
+  "COMBAT_PRESS_FAILED",
+  "KILL_SECURE_FAILED",
+  "DISENGAGE_FAILED",
+  "HEAL_INTERRUPTED",
+  "CHASE_ABANDONED",
+  "BELIEF_STALE_INVALIDATED",
+  "SUPPORT_UNAVAILABLE",
 ] as const;
 export type FailureCode = (typeof FAILURE_CODES)[number];
 
@@ -423,6 +434,25 @@ export function classifyIncident(input: ClassifyInput): Classification {
     case "RETREAT_IN_PROGRESS":
       matched.push(`failureCode=${input.failureCode}`);
       return { suspectedLayer: "RUNTIME", ruleId: "R-PRECOND-SAFETY-1", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "medium", matchedEvidence: matched };
+    // 战术核心终态失败码：裁决与执行都发生在 Runtime 的 combat reaction loop
+    // （同一事件循环内），先归 RUNTIME（R-COMBAT-1，medium）。
+    case "COMBAT_ENGAGE_REFUSED":
+    case "COMBAT_PRESS_FAILED":
+    case "KILL_SECURE_FAILED":
+    case "DISENGAGE_FAILED":
+    case "HEAL_INTERRUPTED":
+    case "SUPPORT_UNAVAILABLE":
+      matched.push(`failureCode=${input.failureCode}`);
+      return { suspectedLayer: "RUNTIME", ruleId: "R-COMBAT-1", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "medium", matchedEvidence: matched };
+    // CHASE_ABANDONED 是战术层主动放弃追击（信息性，非故障）；仍映射 RUNTIME，
+    // 但独立 ruleId 以免与真实失败混入同一聚合计数。
+    case "CHASE_ABANDONED":
+      matched.push(`failureCode=${input.failureCode}`);
+      return { suspectedLayer: "RUNTIME", ruleId: "R-COMBAT-2", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "medium", matchedEvidence: matched };
+    // belief 过龄失效是观察事实过期（目标血量/位置区间超龄），不是裁决缺陷。
+    case "BELIEF_STALE_INVALIDATED":
+      matched.push(`failureCode=${input.failureCode}`);
+      return { suspectedLayer: "WORLD_STATE", ruleId: "R-COMBAT-3", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "medium", matchedEvidence: matched };
     default:
       matched.push(`failureCode=${input.failureCode}`);
       return { suspectedLayer: "UNKNOWN", ruleId: "R-DEFAULT-0", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "low", matchedEvidence: matched };

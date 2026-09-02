@@ -14,6 +14,7 @@ import {
   armorEquipCapabilityOutputSchema,
   armorSnapshotCapabilityInputSchema,
   armorSnapshotCapabilityOutputSchema,
+  ACTION_FAMILIES,
   collectBlockCapabilityInputSchema,
   collectBlockCapabilityOutputSchema,
   containerTransferCapabilityInputSchema,
@@ -28,6 +29,7 @@ import {
   smeltItemCapabilityOutputSchema,
   MOVEMENT_PRIORITIES,
   MovementController,
+  ServerBehaviorObserver,
   type MovementLease,
   SAFE_PATH_MAX_DISTANCE,
   SkillFault,
@@ -57,6 +59,8 @@ import {
   mineVeinCapabilityOutputSchema,
   buildBlueprintCapabilityInputSchema,
   buildBlueprintCapabilityOutputSchema,
+  type BehaviorSignalEvent,
+  type FamilyWindowStats,
   type SkillCapabilityRequest,
   type SkillCompatibilityEnvironment,
   type SkillResourceKind,
@@ -81,6 +85,7 @@ import type {
   BotDisconnectInfo,
   BotRecoveryAction,
   BotRecoveryActionResult,
+  CompatSignalsSnapshot,
 } from "./client.js";
 import {
   attachNoHunger,
@@ -1094,6 +1099,23 @@ function mapDisconnectReason(
   };
 }
 
+/**
+ * timeout 判定只认明确语义：Node errno（ETIMEDOUT/ESOCKETTIMEDOUT）或消息
+ * 里带 "timed out"/"timeout"。ECONNRESET/证书错误等不算——宁可漏报也不把
+ * 别的断线原因臆断成 timeout。
+ */
+const TIMEOUT_ERRNOS: ReadonlySet<string> = new Set(["ETIMEDOUT", "ESOCKETTIMEDOUT"]);
+
+function isTimeoutLikeError(error: Error): boolean {
+  const errno = (error as NodeJS.ErrnoException).code;
+  if (typeof errno === "string" && TIMEOUT_ERRNOS.has(errno)) return true;
+  return /timed?\s*out|timeout/iu.test(error.message);
+}
+
+function isTimeoutLikeReason(reason: unknown): boolean {
+  return typeof reason === "string" && /timed?\s*out|timeout/iu.test(reason);
+}
+
 export class MineflayerBotClient implements BotClient {
   private handlers: BotClientHandlers | null = null;
   private lastObservedHealth: number | null = null;
@@ -1129,6 +1151,14 @@ export class MineflayerBotClient implements BotClient {
   private safeForageExplorationCursor = 0;
   private readonly combatAdapter: MineflayerCombatAdapter;
   private readonly noHungerController: NoHungerController;
+  /**
+   * Round 7 兼容层信号采集：每 client 会话（每条连接）一个 observer，
+   * 只在 mineflayer 真实事件上 O(1) append，其余路径零成本。
+   * wiring-pending：action-rejected / block-divergence / inventory-divergence
+   * 需要服务器侧回包对比（当前 mineflayer 不暴露可判定的拒绝信号），
+   * 在有结构化来源之前不伪造这三类信号。
+   */
+  private readonly compatObserver = new ServerBehaviorObserver();
 
   /** Facilities are intentionally conservative: a nearby reachable table is
    * always reused, and creation is rate-limited even across separate tasks. */
@@ -1297,11 +1327,39 @@ export class MineflayerBotClient implements BotClient {
     bot.on("entityEquip", (entity) => {
       if (entity === bot.entity) this.handlers?.onStateChanged();
     });
+    // 服务器强制传送/回拉（rubberband）——反作弊纠正最直接的可观测信号。
+    // forcedMove 只在服务器 position 包把 bot 拉到与本地预测不符的位置时发出。
+    bot.on("forcedMove", () => {
+      const position = bot.entity?.position;
+      const detail = position && Number.isFinite(position.x)
+        ? `teleported to ${position.x.toFixed(1)} ${position.y.toFixed(1)} ${position.z.toFixed(1)}`
+        : undefined;
+      this.compatObserver.record({
+        kind: "position-correction",
+        family: "MOVEMENT",
+        ...(detail ? { detail } : {}),
+      });
+    });
     bot.on("kicked", (reason) => {
       this.kickedDetail = safeDetail(reason);
+      // kick 无法归因到单一动作族（任何族都可能触发）；PACKET_INTENSIVE 是
+      // 服务器侧响应的兜底族，仅供窗口统计，不作为族级归因结论。
+      this.compatObserver.record({
+        kind: "kick",
+        family: "PACKET_INTENSIVE",
+        ...(this.kickedDetail ? { detail: this.kickedDetail } : {}),
+      });
     });
     bot.on("error", (error) => {
       this.errorDetail = safeDetail(error.message);
+      // timeout 只在可明确识别时上报（errno/消息），识别不出就不臆断。
+      if (isTimeoutLikeError(error)) {
+        this.compatObserver.record({
+          kind: "timeout",
+          family: "PACKET_INTENSIVE",
+          ...(this.errorDetail ? { detail: this.errorDetail } : {}),
+        });
+      }
       if (
         !this.versionUnsupportedReported &&
         isMineflayerUnsupportedVersionError(error)
@@ -1312,6 +1370,15 @@ export class MineflayerBotClient implements BotClient {
       this.handlers?.onError(error);
     });
     bot.on("end", (reason) => {
+      // end 的 reason 串同样只在明确含 timeout 语义时计 timeout。
+      if (isTimeoutLikeReason(reason)) {
+        const detail = safeDetail(reason);
+        this.compatObserver.record({
+          kind: "timeout",
+          family: "PACKET_INTENSIVE",
+          ...(detail ? { detail } : {}),
+        });
+      }
       this.handlers?.onDisconnected(
         mapDisconnectReason(
           this.requestedStop,
@@ -2246,6 +2313,22 @@ export class MineflayerBotClient implements BotClient {
   }
   combatObservation(nowMs: number): CombatDriverObservation | null {
     return this.combatAdapter.observation(nowMs);
+  }
+
+  /**
+   * 兼容层信号快照（最近 60s bounded 事件 + 每 family 窗口统计）。
+   * 与 combatObservation 同级的观测边界：只读、无副作用。
+   */
+  compatSignals(): CompatSignalsSnapshot {
+    const familyStats: Record<string, FamilyWindowStats> = {};
+    for (const family of ACTION_FAMILIES) {
+      familyStats[family] = this.compatObserver.familyStats(family);
+    }
+    return {
+      stats: this.compatObserver.stats,
+      events: this.compatObserver.snapshot(60_000),
+      familyStats,
+    };
   }
 
   executeCombatAction(

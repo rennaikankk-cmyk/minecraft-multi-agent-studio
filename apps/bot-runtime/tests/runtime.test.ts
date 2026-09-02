@@ -26,6 +26,7 @@ import type {
   CombatPrimitiveAction,
 } from "../src/combat-driver.js";
 import { SingleBotRuntime } from "../src/runtime.js";
+import { CombatReactionLoopProbe } from "../src/combat-reflex-probe.js";
 import type { ServerProfile } from "../src/server-profile.js";
 import type { RuntimeLogger } from "../src/runtime-types.js";
 import {
@@ -461,6 +462,7 @@ describe("SingleBotRuntime", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
   });
 
   it("emits connecting heartbeat and real snapshot after spawn", async () => {
@@ -1598,6 +1600,111 @@ describe("SingleBotRuntime", () => {
     );
     expect(statuses.at(-1)?.payload.currentTask?.status).toBe("completed");
     expect(client.combatActions.length).toBeLessThanOrEqual(32);
+    await runtime.stop("test_cleanup");
+  });
+
+  it("feeds a live reflex probe from the combat reaction loop and installs its measured report", async () => {    const messages: BotTelemetryMessageV1[] = [];
+    const client = new FakeBotClient();
+    client.combatEnabled = true;
+    // 预置一个实测样本：spawn 时 handleSpawn 会把 live 报告装进 CombatDriver，
+    // 状态面从 "not-run"（NO_PROBE_DATA）变为实测拒绝（INSUFFICIENT_SAMPLES）。
+    const probe = new CombatReactionLoopProbe();
+    probe.recordStepDurationMs(12);
+    const runtime = new SingleBotRuntime(combatProfile, {
+      createClient: () => client,
+      messageSink: (message) => messages.push(message),
+      logger,
+      combatReflexProbe: probe,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+    runtime.start();
+    client.spawn();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const status = messages
+      .filter((message): message is Extract<BotTelemetryMessageV1, { type: "bot.status.v1" }> =>
+        message.type === "bot.status.v1")
+      .at(-1);
+    expect(status?.payload.combat?.reflexProbe).toMatchObject({
+      status: "denied",
+      denial: "INSUFFICIENT_SAMPLES",
+    });
+
+    // 探针确实在依赖里（非 null）且被反应循环回填：damage 后样本数增长。
+    expect(probe.sampleCount).toBe(1);
+    client.damage({ previousHealth: 20, currentHealth: 18 });
+    await vi.advanceTimersByTimeAsync(250);
+    expect(probe.sampleCount).toBeGreaterThan(1);
+    await runtime.stop("test_cleanup");
+  });
+
+  it("emits no tactics shadow events and keeps behavior identical when the flag is unset", async () => {
+    const client = new FakeBotClient();
+    client.combatEnabled = true;
+    vi.stubEnv("STUDIO_TACTICS_CORE", undefined);
+    const runtime = new SingleBotRuntime(combatProfile, {
+      createClient: () => client,
+      messageSink: () => undefined,
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+    runtime.start();
+    client.spawn();
+    client.damage({ previousHealth: 20, currentHealth: 18 });
+    await vi.advanceTimersByTimeAsync(250);
+
+    // 反应循环照常（advisory 不劫持执行），但零 tactics 事件。
+    expect(client.combatActions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "MELEE_ATTACK", targetEntityId: 42 }),
+      ]),
+    );
+    const loggedEvents = logger.info.mock.calls.map(([event]) => event as string);
+    expect(loggedEvents).toContain("bot_runtime_damage_reaction_step");
+    expect(loggedEvents).not.toContain("bot_tactics_decision");
+    await runtime.stop("test_cleanup");
+  });
+
+  it("emits one advisory tactics decision event per reaction step when STUDIO_TACTICS_CORE=1", async () => {
+    const client = new FakeBotClient();
+    client.combatEnabled = true;
+    vi.stubEnv("STUDIO_TACTICS_CORE", "1");
+    const runtime = new SingleBotRuntime(combatProfile, {
+      createClient: () => client,
+      messageSink: () => undefined,
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+    runtime.start();
+    client.spawn();
+    client.damage({ previousHealth: 20, currentHealth: 18 });
+    await vi.advanceTimersByTimeAsync(250);
+
+    const infoCalls = logger.info.mock.calls as Array<[string, Record<string, unknown>?]>;
+    const stepCalls = infoCalls.filter(([event]) => event === "bot_runtime_damage_reaction_step");
+    const tacticsCalls = infoCalls.filter(([event]) => event === "bot_tactics_decision");
+    expect(stepCalls.length).toBeGreaterThan(0);
+    // 每步恰好一条：与反应步日志一一对应。
+    expect(tacticsCalls.length).toBe(stepCalls.length);
+    for (const [, fields] of tacticsCalls) {
+      expect(fields).toMatchObject({
+        advisoryOnly: true,
+        evidenceQuality: "partial-wiring",
+      });
+      expect(typeof fields?.decision).toBe("string");
+      expect(fields?.evidence).toMatchObject({
+        tacticsProfileVersion: "tactics-v0-uncalibrated",
+        schemaVersion: 1,
+        decision: fields?.decision,
+      });
+    }
+    // 影子裁决绝不驱动动作：执行面仍只含战斗原语。
+    expect(client.combatActions.length).toBeGreaterThan(0);
+    expect(logger.warn.mock.calls.map(([event]) => event))
+      .not.toContain("bot_tactics_decision_failed");
     await runtime.stop("test_cleanup");
   });
 

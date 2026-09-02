@@ -133,6 +133,43 @@ describe("MineflayerBotClient lifecycle", () => {
     expect(bot.clearControlStates).toHaveBeenCalledTimes(1);
   });
 
+  it("records real compat signals: forcedMove, kicked, and identifiable timeouts only", () => {
+    const emitter = new EventEmitter();
+    const bot = emitter as unknown as Bot;
+    Object.assign(bot, {
+      health: 20,
+      inventory: new EventEmitter(),
+      entity: { id: 1, position: new Vec3(3, 64, -2) },
+    });
+    const client = new MineflayerBotClient(bot, "auto");
+    client.setHandlers(handlers({}));
+
+    expect(client.compatSignals().events).toHaveLength(0);
+
+    emitter.emit("forcedMove");
+    emitter.emit("kicked", "You are banned from this server");
+    emitter.emit("error", Object.assign(new Error("connect ETIMEDOUT 1.2.3.4:25565"), { code: "ETIMEDOUT" }));
+    // ECONNRESET 不是 timeout：识别不出就不记。
+    emitter.emit("error", Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }));
+    emitter.emit("end", "socketClosed");
+
+    const snapshot = client.compatSignals();
+    expect(snapshot.events.map((event) => event.kind)).toEqual([
+      "position-correction",
+      "kick",
+      "timeout",
+    ]);
+    expect(snapshot.familyStats.MOVEMENT).toMatchObject({ corrections: 1, total: 1 });
+    expect(snapshot.familyStats.PACKET_INTENSIVE).toMatchObject({ total: 2 });
+    expect(snapshot.stats.buffered).toBe(3);
+    // kick 细节经 redaction 入口（此处无敏感内容应原样保留有界片段）。
+    expect(snapshot.events[1]?.detail).toContain("banned");
+
+    // timeout 语义的 end reason 也计入；非 timeout reason 不计。
+    emitter.emit("end", "connection timed out");
+    expect(client.compatSignals().events.at(-1)?.kind).toBe("timeout");
+  });
+
   it("forages one bounded passive target when low health has no safe food", async () => {
     vi.useFakeTimers();
     try {

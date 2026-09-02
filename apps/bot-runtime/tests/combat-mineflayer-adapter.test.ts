@@ -307,14 +307,19 @@ describe("MineflayerCombatAdapter", () => {
     expect(adapter.observation(nowMs)?.entities[0]).not.toHaveProperty("recentlyPopped");
   });
 
-  it("tracks target hurt and swing windows from server wire events", () => {
+  it("ignores entity_status 2 (trident charge) as hurt; damage_event advances the hit window", () => {
     const wire = new EventEmitter();
     const bot = fakeBot({ _client: wire });
     const adapter = new MineflayerCombatAdapter(bot, SERVER, true);
     let nowMs = 40_000;
     adapter.setClock(() => nowMs);
 
+    // Entity Status 2 是三叉戟蓄力动画，不是受击：不得开 i-frame 窗。
     wire.emit("entity_status", { entityId: 42, entityStatus: 2 });
+    expect(adapter.observation(nowMs)?.entities[0]?.invulnerableRemainingMs).toBe(0);
+
+    // 受击的权威信号是 damage_event 包（1.19.3+，含 entityId）。
+    wire.emit("damage_event", { entityId: 42 });
     expect(adapter.observation(nowMs)?.entities[0]).toMatchObject({
       invulnerableRemainingMs: 500,
       targetCooldownRatio01: 1,

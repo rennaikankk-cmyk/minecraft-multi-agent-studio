@@ -9,6 +9,10 @@ import type {
   SkillCapabilityRequest,
   SkillCompatibilityEnvironment,
 } from "@minecraft-studio/skills";
+import type {
+  BehaviorSignalEvent,
+  FamilyWindowStats,
+} from "@minecraft-studio/skills";
 import type { WorldStateSnapshot, WorldStateStore } from "./world-state.js";
 import type {
   CombatActionAcknowledgement,
@@ -41,6 +45,13 @@ export type BotClientSnapshot = {
     movementRequested: boolean;
   };
 };
+
+/** 兼容层（Round 7）信号快照：bounded 事件列表 + 每 ActionFamily 窗口统计。 */
+export type CompatSignalsSnapshot = Readonly<{
+  stats: Readonly<{ buffered: number; dropped: number }>;
+  events: readonly BehaviorSignalEvent[];
+  familyStats: Readonly<Record<string, FamilyWindowStats>>;
+}>;
 
 export type BotDisconnectInfo = {
   reason:
@@ -108,6 +119,11 @@ export interface BotClient {
   invokeSkillCapability?(request: SkillCapabilityRequest): Promise<unknown>;
   /** Narrow deterministic combat boundary; absent means this client cannot fight. */
   combatObservation?(nowMs: number): CombatDriverObservation | null;
+  /**
+   * Round 7 兼容层信号快照（bounded 事件 + family 统计）。absent = 该 client
+   * 不采集服务器行为信号（测试替身/遗留 client），调用方按无信号处理。
+   */
+  compatSignals?(): CompatSignalsSnapshot;
   executeCombatAction?(
     action: CombatPrimitiveAction,
     signal: AbortSignal,
