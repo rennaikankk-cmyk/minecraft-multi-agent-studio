@@ -93,6 +93,25 @@ export type ParsedStanceGoal = Readonly<{
   stance: "preserve-life" | "expendable" | "aggressive";
 }>;
 
+/**
+ * Round 6.5 —— 确定性蓝图模板（免模型转写）。
+ * 模型对 8+ 格蓝图的结构化转写保真度不足（Round 6.4 实测 PLANNER_DECISION_INVALID）；
+ * 模板让蓝图结构由协调器确定性构造——每格坐标、参考面、朝向全部来自受控语法，
+ * 与 movement/scan 模板同一纪律：物品名只接受 registry 命名，数量小整数有界。
+ */
+export type ParsedBlueprintGoal = Readonly<{
+  kind: "build-blueprint-row";
+  anchor: Readonly<{ x: number; y: number; z: number }>;
+  /** 行方向：+x / -x / +z / -z（受控枚举，不接受自由文本）。 */
+  direction: "+x" | "-x" | "+z" | "-z";
+  count: number;
+  itemName: string;
+  /** 分批放置：每批格数（缺省全量；J3 resume 用 startIndex 语法另配）。 */
+  maxPlacements: number | null;
+  /** resume 语义：从第 N 格继续（0 基）。 */
+  startIndex: number;
+}>;
+
 export type DeterministicGoal =
   | ParsedAcquisitionGoal
   | ParsedMovementGoal
@@ -100,7 +119,8 @@ export type DeterministicGoal =
   | ParsedFoodGoal
   | ParsedShelterGoal
   | ParsedEquipGoal
-  | ParsedStanceGoal;
+  | ParsedStanceGoal
+  | ParsedBlueprintGoal;
 
 /**
  * 解析一条目标文本。识别顺序刻意固定：先看采集动词+唯一物品（这是自由
@@ -123,7 +143,63 @@ export function parseDeterministicGoal(
   if (equip !== null) return equip;
   const stance = parseStanceGoal(operatorGoal);
   if (stance !== null) return stance;
+  const blueprint = parseBlueprintGoal(operatorGoal);
+  if (blueprint !== null) return blueprint;
   return parseShelterGoal(operatorGoal);
+}
+
+/** 蓝图行模板物品名：registry 命名（与 scan 同纪律）。 */
+const BLUEPRINT_ITEM_PATTERN = /^[a-z0-9_]+$/u;
+
+/**
+ * Round 6.5 蓝图行模板（确定性，免模型转写）：
+ *
+ *   "施工蓝图行：锚点 x={ax} y={ay} z={az}，沿 {+x|-x|+z|-z} 放置 {n} 个
+ *    {item}，每批最多 {m} 格，从第 {s} 格开始"
+ *
+ * 每批/从第…格为可选段（缺省=全量、从 0）。数量上界 64（模板蓝图规模），
+ * 方向受控枚举。锚点坐标三元组必须恰好出现一次（多个=语义不明→模型分支）。
+ */
+export function parseBlueprintGoal(operatorGoal: string): ParsedBlueprintGoal | null {
+  if (!/施工蓝图行/.test(operatorGoal)) return null;
+  const anchorMatch = /锚点\s*x\s*[:=]?\s*(-?\d+)\s*y\s*[:=]?\s*(-?\d+)\s*z\s*[:=]?\s*(-?\d+)/u.exec(
+    operatorGoal,
+  );
+  if (anchorMatch === null) return null;
+  const directionMatch = /沿\s*([+-][xz])/u.exec(operatorGoal);
+  if (directionMatch === null) return null;
+  const direction = directionMatch[1]!;
+  if (direction !== "+x" && direction !== "-x" && direction !== "+z" && direction !== "-z") {
+    return null;
+  }
+  const countMatch = /放置\s*(\d{1,2})\s*个/u.exec(operatorGoal);
+  if (countMatch === null) return null;
+  const count = Number(countMatch[1]!);
+  if (count < 1 || count > 64) return null;
+  const itemMatch = /个\s+([a-z0-9_]+)\s*[,，]/u.exec(operatorGoal)
+    ?? /个\s+([a-z0-9_]+)\s*每批/u.exec(operatorGoal)
+    ?? /个\s+([a-z0-9_]+)\s*从第/u.exec(operatorGoal)
+    ?? /个\s+([a-z0-9_]+)\s*$/u.exec(operatorGoal.trimEnd());
+  if (itemMatch === null) return null;
+  const itemName = itemMatch[1]!;
+  if (!BLUEPRINT_ITEM_PATTERN.test(itemName)) return null;
+  const batchMatch = /每批最多\s*(\d{1,3})\s*格/u.exec(operatorGoal);
+  const maxPlacements = batchMatch !== null ? Math.max(1, Math.min(128, Number(batchMatch[1]!))) : null;
+  const startMatch = /从第\s*(\d{1,3})\s*格开始/u.exec(operatorGoal);
+  const startIndex = startMatch !== null ? Math.max(0, Number(startMatch[1]!)) : 0;
+  return {
+    kind: "build-blueprint-row",
+    anchor: {
+      x: Number(anchorMatch[1]!),
+      y: Number(anchorMatch[2]!),
+      z: Number(anchorMatch[3]!),
+    },
+    direction,
+    count,
+    itemName,
+    maxPlacements,
+    startIndex,
+  };
 }
 
 /**

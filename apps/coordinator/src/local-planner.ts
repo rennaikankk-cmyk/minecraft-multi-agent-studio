@@ -4007,6 +4007,43 @@ function deterministicSkillDecision(
       reasonCode: "DETERMINISTIC_EQUIP",
     };
   }
+  if (parsed.kind === "build-blueprint-row") {
+    const blueprintVersion = advertisedVersion("build.blueprint");
+    if (blueprintVersion === null) return null;
+    // 确定性构造蓝图：每格 offset 沿受控方向递增，参考面=格正下方、朝上。
+    // 模型只被允许做非模板目标——结构化蓝图从不经过模型转写（保真度瓶颈）。
+    const step =
+      parsed.direction === "+x" ? { x: 1, y: 0, z: 0 }
+      : parsed.direction === "-x" ? { x: -1, y: 0, z: 0 }
+      : parsed.direction === "+z" ? { x: 0, y: 0, z: 1 }
+      : { x: 0, y: 0, z: -1 };
+    const cells = Array.from({ length: parsed.count }, (_, index) => ({
+      offset: { x: step.x * index, y: 0, z: step.z * index },
+      itemName: parsed.itemName,
+      blockClass: "structural" as const,
+      order: index * 8,
+      referenceOffset: { x: 0, y: -1, z: 0 },
+      face: { x: 0, y: 1, z: 0 },
+    }));
+    return {
+      action: "invoke_skill",
+      botId: request.botId,
+      taskId: request.taskId,
+      skillId: "build.blueprint",
+      skillVersion: blueprintVersion,
+      input: {
+        blueprint: {
+          anchor: parsed.anchor,
+          dimension,
+          serverProfileId: TRUSTED_SERVER_PROFILE_PLACEHOLDER,
+          cells,
+        },
+        ...(parsed.startIndex > 0 ? { startIndex: parsed.startIndex } : {}),
+        ...(parsed.maxPlacements !== null ? { maxPlacements: parsed.maxPlacements } : {}),
+      },
+      reasonCode: "DETERMINISTIC_BLUEPRINT_ROW",
+    };
+  }
   const skillVersion = advertisedVersion("shelter.dig");
   if (skillVersion === null) return null;
   return {
