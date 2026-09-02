@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import { scenarioResults } from "../src/scenario-results.js";
 import {
   buildSkillStatusCatalog,
   builtinSkillIds,
@@ -108,25 +109,25 @@ describe("builtin skill status catalog", () => {
     }
   });
 
-  it("keeps combat skills Partial until real environment gates are green", () => {
-    // W0 已完成 Runtime adapter 接线；没有隔离服/跨版本结果，仍不许显示成 Stable。
+  it("evidence bits stay honest: isolated=true requires ledger PASS; combat stays ungated until a real PvP scenario passes", () => {
+    // 纪律不变：bit 只能在真实场景 PASS 后翻转，且必须能在场景账本里找到支撑；
+    // combat 族在 PvP Lab 场景 PASS 之前保持 isolated=false（W0 接线≠真实验证）。
     for (const entry of builtinSkillStatusCatalog) {
-      expect(entry.evidence.isolatedServerScenarios).toBe(false);
-      expect(entry.evidence.crossVersionMatrix).toBe(false);
-      expect(evidenceSupportsVerifiedClaim(entry.evidence)).toBe(false);
+      const isCombat = entry.skillId.startsWith("combat.");
+      if (isCombat) {
+        expect(entry.evidence.isolatedServerScenarios, entry.skillId).toBe(false);
+      } else if (entry.evidence.isolatedServerScenarios) {
+        const passes = scenarioResults.filter(
+          (r) => r.result === "PASS" && r.skills.includes(entry.skillId),
+        );
+        expect(passes.length, entry.skillId).toBeGreaterThan(0);
+      }
+      expect(entry.evidence.crossVersionMatrix, entry.skillId).toBe(false);
+      expect(evidenceSupportsVerifiedClaim(entry.evidence), entry.skillId).toBe(false);
       if (entry.evidence.runtimeWiring) {
-        expect(entry.status).toBe("Partial");
-        expect(entry.pendingGates).toEqual([
-          "isolated-server-scenarios",
-          "cross-version-matrix",
-        ]);
+        expect(entry.status, entry.skillId).toBe("Partial");
       } else {
-        expect(entry.status).toBe("Experimental");
-        expect(entry.pendingGates).toEqual([
-          "runtime-wiring",
-          "isolated-server-scenarios",
-          "cross-version-matrix",
-        ]);
+        expect(entry.status, entry.skillId).toBe("Experimental");
       }
     }
   });

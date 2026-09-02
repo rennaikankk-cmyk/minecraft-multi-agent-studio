@@ -6,8 +6,8 @@
     "L0": 0,
     "L1": 0,
     "L2": 1,
-    "L3": 22,
-    "L4": 0,
+    "L3": 18,
+    "L4": 4,
     "L5": 0
   },
   "skills": [
@@ -16,7 +16,7 @@
       "schemaVersion": "1.0.0",
       "family": "movement",
       "status": "Partial",
-      "maturityLevel": "L3",
+      "maturityLevel": "L4",
       "plannerReachability": "both",
       "runtimeCapabilities": [
         "bot.move"
@@ -26,7 +26,9 @@
         "standard"
       ],
       "minecraftRequirements": [],
-      "verifiedMinecraftVersions": [],
+      "verifiedMinecraftVersions": [
+        "1.21.11"
+      ],
       "progressContract": "MOVE_TO_TARGET",
       "postconditionKind": null,
       "recoveryStrategies": [
@@ -49,8 +51,16 @@
       ],
       "unitTested": true,
       "runtimeWired": true,
-      "realScenarioIds": [],
-      "evidenceRefs": [],
+      "realScenarioIds": [
+        "J1L-build-row-8",
+        "F1-smelt-lifecycle",
+        "F2-furnace-contention"
+      ],
+      "evidenceRefs": [
+        "J1L-build-row-8@cce98c7",
+        "F1-smelt-lifecycle@cce98c7",
+        "F2-furnace-contention@cce98c7"
+      ],
       "limitations": [
         "完成半径 ~4 格（模板锚点按停点动态折算）",
         "死亡掉落回收依赖 coordinator DEATH_RECOVERY goal（同维度、15 分钟窗口）"
@@ -267,7 +277,7 @@
       "schemaVersion": "1.0.0",
       "family": "observation",
       "status": "Partial",
-      "maturityLevel": "L3",
+      "maturityLevel": "L4",
       "plannerReachability": "both",
       "runtimeCapabilities": [
         "world.read"
@@ -277,7 +287,9 @@
         "standard"
       ],
       "minecraftRequirements": [],
-      "verifiedMinecraftVersions": [],
+      "verifiedMinecraftVersions": [
+        "1.21.11"
+      ],
       "progressContract": "WAITING_EXTERNAL",
       "postconditionKind": null,
       "recoveryStrategies": [
@@ -296,8 +308,12 @@
       ],
       "unitTested": true,
       "runtimeWired": true,
-      "realScenarioIds": [],
-      "evidenceRefs": [],
+      "realScenarioIds": [
+        "F1-smelt-lifecycle"
+      ],
+      "evidenceRefs": [
+        "F1-smelt-lifecycle@cce98c7"
+      ],
       "limitations": [],
       "ownerModule": "packages/skills/src/builtin/scan-blocks.ts"
     },
@@ -480,7 +496,7 @@
       "schemaVersion": "1.0.0",
       "family": "production",
       "status": "Partial",
-      "maturityLevel": "L3",
+      "maturityLevel": "L4",
       "plannerReachability": "both",
       "runtimeCapabilities": [
         "craft.execute"
@@ -490,7 +506,9 @@
         "standard"
       ],
       "minecraftRequirements": [],
-      "verifiedMinecraftVersions": [],
+      "verifiedMinecraftVersions": [
+        "1.21.11"
+      ],
       "progressContract": "SMELTING_WAIT",
       "postconditionKind": null,
       "recoveryStrategies": [
@@ -512,8 +530,14 @@
       ],
       "unitTested": true,
       "runtimeWired": true,
-      "realScenarioIds": [],
-      "evidenceRefs": [],
+      "realScenarioIds": [
+        "F1-smelt-lifecycle",
+        "F2-furnace-contention"
+      ],
+      "evidenceRefs": [
+        "F1-smelt-lifecycle@cce98c7",
+        "F2-furnace-contention@cce98c7"
+      ],
       "limitations": [
         "F1-F3 真实验证过；F4/F5（重启 reconcile/false-success）本轮补齐"
       ],
@@ -770,7 +794,7 @@
       "schemaVersion": "1.0.0",
       "family": "build",
       "status": "Partial",
-      "maturityLevel": "L3",
+      "maturityLevel": "L4",
       "plannerReachability": "both",
       "runtimeCapabilities": [
         "world.interact"
@@ -780,7 +804,9 @@
         "standard"
       ],
       "minecraftRequirements": [],
-      "verifiedMinecraftVersions": [],
+      "verifiedMinecraftVersions": [
+        "1.21.11"
+      ],
       "progressContract": "PLACE_AND_VERIFY",
       "postconditionKind": "build-cell",
       "recoveryStrategies": [
@@ -803,8 +829,14 @@
       ],
       "unitTested": true,
       "runtimeWired": true,
-      "realScenarioIds": [],
-      "evidenceRefs": [],
+      "realScenarioIds": [
+        "J1L-build-row-8",
+        "F1-smelt-lifecycle"
+      ],
+      "evidenceRefs": [
+        "J1L-build-row-8@cce98c7",
+        "F1-smelt-lifecycle@cce98c7"
+      ],
       "limitations": [
         "确定性通道为单行模板（≤64 格/行）；更大结构需多行 goal 或文件蓝图（未实现）",
         "place-block 不移动：bot 必须站在行中点可达范围（≤3.8 格）"

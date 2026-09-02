@@ -149,7 +149,7 @@ export type SkillStatusEntry = Readonly<{
 const EVIDENCE: Readonly<Record<string, SkillEvidence>> = Object.freeze({
   "movement.goto": {
     offlineTests: true, runtimeWiring: true,
-    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+    isolatedServerScenarios: true, crossVersionMatrix: false, knownDefects: [],
   },
   "travel.route": {
     offlineTests: true, runtimeWiring: true,
@@ -189,7 +189,7 @@ const EVIDENCE: Readonly<Record<string, SkillEvidence>> = Object.freeze({
   },
   "world.scan": {
     offlineTests: true, runtimeWiring: true,
-    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+    isolatedServerScenarios: true, crossVersionMatrix: false, knownDefects: [],
   },
   "collect.block": {
     offlineTests: true, runtimeWiring: true,
@@ -209,7 +209,7 @@ const EVIDENCE: Readonly<Record<string, SkillEvidence>> = Object.freeze({
   },
   "smelt.item": {
     offlineTests: true, runtimeWiring: true,
-    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+    isolatedServerScenarios: true, crossVersionMatrix: false, knownDefects: [],
   },
   "combat.stance": {
     offlineTests: true, runtimeWiring: true,
@@ -221,7 +221,7 @@ const EVIDENCE: Readonly<Record<string, SkillEvidence>> = Object.freeze({
   },
   "build.blueprint": {
     offlineTests: true, runtimeWiring: true,
-    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+    isolatedServerScenarios: true, crossVersionMatrix: false, knownDefects: [],
   },
   "stock.levels": {
     offlineTests: true, runtimeWiring: false,
