@@ -599,3 +599,5 @@ export {
   type ServerBehaviorProfile,
   type ServerCompatibilityMode,
 } from "./compat/index.js";
+export * from "./facility-platform.js";
+export * from "./base-master-plan.js";
