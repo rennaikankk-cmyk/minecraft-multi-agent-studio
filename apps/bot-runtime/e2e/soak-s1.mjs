@@ -41,17 +41,29 @@ async function botOnline(botId) {
   return bot?.connectionState === "online" ? bot : null;
 }
 
+const REGISTRATION_CLASS_CODES = new Set([
+  "BOT_UNAVAILABLE", "PLANNER_BOT_UNAVAILABLE", "PLANNER_REJECTED", "PLANNER_BOT_BUSY",
+]);
 async function submitGoal(botId, text, timeoutMs = 150_000) {
-  const requestId = randomUUID();
-  await api(CONTROL_API, "/v1/goals", {
-    method: "POST",
-    body: JSON.stringify({ schemaVersion: "1.0", requestId, botId, operatorGoal: text, timeoutMs }),
-  });
-  for (let i = 0; i < Math.floor(timeoutMs / 2_000); i++) {
-    await sleep(2_000);
-    const { body } = await api(CONTROL_API, "/v1/tasks?limit=10");
-    const task = (body.data?.tasks ?? []).find((c) => c.taskId === requestId);
-    if (task && (task.status === "completed" || task.status === "failed")) return task;
+  for (let submission = 0; submission < 4; submission += 1) {
+    const requestId = randomUUID();
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const res = await api(CONTROL_API, "/v1/goals", {
+        method: "POST",
+        body: JSON.stringify({ schemaVersion: "1.0", requestId, botId, operatorGoal: text, timeoutMs }),
+      });
+      if (res.status < 300) break;
+      await sleep(10_000);
+    }
+    for (let i = 0; i < Math.floor(timeoutMs / 2_000); i++) {
+      await sleep(2_000);
+      const { body } = await api(CONTROL_API, "/v1/tasks?limit=10");
+      const task = (body.data?.tasks ?? []).find((c) => c.taskId === requestId);
+      if (task && (task.status === "completed" || task.status === "failed")) {
+        if (task.status === "failed" && REGISTRATION_CLASS_CODES.has(task.failureReason ?? "") && submission < 3) break;
+        return task;
+      }
+    }
   }
   return null;
 }

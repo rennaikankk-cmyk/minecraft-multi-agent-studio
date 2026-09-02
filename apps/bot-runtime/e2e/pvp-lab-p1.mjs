@@ -41,10 +41,17 @@ async function botState(botId) {
   return (body.data?.bots ?? []).find((b) => b.botId === botId) ?? null;
 }
 
-async function makeBot(name) {
+async function makeBot(name, purpose) {
   const created = await api(MANAGER, "/v1/bots", {
     method: "POST",
-    body: JSON.stringify({ schemaVersion: "1.0", username: `${name}${RUN_TAG}`.slice(0, 16), serverHost: "127.0.0.1", serverPort: fixture.port, minecraftVersion: "auto" }),
+    body: JSON.stringify({
+      schemaVersion: "1.0",
+      username: `${name}${RUN_TAG}`.slice(0, 16),
+      serverHost: "127.0.0.1",
+      serverPort: fixture.port,
+      minecraftVersion: "auto",
+      ...(purpose === "anarchy" ? { purpose: "anarchy" } : {}),
+    }),
   });
   const botId = created.body.bot?.botId;
   if (!botId) throw new Error(`create bot failed ${created.status}`);
@@ -56,10 +63,13 @@ async function makeBot(name) {
   throw new Error("bot never online");
 }
 
-/** 裁判真值：RCON 读玩家 Health（只在裁判侧使用，不进 bot 输入）。 */
+/** 裁判真值：RCON 读玩家 Health（只在裁判侧使用，不进 bot 输入）。
+ * `data get entity X Health` 回显是 `X has the following entity data: 20.0f`——
+ * 没有 "Health:" 前缀，且用户名含数字；必须取**最后一个**数字（11:02/11:03
+ * 两轮实测：首数字=用户名里的数字、Health: 锚点不存在）。 */
 async function healthOf(username) {
   const raw = await fixture.rcon(`data get entity ${username} Health`).catch(() => "");
-  const m = /(\d+(\.\d+)?)f?/.exec(raw);
+  const m = /([\d.]+)f?\s*$/.exec(raw.trim());
   return m ? Number(m[1]) : null;
 }
 
@@ -75,24 +85,39 @@ await withE2EFixture(async (f) => {
   fixture = f;
   log(`fixture port=${fixture.port}`);
 
-  const subject = await makeBot("PA");
+  // subject 用 anarchy purpose：managed 档的反射预算（32 步/8s）追不完 3+ 格
+  // 距离就到期（10:54 实测 20 步零交火）；anarchy 档 200 步/30s + 交战地板 8。
+  const subject = await makeBot("PA", "anarchy");
   const opponent = await makeBot("PB");
   log(`subject=${subject.username} opponent=${opponent.username}`);
-  // 消解自治需求：否则 TOOL_PROGRESSION 会让双方走开采矿，无法形成对峙。
+  // 消解 FOOD 自治需求（面包）。**不给镐**：铁镐会喂 TOOL_PROGRESSION 阶梯把
+  // bot 拉去挖矿游走（10:48 实测对手跑到 z=10 摔伤），对峙无法保持。
   for (const b of [subject, opponent]) {
-    await fixture.rcon(`give ${b.username} minecraft:iron_pickaxe 1`).catch(() => "");
-    await fixture.rcon(`give ${b.username} minecraft:bread 8`).catch(() => "");
+    await fixture.rcon(`give ${b.username} minecraft:bread 16`).catch(() => "");
     await fixture.rcon(`give ${b.username} minecraft:wooden_sword 1`).catch(() => "");
   }
 
   const baseStatus = await api(MANAGER, "/v1/status");
   const crashBase = (baseStatus.body?.metrics?.bot_crash_total ?? baseStatus.body?.crashes ?? 0);
 
-  // 双方站位：相距 ~3 格（reach 内）
+  // 顺序纪律：上线即冻结（自治需求从 spawn 第一秒就拉 bot 游走，冻结必须先行），
+  // 再 tp 对峙，落地后治疗。
+  for (const b of [subject, opponent]) {
+    await fixture.rcon(`effect give ${b.username} minecraft:slowness 200 255`).catch(() => "");
+  }
   // RCON tp 到平地对峙（树冠出生+寻路冻结事件循环；站位是服务器侧测试条件）。
   await fixture.rcon(`tp ${subject.username} 0 70 0`).catch(() => "");
   await fixture.rcon(`tp ${opponent.username} 3 70 0`).catch(() => "");
-  await sleep(3_000);
+  await sleep(4_000); // 先落地（16 格坠落 ~1.2s）再治疗，否则摔伤落在治疗之后。
+  for (const b of [subject, opponent]) {
+    await fixture.rcon(`effect give ${b.username} minecraft:slowness 200 255`).catch(() => "");
+  }
+  // 治疗回满 + 临战再补一次（保持交战地板之上；7 血会被固定闸拒绝报复）。
+  for (const b of [subject, opponent]) {
+    await fixture.rcon(`effect give ${b.username} minecraft:instant_health 1 5`).catch(() => "");
+    await fixture.rcon(`effect give ${b.username} minecraft:instant_health 1 5`).catch(() => "");
+  }
+  await sleep(1_500);
   const pa = await posOf(subject.username);
   const pb = await posOf(opponent.username);
   log(`positions subject=${JSON.stringify(pa)} opponent=${JSON.stringify(pb)}`);
@@ -100,15 +125,26 @@ await withE2EFixture(async (f) => {
   const gap = Math.hypot(pa.x - pb.x, pa.y - pb.y, pa.z - pb.z);
   log(`gap=${gap.toFixed(1)}`);
 
-  // 裁判基线
-  const h0a = await healthOf(subject.username);
-  const h0b = await healthOf(opponent.username);
+  // 裁判基线（>0 才有效；0 = bot 尚在重生/读取竞态，等待后重读）
+  let h0a = await healthOf(subject.username);
+  let h0b = await healthOf(opponent.username);
+  for (let i = 0; i < 5 && (h0a === null || h0a <= 0 || h0b === null || h0b <= 0); i += 1) {
+    await sleep(2_000);
+    h0a = await healthOf(subject.username);
+    h0b = await healthOf(opponent.username);
+  }
   jlog({ t: new Date().toISOString(), event: "baseline", subject: h0a, opponent: h0b, gap });
   log(`referee baseline: subject=${h0a} opponent=${h0b}`);
 
-  // ===== 触发：对 subject 注入 4 点伤害（受击反射 → 报复交战）=====
+  // ===== 触发：对 subject 注入 2 点伤害（受击反射 → 报复交战）=====
   // damage 命令的攻击者归因不完美；反射环以"血量下降+近旁 hostile"选择目标。
-  await fixture.rcon(`damage ${subject.username} 4`).catch(() => "");
+  // 注入量必须让 subject 保持交战地板（8）之上——10:40 的 4 点注入把 3 血主体
+  // 顶进 HEALTH_BELOW_ENGAGE_FLOOR，固定闸门拒绝报复（研究反例的活标本）。
+  for (const b of [subject, opponent]) {
+    await fixture.rcon(`effect give ${b.username} minecraft:instant_health 1 5`).catch(() => "");
+  }
+  await sleep(500);
+  await fixture.rcon(`damage ${subject.username} 2`).catch(() => "");
   log("damage injected → reflex loop expected");
 
   // ===== 交战窗：90s 裁判逐 2s 采样 =====
@@ -161,7 +197,21 @@ await withE2EFixture(async (f) => {
   log(pass ? "SCENARIO PVP-P1-PILOT PASS" : "SCENARIO PVP-P1-PILOT PARTIAL (see verdict)");
   process.exit(pass ? 0 : 2);
 
-  async function submitGoalRaw(botId, text, timeoutMs = 90_000) {
+  const REGISTRATION_CLASS_CODES = new Set([
+  "BOT_UNAVAILABLE", "PLANNER_BOT_UNAVAILABLE", "PLANNER_REJECTED", "PLANNER_BOT_BUSY",
+]);
+async function submitGoalRaw(botId, text, timeoutMs) {
+  for (let submission = 0; submission < 4; submission += 1) {
+    const task = await submitGoalRawImpl(botId, text, timeoutMs);
+    if (task !== null && task !== undefined && task.status !== "failed") return task;
+    const reason = task?.failureReason ?? "";
+    if (task === null || task === undefined || !REGISTRATION_CLASS_CODES.has(reason) || submission >= 3) return task;
+    await sleep(10_000);
+  }
+  return null;
+}
+
+async function submitGoalRawImpl(botId, text, timeoutMs = 90_000) {
     const requestId = randomUUID();
     await api(CONTROL_API, "/v1/goals", {
       method: "POST",

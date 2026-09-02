@@ -31,7 +31,21 @@ async function botOnline(botId) {
   return bot?.connectionState === "online" ? bot : null;
 }
 
-async function submitGoal(botId, text, timeoutMs = 120_000) {
+const REGISTRATION_CLASS_CODES = new Set([
+  "BOT_UNAVAILABLE", "PLANNER_BOT_UNAVAILABLE", "PLANNER_REJECTED", "PLANNER_BOT_BUSY",
+]);
+async function submitGoal(botId, text, timeoutMs) {
+  for (let submission = 0; submission < 4; submission += 1) {
+    const task = await submitGoalImpl(botId, text, timeoutMs);
+    if (task !== null && task !== undefined && task.status !== "failed") return task;
+    const reason = task?.failureReason ?? "";
+    if (task === null || task === undefined || !REGISTRATION_CLASS_CODES.has(reason) || submission >= 3) return task;
+    await sleep(10_000);
+  }
+  return null;
+}
+
+async function submitGoalImpl(botId, text, timeoutMs = 120_000) {
   const requestId = randomUUID();
   await api(CONTROL_API, "/v1/goals", {
     method: "POST",

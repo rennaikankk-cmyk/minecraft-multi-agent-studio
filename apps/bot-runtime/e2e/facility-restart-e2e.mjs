@@ -47,23 +47,37 @@ async function countItem(username, itemId) {
   return { count, raw };
 }
 
+/** 注册类失败：bot 上线/重启后 runtime-link 注册窗内，协调器会永久拒绝 goal
+ * （POST 200 后 goal_failed BOT_UNAVAILABLE/PLANNER_REJECTED，实测窗口 >8s）。
+ * 这些码换 requestId 重提是场景层的正当对策（产品侧排队化是独立待办）。 */
+const REGISTRATION_CLASS_CODES = new Set([
+  "BOT_UNAVAILABLE", "PLANNER_BOT_UNAVAILABLE", "PLANNER_REJECTED", "PLANNER_BOT_BUSY",
+]);
+
 async function submitGoal(botId, text, timeoutMs = 120_000) {
-  const requestId = randomUUID();
-  // 重启后 runtime-link/catalog 就绪前，coordinator 会 PLANNER_REJECTED/BOT_UNAVAILABLE
-  // 拒绝（实测 08:41 三连拒后 script 却轮询 360s 空 task）。12×10s 全状态码重试。
-  for (let attempt = 0; attempt < 12; attempt += 1) {
-    const res = await api(CONTROL_API, "/v1/goals", {
-      method: "POST",
-      body: JSON.stringify({ schemaVersion: "1.0", requestId, botId, operatorGoal: text, timeoutMs }),
-    });
-    if (res.status < 300) break;
-    await sleep(10_000);
-  }
-  for (let i = 0; i < Math.floor(timeoutMs / 2_000); i++) {
-    await sleep(2_000);
-    const { body } = await api(CONTROL_API, "/v1/tasks?limit=10");
-    const task = (body.data?.tasks ?? []).find((c) => c.taskId === requestId);
-    if (task && (task.status === "completed" || task.status === "failed")) return task;
+  for (let submission = 0; submission < 4; submission += 1) {
+    const requestId = randomUUID();
+    // POST 拒绝（409 直拒）也重试。
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const res = await api(CONTROL_API, "/v1/goals", {
+        method: "POST",
+        body: JSON.stringify({ schemaVersion: "1.0", requestId, botId, operatorGoal: text, timeoutMs }),
+      });
+      if (res.status < 300) break;
+      await sleep(10_000);
+    }
+    for (let i = 0; i < Math.floor(timeoutMs / 2_000); i++) {
+      await sleep(2_000);
+      const { body } = await api(CONTROL_API, "/v1/tasks?limit=10");
+      const task = (body.data?.tasks ?? []).find((c) => c.taskId === requestId);
+      if (task && (task.status === "completed" || task.status === "failed")) {
+        if (task.status === "failed" && REGISTRATION_CLASS_CODES.has(task.failureReason ?? "") && submission < 3) {
+          log(`goal registration-class failure (${task.failureReason}), resubmitting (${submission + 1}/3)`);
+          break;
+        }
+        return task;
+      }
+    }
   }
   return null;
 }
@@ -121,15 +135,12 @@ await withE2EFixture(async (f) => {
   }
   if (!cell) { log("FATAL: no furnace cell"); process.exit(1); }
 
-  const place = await submitGoal(botId, [
-    "使用蓝图施工技能放置一个 furnace：",
-    `锚点 x=${cell.x}、y=${cell.y}、z=${cell.z}；`,
-    `参考方块 x=${cell.x}、y=${cell.y - 1}、z=${cell.z}；`,
-    "唯一单元格 offset x=0、y=0、z=0；referenceOffset x=0、y=-1、z=0；face x=0、y=1、z=0；",
-    "维度为主世界；物品 furnace；结构类别 utility。坐标与结构不要改动。",
-  ].join(""));
+  // 熔炉本体用 RCON setblock 注入（放置链已有 J1L/J2/J3F 专测；本场景主题是
+  // smelt 重启 reconcile 与 false-success，不再让放置 flakes 进入判定路径）。
+  await fixture.rcon(`setblock ${cell.x} ${cell.y} ${cell.z} minecraft:furnace`).catch(() => "");
+  await sleep(1_500);
   const placed = await fixture.rcon(`execute if block ${cell.x} ${cell.y} ${cell.z} minecraft:furnace`);
-  log(`furnace place: goal=${place?.status} server=${placed.includes("Test passed")}`);
+  log(`furnace setblock: server=${placed.includes("Test passed")}`);
   if (!placed.includes("Test passed")) { log("FATAL: furnace not placed"); process.exit(1); }
   await submitGoal(botId, "读取当前区域的 furnace 方块分布并给出扫描结果，只读");
 

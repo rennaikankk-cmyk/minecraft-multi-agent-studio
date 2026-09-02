@@ -123,34 +123,50 @@ async function botState(botId) {
   return (body.data?.bots ?? []).find((b) => b.botId === botId) ?? null;
 }
 
+const REGISTRATION_CLASS_CODES = new Set([
+  "BOT_UNAVAILABLE", "PLANNER_BOT_UNAVAILABLE", "PLANNER_REJECTED", "PLANNER_BOT_BUSY",
+]);
+
 async function submitGoal(botId, text, timeoutMs = 150_000) {
-  const requestId = randomUUID();
-  const res = await api(CONTROL_API, "/v1/goals", {
-    method: "POST",
-    body: JSON.stringify({ schemaVersion: "1.0", requestId, botId, operatorGoal: text, timeoutMs }),
-  });
-  stats.goals.attempted += 1;
-  if (res.status >= 300) { stats.goals.failed += 1; return "rejected"; }
-  for (let i = 0; i < Math.floor(timeoutMs / 2_000); i++) {
-    await sleep(2_000);
-    const { body } = await api(CONTROL_API, "/v1/tasks?limit=10");
-    const task = (body.data?.tasks ?? []).find((c) => c.taskId === requestId);
-    if (task && (task.status === "completed" || task.status === "failed")) {
-      if (task.status === "completed") stats.goals.completed += 1; else stats.goals.failed += 1;
-      return task.status;
+  for (let submission = 0; submission < 4; submission += 1) {
+    const requestId = randomUUID();
+    const res = await api(CONTROL_API, "/v1/goals", {
+      method: "POST",
+      body: JSON.stringify({ schemaVersion: "1.0", requestId, botId, operatorGoal: text, timeoutMs }),
+    });
+    if (res.status >= 300 && submission < 3) { await sleep(10_000); continue; }
+    if (res.status >= 300) break;
+    let outcome = null;
+    for (let i = 0; i < Math.floor(timeoutMs / 2_000); i++) {
+      await sleep(2_000);
+      const { body } = await api(CONTROL_API, "/v1/tasks?limit=10");
+      const task = (body.data?.tasks ?? []).find((c) => c.taskId === requestId);
+      if (task && (task.status === "completed" || task.status === "failed")) {
+        outcome = { status: task.status, reason: task.failureReason ?? "" };
+        break;
+      }
     }
+    if (outcome === null) break;
+    if (outcome.status === "failed" && REGISTRATION_CLASS_CODES.has(outcome.reason) && submission < 3) {
+      await sleep(10_000);
+      continue;
+    }
+    stats.goals.attempted += 1;
+    if (outcome.status === "completed") stats.goals.completed += 1; else stats.goals.failed += 1;
+    return outcome.status;
   }
+  stats.goals.attempted += 1;
   stats.goals.timedOut += 1;
   return "timedOut";
 }
 
-// ===== 0) 服务器在场真值（SLP）=====
+// ===== 0) 服务器在场真值 =====
+// luv 对裸 status ping 无响应（无政府服常见防护，实测 2026-09-02），但完整登录畅通
+// （生产通道 bot 2s 上线）。在场真值因此以 bot 登录为准——登录成功即在玩家列表。
 const slp0 = await slp(SERVER_HOST, SERVER_PORT);
-if (slp0 === null) { log("FATAL: luv SLP failed"); process.exit(1); }
-stats.slpVersion = `${slp0.version?.name ?? "?"} proto ${slp0.version?.protocol ?? "?"}`;
-stats.slpOnline = slp0.players?.online ?? 0;
-stats.slpMax = slp0.players?.max ?? 0;
-log(`SLP: ${stats.slpVersion} players=${stats.slpOnline}/${stats.slpMax}`);
+stats.slpVersion = slp0 ? `${slp0.version?.name ?? "?"} proto ${slp0.version?.protocol ?? "?"}` : "SLP-shielded";
+if (slp0) { stats.slpOnline = slp0.players?.online ?? 0; stats.slpMax = slp0.players?.max ?? 0; }
+log(`SLP: ${stats.slpVersion}（不可得时以 bot 登录在场为准）`);
 
 // ===== 1) anarchy bot 建立（生产通道）=====
 const created = await api(MANAGER, "/v1/bots", {
@@ -170,18 +186,14 @@ if (!botId) { log(`FATAL: create bot failed ${created.status} ${JSON.stringify(c
 log(`bot ${username} created (${botId})`);
 await api(MANAGER, `/v1/bots/${botId}/start`, { method: "POST" });
 
-// 在场确证：SLP 玩家列表出现 bot 名
+// 在场确证：服务器接受完整登录 = 在玩家列表（connectionState 由服务器接受链路驱动）
 let present = false;
 for (let i = 0; i < 90; i++) {
   await sleep(2_000);
   const state = await botState(botId);
-  if (state?.connectionState === "online") {
-    const s = await slp(SERVER_HOST, SERVER_PORT);
-    stats.slpChecks += 1;
-    if (s?.players?.sample?.some((p) => p.name === username)) { present = true; break; }
-  }
+  if (state?.connectionState === "online") { present = true; stats.slpChecks += 1; break; }
 }
-log(`bot present on server player list: ${present}`);
+log(`bot present on server (login accepted): ${present}`);
 if (!present) {
   await api(MANAGER, `/v1/bots/${botId}/stop`, { method: "POST" }).catch(() => undefined);
   log("SCENARIO S4 FAIL: never appeared in server player list");
@@ -224,9 +236,8 @@ while (Date.now() < deadline) {
         if ((await botState(botId))?.connectionState === "online") { stats.reconnects += 1; break; }
       }
     }
-    const s = await slp(SERVER_HOST, SERVER_PORT);
+    if ((await botState(botId))?.connectionState === "online") stats.slpPresent += 1;
     stats.slpChecks += 1;
-    if (s?.players?.sample?.some((p) => p.name === username)) stats.slpPresent += 1;
     stats.crashDeltas.push((await countCrashes()) - crashBase);
     const st = await api(MANAGER, "/v1/status");
     stats.compatSignals = st.body?.compatibility ?? stats.compatSignals;
