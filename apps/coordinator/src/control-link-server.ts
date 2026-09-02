@@ -383,6 +383,11 @@ export class ControlLinkServer {
     if (this.started || this.stopped) {
       throw new Error("Control Link server cannot be started more than once.");
     }
+    // Phase 1b：恢复磁盘持久化的 waiting goal（协调器重启不丢）。
+    const durableRecovery = this.durableWaitingQueue.initialize();
+    if (durableRecovery.recovered > 0 || durableRecovery.expired > 0) {
+      safeLog(this.options.logger, "info", "coordinator_durable_waiting_recovered", durableRecovery);
+    }
     if (this.options.goalStore) {
       const snapshots = await this.options.goalStore.initialize(
         COMPLETED_GOAL_TTL_MS,
@@ -422,8 +427,8 @@ export class ControlLinkServer {
     this.unsubscribeRegistry();
     this.unsubscribeReadiness();
     this.unsubscribeAutonomous();
-    // 停车 goal 的死线定时器全部清掉；store 的 task 恢复路径会诚实过期
-    // 残留 lease（不丢、不悬挂）。
+    // Phase 1b：durable 队列的 waiting goal 在 stop 时保留在磁盘（下次
+    // start 恢复）——不清除，不丢。旧内存 Map 的定时器仍需清理。
     for (const [botId, queue] of this.waitingGoals) {
       for (const entry of queue) {
         clearTimeout(entry.deadlineTimer);
@@ -1572,30 +1577,48 @@ export class ControlLinkServer {
     });
   }
 
-  /** 就绪翻沿驱动的唤醒（FIFO；唤醒后由 per-bot assignment 保证串行）。 */
+  /**
+   * 就绪翻沿驱动的唤醒：从 durable 队列 FIFO dequeue，重建 PendingGoal 走
+   * executeGoal（此时 bot 已 ready → 正常 begin→execute 流程）。
+   * 链式恢复：当前 goal 终态后若 bot 仍就绪，唤醒下一个。
+   */
   private resumeWaitingGoals(botId: string): void {
     if (this.stopped) return;
-    const queue = this.waitingGoals.get(botId);
-    if (queue === undefined || queue.length === 0) return;
-    const entry = queue.shift()!;
-    if (queue.length === 0) this.waitingGoals.delete(botId);
-    clearTimeout(entry.deadlineTimer);
-    const remainingMs = Math.max(
-      1_000,
-      Math.min(entry.deadlineMs - validNow(this.now()).getTime(), entry.pending.request.payload.timeoutMs),
-    );
-    const controller = entry.pending.controller;
-    const timer = setTimeout(() => {
-      controller.abort(new Error("goal_timeout"));
-    }, remainingMs);
-    safeLog(this.options.logger, "info", "coordinator_goal_waiting_resumed", {
-      traceId: entry.pending.request.payload.operationId,
+    const entry = this.durableWaitingQueue.dequeueForBot(botId);
+    if (entry === null) return;
+    safeLog(this.options.logger, "info", "coordinator_goal_durable_resumed", {
+      traceId: entry.operationId,
       botId,
-      remainingMs,
+      remainingMs: entry.expiresAtMs - validNow(this.now()).getTime(),
     });
-    entry.pending.execution = this.executeAcquiredGoal(entry.pending, entry.lease, timer);
-    void entry.pending.execution.finally(() => {
-      // 链式恢复：当前 goal 终态后若 bot 仍就绪，唤醒该 bot 下一个停车 goal。
+    // 重建 goal request（durable entry → 完整消息协议）
+    const request: ControlLinkGoalRequestV1 = {
+      schemaVersion: "1.0",
+      messageId: this.randomId(),
+      timestamp: new Date(entry.issuedAtMs).toISOString(),
+      type: "control.link.goal-request.v1",
+      payload: {
+        coordinatorInstanceId: this.options.instanceId,
+        clientId: entry.clientId,
+        controlApiInstanceId: entry.controlApiInstanceId,
+        operationId: entry.operationId,
+        taskId: entry.taskId,
+        botId: entry.botId,
+        actorId: entry.actorId,
+        operatorGoal: entry.operatorGoal,
+        timeoutMs: entry.timeoutMs,
+        issuedAt: new Date(entry.issuedAtMs).toISOString(),
+        expiresAt: new Date(entry.expiresAtMs).toISOString(),
+      },
+    };
+    const pending: PendingGoal = {
+      fingerprint: `durable-${entry.operationId}`,
+      request,
+      responders: new Map(),
+      controller: new AbortController(),
+      execution: null,
+    };
+    void this.executeGoal(pending).finally(() => {
       if (!this.stopped && this.options.registry.goalExecutionReady(botId)) {
         this.resumeWaitingGoals(botId);
       }
