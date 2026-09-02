@@ -121,9 +121,7 @@ await withE2EFixture(async (fixture) => {
   log(`batch2(resume): goal=${batch2?.status} cell2=${c2.includes("Test passed")} cell3=${c3.includes("Test passed")}`);
 
   // 显式重验整行：cell0 现在是 cobblestone —— 期望发现分歧。
-  const verifyGoal = await submitGoal(botId, [
-    "读取当前区域 oak_log 与 cobblestone 方块分布并给出扫描结果，只读",
-  ].join(""));
+  const verifyGoal = await submitGoal(botId, "读取当前区域的 cobblestone 方块分布并给出扫描结果，只读");
   const cell0Now = await fixture.rcon(`execute if block ${anchor.x} ${anchor.y} ${anchor.z} minecraft:oak_log`);
   const tamperStillThere = !cell0Now.includes("Test passed");
   log(`re-verify: goal=${verifyGoal?.status} cell0_still_tampered=${tamperStillThere}`);

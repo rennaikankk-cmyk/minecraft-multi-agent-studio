@@ -36,11 +36,14 @@ async function botOnline(botId) {
 
 async function countItem(username, itemId) {
   const raw = await fixture.rcon(`data get entity ${username} Inventory`).catch(() => "");
+  // NBT 条目形如 {Slot:0b,id:"minecraft:iron_ingot",Count:3b}——按条目配对求和，
+  // 出现次数会低估堆叠（2 锭 1 槽 = 1 次）。
   let count = 0;
-  const re = new RegExp(`(?:id:|"id":"?)minecraft:${itemId}`, "g");
-  // NBT 列表按条目计：粗匹配条目数即可（give 数量级小）。
-  const matches = raw.match(new RegExp(`minecraft:${itemId}`, "g")) ?? [];
-  count = matches.length;
+  const itemEntries = raw.match(new RegExp(`\\{[^{}]*id:"minecraft:${itemId}[^{}]*\\}`, "g")) ?? [];
+  for (const entry of itemEntries) {
+    const m = /Count:(\d+)b/.exec(entry);
+    count += m ? Number(m[1]) : 1;
+  }
   return { count, raw };
 }
 

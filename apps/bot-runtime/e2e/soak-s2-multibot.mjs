@@ -137,13 +137,7 @@ await withE2EFixture(async (fixture) => {
     if (solid.includes("Test passed")) { cell = c; break; }
   }
   if (!cell) { log("FATAL: no furnace cell"); process.exit(1); }
-  await submitGoal(lead.botId, [
-    "使用蓝图施工技能放置一个 furnace：",
-    `锚点 x=${cell.x}、y=${cell.y}、z=${cell.z}；`,
-    `参考方块 x=${cell.x}、y=${cell.y - 1}、z=${cell.z}；`,
-    "唯一单元格 offset x=0、y=0、z=0；referenceOffset x=0、y=-1、z=0；face x=0、y=1、z=0；",
-    "维度为主世界；物品 furnace；结构类别 utility。坐标与结构不要改动。",
-  ].join(""), 150_000);
+  await submitGoal(lead.botId, `施工蓝图行：锚点 x=${cell.x} y=${cell.y} z=${cell.z}，沿 +x 放置 1 个 furnace，每批最多 1 格，从第 1 格开始`, 150_000);
   await submitGoal(lead.botId, "读取当前区域的 furnace 方块分布并给出扫描结果，只读", 90_000);
   log("shared furnace placed + registered");
 
@@ -162,7 +156,7 @@ await withE2EFixture(async (fixture) => {
     try {
       // 独立轻 goal（各 bot 并发）
       const independent = bots.map((bot, idx) =>
-        submitGoal(bot.botId, ["读取当前区域的方块分布并给出扫描结果，只读", "合成 4 个 oak_planks", "盘点当前背包各类物品数量，只读"][idx % 3], 120_000)
+        submitGoal(bot.botId, ["读取当前区域的 oak_log 方块分布并给出扫描结果，只读", "合成 4 个 oak_planks", "读取当前区域的 stone 方块分布并给出扫描结果，只读"][idx % 3], 120_000)
           .then((status) => { const s = stats.perBot[bot.botId]; s.attempted += 1; if (status === "completed") s.completed += 1; else s.failed += 1; jlog({ t: new Date().toISOString(), cycle, bot: bot.username, step: "independent", status }); }),
       );
       await Promise.all(independent);

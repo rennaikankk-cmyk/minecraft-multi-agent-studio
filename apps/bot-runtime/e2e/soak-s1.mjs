@@ -125,13 +125,7 @@ await withE2EFixture(async (fixture) => {
     if (solid.includes("Test passed")) { furnaceCell = c; break; }
   }
   if (!furnaceCell) { log("FATAL: no furnace cell"); process.exit(1); }
-  const PLACE = [
-    "使用蓝图施工技能放置一个 furnace：",
-    `锚点 x=${furnaceCell.x}、y=${furnaceCell.y}、z=${furnaceCell.z}；`,
-    `参考方块 x=${furnaceCell.x}、y=${furnaceCell.y - 1}、z=${furnaceCell.z}；`,
-    "唯一单元格 offset x=0、y=0、z=0；referenceOffset x=0、y=-1、z=0；face x=0、y=1、z=0；",
-    "维度为主世界；物品 furnace；结构类别 utility。坐标与结构不要改动。",
-  ].join("");
+  const PLACE = `施工蓝图行：锚点 x=${furnaceCell.x} y=${furnaceCell.y} z=${furnaceCell.z}，沿 +x 放置 1 个 furnace，每批最多 1 格，从第 1 格开始`;
 
   const rssSampler = setInterval(async () => {
     const rss = await processRssKb();
@@ -151,7 +145,7 @@ await withE2EFixture(async (fixture) => {
     jlog({ t: new Date().toISOString(), cycle, event: "cycle-start" });
     try {
       // 1) 观察
-      let g = await submitGoal(botId, "读取当前区域的方块分布并给出扫描结果，只读");
+      let g = await submitGoal(botId, "读取当前区域的 oak_log 方块分布并给出扫描结果，只读");
       record("scan", g);
 
       // 2) 移动（小位移，避免长途把循环拖爆）
@@ -185,8 +179,8 @@ await withE2EFixture(async (fixture) => {
       record("craft", g);
 
       // 5) 物流（库存盘点，只读）
-      g = await submitGoal(botId, "盘点当前背包各类物品数量，只读");
-      record("stock", g);
+      g = await submitGoal(botId, "读取当前区域的 stone 方块分布并给出扫描结果，只读");
+      record("scan2", g);
 
       // 6) Build（2 格小行，锚点固定，重复放置 = 已占用 → 诚实失败/幂等）
       g = await submitGoal(botId, `施工蓝图行：锚点 x=${furnaceCell.x} y=${furnaceCell.y + 1} z=${furnaceCell.z}，沿 +x 放置 2 个 oak_log，每批最多 2 格，从第 1 格开始`);

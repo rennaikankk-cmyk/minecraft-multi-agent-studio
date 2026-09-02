@@ -195,10 +195,10 @@ log(`baseline crash counter=${crashBase}`);
 // ===== 2) soak 循环 =====
 const deadline = Date.now() + SOAK_MINUTES * 60_000;
 const LIGHT_GOALS = [
-  "读取当前区域的方块分布并给出扫描结果，只读",
+  "读取当前区域的 oak_log 方块分布并给出扫描结果，只读",
   "采集 1 个 oak_log",
   "合成 4 个 oak_planks",
-  "盘点当前背包各类物品数量，只读",
+  "合成 4 个 oak_planks",
   "移动到当前坐标附近 5 格内的安全位置",
 ];
 let i = 0;
