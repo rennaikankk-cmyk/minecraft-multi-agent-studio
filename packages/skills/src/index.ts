@@ -561,3 +561,41 @@ export {
   stripEphemeralState,
   type DurableStateSnapshot,
 } from "./durable-state-store.js";
+export {
+  skillSystemV1Manifest,
+  skillMaturityLevels,
+  type SkillV1ManifestEntry,
+  type SkillSystemV1Manifest,
+  type SkillMaturityLevel,
+  type PlannerReachability,
+} from "./v1-manifest.js";
+export { scenarioResults, type ScenarioResult } from "./scenario-results.js";
+
+// Round 7 兼容层（compat/）：结构化服务器行为信号（observer/profile/适应机）。
+// mineflayer 边界显式上报，不解析自然语言日志——bot-runtime 消费 observer
+// 与 ACTION_FAMILIES，coordinator/dashboard 消费 profile 面。
+export {
+  ACTION_FAMILIES,
+  ACTION_RISKS,
+  COMPAT_PROFILE_SCHEMA_VERSION,
+  CompatibilityProfileError,
+  featureGateSchema,
+  MODE_SOURCES,
+  MODE_TO_BASELINE,
+  newBehaviorProfile,
+  OBSERVER_DEFAULT_WINDOW_MS,
+  OBSERVER_MAX_EVENTS,
+  resolveCompatibilityMode,
+  SERVER_COMPATIBILITY_MODES,
+  serverBehaviorProfileSchema,
+  ServerBehaviorObserver,
+  type ActionFamily,
+  type ActionRisk,
+  type BehaviorSignalEvent,
+  type BehaviorSignalKind,
+  type CompatibilityModeSource,
+  type FamilyWindowStats,
+  type FeatureGate,
+  type ServerBehaviorProfile,
+  type ServerCompatibilityMode,
+} from "./compat/index.js";
