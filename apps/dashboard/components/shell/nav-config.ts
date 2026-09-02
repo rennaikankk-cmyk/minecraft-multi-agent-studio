@@ -1,6 +1,7 @@
 import type { LucideIcon } from "lucide-react";
 import {
   Activity,
+  Layers,
   Bot,
   Cpu,
   FlaskConical,
@@ -37,6 +38,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
       { label: "Servers", href: "/servers", icon: Server, hint: "External / Local Test" },
       { label: "Bots", href: "/bots", icon: Bot, hint: "Bot Fleet" },
       { label: "Combat", href: "/combat", icon: Target, hint: "战斗 reflex" },
+      { label: "Skills", href: "/skills", icon: Layers, hint: "Skill System v1 Manifest" },
     ],
   },
   {
