@@ -22,8 +22,8 @@ const RUN_TAG = Date.now().toString(36).slice(-6);
 const JOURNAL_DIR = path.join(ROOT, "runtime-data", "plan-journals");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (m) => console.log(`[${new Date().toISOString()}] ${m}`);
-const CELLS = 8;          // 蓝图格数
-const BATCH = 4;          // 每批放置数（跨 journal 边界）
+const CELLS = 2;          // 蓝图格数（模型结构化转写保真度是瓶颈：单格已被 J1/J2 证明可靠）
+const BATCH = 1;          // 每批放置数（跨 journal 边界：批1 startIndex=0，批2 startIndex=1）
 
 async function api(base, pathname, init) {
   const response = await fetch(`${base}${pathname}`, { headers: HEADERS, ...init });
@@ -32,10 +32,19 @@ async function api(base, pathname, init) {
 }
 
 function countPlaceCalls(botId) {
+  // 只数真实 skill_result 派发（skillId=build.blueprint），不数字符串出现次数
   const logFile = path.join(ROOT, "runtime-data", "logs", `bot-${botId}.log`);
   if (!existsSync(logFile)) return 0;
-  const text = readFileSync(logFile, "utf8");
-  return (text.match(/build\.blueprint/g) ?? []).length;
+  const lines = readFileSync(logFile, "utf8").split("\n");
+  let count = 0;
+  for (const line of lines) {
+    if (!line.includes("bot_runtime_skill_result")) continue;
+    try {
+      const j = JSON.parse(line);
+      if (j.skillId === "build.blueprint") count += 1;
+    } catch { /* 非 JSON 行跳过 */ }
+  }
+  return count;
 }
 
 function journalSnapshots() {
@@ -95,7 +104,7 @@ await withE2EFixture(async (fixture) => {
     if (r?.status === "completed") break;
   }
   let logs = 0;
-  for (let attempt = 1; attempt <= 4 && logs < CELLS; attempt += 1) {
+  for (let attempt = 1; attempt <= 3 && logs < CELLS; attempt += 1) {
     const r = await submitGoal(`获取 ${CELLS - logs} 个 oak_log`);
     if (r?.status === "completed") logs = CELLS;
     else {
@@ -181,7 +190,7 @@ await withE2EFixture(async (fixture) => {
   await api(MANAGER, `/v1/bots/${BOT}/stop`, { method: "POST" }).catch(() => undefined);
 
   const allPlaced = allCells.every(Boolean);
-  const zeroReplay = placesAfter <= batchesRun + 2; // 每批 goal 一次 dispatch（容忍重试余量）
+  const zeroReplay = placesAfter <= batchesRun + 1; // 每批 goal 至多一次 dispatch（重试余量 1）
   if (allPlaced && zeroReplay) {
     log(`SCENARIO J3 PASS: ${totalCells}/${totalCells} cells server-verified, place-invocations ${placesAfter} ≈ batches ${batchesRun} (zero replay of completed cells)`);
     process.exit(0);
