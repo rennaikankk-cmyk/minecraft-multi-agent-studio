@@ -87,6 +87,14 @@ function executor(invoke = vi.fn()) {
 }
 
 describe("movement.goto@1.0.0", () => {
+  it("declares idempotent — L0 STUCK pause must be replayable, not a terminal abort", () => {
+    // L2 实证（2026-09-03 重跑）：idempotent:false 时，重启后起步瞬态触发
+    // L0 STUCK（5s 位移<ε）→ 在飞 movement 被取消 → NON_IDEMPOTENT_L0_RETRY_
+    // UNSAFE → goal 必死。移动到目标点无不可逆副作用，重放收敛——此声明
+    // 是 L0 取消/协调器重启/传输失败三条恢复路径的共同前提。
+    expect(movementGotoSkill.idempotent).toBe(true);
+  });
+
   it("calls only the bounded Pathfinder capability", async () => {
     const adapter = vi.fn(async () => ({
       reached: true,

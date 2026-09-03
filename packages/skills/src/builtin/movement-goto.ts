@@ -105,7 +105,14 @@ export const movementGotoSkill = defineSkill({
   },
   requiredCapabilities: ["bot.move"] as const,
   timeoutMs: SAFE_PATH_TIMEOUT_MS,
-  idempotent: false,
+  // L2 实证（2026-09-03 重跑）：L0 STUCK（5s 位移<ε，重启后起步瞬态即可触发）
+  // → PAUSE_NORMAL_TASKS 取消在飞的 movement.goto → idempotent:false 判
+  // NON_IDEMPOTENT_L0_RETRY_UNSAFE 直接 ABORT——而"移动到目标点"对世界零
+  // 不可逆副作用，重放只会收敛（重派同目标）。声明 idempotent 后：L0 取消
+  // → 安全重放；协调器重启期间在飞移动 → 保守重规划而非 PLANNER_RESTART_
+  // RECOVERY_UNSAFE；传输失败 → 直接重试而非背包快照 reconcile（移动无物品
+  // 副作用，快照 reconcile 对移动步是语义错误）。
+  idempotent: true,
   retryPolicy: {
     maxAttempts: 1,
     baseDelayMs: 50,
