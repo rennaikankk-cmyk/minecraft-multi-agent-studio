@@ -1219,11 +1219,19 @@ export class MineflayerBotClient implements BotClient {
           persistPath: provenancePersistPath(serverProfileId),
         })
       : null;
+    // NoHunger 环境熔断（2026-09-04 用户诊断实证：luv 上 NoHunger maximum
+    // 的"地面位移声明 onGround=false"= 自签空中行走签名 → 移动被静默拒绝，
+    // 而旋转/潜行不受影响）。STUDIO_NO_HUNGER=0 一刀关闭；长期解=按服自适应。
+    const noHungerKillSwitch = process.env.STUDIO_NO_HUNGER === "0";
     this.noHungerController = attachNoHunger(bot as unknown as NoHungerBot, {
       serverKey: serverAddress
         ? `${serverAddress.host}:${serverAddress.port}`
         : serverProfileId ?? "unknown-server",
-      ...(noHungerConfig ? { config: noHungerConfig } : {}),
+      ...(noHungerKillSwitch
+        ? { config: { enabled: false } satisfies ServerProfile["noHunger"] }
+        : noHungerConfig
+          ? { config: noHungerConfig }
+          : {}),
     });
     const combatEnabled = typeof combatEnabledOrWorldState === "boolean"
       ? combatEnabledOrWorldState
