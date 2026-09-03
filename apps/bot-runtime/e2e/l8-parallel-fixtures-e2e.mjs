@@ -23,9 +23,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (m) => console.log(`[${new Date().toISOString()}] ${m}`);
 const ACTIVE = new Set(["queued", "assigned", "running", "blocked", "waiting", "paused"]);
 
-function sh(cmd, args, timeoutMs = 60_000) {
+function sh(cmd, args, timeoutMs = 60_000, cwd = process.cwd()) {
   return new Promise((resolve) => {
-    execFile(cmd, args, { timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
+    execFile(cmd, args, { timeout: timeoutMs, windowsHide: true, cwd }, (err, stdout, stderr) => {
       resolve({ ok: !err, stdout: (stdout ?? "").trim(), stderr: (stderr ?? "").trim() });
     });
   });
@@ -76,12 +76,18 @@ try {
   RESULTS.bothFixturesReady = true;
 
   // —— (2) 外部进程 reclaim 探针：不同 pid + 默认超龄 10min ——
+  // 注意：Windows 绝对路径不能直接 dynamic import——用 cwd=e2e 目录 + 相对导入。
   const probeScript = `
-    import(${JSON.stringify(path.join(E2E_DIR, "fixture-manager.mjs"))}).then(async (m) => {
-      console.log("__RECLAIM__" + JSON.stringify(await m.reclaimStaleFixtures()));
-    });
+    import('./fixture-manager.mjs').then(async (m) => {
+      console.log('__RECLAIM__' + JSON.stringify(await m.reclaimStaleFixtures()));
+    }).catch((e) => { console.error('PROBE-ERR ' + e.message); process.exit(1); });
   `;
-  const probe = await sh("node", ["-e", probeScript], 120_000);
+  const probe = await sh(
+    "node",
+    ["-e", probeScript],
+    120_000,
+    E2E_DIR,
+  );
   const probeResult = JSON.parse((probe.stdout.match(/__RECLAIM__(\{.*\})/) ?? [null, "{}"])[1]);
   RESULTS.reclaimProbe = probeResult;
   const aAlive = await sh("docker", ["inspect", "-f", "{{.State.Running}}", fixtureA.containerName]);
@@ -115,21 +121,26 @@ try {
 
   const goalA = randomUUID();
   const goalB = randomUUID();
-  await api(CONTROL_API, "/v1/goals", {
+  const submitA = await api(CONTROL_API, "/v1/goals", {
     method: "POST",
     body: JSON.stringify({ schemaVersion: "1.0", requestId: goalA, botId: botA.botId, operatorGoal: "移动到坐标 x=9 y=70 z=9 附近", timeoutMs: 120_000 }),
   });
-  await api(CONTROL_API, "/v1/goals", {
+  const submitB = await api(CONTROL_API, "/v1/goals", {
     method: "POST",
     body: JSON.stringify({ schemaVersion: "1.0", requestId: goalB, botId: botB.botId, operatorGoal: "移动到坐标 x=-9 y=70 z=-9 附近", timeoutMs: 120_000 }),
   });
-  const [taskA, taskB] = await Promise.all([
-    waitTaskTerminal(goalA, 180_000),
-    waitTaskTerminal(goalB, 180_000),
-  ]);
+  // 同步完成（200+skill_result）不算失败——这种 goal 不进 /v1/tasks，
+  // 终局判定交给后面的 RCON 位置真值；异步（202）才轮询任务终态。
+  const syncDone = (r) => r.status === 200 && r.body?.data?.action === "skill_result";
+  const [taskA, taskB] = syncDone(submitA) && syncDone(submitB)
+    ? [{ status: "completed" }, { status: "completed" }]
+    : await Promise.all([
+        syncDone(submitA) ? Promise.resolve({ status: "completed" }) : waitTaskTerminal(goalA, 180_000),
+        syncDone(submitB) ? Promise.resolve({ status: "completed" }) : waitTaskTerminal(goalB, 180_000),
+      ]);
   RESULTS.goalAStatus = taskA?.status ?? "not_found";
   RESULTS.goalBStatus = taskB?.status ?? "not_found";
-  log(`goals terminal: A=${RESULTS.goalAStatus} B=${RESULTS.goalBStatus}`);
+  log(`goals terminal: A=${RESULTS.goalAStatus} B=${RESULTS.goalBStatus} (sync: ${syncDone(submitA)}/${syncDone(submitB)})`);
 
   // RCON 真值：位置正确 + 对侧不存在（防串扰）
   async function posOn(fixture, username) {

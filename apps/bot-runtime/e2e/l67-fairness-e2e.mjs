@@ -50,6 +50,9 @@ await withE2EFixture(async (fixture) => {
 
   // 建 bot 并全部上线
   const bots = [];
+  // 先全部 create（stopped 态），再统一 start——createBot 会重启同服所有
+  // 在跑 peer（combat 白名单生效），阶梯式 create+start 造成 O(N²) 重启
+  // 风暴（L7 实测 bot-06 40s 内被 SIGTERM 4 次，goal 全灭）。
   for (let i = 0; i < BOT_COUNT; i++) {
     const created = await api(MANAGER, "/v1/bots", {
       method: "POST",
@@ -59,6 +62,8 @@ await withE2EFixture(async (fixture) => {
     if (!botId) { log(`FATAL: bot ${i} create failed`); process.exit(1); }
     bots.push(botId);
     RESULTS.perBot[botId] = { completed: 0, failed: 0, submitted: 0 };
+  }
+  for (const botId of bots) {
     await api(MANAGER, `/v1/bots/${botId}/start`, { method: "POST" });
   }
   for (const botId of bots) {
@@ -83,7 +88,7 @@ await withE2EFixture(async (fixture) => {
       const taskId = randomUUID();
       const response = await api(CONTROL_API, "/v1/goals", {
         method: "POST",
-        body: JSON.stringify({ schemaVersion: "1.0", requestId: taskId, botId: bots[i], operatorGoal: `移动到坐标 x=${round * 3 + i} y=70 z=${round * 3} 附近`, timeoutMs: 120_000 }),
+        body: JSON.stringify({ schemaVersion: "1.0", requestId: taskId, botId: bots[i], operatorGoal: `移动到坐标 x=${i * 10 - 45} y=70 z=${round * 10 - 5} 附近`, timeoutMs: 120_000 }),
       }).catch(() => ({ status: 0, body: {} }));
       const entry = {
         taskId,
