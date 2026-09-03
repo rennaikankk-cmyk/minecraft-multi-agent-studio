@@ -80,6 +80,13 @@ export type BotChatMessage = Readonly<{
 export type BotDeathInfo = Readonly<{
   position: Readonly<{ x: number; y: number; z: number }> | null;
   dimension: string | null;
+  /**
+   * 2026-09-03 门禁 3：死亡时刻的背包快照（含盔甲/副手槽）。死亡后背包
+   * 被清空——掉落物评估必须在 death 事件当场抓，不能用重生后的空背包。
+   */
+  droppedItems?: ReadonlyArray<Readonly<{ itemId: string; count: number }>>;
+  /** 死亡时刻的 XP 点数。 */
+  xpPoints?: number;
 }>;
 
 export type BotRecoveryAction = Readonly<{

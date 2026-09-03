@@ -951,6 +951,17 @@ export const botStatusV1Schema = z
             z: z.number().finite(),
             dimension: z.string().min(3).max(128),
             diedAt: timestampSchema,
+            // 门禁 3：死亡时刻快照（重生后背包为空，评估必须用这份）。
+            droppedItems: z
+              .array(
+                z.object({
+                  itemId: z.string().min(1).max(128),
+                  count: z.number().int().positive().max(2304),
+                }).strict(),
+              )
+              .max(64)
+              .optional(),
+            xpPoints: z.number().int().nonnegative().max(2_000_000_000).optional(),
           })
           .strict()
           .optional(),

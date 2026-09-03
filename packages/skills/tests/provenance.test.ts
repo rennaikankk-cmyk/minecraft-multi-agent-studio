@@ -1,5 +1,8 @@
 // Provenance + HarvestAuthorization 测试。
 import { describe, expect, it } from "vitest";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import {
   ProvenanceStore,
   authorizeHarvest,
@@ -68,6 +71,52 @@ describe("authorizeHarvest", () => {
   it("external 记录 → allowed（anarchy 场景可采集）", () => {
     const result = authorizeHarvest({ record: makeRecord({ owner: "external", source: "external_placed" }), explicitSalvageAuthorized: false, nearOwnBase: false });
     expect(result.allowed).toBe(true);
+  });
+});
+
+
+describe('ProvenanceStore 持久化（2026-09-03 深度审计）', () => {
+  it('记录落盘；新实例从磁盘恢复', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'prov-test-'));
+    try {
+      const filePath = path.join(dir, 'prov.json');
+      const s1 = new ProvenanceStore({ persistPath: filePath });
+      s1.record(makeRecord());
+      expect(existsSync(filePath)).toBe(true);
+      const s2 = new ProvenanceStore({ persistPath: filePath });
+      expect(s2.size).toBe(1);
+      expect(s2.get(POS, DIM)!.owner).toBe('own_bot');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('remove 后落盘；重启后不再恢复', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'prov-test-'));
+    try {
+      const filePath = path.join(dir, 'prov.json');
+      const s1 = new ProvenanceStore({ persistPath: filePath });
+      s1.record(makeRecord());
+      expect(s1.remove(POS, DIM)).toBe(true);
+      const s2 = new ProvenanceStore({ persistPath: filePath });
+      expect(s2.size).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('corrupt 文件隔离为 .corrupt-*，空库继续', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'prov-test-'));
+    try {
+      const filePath = path.join(dir, 'prov.json');
+      writeFileSync(filePath, 'NOT JSON {{{');
+      const store = new ProvenanceStore({ persistPath: filePath });
+      expect(store.size).toBe(0);
+      const corrupt = readdirSync(dir).filter((f) => f.startsWith('prov.json.corrupt-'));
+      expect(corrupt).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

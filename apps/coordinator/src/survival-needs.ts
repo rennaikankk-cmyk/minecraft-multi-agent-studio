@@ -126,6 +126,12 @@ const DIAMOND_PICKAXE_RESERVE = 3;
 
 /** 连续死亡追踪——streak ≥ 3 时停止送装备去捡装备。 */
 const deathStreakTracker = new DeathStreakTracker({ resetWindowMs: 5 * 60_000 });
+/**
+ * 门禁 3 修复：recordDeath 此前从未被调用（streak 恒 0，死亡循环保险丝
+ * 失效）。assessSurvivalNeeds 是 coordinator 每 tick 的入口——在这里识别
+ * 新死亡（diedAt 未见过）记 streak；到达死点视为捡回，reset。
+ */
+const seenDeathAtByBot = new Map<string, string>();
 const DEATH_RECOVERY_WINDOW_MS = 15 * 60_000;
 /** 距死点多近算"已到达"（掉落物碰撞拾取半径外扩）。 */
 const DEATH_RECOVERY_ARRIVAL_BLOCKS = 6;
@@ -174,16 +180,30 @@ export function assessSurvivalNeeds(
       status.position.y - lastDeath.y,
       status.position.z - lastDeath.z,
     ) : Infinity;
+    // streak 接线：新死亡记一次；到达死点（已捡回）则清零。
+    const seenDeathAt = seenDeathAtByBot.get(input.record.botId);
+    if (seenDeathAt !== lastDeath.diedAt) {
+      seenDeathAtByBot.set(input.record.botId, lastDeath.diedAt);
+      deathStreakTracker.recordDeath();
+    }
+    if (sameDimension && distance <= DEATH_RECOVERY_ARRIVAL_BLOCKS) {
+      deathStreakTracker.reset();
+    }
     if (
       sameDimension &&
       Number.isFinite(deathAgeMs) &&
       now.getTime() - deathAgeMs <= DEATH_RECOVERY_WINDOW_MS &&
       distance > DEATH_RECOVERY_ARRIVAL_BLOCKS
     ) {
-      // Phase 1d：用 assessDropRecovery 做价值/风险/streak 评估
-      // （inventory 是近似——死亡时掉的就是死前有的）。
+      // Phase 1d：用 assessDropRecovery 做价值/风险/streak 评估。
+      // 门禁 3：优先用死亡时刻快照（droppedItems/xpPoints）；快照缺失
+      // （旧 runtime）才退回当前背包近似（重生后为空 = unknown-value）。
+      const drops =
+        lastDeath.droppedItems !== undefined && lastDeath.droppedItems.length > 0
+          ? lastDeath.droppedItems.map((d) => ({ itemId: d.itemId, count: d.count }))
+          : [...inventory.entries()].map(([itemId, info]) => ({ itemId, count: info.count }));
       const assessment = assessDropRecovery({
-        drops: [...inventory.entries()].map(([itemId, info]) => ({ itemId, count: info.count })),
+        drops,
         diedAtMs: deathAgeMs,
         nowMs: now.getTime(),
         distanceBlocks: Math.round(distance),

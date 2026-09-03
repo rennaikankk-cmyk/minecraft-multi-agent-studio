@@ -184,6 +184,32 @@ describe("assessSurvivalNeeds", () => {
     expect(needs.find((n) => n.key === "DEATH_RECOVERY")).toBeUndefined();
   });
 
+  it("values the death-time snapshot over the emptied post-respawn inventory", () => {
+    const diedAt = new Date(Date.now() - 2 * 60_000).toISOString();
+    // 有价值的快照 → 回收（即便当前背包已空）
+    const valuable = assess({
+      inventory: [],
+      foodLevel: 20,
+      lastDeath: {
+        x: 120, y: 64, z: -80, dimension: "minecraft:overworld", diedAt,
+        droppedItems: [{ itemId: "diamond_pickaxe", count: 1 }, { itemId: "diamond_sword", count: 1 }],
+        xpPoints: 300,
+      },
+    });
+    expect(valuable[0]).toMatchObject({ key: "DEATH_RECOVERY" });
+    // 垃圾快照 → 不值得回收——这证明评估用的是快照而非空背包的
+    // unknown-value 路径（空背包会保守回收）。
+    const junk = assess({
+      inventory: [],
+      foodLevel: 20,
+      lastDeath: {
+        x: 120, y: 64, z: -80, dimension: "minecraft:overworld", diedAt,
+        droppedItems: [{ itemId: "dirt", count: 1 }],
+      },
+    });
+    expect(junk.find((n) => n.key === "DEATH_RECOVERY")).toBeUndefined();
+  });
+
   it("never explores on an empty food reserve", () => {
     const needs = assess({
       inventory: [{ itemName: "diamond_pickaxe", count: 1 }],
@@ -216,6 +242,8 @@ function assess(options: {
     z: number;
     dimension: string;
     diedAt: string;
+    droppedItems?: ReadonlyArray<{ itemId: string; count: number }>;
+    xpPoints?: number;
   };
 }): ReturnType<typeof assessSurvivalNeeds> {
   return assessSurvivalNeeds({
@@ -241,6 +269,8 @@ function record(
     z: number;
     dimension: string;
     diedAt: string;
+    droppedItems?: ReadonlyArray<{ itemId: string; count: number }>;
+    xpPoints?: number;
   },
 ): BotRegistryRecord {
   return {

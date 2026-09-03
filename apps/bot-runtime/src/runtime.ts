@@ -382,6 +382,9 @@ export class SingleBotRuntime {
     z: number;
     dimension: string;
     diedAt: string;
+    /** 死亡时刻的背包快照（门禁 3：重生后背包为空，事后无法补抓）。 */
+    droppedItems?: ReadonlyArray<Readonly<{ itemId: string; count: number }>>;
+    xpPoints?: number;
   } | null = null;
   private readonly activeSkillTasks = new Map<
     string,
@@ -2514,6 +2517,8 @@ export class SingleBotRuntime {
     info: Readonly<{
       position: Readonly<{ x: number; y: number; z: number }> | null;
       dimension: string | null;
+      droppedItems?: ReadonlyArray<Readonly<{ itemId: string; count: number }>>;
+      xpPoints?: number;
     }>,
   ): void {
     if (generation !== this.generation || this.stopping) return;
@@ -2524,6 +2529,10 @@ export class SingleBotRuntime {
         z: Math.floor(info.position.z),
         dimension: info.dimension,
         diedAt: this.now().toISOString(),
+        ...(info.droppedItems !== undefined && info.droppedItems.length > 0
+          ? { droppedItems: info.droppedItems }
+          : {}),
+        ...(info.xpPoints !== undefined ? { xpPoints: info.xpPoints } : {}),
       };
     }
     this.cancelActiveSkills();

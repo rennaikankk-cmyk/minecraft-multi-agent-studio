@@ -10,6 +10,9 @@
 // ---------------------------------------------------------------------------
 
 import { z } from "zod";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import path from "node:path";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -113,6 +116,12 @@ export function authorizeHarvest(input: {
 
 export interface ProvenanceStoreOptions {
   maxRecords?: number;
+  /**
+   * 2026-09-03 深度审计：持久化路径（可选）。提供时启动加载、每次变更
+   * 原子落盘（tmp+rename）——runtime 重启后 own-placed 记录不丢，dig 边界
+   * 才能跨会话生效。corrupt 文件隔离为 .corrupt-*，不杀进程（空库继续）。
+   */
+  persistPath?: string;
 }
 
 const DEFAULT_MAX_RECORDS = 8192;
@@ -120,11 +129,64 @@ const DEFAULT_MAX_RECORDS = 8192;
 export class ProvenanceStore {
   private readonly records = new Map<string, ProvenanceRecord>();
   private readonly maxRecords: number;
+  private readonly persistPath: string | null;
   /** chunk key → Set<recordKey> 空间索引。 */
   private readonly chunkIndex = new Map<string, Set<string>>();
 
   constructor(options: ProvenanceStoreOptions = {}) {
     this.maxRecords = options.maxRecords ?? DEFAULT_MAX_RECORDS;
+    this.persistPath = options.persistPath ?? null;
+    this.loadFromDisk();
+  }
+
+  private loadFromDisk(): void {
+    if (this.persistPath === null) return;
+    try {
+      if (!existsSync(this.persistPath)) return;
+      const parsed = JSON.parse(readFileSync(this.persistPath, "utf8")) as {
+        schemaVersion: string;
+        records: ProvenanceRecord[];
+      };
+      if (parsed.schemaVersion !== "1.0" || !Array.isArray(parsed.records)) {
+        throw new Error("invalid provenance schema");
+      }
+      for (const raw of parsed.records) {
+        const record = provenanceRecordSchema.safeParse(raw);
+        if (!record.success) continue;
+        const key = ProvenanceStore.key(record.data.position, record.data.dimension);
+        this.records.set(key, record.data);
+        const ck = ProvenanceStore.chunkKey(record.data.position, record.data.dimension);
+        const set = this.chunkIndex.get(ck) ?? new Set<string>();
+        set.add(key);
+        this.chunkIndex.set(ck, set);
+      }
+    } catch {
+      // corrupt → 隔离（不清空别的文件），进程继续跑空库
+      try {
+        if (this.persistPath && existsSync(this.persistPath)) {
+          renameSync(this.persistPath, `${this.persistPath}.corrupt-${Date.now()}`);
+        }
+      } catch {
+        // 隔离失败也继续
+      }
+    }
+  }
+
+  private persistToDisk(): void {
+    if (this.persistPath === null) return;
+    try {
+      mkdirSync(path.dirname(this.persistPath), { recursive: true });
+      const body = JSON.stringify({
+        schemaVersion: "1.0",
+        updatedAt: new Date().toISOString(),
+        records: [...this.records.values()],
+      }) + "\n";
+      const tmpPath = `${this.persistPath}.tmp-${randomUUID().slice(0, 8)}`;
+      writeFileSync(tmpPath, body, "utf8");
+      renameSync(tmpPath, this.persistPath);
+    } catch {
+      // 磁盘失败不杀 runtime：内存记录仍生效（本会话），下次启动回退旧盘文件
+    }
   }
 
   private static key(pos: { x: number; y: number; z: number }, dimension: string): string {
@@ -158,7 +220,20 @@ export class ProvenanceStore {
     const set = this.chunkIndex.get(ck) ?? new Set<string>();
     set.add(key);
     this.chunkIndex.set(ck, set);
+    this.persistToDisk();
     return record;
+  }
+
+  /** 挖掘/破坏已确认后清除记录（server-confirmed dig 后调用）。 */
+  remove(position: { x: number; y: number; z: number }, dimension: string): boolean {
+    const key = ProvenanceStore.key(position, dimension);
+    const existed = this.records.delete(key);
+    if (existed) {
+      const ck = ProvenanceStore.chunkKey(position, dimension);
+      this.chunkIndex.get(ck)?.delete(key);
+      this.persistToDisk();
+    }
+    return existed;
   }
 
   /** 查询指定位置的 provenance（无则 null）。 */

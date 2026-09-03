@@ -1,4 +1,5 @@
 import { createBot, type Bot } from "mineflayer";
+import path from "node:path";
 import pathfinderModule, {
   Movements,
   pathfinder,
@@ -1132,8 +1133,14 @@ export class MineflayerBotClient implements BotClient {
   private chatBound = false;
   /** 服务器认证监听的清理函数（断线/spawn 重建时调用）。 */
   private serverAuthDetach: (() => void) | null = null;
-  /** Phase 3：Material Provenance——bot.dig 边界 HarvestAuthorization。 */
-  private readonly provenanceStore: ProvenanceStore | null = null;
+  /**
+   * Phase 3：Material Provenance——bot.dig 边界 HarvestAuthorization。
+   * 2026-09-03 深度审计：此前恒为 null（检查是死代码）。现在按 serverProfile
+   * 构造并持久化（runtime-data/provenance/<profile>.json），放置写入、挖掘清除。
+   */
+  private readonly provenanceStore: ProvenanceStore | null;
+  /** 显式拆除/回收授权的位置集合（salvage 通道，带死线）。 */
+  private readonly salvageGrants = new Map<string, number>();
   /** 服务器地址（auth store 按 host:port 隔离凭据用）。 */
   private readonly serverAddress: Readonly<{ host: string; port: number }> | null;
   /** 最近一次熔炉掠夺的物品名（诊断留痕，不参与计数）。 */
@@ -1189,6 +1196,12 @@ export class MineflayerBotClient implements BotClient {
     /** 无规则服导航档：true = 沿途挖掘/疾跑/跑酷/搭高全部放开。 */
     this.anarchyNavigation = navigationProfile === "anarchy";
     this.serverAddress = serverAddress;
+    // Material Provenance：按 serverProfile 持久化（跨重启生效）。
+    this.provenanceStore = serverProfileId
+      ? new ProvenanceStore({
+          persistPath: provenancePersistPath(serverProfileId),
+        })
+      : null;
     this.noHungerController = attachNoHunger(bot as unknown as NoHungerBot, {
       serverKey: serverAddress
         ? `${serverAddress.host}:${serverAddress.port}`
@@ -1294,11 +1307,24 @@ export class MineflayerBotClient implements BotClient {
     // 服务器踢人。
     bot.on("death", () => {
       const entity = bot.entity as typeof bot.entity & { position?: Vec3 };
+      // 门禁 3：当场抓背包快照（盔甲/副手槽都在 inventory.slots 里）+ XP——
+      // respawn 后这些就被清空了，事后拿到的只会是空背包。
+      const droppedItems = bot.inventory.slots
+        .flatMap((item) =>
+          item !== null && item.count > 0
+            ? [{ itemId: item.name, count: item.count }]
+            : [],
+        );
+      const xpPoints = Number.isFinite(bot.experience?.points)
+        ? Math.floor(bot.experience.points)
+        : null;
       this.handlers?.onDeath?.({
         position: entity?.position
           ? { x: entity.position.x, y: entity.position.y, z: entity.position.z }
           : null,
         dimension: normalizeDimension(String(this.bot.game?.dimension ?? "minecraft:overworld")),
+        droppedItems,
+        ...(xpPoints !== null ? { xpPoints } : {}),
       });
       try {
         (bot as unknown as { _client: { write: (channel: string, payload: unknown) => void } })._client.write(
@@ -2878,24 +2904,56 @@ export class MineflayerBotClient implements BotClient {
       const block = args[0];
       // Phase 3：bot.dig 边界 HarvestAuthorization——own/team/facility 方块
       // 无显式 salvage 授权时拒绝采集。无 provenance 记录=自然方块=放行。
+      // pathfinder 的沿途挖掘同样走 bot.dig——这一层就是全部挖掘的边界。
       if (this.provenanceStore !== null) {
         const dimension = this.bot.game?.dimension ?? "minecraft:overworld";
         const record = this.provenanceStore.get(block.position, dimension);
-        const nearOwnBase = false; // 空间检查待接入 Base registry 后补
+        const grantKey = `${dimension}:${block.position.x},${block.position.y},${block.position.z}`;
+        const grantDeadline = this.salvageGrants.get(grantKey) ?? 0;
+        const explicitSalvageAuthorized = grantDeadline > Date.now();
+        // 空间检查待接入 Base registry 后补（nearOwnBase fail-closed 分支
+        // 已有单测覆盖，运行时接入点在此——registry 落地前恒 false）。
+        const nearOwnBase = false;
         const decision = authorizeHarvest({
           record,
-          explicitSalvageAuthorized: false,
+          explicitSalvageAuthorized,
           nearOwnBase,
         });
         if (!decision.allowed) {
           throw new SkillFault("HARVEST_PROTECTED_ASSET");
+        }
+        try {
+          return await (async () => {
+            for (let attempt = 0; attempt <= COLLECT_SERVER_DIG_RETRIES; attempt += 1) {
+              if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+              const confirmation = waitForServerConfirmation(block.position);
+              try {
+                await callOriginalDig(...args);
+                confirmation.armTimeout();
+                if (await confirmation.promise) {
+                  // 服务器确认破坏：清除 provenance（含过期的 salvage grant）。
+                  this.salvageGrants.delete(grantKey);
+                  this.provenanceStore?.remove(block.position, dimension);
+                  return;
+                }
+              } finally {
+                confirmation.cancel();
+              }
+            }
+            throw new Error("Server did not confirm collected block break.");
+          })();
+        } finally {
+          // 兜底清一次可能过期的 grant（决策时未过期但执行期跨过死线）
+          if (this.salvageGrants.get(grantKey) !== undefined && this.salvageGrants.get(grantKey)! <= Date.now()) {
+            this.salvageGrants.delete(grantKey);
+          }
         }
       }
       for (let attempt = 0; attempt <= COLLECT_SERVER_DIG_RETRIES; attempt += 1) {
         if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
         const confirmation = waitForServerConfirmation(block.position);
         try {
-          await callOriginalDig(...args);
+          await originalDig(...args);
           confirmation.armTimeout();
           if (await confirmation.promise) return;
         } finally {
@@ -2906,9 +2964,68 @@ export class MineflayerBotClient implements BotClient {
     }) as Bot["dig"];
 
     mutableBot.dig = wrappedDig;
+
+    // Phase 3 补全：placeBlock 包装——服务器确认放置成功后写 provenance
+    // （owner=own_bot），下次 dig 该位置会被 HarvestAuthorization 拦截。
+    const originalPlaceBlock = mutableBot.placeBlock;
+    if (this.provenanceStore !== null && typeof originalPlaceBlock === "function") {
+      const callOriginalPlaceBlock = originalPlaceBlock.bind(this.bot);
+      const wrappedPlaceBlock = (async (
+        ...args: Parameters<Bot["placeBlock"]>
+      ) => {
+        const [reference, face] = args;
+        const result = await callOriginalPlaceBlock(...args);
+        const target = {
+          x: reference.position.x + face.x,
+          y: reference.position.y + face.y,
+          z: reference.position.z + face.z,
+        };
+        const confirmed = this.bot.blockAt(new Vec3(target.x, target.y, target.z));
+        if (confirmed && confirmed.boundingBox !== "empty") {
+          this.provenanceStore!.record({
+            serverProfileId: this.serverProfileId ?? "unknown-server",
+            dimension: this.bot.game?.dimension ?? "minecraft:overworld",
+            position: target,
+            source: "bot_placed",
+            owner: "own_bot",
+            purpose: "structural",
+            serverVerified: true,
+          });
+        }
+        return result;
+      }) as Bot["placeBlock"];
+      mutableBot.placeBlock = wrappedPlaceBlock;
+    }
+
     return () => {
       if (mutableBot.dig === wrappedDig) mutableBot.dig = originalDig;
     };
+  }
+
+  /**
+   * 显式拆除/回收授权（salvage 通道）：授权一组位置在死线前可 dig。
+   * 拆除/回收类技能（facility destroy 等）在调用 dig 前先 grant；
+   * 死线自动过期，grant 不跨会话持久化。
+   */
+  grantSalvage(
+    positions: ReadonlyArray<{
+      position: { x: number; y: number; z: number };
+      dimension?: string;
+    }>,
+    ttlMs = 120_000,
+  ): void {
+    const deadline = Date.now() + ttlMs;
+    for (const { position, dimension } of positions) {
+      const key = `${dimension ?? this.bot.game?.dimension ?? "minecraft:overworld"}:${position.x},${position.y},${position.z}`;
+      this.salvageGrants.set(key, deadline);
+    }
+    // 有界：授权集合本身不能无限增长
+    if (this.salvageGrants.size > 4096) {
+      const now = Date.now();
+      for (const [key, deadlineAt] of this.salvageGrants) {
+        if (deadlineAt <= now) this.salvageGrants.delete(key);
+      }
+    }
   }
 
   private directCollectionAvailable(): boolean {
@@ -5705,6 +5822,12 @@ function resolveOnlinePassword(botId: string): string {
     );
   }
   return value;
+}
+
+/** Provenance 持久化路径：runtime-data/provenance/<serverProfileId>.json。 */
+function provenancePersistPath(serverProfileId: string): string {
+  const safe = serverProfileId.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 128);
+  return path.join(process.cwd(), "runtime-data", "provenance", `${safe}.json`);
 }
 
 export function createMineflayerClient(
