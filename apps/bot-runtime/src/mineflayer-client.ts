@@ -5883,49 +5883,29 @@ export class MineflayerBotClient implements BotClient {
         void this.bot
           .look(Math.atan2(-Math.cos(rad), Math.sin(rad)), 0, true)
           .catch(() => undefined);
+        // v0.3（用户旁观实测 2026-09-04）：pathfinder 重试耗 6-8s + 5s 疾跑
+        // 不够离开击杀区——裸装每条命 ~10s 内被围死。原始疾跑为初始逃逸的
+        // 唯一手段（shaper 已实证直推控制状态过闸 delta 10.98）；时长默认
+        // 20s（≈100+ 格），STUDIO_SPAWN_ESCAPE_SPRINT_MS 可调。下坠期空气
+        // 控制无效无妨——落地瞬间疾跑即接管。
+        const sprintMs = Number(
+          process.env.STUDIO_SPAWN_ESCAPE_SPRINT_MS ?? "20000",
+        );
+        const duration = Number.isFinite(sprintMs) && sprintMs >= 3_000 && sprintMs <= 60_000
+          ? sprintMs
+          : 20_000;
         setTimeout(() => {
           this.bot.setControlState("forward", false);
           this.bot.setControlState("sprint", false);
           settle("raw_sprint");
-        }, 5_000).unref?.();
+        }, duration).unref?.();
       } catch {
         settle("raw_sprint_failed");
       }
     };
-    const attempt = (n: number): void => {
-      if (n > 3) {
-        rawSprint();
-        return;
-      }
-      try {
-        const movements = configureNavigationMovements(
-          new Movements(this.bot),
-          this.bot,
-          true,
-        );
-        this.bot.pathfinder.setMovements(movements);
-        this.bot.pathfinder.thinkTimeout = 8_000;
-        this.bot.pathfinder.tickTimeout = 40;
-        this.bot.setControlState("sprint", true);
-        this.bot.setControlState("jump", true);
-        void this.bot.pathfinder
-          .goto(new goals.GoalXZ(targetX, targetZ))
-          .then(
-            () => settle("pathfinder"),
-            () => {
-              this.bot.setControlState("sprint", false);
-              this.bot.setControlState("jump", false);
-              escapeLog("bot_runtime_spawn_escape_retry", { attempt: n });
-              setTimeout(() => attempt(n + 1), 2_000).unref?.();
-            },
-          );
-        this.handlers?.onStateChanged();
-      } catch {
-        escapeLog("bot_runtime_spawn_escape_retry", { attempt: n, sync: true });
-        setTimeout(() => attempt(n + 1), 2_000).unref?.();
-      }
-    };
-    attempt(1);
+    // v0.3：初始逃逸直走原始疾跑——pathfinder 在出生点击杀区从未来得及
+    // 产出路径（200ms 假结算 + 重试全是浪费的死亡时间）。
+    rawSprint();
   }
 
   private bindInventoryEvents(): void {
