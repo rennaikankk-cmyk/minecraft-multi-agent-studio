@@ -91,3 +91,32 @@
   （docs/research/SPAWN_ESCAPE_SPEC.md 立项；v0 同日交付：第一 tick
   疾跑逃逸 + 纯 mob 零门槛撤 + 床毁重生重触发语义）。
 - 下一步：带 v0 逃逸重跑 G1 剩余腿（稳定会话 + 移动 + 观察）。
+
+---
+
+## 终章：Grim 过闸工程（2026-09-04 凌晨，五步全做）
+
+**根因（双向抓包钉死，grim-packet-capture.mjs）**：位置战争——auth 冻结用
+setback 钉人，mineflayer 确认传送后立刻重发自预测位置（3s 内 141 次确认
+循环）；登录后静止包放行、移动包全打回；物理在战争中失同步（站在 y=90
+实地却报 onGround=false = 空中行走签名）。
+
+**修复：movementSync 整形器**（`apps/bot-runtime/src/movement-sync.ts`，
+默认开启、`STUDIO_MOVEMENT_SHAPER=0` 熔断，5b650d8+d279e1c）：
+- 服从窗：setback 后 1.2s 内一切出站移动改写为服务端钉住位置（停战）；
+- onGround 重建：悬空声明 + 脚下实方块 + 垂直静止 → 改真值；
+- 速度钳制：单包水平位移 ≤ 疾跑可达（5.612×0.05×1.25）。
+6 单测；探针实测 **delta 0.03 → 10.98 格、setback 141 → 3、onGround 稳定**。
+
+**生产链验证**：studio bot 满血稳定在出生台顶、真实行走 15+ 格至
+(-9.5,81,-7.5) 后死亡 → 重生循环闭环（第二次实战验证）。移动 goal 经
+durable 队列正常接收（202 入队）。
+
+**遗留（下一棒）**：
+1. 移动模板 goal 在 luv 走了模型分支（fixture 上同文本走确定性）——
+   anarchy/managed 路由差异待查（PLANNER_STALE_RESPONSE 因此偶发）；
+2. 逃逸 goto 的 200ms 假结算（下坠期无解路径）未修；
+3. spawn-escape 在过闸后需重标定（现在真的能跑了）；
+4. MOVEMENT_SHAPED 正式并入 compat 枚举（等第二台整形服务器出现再
+   形式化；当前默认开+熔断已覆盖生产语义）。
+
