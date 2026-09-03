@@ -1260,7 +1260,7 @@ export class MineflayerBotClient implements BotClient {
         this.serverAuthDetach = null;
       }
       const env = process.env as Record<string, string | undefined>;
-      const botUsername = (bot as { username?: string }).username ?? "";
+      const botUsername = (this.bot as { username?: string }).username ?? "";
       const envPassword =
         (botUsername ? resolveServerAuthPassword(botUsername, env) : "") ||
         (this.serverProfileId ? resolveServerAuthPassword(this.serverProfileId, env) : "");
@@ -5799,30 +5799,43 @@ export class MineflayerBotClient implements BotClient {
     const targetX = Math.floor(pos.x + Math.cos(rad) * distance);
     const targetZ = Math.floor(pos.z + Math.sin(rad) * distance);
     this.spawnEscapeActive = true;
-    try {
-      const movements = configureNavigationMovements(
-        new Movements(this.bot),
-        this.bot,
-        true,
+    // 观测日志：逃逸是反射行为，无 planner 链路——直接写进程日志
+    // （bot-<id>.log，manager 捕获 stdout），字段结构与结构化事件对齐。
+    const escapeLog = (event: string, extra: Record<string, unknown> = {}) => {
+      console.warn(
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "warn",
+          service: "bot-runtime",
+          event,
+          botId: (this.bot as { username?: string }).username ?? null,
+          ...extra,
+        }),
       );
-      this.bot.pathfinder.setMovements(movements);
-      this.bot.pathfinder.thinkTimeout = 8_000;
-      this.bot.pathfinder.tickTimeout = 40;
-      this.bot.setControlState("sprint", true);
-      this.bot.setControlState("jump", true);
-      void this.bot.pathfinder
-        .goto(new goals.GoalXZ(targetX, targetZ))
-        .catch(() => undefined)
-        .finally(() => {
-          this.spawnEscapeActive = false;
-          this.bot.setControlState("sprint", false);
-          this.bot.setControlState("jump", false);
-          this.handlers?.onStateChanged();
-        });
-      this.handlers?.onStateChanged();
-    } catch {
-      // 寻路不可用（极端情况）：至少疾跑直向 5s——比站桩好。
+    };
+    escapeLog("bot_runtime_spawn_escape_started", {
+      from: `${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)}`,
+      target: `${targetX},${targetZ}`,
+      distance,
+      bearingDeg,
+    });
+    // v0.1 修复（2026-09-03 实测）：spawn 第一 tick bot 常在半空且 chunk
+    // 未加载完——goto 17ms 内即拒绝。拒绝 ≠ 放弃：2s 后重试（等 chunk 追上），
+    // 三试仍败才落原始疾跑兜底（此前兜底被 .catch 吞掉永远不跑）。
+    const settle = (via: string) => {
       this.spawnEscapeActive = false;
+      this.bot.setControlState("sprint", false);
+      this.bot.setControlState("jump", false);
+      const at = this.bot.entity?.position;
+      escapeLog("bot_runtime_spawn_escape_settled", {
+        via,
+        at: at
+          ? `${Math.floor(at.x)},${Math.floor(at.y)},${Math.floor(at.z)}`
+          : "unknown",
+      });
+      this.handlers?.onStateChanged();
+    };
+    const rawSprint = () => {
       try {
         this.bot.setControlState("sprint", true);
         this.bot.setControlState("forward", true);
@@ -5832,11 +5845,46 @@ export class MineflayerBotClient implements BotClient {
         setTimeout(() => {
           this.bot.setControlState("forward", false);
           this.bot.setControlState("sprint", false);
+          settle("raw_sprint");
         }, 5_000).unref?.();
       } catch {
-        /* 尽力而为 */
+        settle("raw_sprint_failed");
       }
-    }
+    };
+    const attempt = (n: number): void => {
+      if (n > 3) {
+        rawSprint();
+        return;
+      }
+      try {
+        const movements = configureNavigationMovements(
+          new Movements(this.bot),
+          this.bot,
+          true,
+        );
+        this.bot.pathfinder.setMovements(movements);
+        this.bot.pathfinder.thinkTimeout = 8_000;
+        this.bot.pathfinder.tickTimeout = 40;
+        this.bot.setControlState("sprint", true);
+        this.bot.setControlState("jump", true);
+        void this.bot.pathfinder
+          .goto(new goals.GoalXZ(targetX, targetZ))
+          .then(
+            () => settle("pathfinder"),
+            () => {
+              this.bot.setControlState("sprint", false);
+              this.bot.setControlState("jump", false);
+              escapeLog("bot_runtime_spawn_escape_retry", { attempt: n });
+              setTimeout(() => attempt(n + 1), 2_000).unref?.();
+            },
+          );
+        this.handlers?.onStateChanged();
+      } catch {
+        escapeLog("bot_runtime_spawn_escape_retry", { attempt: n, sync: true });
+        setTimeout(() => attempt(n + 1), 2_000).unref?.();
+      }
+    };
+    attempt(1);
   }
 
   private bindInventoryEvents(): void {
