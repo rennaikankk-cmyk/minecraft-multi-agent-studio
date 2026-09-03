@@ -376,6 +376,13 @@ export class SingleBotRuntime {
   >();
   private readonly activeSkillControllers = new Map<string, AbortController>();
   /** 最近一次死亡事实；由 death 事件写入，随 status 上报供回收决策。 */
+  /**
+   * P1（2026-09-03）：确定性不兼容（Forge/FML mod loader kick）闩锁——
+   * 一旦确认即抑制一切自动重连（重连不可能改变 mod loader 事实），
+   * 全生命周期只产生一个 SERVER_KICK Incident，随后进入 BLOCKED 语义
+   * （offline + 不再尝试，等待人工换服/换兼容栈）。
+   */
+  private modLoaderIncompatible = false;
   private lastDeath: {
     x: number;
     y: number;
@@ -1275,10 +1282,17 @@ export class SingleBotRuntime {
       reason: info.reason,
     });
 
+    const isModLoaderIncompatible =
+      info.reason === "kicked" &&
+      normalizeKickReason(info.detail) === "forge_or_modded_server";
+    if (isModLoaderIncompatible) this.modLoaderIncompatible = true;
     const kickIncidentId = this.reportConnectionIncident(info);
     this.dependencies.logger.warn("bot_runtime_disconnected", this.logFields({
       reason: info.reason,
       expected: info.expected,
+      ...(isModLoaderIncompatible
+        ? { classification: "INCOMPATIBLE_MOD_LOADER" }
+        : {}),
       // SERVER_KICK 结构化证据（canary 修正）：脱敏策略不再吞掉 kick 原因。
       ...(info.reason === "kicked"
         ? {
@@ -1300,8 +1314,14 @@ export class SingleBotRuntime {
       detail: `disconnected reason=${info.reason} expected=${info.expected ? "yes" : "no"}`,
     });
 
-    if (!this.stopping && !this.versionUnsupported) {
+    if (!this.stopping && !this.versionUnsupported && !this.modLoaderIncompatible) {
       this.scheduleReconnect();
+    } else if (this.modLoaderIncompatible) {
+      // 确定性不兼容：重连无意义。单 Incident 已上报；BLOCKED 等人工处置。
+      this.dependencies.logger.warn("bot_runtime_reconnect_suppressed", this.logFields({
+        code: "INCOMPATIBLE_MOD_LOADER",
+        hint: "server requires Forge/FML client mods; switch Server Profile or use a compatible server",
+      }));
     } else if (this.versionUnsupported) {
       this.dependencies.logger.warn("bot_runtime_reconnect_suppressed", this.logFields({
         code: "MINECRAFT_VERSION_UNSUPPORTED",

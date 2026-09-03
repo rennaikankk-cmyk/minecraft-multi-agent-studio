@@ -1428,14 +1428,31 @@ export class MineflayerBotClient implements BotClient {
           ...(detail ? { detail } : {}),
         });
       }
+      // P1（2026-09-03）：部分 Forge 服在 login 期直接断流而非发 kick 包——
+      // 裸探针抓到 kick、Runtime 抓到裸 end 的分裂就是这条路径。end 文本含
+      // FML/Forge 标记时合成为等价 kick（PRE_LOGIN），保证与裸探针同等捕获。
+      let kickedDetail = this.kickedDetail;
+      let kickPhase = this.kickPhase;
+      if (
+        kickedDetail === undefined &&
+        typeof reason === "string" &&
+        /FML|Forge/iu.test(reason)
+      ) {
+        kickedDetail = safeDetail(reason);
+        kickPhase = this.spawnSeen
+          ? "POST_SPAWN"
+          : this.loginSeen
+            ? "POST_LOGIN"
+            : "PRE_LOGIN";
+      }
       this.handlers?.onDisconnected(
         mapDisconnectReason(
           this.requestedStop,
           this.versionUnsupportedReported,
-          this.kickedDetail,
+          kickedDetail,
           this.errorDetail,
           reason,
-          this.kickPhase,
+          kickPhase,
         ),
       );
     });
