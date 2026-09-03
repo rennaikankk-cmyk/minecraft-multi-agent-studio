@@ -116,7 +116,7 @@ async function phasePing() {
     const script = `
       const mc = require('minecraft-protocol');
       const opts = { host: ${JSON.stringify(facts.connectionHost)}, port: ${facts.port} };
-      mc.ping(opts, 8000, (err, res) => {
+      mc.ping({ ...opts, timeout: 8000 }, (err, res) => {
         if (err) { console.log('__PING__' + JSON.stringify({ ok: false, error: String(err.message || err) })); process.exit(0); }
         console.log('__PING__' + JSON.stringify({ ok: true, version: res.version, players: { max: res.players?.max, online: res.players?.online }, description: typeof res.description === 'object' ? JSON.stringify(res.description).slice(0, 400) : String(res.description ?? '') }));
       });
