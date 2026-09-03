@@ -1,0 +1,39 @@
+{
+  "schemaVersion": "1.0",
+  "id": "simpfun-gray",
+  "botId": "studio-bot-04",
+  "purpose": "anarchy",
+  "networkScope": "public",
+  "host": "play.simpfun.cn",
+  "port": 16377,
+  "minecraftVersion": "auto",
+  "username": "StudioGray01",
+  "auth": "offline",
+  "combat": {
+    "enabled": true,
+    "stance": "preserve-life",
+    "whitelist": {
+      "usernames": ["StudioGray01"],
+      "uuids": []
+    }
+  },
+  "statusIntervalMs": 1000,
+  "heartbeatIntervalMs": 5000,
+  "stopGracePeriodMs": 5000,
+  "reconnect": {
+    "enabled": true,
+    "maxAttempts": 10,
+    "baseDelayMs": 3000,
+    "maxDelayMs": 30000
+  },
+  "_profileStatus": {
+    "probedAt": "2026-09-03T05:00:00Z",
+    "tcpReachable": true,
+    "slpResponsive": false,
+    "slpBlockedByServer": true,
+    "minecraftVersion": null,
+    "protocolVersion": null,
+    "serverKind": "forge-modded",
+    "notes": "2026-09-03 user directive: gray target switched from luv.mc6.cn:22936 (logins refused/hung server-side that day) to play.simpfun.cn:16377. Real IP via DoH: 43.248.103.155 (local tun proxy fakes DNS as 198.18.0.23; direct egress verified real ISP IP 155.117.84.120). CANARY VERDICT = BLOCKED: server kicks vanilla-protocol logins in ~3s with 'This server has mods that require FML/Forge to be installed on the client' — a Forge/FML modded server. Vanilla mineflayer cannot join without FML handshake support (future feature work). luv.mc6.cn same-day logins also refused (3s kick / 60s hang) — both BLOCKED server-side, not a local code defect (local fixture logins all pass)."
+  }
+}
