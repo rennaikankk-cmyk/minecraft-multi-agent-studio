@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   movementGotoSkill,
   SkillExecutor,
+  SkillFault,
   SkillRegistry,
   type SkillExecutionAuthorization,
 } from "../src/index.js";
@@ -120,6 +121,34 @@ describe("movement.goto@1.0.0", () => {
         input: invocation.payload.input,
       }),
     );
+  });
+
+  it("retries transient PATHFINDER_GOTO_FAILED (fresh-spawn NoPath window)", async () => {
+    // L2 实证（2026-09-03 第二轮）：durable 恢复在 catalog 后 ~100ms 派发，
+    // 出生 chunk 未加载 → NoPath 55ms。前两次 NoPath、第三次成功 → 必须完成
+    // 而非终态 FAIL（attempts=3 证明重试真发生）。
+    const adapter = vi.fn()
+      .mockRejectedValueOnce(new SkillFault("PATHFINDER_GOTO_FAILED", "NoPath: No path to the goal!"))
+      .mockRejectedValueOnce(new SkillFault("PATHFINDER_GOTO_FAILED", "NoPath: No path to the goal!"))
+      .mockResolvedValueOnce({
+        reached: true,
+        finalPosition: invocation.payload.input.target,
+        distanceToTarget: 0,
+      });
+    const run = executor(adapter);
+
+    const result = await run.executor.execute(
+      invocation,
+      authorization(),
+      state,
+    );
+
+    expect(result.payload).toMatchObject({
+      outcome: "completed",
+      attempts: 3,
+      output: { reached: true },
+    });
+    expect(adapter).toHaveBeenCalledTimes(3);
   });
 
   it("rejects paused, cross-dimension and distant targets before movement", async () => {

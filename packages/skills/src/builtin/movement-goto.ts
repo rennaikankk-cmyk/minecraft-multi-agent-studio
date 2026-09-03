@@ -113,11 +113,15 @@ export const movementGotoSkill = defineSkill({
   // RECOVERY_UNSAFE；传输失败 → 直接重试而非背包快照 reconcile（移动无物品
   // 副作用，快照 reconcile 对移动步是语义错误）。
   idempotent: true,
+  // L2 实证（2026-09-03 第二轮）：durable 队列在 catalog 接受后 ~100ms 即恢复
+  // goal，此刻出生点 chunk 尚未加载完 → pathfinder 55ms NoPath → 终态 FAIL。
+  // NoPath 在刚上线窗口是瞬态（chunk 流追上来即可达），movement 已 idempotent，
+  // 有界重试语义安全：3 次 × 750ms 基退避给 chunk ~2s 追载窗口。
   retryPolicy: {
-    maxAttempts: 1,
-    baseDelayMs: 50,
-    maxDelayMs: 250,
-    retryableErrorCodes: [],
+    maxAttempts: 3,
+    baseDelayMs: 750,
+    maxDelayMs: 2_000,
+    retryableErrorCodes: ["PATHFINDER_GOTO_FAILED"],
   },
   preconditions: [
     {
