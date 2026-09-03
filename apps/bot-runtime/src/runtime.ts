@@ -1275,17 +1275,30 @@ export class SingleBotRuntime {
       reason: info.reason,
     });
 
+    const kickIncidentId = this.reportConnectionIncident(info);
     this.dependencies.logger.warn("bot_runtime_disconnected", this.logFields({
       reason: info.reason,
       expected: info.expected,
+      // SERVER_KICK 结构化证据（canary 修正）：脱敏策略不再吞掉 kick 原因。
+      ...(info.reason === "kicked"
+        ? {
+            kick_normalizedReason: normalizeKickReason(info.detail),
+            kick_sanitizedRawReason: sanitizeServerText(info.detail),
+            kick_phase: info.phase ?? "PRE_LOGIN",
+            kick_serverProfileId: this.profile.id,
+            kick_authMode: this.profile.auth,
+            kick_requestedVersion: this.profile.minecraftVersion,
+            kick_connectionHost: this.profile.connectHost ?? this.profile.host,
+            kick_handshakeHost: this.profile.host,
+            kick_incidentId: kickIncidentId ?? "not_reported",
+          }
+        : {}),
     }));
     this.eventBuffer.append({
       kind: "connection_event",
       source: "connection",
       detail: `disconnected reason=${info.reason} expected=${info.expected ? "yes" : "no"}`,
     });
-
-    this.reportConnectionIncident(info);
 
     if (!this.stopping && !this.versionUnsupported) {
       this.scheduleReconnect();
@@ -1296,9 +1309,19 @@ export class SingleBotRuntime {
     }
   }
 
-  /** 连接类 Incident（kick / auth / network / version mismatch；expected 断开不上报）。 */
-  private reportConnectionIncident(info: { reason: string; expected: boolean; detail?: string }): void {
-    if (info.expected) return; // requested_stop / server_shutdown 是正常断开
+  /**
+   * 连接类 Incident（kick / auth / network / version mismatch；expected 断开不上报）。
+   * 2026-09-03 canary 修正：SERVER_KICK 不再因脱敏丢原因——incident 快照与
+   * runtime 日志都保存结构化证据（normalizedReason/sanitizedRawReason/phase/
+   * host 族/authMode），绝不含凭据。返回 reporterEventId 供日志关联。
+   */
+  private reportConnectionIncident(info: {
+    reason: string;
+    expected: boolean;
+    detail?: string;
+    phase?: "PRE_LOGIN" | "POST_LOGIN" | "POST_SPAWN";
+  }): string | null {
+    if (info.expected) return null; // requested_stop / server_shutdown 是正常断开
     let failureCode: string | null = null;
     let incidentType = "BOT_DISCONNECT";
     if (info.reason === "kicked") {
@@ -1311,9 +1334,10 @@ export class SingleBotRuntime {
     } else if (info.reason === "runtime_error" && info.detail === "unsupported_minecraft_version") {
       failureCode = "SERVER_VERSION_MISMATCH";
     }
-    if (!failureCode) return; // unknown 等其它原因：等 reconnect 结果再定性
+    if (!failureCode) return null; // unknown 等其它原因：等 reconnect 结果再定性
     const identity = loadRuntimeIdentity();
-    const detailSuffix = info.detail ? `: ${String(info.detail).slice(0, 200)}` : "";
+    const reporterEventId = "incident-" + this.randomId();
+    const detailSuffix = info.detail ? ": " + String(info.detail).slice(0, 2000) : "";
     this.incidentReporter.report({
       eventWindow: this.eventBuffer.snapshot({ windowMs: 60_000 }).events as Array<{ at: string; kind: string; detail?: string }>,
       failureCode,
@@ -1323,6 +1347,7 @@ export class SingleBotRuntime {
       sessionId: this.runtimeInstanceId,
       runtimeInstanceId: this.runtimeInstanceId,
       serverProfileId: this.profile.id,
+      reporterEventId,
       ...(identity.gitCommit ? { gitCommit: identity.gitCommit } : {}),
       ...(identity.branch ? { branch: identity.branch } : {}),
       ...(identity.buildVersion ? { buildVersion: identity.buildVersion } : {}),
@@ -1330,8 +1355,22 @@ export class SingleBotRuntime {
       actual: info.reason + detailSuffix,
       normalizedErrorSignature: info.reason,
       actionFamily: "connection",
-      snapshots: {},
+      snapshots: info.reason === "kicked"
+        ? {
+            kick: {
+              normalizedReason: normalizeKickReason(info.detail),
+              sanitizedRawReason: sanitizeServerText(info.detail),
+              phase: info.phase ?? "PRE_LOGIN",
+              serverProfileId: this.profile.id,
+              authMode: this.profile.auth,
+              requestedVersion: this.profile.minecraftVersion,
+              connectionHost: this.profile.connectHost ?? this.profile.host,
+              handshakeHost: this.profile.host,
+            },
+          }
+        : {},
     });
+    return reporterEventId;
   }
 
   private scheduleReconnect(): void {
@@ -3071,4 +3110,30 @@ function skillFaultIncidentType(rootErrorCode: string): string {
   if (rootErrorCode === "FACILITY_SLOT_INVALID") return "STATE_DIVERGENCE";
   if (rootErrorCode === "FACILITY_RESERVATION_CORRUPT") return "RESERVATION_CONFLICT";
   return "SKILL_FAILED";
+}
+
+/** kick 原文的机器可归类摘要（证据字段；不下结论——根因仍看 A/B/C 矩阵）。 */
+export function normalizeKickReason(detail: string | undefined): string {
+  const text = (detail ?? "").toLowerCase();
+  if (text.includes("fml") || text.includes("forge")) return "forge_or_modded_server";
+  if (text.includes("outdated client")) return "outdated_client";
+  if (text.includes("outdated server")) return "outdated_server";
+  if (text.includes("banned")) return "banned";
+  if (text.includes("whitelist") || text.includes("not whitelisted")) return "whitelist";
+  if (text.includes("already connected") || text.includes("logged in from another location")) return "duplicate_session";
+  if (text.includes("captcha") || text.includes("/login") || text.includes("register")) return "auth_plugin_gate";
+  if (text.includes("timeout")) return "timeout";
+  if (text.includes("server full") || text.includes("is full")) return "server_full";
+  return detail === undefined ? "unknown" : "server_kick_unclassified";
+}
+
+/** 服务器文本安全转纯文本：去控制字符/折叠空白/限长（保留原文语义，去传输层噪音）。 */
+export function sanitizeServerText(detail: string | undefined): string {
+  if (detail === undefined) return "";
+  const flattened = detail
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return flattened.slice(0, 2000);
 }

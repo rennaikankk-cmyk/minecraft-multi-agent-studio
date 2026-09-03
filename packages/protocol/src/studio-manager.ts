@@ -62,6 +62,8 @@ export const studioManagedBotV1Schema = z
     serverHost: z.string().trim().min(1).max(253),
     serverPort: z.number().int().min(1).max(65_535),
     minecraftVersion: z.union([z.literal("auto"), minecraftVersionStringSchema]),
+    /** TCP 目的地址覆盖（可选）；握手 hostname 恒为 serverHost。 */
+    connectHost: z.string().trim().min(1).max(253).optional(),
     processState: studioManagedBotProcessStateSchema,
     pid: z.number().int().positive().nullable(),
     createdAt: timestampSchema,
@@ -156,6 +158,8 @@ export const studioCreateBotRequestV1Schema = z
     serverHost: z.string().trim().min(1).max(253),
     serverPort: z.number().int().min(1).max(65_535),
     minecraftVersion: z.union([z.literal("auto"), minecraftVersionStringSchema]),
+    /** TCP 目的地址覆盖（可选）；握手 hostname 恒为 serverHost。 */
+    connectHost: z.string().trim().min(1).max(253).optional(),
   })
   .strict();
 

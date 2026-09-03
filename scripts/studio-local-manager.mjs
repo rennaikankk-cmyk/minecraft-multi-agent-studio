@@ -1105,6 +1105,7 @@ export class StudioLocalManager {
       serverPort: input.serverPort,
       minecraftVersion: input.minecraftVersion,
       ...(input.purpose === "anarchy" ? { purpose: "anarchy" } : {}),
+      ...(input.connectHost !== undefined ? { connectHost: input.connectHost } : {}),
       createdAt: now,
       updatedAt: now,
       processState: "stopped",
@@ -1527,6 +1528,7 @@ export class StudioLocalManager {
       username: config.username,
       serverHost: config.serverHost,
       serverPort: config.serverPort,
+      ...(config.connectHost !== undefined ? { connectHost: config.connectHost } : {}),
       minecraftVersion: config.minecraftVersion,
       processState: config.processState,
       pid: process?.child.exitCode === null ? process.child.pid ?? null : null,
@@ -1710,6 +1712,7 @@ export class StudioLocalManager {
         serverPort: config.serverPort,
         minecraftVersion: config.minecraftVersion,
         ...(config.purpose === "anarchy" ? { purpose: "anarchy" } : {}),
+        ...(config.connectHost !== undefined ? { connectHost: config.connectHost } : {}),
         createdAt: config.createdAt,
         desiredRunning: config.desiredRunning === true,
       })),
@@ -1736,6 +1739,8 @@ export class StudioLocalManager {
       networkScope,
       host: config.serverHost,
       port: config.serverPort,
+      // TCP 直连地址覆盖（可选）；握手 hostname 恒为 host。
+      ...(config.connectHost !== undefined ? { connectHost: config.connectHost } : {}),
       minecraftVersion: config.minecraftVersion,
       username: config.username,
       auth: "offline",
@@ -1914,14 +1919,20 @@ function validateCreateBotRequest(input) {
     throw managedError("INVALID_REQUEST", "Bot 创建请求必须是对象。", 400);
   }
   const keys = Object.keys(input).sort().join(",");
-  const allowed = input.purpose === "anarchy"
+  // connectHost 可选（2026-09-03 canary 修正）：仅覆盖 TCP 连接目的地址；
+  // 握手 hostname 恒为 serverHost（Server Profile SSOT）。
+  const base = input.purpose === "anarchy"
     ? "minecraftVersion,purpose,schemaVersion,serverHost,serverPort,username"
     : "minecraftVersion,schemaVersion,serverHost,serverPort,username";
+  const allowed = input.connectHost !== undefined ? "connectHost," + base : base;
   if (keys !== allowed) {
     throw managedError("INVALID_REQUEST", "Bot 创建请求包含未知或缺失字段。", 400);
   }
   const serverHost = String(input.serverHost ?? "").trim();
   const minecraftVersion = String(input.minecraftVersion ?? "").trim();
+  const connectHost = input.connectHost !== undefined
+    ? String(input.connectHost).trim()
+    : undefined;
   if (
     input.schemaVersion !== "1.0" ||
     typeof input.username !== "string" ||
@@ -1930,7 +1941,8 @@ function validateCreateBotRequest(input) {
     !Number.isSafeInteger(input.serverPort) ||
     input.serverPort < 1 ||
     input.serverPort > 65_535 ||
-    (minecraftVersion !== "auto" && !/^[0-9]+\.[0-9]+(?:\.[0-9]+)?$/u.test(minecraftVersion))
+    (minecraftVersion !== "auto" && !/^[0-9]+\.[0-9]+(?:\.[0-9]+)?$/u.test(minecraftVersion)) ||
+    (connectHost !== undefined && (connectHost === "" || connectHost.length > 253 || !/^[A-Za-z0-9.:\-]+$/u.test(connectHost)))
   ) {
     throw managedError(
       "INVALID_REQUEST",
@@ -1944,6 +1956,7 @@ function validateCreateBotRequest(input) {
     serverPort: input.serverPort,
     minecraftVersion,
     ...(input.purpose === "anarchy" ? { purpose: "anarchy" } : {}),
+    ...(connectHost !== undefined ? { connectHost } : {}),
   };
 }
 
@@ -1958,6 +1971,7 @@ function validatePersistedBot(input, slots) {
     serverPort: input?.serverPort,
     minecraftVersion: input?.minecraftVersion,
     ...(input?.purpose === "anarchy" ? { purpose: "anarchy" } : {}),
+    ...(input?.connectHost !== undefined ? { connectHost: input?.connectHost } : {}),
   });
   if (!createdAt || typeof input?.botId !== "string" || !slots.has(input.botId)) {
     throw new Error("Persisted local Bot entry is invalid.");

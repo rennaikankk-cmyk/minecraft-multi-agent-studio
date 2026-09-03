@@ -179,6 +179,23 @@ export const serverProfileSchema = z
     networkScope: z.enum(["loopback", "private-lan", "public"]),
     host: z.string().trim().min(1).max(253),
     port: z.number().int().min(1).max(65_535),
+    /**
+     * 2026-09-03 canary 修正：host/connectHost 分离。host 是逻辑地址、
+     * Server Profile SSOT、Minecraft 握手 hostname（set_protocol.serverHost）；
+     * connectHost 仅覆盖 TCP 连接目的地址（本机 tun 代理把公网域名解析成
+     * fake-ip 时的真 IP 直连通道），缺省 = host。运行时映射（已按锁定依赖
+     * minecraft-protocol@1.66.2 setProtocol.js:19 核实）：mineflayer
+     * host=connectHost、fakeHost=host——握手域名恒为 host。
+     */
+    connectHost: z
+      .string()
+      .trim()
+      .min(1)
+      .max(253)
+      .refine(isResolvablePublicHost, {
+        message: "connectHost must be a bare IPv4/IPv6 literal or DNS name.",
+      })
+      .optional(),
     minecraftVersion: z.union([
       z.literal("auto"),
       z
@@ -217,6 +234,12 @@ export const serverProfileSchema = z
         maxDelayMs: z.number().int().min(500).max(300_000),
       })
       .strict(),
+    /**
+     * 下划线前缀 = 人工/工具批注字段（探测事实、运维备注），runtime 不消费。
+     * 让 configs/servers/*.json SSOT 文档能通过 schema 校验的同时保持
+     * 运行时字段的严格性。
+     */
+    _profileStatus: z.record(z.string(), z.unknown()).optional(),
   })
   .strict()
   .superRefine((profile, context) => {

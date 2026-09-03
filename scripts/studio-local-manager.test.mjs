@@ -955,6 +955,87 @@ test("DELETE removes a stopped bot from the manifest and frees its slot", async 
   assert.equal(recreated.status, 201);
 });
 
+test("connectHost survives create → manifest → profile JSON → reload (TCP override only; handshake host stays serverHost)", async (context) => {
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "studio-manager-connecthost-"));
+  context.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  const options = {
+    repositoryRoot: process.cwd(),
+    runtimeRoot,
+    port: 0,
+    token: TOKEN,
+    slots: createLocalBotSlots(SECRET, 2),
+    aiStatus: unavailableStatus(),
+    environment: { STUDIO_SPARK_AUTO_DISCOVERY: "0" },
+    runtimeLinkPort: 3220,
+    packagedMode: false,
+  };
+  const manager = new StudioLocalManager(options);
+  manager.startBot = fakeStart(manager);
+  const address = await manager.start();
+  context.after(() => manager.stop());
+  const base = `http://127.0.0.1:${address.port}`;
+  const authHeaders = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
+
+  const created = await fetch(`${base}/v1/bots`, {
+    method: "POST",
+    headers: authHeaders,
+    body: JSON.stringify({
+      schemaVersion: "1.0",
+      username: "ConnectHost1",
+      serverHost: "127.0.0.1",
+      serverPort: 25565,
+      minecraftVersion: "auto",
+      connectHost: "127.0.0.9",
+    }),
+  });
+  assert.equal(created.status, 201);
+  const createdBot = (await created.json()).bot;
+  assert.equal(createdBot.connectHost, "127.0.0.9");
+  // serverHost（握手/逻辑地址）绝不被 connectHost 覆盖
+  assert.equal(createdBot.serverHost, "127.0.0.1");
+
+  // 站 1：manifest 持久化
+  const manifest = JSON.parse(await readFile(path.join(runtimeRoot, "local-bots.json"), "utf8"));
+  assert.equal(manifest.bots[0].connectHost, "127.0.0.9");
+  assert.equal(manifest.bots[0].serverHost, "127.0.0.1");
+
+  // 站 2：runtime profile JSON（bot-runtime 消费的那份）
+  const profile = JSON.parse(
+    await readFile(path.join(runtimeRoot, "bots", "studio-bot-01", "server-profile.json"), "utf8"),
+  );
+  assert.equal(profile.host, "127.0.0.1");
+  assert.equal(profile.connectHost, "127.0.0.9");
+
+  // 站 3：reload 后仍然在（validatePersistedBot 四站规则）
+  await manager.stop();
+  const reloaded = new StudioLocalManager(options);
+  reloaded.startBot = fakeStart(reloaded);
+  const reloadedAddress = await reloaded.start();
+  context.after(() => reloaded.stop());
+  const status = await (await fetch(`${base.replace(String(address.port), String(reloadedAddress.port))}/v1/status`, {
+    headers: { Authorization: `Bearer ${TOKEN}` },
+  })).json();
+  const bot = status.bots.find((b) => b.username === "ConnectHost1");
+  assert.ok(bot, "reloaded bot present");
+  assert.equal(bot.serverHost, "127.0.0.1");
+  assert.equal(bot.connectHost, "127.0.0.9");
+
+  // 非法 connectHost（带协议前缀）被拒
+  const rejected = await fetch(`${base.replace(String(address.port), String(reloadedAddress.port))}/v1/bots`, {
+    method: "POST",
+    headers: authHeaders,
+    body: JSON.stringify({
+      schemaVersion: "1.0",
+      username: "ConnectHost2",
+      serverHost: "127.0.0.1",
+      serverPort: 25565,
+      minecraftVersion: "auto",
+      connectHost: "http://127.0.0.9",
+    }),
+  });
+  assert.equal(rejected.status, 400);
+});
+
 test("exit classification metadata reaches the public Bot payload", async () => {
   const { manager, children, cleanup } = await exitTestManager();
   await manager.startBot("studio-bot-01");

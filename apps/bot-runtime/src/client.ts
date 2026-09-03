@@ -64,6 +64,8 @@ export type BotDisconnectInfo = {
     | "unknown";
   expected: boolean;
   detail?: string;
+  /** kick 发生阶段（SERVER_KICK 结构化证据字段）。 */
+  phase?: "PRE_LOGIN" | "POST_LOGIN" | "POST_SPAWN";
 };
 
 export type BotDamageInfo = Readonly<{

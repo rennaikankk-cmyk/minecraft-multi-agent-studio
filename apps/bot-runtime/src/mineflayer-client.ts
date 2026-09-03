@@ -1072,6 +1072,7 @@ function mapDisconnectReason(
   kickedDetail: string | undefined,
   errorDetail: string | undefined,
   endReason: string,
+  kickPhase?: "PRE_LOGIN" | "POST_LOGIN" | "POST_SPAWN",
 ): BotDisconnectInfo {
   if (requestedStop) {
     return { reason: "requested_stop", expected: true };
@@ -1084,7 +1085,12 @@ function mapDisconnectReason(
     };
   }
   if (kickedDetail) {
-    return { reason: "kicked", expected: false, detail: kickedDetail };
+    return {
+      reason: "kicked",
+      expected: false,
+      detail: kickedDetail,
+      ...(kickPhase !== undefined ? { phase: kickPhase } : {}),
+    };
   }
   if (errorDetail) {
     const authentication = /auth|login|token|session/iu.test(errorDetail);
@@ -1124,6 +1130,10 @@ export class MineflayerBotClient implements BotClient {
   private lastObservedHealth: number | null = null;
   private requestedStop = false;
   private kickedDetail: string | undefined;
+  /** kick 阶段证据：login 前后 / spawn 前后（SERVER_KICK 结构化字段）。 */
+  private loginSeen = false;
+  private spawnSeen = false;
+  private kickPhase: "PRE_LOGIN" | "POST_LOGIN" | "POST_SPAWN" | undefined;
   private errorDetail: string | undefined;
   private versionUnsupportedReported = false;
   private inventoryListenerBound = false;
@@ -1225,7 +1235,11 @@ export class MineflayerBotClient implements BotClient {
       onPreempt: () => this.stopMovementPrimitives(),
       onRelease: () => this.stopMovementPrimitives(),
     });
+    bot.on("login", () => {
+      this.loginSeen = true;
+    });
     bot.on("spawn", () => {
+      this.spawnSeen = true;
       this.lastObservedHealth = finiteNumber(bot.health)
         ? Number(bot.health)
         : null;
@@ -1372,6 +1386,11 @@ export class MineflayerBotClient implements BotClient {
     });
     bot.on("kicked", (reason) => {
       this.kickedDetail = safeDetail(reason);
+      this.kickPhase = this.spawnSeen
+        ? "POST_SPAWN"
+        : this.loginSeen
+          ? "POST_LOGIN"
+          : "PRE_LOGIN";
       // kick 无法归因到单一动作族（任何族都可能触发）；PACKET_INTENSIVE 是
       // 服务器侧响应的兜底族，仅供窗口统计，不作为族级归因结论。
       this.compatObserver.record({
@@ -1416,6 +1435,7 @@ export class MineflayerBotClient implements BotClient {
           this.kickedDetail,
           this.errorDetail,
           reason,
+          this.kickPhase,
         ),
       );
     });
@@ -5863,7 +5883,14 @@ export function createMineflayerClient(
 export function createMineflayerOptions(profile: ServerProfile) {
   const version = mineflayerVersionOption(profile.minecraftVersion);
   return {
-    host: profile.host,
+    // host/connectHost 分离（2026-09-03 canary 修正）：TCP 目的地址可被
+    // connectHost 覆盖（真 IP 直连），握手 hostname 恒为 profile.host
+    // （fakeHost 覆盖 set_protocol.serverHost——按锁定依赖
+    // minecraft-protocol@1.66.2 src/client/setProtocol.js:19 核实）。
+    host: profile.connectHost ?? profile.host,
+    ...(profile.connectHost !== undefined
+      ? { fakeHost: profile.host }
+      : {}),
     port: profile.port,
     username: profile.username,
     // offline 档直连；online 档的 microsoft 映射与密码注入在
