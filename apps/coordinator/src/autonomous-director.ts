@@ -140,6 +140,17 @@ const AUTONOMOUS_SHELTER_MATERIALS = Object.freeze([
 ] as const);
 /** 同一需求连续失败这么多次后，冷却窗口内不再选中它（livelock 防护）。 */
 const AUTONOMOUS_NEED_FAILURE_LIMIT = 3;
+/**
+ * 中断类失败码：更高优先级（战斗反应/L0 安全/逃逸租约）抢占了运动或动作
+ * 资源——任务不是败了，是被打断了。恢复语义=零冷却立即重派（见 finishTask）。
+ */
+const INTERRUPT_FAILURE_CODES: ReadonlySet<string> = new Set([
+  "SKILL_CANCELLED",
+  "NORMAL_ACTIONS_PAUSED",
+  "SKILL_EXECUTION_INTERRUPTED",
+  "ACTION_LOCK_BUSY",
+  "BOT_MOVEMENT_BUSY",
+]);
 /** 神谕提示词里的镐档描述顺序（仅用于摘要，不参与决策）。 */
 const PICKAXE_TIERS_FOR_PROMPT = [
   "wooden_pickaxe",
@@ -724,7 +735,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
           status = taskStatusFromPlanResult(result, controller.signal);
         }
       }
-      this.finishTask(record.botId, taskId, goal, status, keepGoal);
+      this.finishTask(record.botId, taskId, goal, status, keepGoal, failureCode);
       this.log("info", "coordinator_autonomous_goal_finished", {
         botId: record.botId,
         taskId,
@@ -749,7 +760,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
         );
         keepGoal = recovery.keepGoal;
       }
-      this.finishTask(record.botId, taskId, goal, status, keepGoal);
+      this.finishTask(record.botId, taskId, goal, status, keepGoal, failureCode);
       this.log("warn", "coordinator_autonomous_goal_failed", {
         botId: record.botId,
         taskId,
@@ -1075,9 +1086,38 @@ export class AutonomousDirector implements AutonomousTaskSource {
     goal: AutonomousGoal,
     status: TaskStatus,
     keepGoal: boolean,
+    failureCode: string | null = null,
   ): void {
     const nowMs = validDate(this.now()).getTime();
     const failureKey = `${botId}:${goal.needKey}`;
+    // 中断-恢复语义（用户实测定性 2026-09-04：战斗/L0 抢占把任务打成终态
+    // →冷却→重选→重规划，表现为"卡来卡去"）。中断类失败码 = 有更高优先级
+    // 抢占了运动/动作（战斗反应、L0 暂停、逃逸租约），不是需求本身失败：
+    // 不计数、零冷却、立即重派同一需求——目标从当前位置重规划=恢复。
+    if (
+      status === "failed" &&
+      failureCode !== null &&
+      INTERRUPT_FAILURE_CODES.has(failureCode) &&
+      !keepGoal
+    ) {
+      this.nextGoalAt.set(botId, nowMs);
+      this.log("info", "coordinator_autonomous_interrupt_resume", {
+        botId,
+        taskId,
+        needKey: goal.needKey,
+        failureCode,
+      });
+      const current0 = this.tasks.get(botId);
+      if (current0 && current0.taskId === taskId) {
+        // 终态保留期也清零：中断的"failed"只是占位，下一个 tick 立即可派。
+        this.setTask(botId, {
+          ...current0,
+          status,
+          terminalExpiresAtMs: nowMs,
+        });
+      }
+      return;
+    }
     if (status === "completed") {
       this.consecutiveNeedFailures.set(failureKey, 0);
       if (goal.needKey === "SHELTER") this.shelterBuilt.add(botId);

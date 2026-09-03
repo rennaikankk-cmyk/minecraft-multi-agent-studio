@@ -512,6 +512,51 @@ describe("AutonomousDirector", () => {
     await director.stop();
   });
 
+  it("interrupt-class failures resume immediately without cooldown or counting (战斗/L0 抢占恢复语义)", async () => {
+    const record = readyRecord("studio-bot-01");
+    let nowMs = NOW.getTime();
+    const registry = {
+      list: vi.fn(() => [record]),
+      get: vi.fn(() => record),
+      subscribe: vi.fn(() => () => undefined),
+    };
+    // SKILL_CANCELLED = 战斗反应/L0 抢占了运动——任务被打断而非失败。
+    const planAndDispatch = vi.fn(async () =>
+      failedPlanResult("SKILL_CANCELLED"),
+    );
+    const director = new AutonomousDirector({
+      registry,
+      planner: { planAndDispatch },
+      intervalMs: 60_000,
+      goalTimeoutMs: 60_000,
+      failureCooldownMs: 30_000,
+      terminalRetentionMs: 10_000,
+      now: () => new Date(nowMs),
+      randomId: uuidSequence(),
+    });
+
+    director.start();
+    await flushDirector();
+    // 中断零冷却：+1s 就应重派（正常失败要等 30s failureCooldown）
+    nowMs += 1_000;
+    registrySubscribeKick(registry, record);
+    await flushDirector();
+    nowMs += 1_000;
+    registrySubscribeKick(registry, record);
+    await flushDirector();
+
+    expect(planAndDispatch).toHaveBeenCalledTimes(3);
+    // 中断不计数：连续 5 次中断也不触发 3 次失败抑制（第 4 次调用仍在派同一需求）
+    for (let i = 0; i < 3; i += 1) {
+      nowMs += 1_000;
+      registrySubscribeKick(registry, record);
+      await flushDirector();
+    }
+    const goals = planAndDispatch.mock.calls.map(([r]) => r.operatorGoal);
+    expect(goals.every((g) => g === goals[0])).toBe(true);
+    await director.stop();
+  });
+
   it("rotates shelter direction, then suppresses the need after repeated failure", async () => {
     const record = readyRecord("studio-bot-01");
     record.currentStatus!.armorPoints = 20;
@@ -806,4 +851,11 @@ function readyRecord(botId: string, maximumHealth: number | null = 20): BotRegis
 function uuidSequence(): () => string {
   let value = 0;
   return () => `00000000-0000-4000-8000-${(++value).toString().padStart(12, "0")}`;
+}
+
+function registrySubscribeKick(
+  registry: { subscribe: { mock: { calls: Array<[listener: (record: BotRegistryRecord) => void]> } } },
+  record: BotRegistryRecord,
+): void {
+  for (const [listener] of registry.subscribe.mock.calls) listener(record);
 }
