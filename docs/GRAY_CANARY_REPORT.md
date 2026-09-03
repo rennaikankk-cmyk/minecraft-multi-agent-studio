@@ -30,7 +30,7 @@
 - **G0 = FAIL**（L7 10-bot 公平性 FAILED；60min soak PARTIAL）
 - **G1 = NOT_STARTED**（尚未开始；此前一切外服连接尝试不计入 G1 计时）
 - **External preflight（simpfun）= BLOCKED_INCOMPATIBLE_MOD_LOADER**（B 裸探针 PRE_LOGIN Forge/FML kick 原文已存证；C Runtime 复现闭环修复中，见 P1）
-- **External preflight（luv）= BLOCKED_PROTOCOL_AUTH_COMPAT**（2026-09-03 定案：A=用户官方客户端确认可登录；B=mineflayer auto 与钉版 1.21.11 两种配置均 TCP 连通后被服务端静默丢弃 29-30s 零响应，早前代理路径曾获 3s 活跃 kick；C=早前 NOT_ONLINE。服务端存在客户端指纹/协议层过滤——Bot 与官方客户端被区别对待。证据：runtime-data/canary-evidence/2026-09-03T12-*）
+- **External preflight（luv）= CONDITIONAL_ACCEPT**（2026-09-03 指纹对抗修正，推翻此前 BLOCKED_PROTOCOL_AUTH_COMPAT：mineflayer 原版协议可登录——raw login774 实测 LOGIN SUCCESS、经中继完整登录链 30s 稳定、5 次直连 2/5 成功（≈每 IP 120s 放行 1 次限速）；硬条件=钉版本+域名握手+真 IP 直连（profile 已配）。详见 docs/FINGERPRINT_LUV.md。G1 服务器侧前提解除；G0/选型前置不变）
 
 ## 阶段状态（2026-09-03）
 
