@@ -7,6 +7,10 @@ import pathfinderModule, {
 import { plugin as collectBlockPlugin } from "mineflayer-collectblock";
 import { Vec3 } from "vec3";
 import { MovementSyncShaper, type MovementWire } from "./movement-sync.js";
+import { PursuitController } from "./pursuit-controller.js";
+
+/** 追击循环定时器（engage 时创建，tick 失败时清除）。 */
+type Vec3Like = { x: number; y: number; z: number };
 import type {
   L0SafetyAction,
   L0SafetyActionResult,
@@ -1146,6 +1150,8 @@ export class MineflayerBotClient implements BotClient {
   private serverAuthDetach: (() => void) | null = null;
   /** Grim 过闸整形器清理函数（STUDIO_MOVEMENT_SHAPER=1 时安装）。 */
   private movementShaperDetach: (() => void) | null = null;
+  /** 追击循环定时器（PursuitController tick 驱动；断线时清除）。 */
+  private pursuitTimer: ReturnType<typeof setInterval> | null = null;
   /** G1 spawn-escape：本连接首个出生点（重触发判定的参照原点）。 */
   private worldSpawnOrigin: { x: number; z: number } | null = null;
   /** spawn-escape 疾跑进行中（防同点重复派发；goto 落定后复位）。 */
@@ -1467,6 +1473,8 @@ export class MineflayerBotClient implements BotClient {
         this.movementShaperDetach();
         this.movementShaperDetach = null;
       }
+      // 追击随连接终止。
+      this.stopPursuit();
       // end 的 reason 串同样只在明确含 timeout 语义时计 timeout。
       if (isTimeoutLikeReason(reason)) {
         const detail = safeDetail(reason);
@@ -2450,7 +2458,108 @@ export class MineflayerBotClient implements BotClient {
     action: CombatPrimitiveAction,
     signal: AbortSignal,
   ): Promise<CombatActionAcknowledgement> {
-    return this.combatAdapter.execute(action, signal);
+    const promise = this.combatAdapter.execute(action, signal);
+    // 追击移交（用户实测 2026-09-04：反击几秒后目标跑开就撒手——反应窗
+    // 没有"追"的概念）。近战命中玩家目标且 anarchy 档 → PursuitController
+    // 接管持续交战（GoalFollow 动态追踪+攻击节奏+承诺窗，设计参考
+    // mineflayer-pvp clean-room）。任务侧由中断-恢复语义在追击结束后接管。
+    void promise.then((ack) => {
+      if (
+        this.anarchyNavigation &&
+        process.env.STUDIO_PURSUIT !== "0" &&
+        action.kind === "MELEE_ATTACK" &&
+        ack.outcome === "executed" &&
+        this.isPlayerEntity(action.targetEntityId)
+      ) {
+        this.engagePursuit(action.targetEntityId);
+      }
+    });
+    return promise;
+  }
+
+  private isPlayerEntity(entityId: number): boolean {
+    const entity = (this.bot.entities as Record<number, { type?: string }> | undefined)?.[entityId];
+    return entity?.type === "player";
+  }
+
+  private engagePursuit(entityId: number): void {
+    if (this.pursuitTimer !== null) return; // 已在追击
+    const botRef = this.bot;
+    const controller = new PursuitController(
+      {
+        entityView: (id) => {
+          const entity = (botRef.entities as Record<number, { position?: Vec3Like }> | undefined)?.[id];
+          if (!entity?.position) return null;
+          return { x: entity.position.x, y: entity.position.y, z: entity.position.z, alive: true };
+        },
+        distanceTo: (id) => {
+          const entity = (botRef.entities as Record<number, { position?: Vec3Like }> | undefined)?.[id];
+          const self = botRef.entity?.position;
+          if (!entity?.position || !self) return null;
+          return Math.hypot(
+            entity.position.x - self.x,
+            entity.position.y - self.y,
+            entity.position.z - self.z,
+          );
+        },
+        attack: (id) => {
+          const entity = (botRef.entities as Record<number, unknown> | undefined)?.[id];
+          if (entity !== undefined) void (botRef as unknown as { attack: (e: unknown) => Promise<void> }).attack(entity);
+        },
+        followTarget: (id, range) => {
+          const entity = (botRef.entities as Record<number, unknown> | undefined)?.[id];
+          if (entity !== undefined) {
+            (botRef.pathfinder as unknown as {
+              setGoal: (goal: unknown, dynamic?: boolean) => void;
+            }).setGoal(
+              new (goals as unknown as { GoalFollow: new (e: unknown, r: number) => unknown }).GoalFollow(
+                entity,
+                range,
+              ),
+              true,
+            );
+          }
+        },
+        stopFollowing: () => {
+          (botRef.pathfinder as unknown as { setGoal: (goal: unknown) => void }).setGoal(
+            null as unknown,
+          );
+        },
+      },
+      {
+        now: () => Date.now(),
+        log: (event, fields) => {
+          console.warn(
+            JSON.stringify({
+              timestamp: new Date().toISOString(),
+              level: "info",
+              service: "bot-runtime",
+              event,
+              ...fields,
+            }),
+          );
+        },
+        acquireLease: () =>
+          this.movementController.acquire({
+            owner: "pursuit",
+            priority: MOVEMENT_PRIORITIES.COMBAT,
+          }),
+      },
+    );
+    if (!controller.engage(entityId)) return;
+    this.pursuitTimer = setInterval(() => {
+      if (!controller.tick()) {
+        this.stopPursuit();
+      }
+    }, 150);
+    this.pursuitTimer.unref?.();
+  }
+
+  private stopPursuit(): void {
+    if (this.pursuitTimer !== null) {
+      clearInterval(this.pursuitTimer);
+      this.pursuitTimer = null;
+    }
   }
 
   resetCombat(): void {
