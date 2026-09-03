@@ -1,0 +1,11 @@
+{"id":"RP-001","fingerprint":"88b912c588679900","kind":"autonomy_need","needKey":"TOOL_PROGRESSION","reason":"no pickaxe at all","botId":"B01","at":"2026-08-29T22:40:34.210Z"}
+{"id":"RP-002","fingerprint":"4ab51aca2d64ae0e","kind":"plan_supervision","plannedSteps":10,"stepsCompleted":0,"botId":"B01","at":"2026-08-29T22:40:34.251Z"}
+{"id":"RP-003","fingerprint":"f7bc285ee2db97a2","kind":"autonomy_need","needKey":"WOOD_RESERVE","reason":"wood reserve 0 < critical 4","botId":"B01","at":"2026-08-29T22:42:06.508Z"}
+{"id":"RP-004","fingerprint":"ca0e77d3d1d5ff33","kind":"autonomy_need","needKey":"EQUIP_ARMOR","reason":"replan combat-stance -> aggressive","botId":"B03","at":"2026-09-02T08:16:33.554Z"}
+{"id":"RP-005","fingerprint":"f7bad5a4bbb0adf7","kind":"autonomy_need","needKey":"FOOD_SECURITY","reason":"safe food 0 below emergency threshold","botId":"B03","at":"2026-09-02T08:16:48.930Z"}
+{"id":"RP-006","fingerprint":"880a4ce9d167843f","kind":"autonomy_need","needKey":"EQUIP_ARMOR","reason":"replan combat-stance -> preserve-life","botId":"B08","at":"2026-09-02T08:36:35.091Z"}
+{"id":"RP-007","fingerprint":"118843e1bf40f80e","kind":"autonomy_need","needKey":"WEAPON","reason":"no sword for defense and hunting","botId":"B09","at":"2026-09-02T08:41:22.055Z"}
+{"id":"RP-008","fingerprint":"3eb7adb8c1a07e0e","kind":"autonomy_need","needKey":"ARMOR","reason":"armor points 0 < 15, filling slots","botId":"B09","at":"2026-09-02T08:44:47.373Z"}
+{"id":"RP-009","fingerprint":"44b5ae823925110e","kind":"autonomy_need","needKey":"DIAMOND_PROGRESSION","reason":"diamond reserve 0 < 3 for a diamond pickaxe","botId":"B09","at":"2026-09-02T08:49:22.895Z"}
+{"id":"RP-010","fingerprint":"ee0b8ca65b6fc38a","kind":"autonomy_need","needKey":"FOOD_SECURITY","reason":"safe food 8 below target threshold","botId":"B09","at":"2026-09-02T09:57:16.301Z"}
+{"id":"RP-011","fingerprint":"2f746128c3b4337b","kind":"autonomy_need","needKey":"WOOD_RESERVE","reason":"wood reserve 2 < critical 4","botId":"B09","at":"2026-09-03T01:42:37.526Z"}
