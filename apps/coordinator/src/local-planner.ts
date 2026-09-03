@@ -96,6 +96,24 @@ const RECOVERABLE_L0_ERROR_CODES = new Set([
   "SKILL_CANCELLED",
   "SKILL_EXECUTION_INTERRUPTED",
 ]);
+/**
+ * 技能派发握手余量（L6/L7 拥挤 fixture 实证 2026-09-03）：协调器的等待/
+ * invocation 过期从 **dispatch 时刻**起算 skill.timeoutMs，而 runtime 侧的
+ * 执行预算从**握手完成后**才起算（executor 自带同值硬停）。负载下
+ * dispatch→invoke 握手实测 ~3s（5-bot），协调器先于 runtime 自身超时
+ * 触发取消——goal 在临完成前数百 ms 被杀（RUNTIME_LINK_RESULT_NOT_PENDING
+ * 迟到结果为证）。加余量只修正等待窗记账：执行预算仍由 executor 本地
+ * timeoutMs 从执行起硬停，不被此值放大。
+ * STUDIO_SKILL_DISPATCH_GRACE_MS：有界测试旋钮（0-60000，垃圾值 fail-closed
+ * 回默认），与 movement 旋钮同纪律——不改变生产缺省契约。
+ */
+function skillDispatchHandshakeGraceMs(): number {
+  const raw = process.env.STUDIO_SKILL_DISPATCH_GRACE_MS?.trim();
+  if (raw === undefined || raw === "") return 10_000;
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isFinite(value) || value < 0 || value > 60_000) return 10_000;
+  return value;
+}
 const DEFAULT_SAFETY_RECOVERY_POLL_INTERVAL_MS = 100;
 const DEFAULT_MAX_SAFETY_RECOVERY_WAIT_MS = 30_000;
 
@@ -2020,7 +2038,7 @@ export class CoordinatorLocalPlanner {
     const startedAt = this.validNow();
     const expiresAtMs = Math.min(
       deadlineMs,
-      startedAt.getTime() + currentSkill.timeoutMs,
+      startedAt.getTime() + currentSkill.timeoutMs + skillDispatchHandshakeGraceMs(),
     );
     const invocation = this.invocation(
       request,
@@ -2419,7 +2437,7 @@ export class CoordinatorLocalPlanner {
       const dispatchStartedAt = this.validNow();
       const invocationDeadlineMs = Math.min(
         input.deadlineMs,
-        dispatchStartedAt.getTime() + input.initialSkill.timeoutMs,
+        dispatchStartedAt.getTime() + input.initialSkill.timeoutMs + skillDispatchHandshakeGraceMs(),
       );
       const skillTimeoutMs = Math.max(
         1,

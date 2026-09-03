@@ -3426,6 +3426,12 @@ describe("CoordinatorLocalPlanner", () => {
   });
 
   it("does not turn a non-idempotent dispatch timeout into a fresh invocation", async () => {
+    // 握手余量测试旋钮置 0：本用例把 craft.item 超时钉 10ms 并依赖真定时器，
+    // 默认 10s 余量会让等待窗超 vitest 上限（生产语义不受影响——余量只加在
+    // 协调器等待窗，executor 本地硬停不变）。
+    const previousGrace = process.env.STUDIO_SKILL_DISPATCH_GRACE_MS;
+    process.env.STUDIO_SKILL_DISPATCH_GRACE_MS = "0";
+    try {
     const planning = planningRegistry();
     const current = planning.get(BOT_ID, NOW)!;
     const timeoutRegistry = {
@@ -3463,6 +3469,10 @@ describe("CoordinatorLocalPlanner", () => {
       planner.planAndDispatch(resourcePlanRequest()),
     ).rejects.toMatchObject({ code: "PLANNER_GOAL_EXECUTION_FAILED" });
     expect(sendSkillInvocation).toHaveBeenCalledTimes(2);
+    } finally {
+      if (previousGrace === undefined) delete process.env.STUDIO_SKILL_DISPATCH_GRACE_MS;
+      else process.env.STUDIO_SKILL_DISPATCH_GRACE_MS = previousGrace;
+    }
   });
 
   it("does not report an earlier successful step when a later target cannot be bound", async () => {
