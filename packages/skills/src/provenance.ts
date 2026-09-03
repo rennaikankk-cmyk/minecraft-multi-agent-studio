@@ -66,7 +66,7 @@ export type ProvenanceRecord = z.infer<typeof provenanceRecordSchema>;
 // ---------------------------------------------------------------------------
 
 export type HarvestDecision =
-  | { allowed: true; reason: "unprotected" | "natural" | "authorized_salvage" }
+  | { allowed: true; reason: "unprotected" | "natural" | "authorized_salvage" | "disposable_own" }
   | { allowed: false; reason: string; code: "HARVEST_PROTECTED_OWN" | "HARVEST_PROTECTED_TEAM" | "HARVEST_UNKNOWN_NEAR_BASE" };
 
 /**
@@ -95,7 +95,15 @@ export function authorizeHarvest(input: {
   if (input.explicitSalvageAuthorized) {
     return { allowed: true, reason: "authorized_salvage" };
   }
+  // 灰度前加固（2026-09-03）：一次性用途的 own 方块允许自挖——anarchy 寻路
+  // 搭高/垫脚（navigation）、临时封口（temporary）与弃置物（sacrificial）按设计
+  // 就是可拆的；否则 bot 会被自己的脚手架卡死（实测 own temporary 也被拒）。
+  // 结构性资产（structural/facility/storage/farm/portal 等）保护不变。
+  const DISPOSABLE_PURPOSES: ReadonlySet<string> = new Set(["navigation", "temporary", "sacrificial"]);
   if (input.record.owner === "own_bot" || input.record.owner === "own_team") {
+    if (input.record.purpose !== undefined && DISPOSABLE_PURPOSES.has(input.record.purpose)) {
+      return { allowed: true, reason: "disposable_own" };
+    }
     return {
       allowed: false,
       reason: `block owned by ${input.record.owner} (purpose=${input.record.purpose ?? "unknown"})`,

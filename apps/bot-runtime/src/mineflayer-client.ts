@@ -3025,7 +3025,9 @@ export class MineflayerBotClient implements BotClient {
             position: target,
             source: "bot_placed",
             owner: "own_bot",
-            purpose: "structural",
+            // 寻路租约期内的放置=垫脚/搭高（navigation，可自拆）；技能建造
+            // （build/blueprint 等）在无租约时发生 → structural（受保护）。
+            purpose: this.movementController.currentLease() !== null ? "navigation" : "structural",
             serverVerified: true,
           });
         }

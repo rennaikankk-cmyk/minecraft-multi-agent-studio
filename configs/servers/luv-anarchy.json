@@ -24,9 +24,9 @@
   "stopGracePeriodMs": 5000,
   "reconnect": {
     "enabled": true,
-    "maxAttempts": 10,
-    "baseDelayMs": 3000,
-    "maxDelayMs": 30000
+    "maxAttempts": 14,
+    "baseDelayMs": 45000,
+    "maxDelayMs": 60000
   },
   "_profileStatus": {
     "probedAt": "2026-09-03T09:00:00Z",
@@ -36,7 +36,7 @@
     "minecraftVersion": "26.1.2",
     "protocolVersion": 775,
     "serverKind": "Paper",
-    "notes": "SLP blocked by server (anarchy server anti-probe). TCP reachable. Bot login is the presence truth (confirmed in prior sessions). Version/protocol from prior verified E0 SLP before protection was enabled, and bot cross-version compatibility confirmed (1.21.11=774 accepted by 775 server). 2026-09-03 补：connectHost=202.189.13.131（DoH 真实 IP，绕本机 fake-ip DNS）；A=用户确认可登录；B/C 矩阵复测中。 版本钉 1.21.11（B 探针证据：auto 依赖 SLP 被 luv 屏蔽→握手未发→30s 静默；Round 8 实证 774 被 775 服务端接受）。 2026-09-03 终判：BLOCKED_PROTOCOL_AUTH_COMPAT——官方客户端可登录而 mineflayer 握手被静默丢弃（或活跃 kick），服务端存在客户端指纹/协议层过滤。证据 runtime-data/canary-evidence/2026-09-03T12-*。",
+    "notes": "SLP blocked by server (anarchy server anti-probe). TCP reachable. Bot login is the presence truth (confirmed in prior sessions). Version/protocol from prior verified E0 SLP before protection was enabled, and bot cross-version compatibility confirmed (1.21.11=774 accepted by 775 server). 2026-09-03 补：connectHost=202.189.13.131（DoH 真实 IP，绕本机 fake-ip DNS）；A=用户确认可登录；B/C 矩阵复测中。 版本钉 1.21.11（B 探针证据：auto 依赖 SLP 被 luv 屏蔽→握手未发→30s 静默；Round 8 实证 774 被 775 服务端接受）。 2026-09-03 终判：BLOCKED_PROTOCOL_AUTH_COMPAT——官方客户端可登录而 mineflayer 握手被静默丢弃（或活跃 kick），服务端存在客户端指纹/协议层过滤。证据 runtime-data/canary-evidence/2026-09-03T12-*。 灰度前加固：reconnect 14×45-60s≈13min≈6 个放行窗口（实测限速 ~1 次/120s/IP；原 10×3-30s 仅 225s≈2 窗口，可能两次都撞封锁窗）。",
     "matrixA": "USER_CONFIRMED_SUCCESS 2026-09-03（官方客户端同网络可登录）",
     "verdict": "CONDITIONAL_ACCEPT",
     "matrix": {
