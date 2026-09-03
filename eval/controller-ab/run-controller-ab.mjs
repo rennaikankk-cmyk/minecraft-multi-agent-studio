@@ -23,18 +23,23 @@ const H = { Authorization: `Bearer ${secrets.dashboardToken}`, "Content-Type": "
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (m) => console.log(`[${new Date().toISOString()}] ${m}`);
 
-// 固定 goal 集（模型分支：非模板措辞 → 走 LLM 规划；两轮逐字相同）
+// goal 电池 v2（EVAL_CONTRACT v2 修订）：v1 十条全部为观察叙述型——模型
+// 合法 noop（0.7/0.8 noop 率），两轮同分 2/10 无判别力。v2 = 8 条工具
+// 强制型（中文措辞刻意避开 deterministic-goals 模板动词与 registry 物品
+// 名 → 必走 LLM 规划分支）+ 2 条 v1 原文对照（noop 是对照组的**预期**
+// 行为，单独分账，不再稀释主指标）。
+// 依赖世界状态的条目（A8 依赖 A2 的原木）在两轮间同序执行——同条件公平。
 const GOALS = [
-  "观察周围环境，汇报看到的地形和最近的树的方向",
-  "看向脚下并告诉我站的方块是什么材质",
-  "环顾四周，找一个最近的安全过夜点并描述它",
-  "检查自己背包里有什么工具，没有工具就说明",
-  "观察附近有没有水源，描述位置",
-  "看一下周围的生物，如果没有就明说",
-  "找一个石头露头，描述它的方位和距离",
-  "评估当前位置是否适合建立临时营地，说明理由",
-  "观察天空和时间，判断现在离夜晚还有多久",
-  "汇报当前坐标附近 30 格内最显眼的地标",
+  { text: "做一个工作台出来", cls: "actionable" },                       // craft.item（木→合成两跳）
+  { text: "去找些橡木原木回来", cls: "actionable" },                      // collect.block oak_log
+  { text: "把手上的原木加工成木板", cls: "actionable" },                   // craft oak_planks（承接上一条状态）
+  { text: "去收集一些泥土回来", cls: "actionable" },                      // collect.block dirt（徒手可采）
+  { text: "看看附近哪里有石头，告诉我最近的一处在什么方向", cls: "actionable" }, // world.scan + 叙述
+  { text: "查一下周围有没有铁矿石", cls: "actionable" },                  // world.scan iron_ore
+  { text: "找点安全的东西填肚子", cls: "actionable" },                    // food.secure
+  { text: "给自己搭个能过夜的地方", cls: "actionable" },                  // shelter.dig
+  { text: "观察周围环境，汇报看到的地形和最近的树的方向", cls: "control" },  // v1 #1 原文对照
+  { text: "检查自己背包里有什么工具，没有工具就说明", cls: "control" },     // v1 #4 原文对照
 ];
 
 async function api(base, pathname, init) {
@@ -88,8 +93,8 @@ await withE2EFixture(async (fixture) => {
       outcome = `submitRejected:${submit.status}`; failureCode = submit.body?.error?.code ?? null;
     }
     const e2eMs = Date.now() - t0;
-    results.push({ index: i + 1, goal: GOALS[i], submitStatus: submit.status, outcome, failureCode, e2eMs });
-    log(`goal ${i + 1}/${GOALS.length}: ${outcome} (${e2eMs}ms)`);
+    results.push({ index: i + 1, cls: GOALS[i].cls, goal: GOALS[i].text, submitStatus: submit.status, outcome, failureCode, e2eMs });
+    log(`goal ${i + 1}/${GOALS.length} [${GOALS[i].cls}]: ${outcome} (${e2eMs}ms)`);
   }
 
   // coordinator 增量解析：无效工具/规划拒绝 + 首派发间隔
@@ -110,15 +115,27 @@ await withE2EFixture(async (fixture) => {
 
   const completed = results.filter((r) => r.outcome === "completed").length;
   const noop = results.filter((r) => r.outcome === "sync_noop").length;
+  // v2 分账：主判别指标=actionable 完成率；对照组建模为预期 noop。
+  // actionable 上的 sync_noop 是**坏信号**（该派发工具却没派发）单列。
+  const actionable = results.filter((r) => r.cls === "actionable");
+  const control = results.filter((r) => r.cls === "control");
+  const actionableCompleted = actionable.filter((r) => r.outcome === "completed").length;
+  const noopOnActionable = actionable.filter((r) => r.outcome === "sync_noop").length;
+  const controlNoop = control.filter((r) => r.outcome === "sync_noop").length;
   const e2e = results.map((r) => r.e2eMs).sort((a, b) => a - b);
   const pct = (p) => e2e[Math.min(e2e.length - 1, Math.floor((p / 100) * e2e.length))];
   const summary = {
     tag: TAG, runAt: new Date().toISOString(), goals: results.length,
     completed, completionRate: Number((completed / results.length).toFixed(4)),
     syncNoop: noop, noopRate: Number((noop / results.length).toFixed(4)),
+    actionableCompleted, actionableCount: actionable.length,
+    actionableCompletionRate: Number((actionableCompleted / Math.max(1, actionable.length)).toFixed(4)),
+    noopOnActionable,
+    controlNoop, controlCount: control.length,
     invalidToolDispatches: invalidTool, plannerRejected, aiErrors,
     e2eLatency: { p50: pct(50), p95: pct(95), max: e2e[e2e.length - 1] },
-    note: "goal completion 由 skill_result/任务终态判定；无效工具=SKILL_DISPATCH_FAILED 计数；planner 拒绝单列。",
+    batteryVersion: "v2",
+    note: "v2 分账：actionable=工具强制型（主判别指标），control=观察对照（noop 为预期）；v1 十条全观察型的同分结果见 controller-ab-M{1,2}-formal.json（有效但无判别力）。",
   };
   writeFileSync(path.join(OUT_DIR, `controller-ab-${TAG}.json`), JSON.stringify({ summary, results }, null, 2));
   console.log("\n===== CONTROLLER A/B SUMMARY", TAG, "=====");

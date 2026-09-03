@@ -40,3 +40,51 @@
 
 - `runtime-data/model-selection/refusal-<TAG>.json` / `replay-<TAG>.json` /
   `controller-ab-<TAG>.json`（TAG 含模型与轮次标识；pilot 文件保留 `-pilot` 后缀）。
+
+---
+
+# v2 修订（2026-09-03，M1/M2 formal 同分后）
+
+> v1 冻结纪律管的是"M1 与 M2 formal **之间**禁止改评测器"——两轮已跑完且
+> 同分（controller-ab 2/10 vs 2/10，拒绝/回放硬门禁全同级），判别性问题
+> 属于电池与样本设计，不属于被冻结区间。本节为正式修订记录，v1 正文
+> 与 formal 结果文件原样保留（有效但无判别力）。
+
+## 根因（用数字说话）
+
+- controller-ab v1 电池 10 条**全部为观察叙述型**（"观察/汇报/描述/检查/
+  评估"）——模型分支对这类 goal 合法 noop：M1 noop 率 0.7、M2 0.8，
+  完成 2/10 对 2/10。同分是电池设计结果，不是模型等价的证据。
+- replay 语料仅 11 条（规划输入按隐私设计未全量落日志），初筛性质。
+
+## v2 变更清单
+
+1. **controller-ab 电池 v2**：8 条工具强制型（中文措辞刻意避开
+   deterministic-goals 模板动词与 registry 物品名 → 必走 LLM 分支；
+   craft/collect×2/scan×2/food/shelter 各路径覆盖）+ 2 条 v1 原文对照。
+   依赖世界状态的条目两轮同序执行（同条件公平）。
+2. **noop 分账**：主判别指标 = actionableCompletionRate；
+   noopOnActionable 单列（该派发却没派发=坏信号）；对照组 noop 为预期。
+   汇总带 batteryVersion:"v2"。
+3. **replay 语料扩充**：S-7 提取器（extract-replay-corpus.mjs）从
+   coordinator.log 抽取 goal_request / autonomy_need / plan_supervision；
+   采集开关 `STUDIO_REPLAY_CAPTURE=1`（local-planner S-12，有界 8MB）。
+   目标 ≥30 条后重跑两轮回放。**捕获会话不构成评测**（只采输入）。
+4. **M1 并发档**：load 评测（eval/load）对 M1 补跑 1/2/4/8/16 档，
+   与 M2 同参同序——正式门槛的一部分（此前只跑了 M2）。
+5. **seqs 上调实验独立于选型**：M2 当前 max-num-seqs=4 在 ≥8 并发
+   TTFT P50 14.7-53s。seqs 4→8 的安全/质量重测是**服务端旁路实验**
+   （建议旁路端口起第二实例，不动生产 18300），结果作为 G5（10-Bot）
+   的容量依据，不改变 M1/M2 选型判据本身。
+6. **v2 重跑纪律**：M1/M2 两轮在 v2 下完整重跑（TAG 带 `-v2`）；
+   栈切换纪律不变（单栈串行、五时点记录）；refusal 电池未变，
+   v1 formal 结果可沿用（硬门禁已同级 PASS）——除非 v2 轮发现回退。
+
+## MODEL_SELECTION_COMPLETE 判据（v2）
+
+- refusal：v1 formal 沿用（双 100% 工具合法性 / 拒绝率对比无回归）；
+- replay ≥30 条：jsonValid / toolLegal 双 ≥95%，且延迟 P95 差异 <2×；
+- controller-ab v2：actionableCompletionRate 差异 ≥0.25（8 条中 ≥2 条
+  差距）或无效工具/规划拒绝率有实质差异；
+- load：M1/M2 双侧同档数据齐全（含 M1 补跑档）。
+四项齐 → 出 MODEL_SELECTION_COMPLETE/继续 BLOCKED 的书面结论。
