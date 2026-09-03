@@ -12,6 +12,7 @@
 import {
   type CombatAllegiance,
   type CombatEntity,
+  type CombatEntityKind,
   type CombatIdentityRegistry,
 } from "./identity.js";
 import { BLAST_POWER, entityRangeFor } from "./blast-model.js";
@@ -52,6 +53,8 @@ export type CombatThreatLevel = "none" | "low" | "elevated" | "critical";
 export type CombatThreat = Readonly<{
   entityId: number;
   allegiance: CombatAllegiance;
+  /** 实体类别（player/monster/animal）——G1 spawn-escape 判"纯 mob 群"用。 */
+  entityKind: CombatEntityKind;
   /** 0–100 的确定性威胁分，越高越危险。 */
   score: number;
   distance: number;
@@ -208,6 +211,7 @@ export class ThreatAnalyzer {
       threats.push({
         entityId: observation.entity.entityId,
         allegiance,
+        entityKind: observation.entity.kind,
         score: Math.min(100, score),
         distance,
         closingSpeed,

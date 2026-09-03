@@ -274,6 +274,9 @@ const ANARCHY_RETREAT_POLICY = Object.freeze({
   withdrawHealth: 8,
   outnumberedAbove: 8,
   respectGearGap: false,
+  // G1 实战加固（2026-09-03 luv）：anarchy/preserve-life 对纯 mob 群零门槛撤
+  // ——裸装逃离而不是与怪物交战（用户产品方向）。
+  avoidMeleeMobPacks: true,
 });
 
 const AGGRESSIVE_ENGAGEMENT_POLICY = Object.freeze({

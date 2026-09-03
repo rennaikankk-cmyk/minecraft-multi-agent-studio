@@ -33,6 +33,7 @@ export type CombatRetreatReason =
   | "HEALTH_CRITICAL"
   | "HEALTH_LOW"
   | "OUTNUMBERED"
+  | "MOB_PACK_AVOIDABLE"
   | "CRYSTAL_THREAT"
   | "ANCHOR_THREAT"
   | "GEAR_OUTCLASSED";
@@ -61,6 +62,13 @@ export type CombatRetreatPolicy = Readonly<{
    * 会记入 `GEAR_OUTCLASSED`（普通 withdraw 级别，不升级为 emergency）。
    */
   respectGearGap: boolean;
+  /**
+   * G1 实战（2026-09-03 luv）：出生点僵尸群下，engage 先行、<8HP 才撤的
+   * 阈值让 bot 在击杀区里边打边耗。对纯 mob（无玩家参与）威胁，
+   * preserve-life 应零血量门槛立即抑制进攻——裸装打僵尸不买任何东西，
+   * 疾跑才是正确答案（用户产品方向：逃，不是战）。
+   */
+  avoidMeleeMobPacks: boolean;
 }>;
 
 export const DEFAULT_RETREAT_POLICY: CombatRetreatPolicy = {
@@ -70,6 +78,7 @@ export const DEFAULT_RETREAT_POLICY: CombatRetreatPolicy = {
   allowDisconnect: true,
   stance: DEFAULT_SURVIVAL_STANCE,
   respectGearGap: true,
+  avoidMeleeMobPacks: false,
 };
 
 export type CombatRetreatDecision = Readonly<{
@@ -89,6 +98,7 @@ const REASON_ORDER: readonly CombatRetreatReason[] = [
   "TOTEM_DEPLETED",
   "HEALTH_CRITICAL",
   "OUTNUMBERED",
+  "MOB_PACK_AVOIDABLE",
   "CRYSTAL_THREAT",
   "ANCHOR_THREAT",
   "GEAR_OUTCLASSED",
@@ -147,6 +157,16 @@ export class RetreatController {
     else if (selfHealth < this.policy.withdrawHealth) detected.add("HEALTH_LOW");
     if (assessment.hostileCount > this.policy.outnumberedAbove) {
       detected.add("OUTNUMBERED");
+    }
+    // G1 加固：纯 mob（无玩家参与）威胁 + 策略开启 → 立即撤，零血量门槛。
+    // 出生点僵尸群场景：裸装疾跑脱离比交战便宜且安全。
+    if (
+      this.policy.avoidMeleeMobPacks &&
+      assessment.hostileCount > 0 &&
+      assessment.threats.length > 0 &&
+      assessment.threats.every((threat) => threat.entityKind !== "player")
+    ) {
+      detected.add("MOB_PACK_AVOIDABLE");
     }
     if (
       assessment.threats.some(({ reasons }) => reasons.includes("CRYSTAL_PLACED"))

@@ -321,4 +321,47 @@ describe("RetreatController gear gap", () => {
         }),
     ).toThrowError(TypeError);
   });
+
+  it("MOB_PACK_AVOIDABLE：纯 mob 群零血量门槛立即撤（G1 spawn-escape）", () => {
+    const controller = new RetreatController({
+      ...DEFAULT_RETREAT_POLICY,
+      avoidMeleeMobPacks: true,
+    });
+    // 满血 + 纯 mob（两个 hostile 怪）→ 撤退理由必须有 MOB_PACK_AVOIDABLE
+    const pureMobs = controller.evaluate(
+      assessment([
+        threat({ entityId: 1, entityKind: "monster" }),
+        threat({ entityId: 2, entityKind: "monster" }),
+      ]),
+      20,
+      SELF,
+      positions(
+        [1, { x: 3, y: 64, z: 0 }],
+        [2, { x: -3, y: 64, z: 1 }],
+      ),
+    );
+    expect(pureMobs.reasons).toContain("MOB_PACK_AVOIDABLE");
+    expect(pureMobs.urgency).not.toBe("none");
+
+    // 混入一个玩家威胁 → 不算"纯 mob 群"，不走零门槛（玩家是另一个量级）
+    const withPlayer = controller.evaluate(
+      assessment([
+        threat({ entityId: 1, entityKind: "monster" }),
+        threat({ entityId: 3, entityKind: "player" }),
+      ]),
+      20,
+      SELF,
+      positions([1, { x: 3, y: 64, z: 0 }], [3, { x: 0, y: 64, z: 5 }]),
+    );
+    expect(withPlayer.reasons).not.toContain("MOB_PACK_AVOIDABLE");
+
+    // 策略关闭（默认）→ 不触发
+    const off = new RetreatController(DEFAULT_RETREAT_POLICY).evaluate(
+      assessment([threat({ entityId: 1, entityKind: "monster" })]),
+      20,
+      SELF,
+      positions([1, { x: 3, y: 64, z: 0 }]),
+    );
+    expect(off.reasons).not.toContain("MOB_PACK_AVOIDABLE");
+  });
 });

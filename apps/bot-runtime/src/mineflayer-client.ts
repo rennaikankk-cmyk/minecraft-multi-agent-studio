@@ -1143,6 +1143,10 @@ export class MineflayerBotClient implements BotClient {
   private chatBound = false;
   /** 服务器认证监听的清理函数（断线/spawn 重建时调用）。 */
   private serverAuthDetach: (() => void) | null = null;
+  /** G1 spawn-escape：本连接首个出生点（重触发判定的参照原点）。 */
+  private worldSpawnOrigin: { x: number; z: number } | null = null;
+  /** spawn-escape 疾跑进行中（防同点重复派发；goto 落定后复位）。 */
+  private spawnEscapeActive = false;
   /**
    * Phase 3：Material Provenance——bot.dig 边界 HarvestAuthorization。
    * 2026-09-03 深度审计：此前恒为 null（检查是死代码）。现在按 serverProfile
@@ -1353,6 +1357,16 @@ export class MineflayerBotClient implements BotClient {
       this.pathResetCount += 1;
       this.currentPathLength = null;
       this.handlers?.onStateChanged();
+    });
+
+    bot.on("spawn", () => {
+      // G1 spawn-escape（2026-09-03 luv 实战）：出生点是结构性击杀区
+      // （法证：竖井坠落 4.5 伤害 + 井底怪坑；认证后物理放开直接坠落）。
+      // anarchy 档第一 tick 沿预设方位疾跑逃离。重触发语义：spawn 事件落在
+      // 首个出生点 64 格内（重生/拉回循环）就再逃——床被毁回出生点同样
+      // 覆盖；跨维度/远点 spawn（下界门）不触发。env：STUDIO_SPAWN_ESCAPE=0
+      // 关闭；_DISTANCE 格数（默认 96）；_BEARING_DEG 方位角（默认 135）。
+      this.trySpawnEscape();
     });
     bot.on("path_update", (path) => {
       this.currentPathLength = Number.isSafeInteger(path.path.length)
@@ -5756,6 +5770,72 @@ export class MineflayerBotClient implements BotClient {
       return !signal.aborted;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * G1 spawn-escape（2026-09-03 luv 实战）：出生点是结构性击杀区——法证
+   * 结论为竖井坠落（4.5=7.5 格）+ 井底怪坑，认证后物理放开即坠落。此反射
+   * 在 spawn 第一时刻沿预设方位疾跑（默认东南 135°、96 格），确定性执行
+   * 不经 planner/LLM；L0 安全层仍在更上层（crit → 断线保号不变）。
+   * 重触发：spawn 落在首个出生点 64 格内即再逃（床毁重生/出生拉回循环
+   * 都覆盖）；远点/跨维度 spawn 不触发（防下界门误逃）。
+   */
+  private trySpawnEscape(): void {
+    if (!this.anarchyNavigation || this.spawnEscapeActive) return;
+    if (process.env.STUDIO_SPAWN_ESCAPE === "0") return;
+    const pos = this.bot.entity?.position;
+    if (!pos) return;
+    if (this.worldSpawnOrigin === null) {
+      this.worldSpawnOrigin = { x: pos.x, z: pos.z };
+    }
+    const dx = pos.x - this.worldSpawnOrigin.x;
+    const dz = pos.z - this.worldSpawnOrigin.z;
+    if (dx * dx + dz * dz > 64 * 64) return;
+    const distance = Number(process.env.STUDIO_SPAWN_ESCAPE_DISTANCE ?? "96");
+    const bearingDeg = Number(process.env.STUDIO_SPAWN_ESCAPE_BEARING_DEG ?? "135");
+    const rad = (bearingDeg * Math.PI) / 180;
+    if (!Number.isFinite(distance) || !Number.isFinite(bearingDeg)) return;
+    const targetX = Math.floor(pos.x + Math.cos(rad) * distance);
+    const targetZ = Math.floor(pos.z + Math.sin(rad) * distance);
+    this.spawnEscapeActive = true;
+    try {
+      const movements = configureNavigationMovements(
+        new Movements(this.bot),
+        this.bot,
+        true,
+      );
+      this.bot.pathfinder.setMovements(movements);
+      this.bot.pathfinder.thinkTimeout = 8_000;
+      this.bot.pathfinder.tickTimeout = 40;
+      this.bot.setControlState("sprint", true);
+      this.bot.setControlState("jump", true);
+      void this.bot.pathfinder
+        .goto(new goals.GoalXZ(targetX, targetZ))
+        .catch(() => undefined)
+        .finally(() => {
+          this.spawnEscapeActive = false;
+          this.bot.setControlState("sprint", false);
+          this.bot.setControlState("jump", false);
+          this.handlers?.onStateChanged();
+        });
+      this.handlers?.onStateChanged();
+    } catch {
+      // 寻路不可用（极端情况）：至少疾跑直向 5s——比站桩好。
+      this.spawnEscapeActive = false;
+      try {
+        this.bot.setControlState("sprint", true);
+        this.bot.setControlState("forward", true);
+        void this.bot
+          .look(Math.atan2(-Math.cos(rad), Math.sin(rad)), 0, true)
+          .catch(() => undefined);
+        setTimeout(() => {
+          this.bot.setControlState("forward", false);
+          this.bot.setControlState("sprint", false);
+        }, 5_000).unref?.();
+      } catch {
+        /* 尽力而为 */
+      }
     }
   }
 
