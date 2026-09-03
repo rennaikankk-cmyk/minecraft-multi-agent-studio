@@ -68,8 +68,11 @@ await withE2EFixture(async (fixture) => {
       body: JSON.stringify({ schemaVersion: "1.0", requestId: goalId, botId, operatorGoal: GOALS[i], timeoutMs: 120_000 }),
     });
     let outcome = null, failureCode = null;
-    if (submit.status === 200 && submit.body?.data?.action === "skill_result") {
-      outcome = "completed";
+    if (submit.status === 200) {
+      // 200=同步终态：action 分流（skill_result=完成；noop=诚实无动作——
+      // 模型/规划器差异的真实信号，单列计数，不是拒绝）
+      const action = submit.body?.data?.action ?? "unknown";
+      outcome = action === "skill_result" ? "completed" : "sync_" + action;
     } else if (submit.status === 202) {
       // 轮询终态
       for (let p = 0; p < 75; p += 1) {
@@ -106,11 +109,13 @@ await withE2EFixture(async (fixture) => {
   await api("http://127.0.0.1:3230", `/v1/bots/${botId}`, { method: "DELETE" }).catch(() => undefined);
 
   const completed = results.filter((r) => r.outcome === "completed").length;
+  const noop = results.filter((r) => r.outcome === "sync_noop").length;
   const e2e = results.map((r) => r.e2eMs).sort((a, b) => a - b);
   const pct = (p) => e2e[Math.min(e2e.length - 1, Math.floor((p / 100) * e2e.length))];
   const summary = {
     tag: TAG, runAt: new Date().toISOString(), goals: results.length,
     completed, completionRate: Number((completed / results.length).toFixed(4)),
+    syncNoop: noop, noopRate: Number((noop / results.length).toFixed(4)),
     invalidToolDispatches: invalidTool, plannerRejected, aiErrors,
     e2eLatency: { p50: pct(50), p95: pct(95), max: e2e[e2e.length - 1] },
     note: "goal completion 由 skill_result/任务终态判定；无效工具=SKILL_DISPATCH_FAILED 计数；planner 拒绝单列。",
