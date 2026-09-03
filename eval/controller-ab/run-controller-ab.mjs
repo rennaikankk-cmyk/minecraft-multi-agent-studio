@@ -65,7 +65,7 @@ await withE2EFixture(async (fixture) => {
     const t0 = Date.now();
     const submit = await api("http://127.0.0.1:3210", "/v1/goals", {
       method: "POST",
-      body: JSON.stringify({ schemaVersion: "1.0", requestId: goalId, botId, operatorGoal: GOALS[i], timeoutMs: 150_000 }),
+      body: JSON.stringify({ schemaVersion: "1.0", requestId: goalId, botId, operatorGoal: GOALS[i], timeoutMs: 120_000 }),
     });
     let outcome = null, failureCode = null;
     if (submit.status === 200 && submit.body?.data?.action === "skill_result") {
