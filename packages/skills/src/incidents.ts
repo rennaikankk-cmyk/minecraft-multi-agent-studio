@@ -120,6 +120,8 @@ export const FAILURE_CODES = [
   // Round 6.6 生命周期：等待/就绪超时属 RUNTIME 编排层，不归 Skill。
   "GOAL_EXPIRED_WAITING_FOR_BOT",
   "BOT_READINESS_TIMEOUT",
+  // Phase 3：Provenance 边界——own/team/facility 方块采集被拒。
+  "HARVEST_PROTECTED_ASSET",
 ] as const;
 export type FailureCode = (typeof FAILURE_CODES)[number];
 
@@ -442,6 +444,9 @@ export function classifyIncident(input: ClassifyInput): Classification {
     case "BOT_READINESS_TIMEOUT":
       matched.push(`failureCode=${input.failureCode}`);
       return { suspectedLayer: "RUNTIME", ruleId: "R-LIFECYCLE-1", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "medium", matchedEvidence: matched };
+    case "HARVEST_PROTECTED_ASSET":
+      matched.push(`failureCode=${input.failureCode}`);
+      return { suspectedLayer: "WORLD_STATE", ruleId: "R-PROVENANCE-1", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "medium", matchedEvidence: matched };
     // 战术核心终态失败码：裁决与执行都发生在 Runtime 的 combat reaction loop
     // （同一事件循环内），先归 RUNTIME（R-COMBAT-1，medium）。
     case "COMBAT_ENGAGE_REFUSED":

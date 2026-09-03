@@ -1,3 +1,4 @@
+import { DeathStreakTracker, assessDropRecovery } from "@minecraft-studio/skills";
 // ---------------------------------------------------------------------------
 // SurvivalNeeds —— 自主生存的确定性需求评估器（Needs/Utility + Goal Graph）。
 //
@@ -122,6 +123,9 @@ const IRON_MINIMUM = 6;
 const TORCH_MINIMUM = 16;
 const DIAMOND_PICKAXE_RESERVE = 3;
 /** 死亡点回收窗口：掉落物 5 分钟后开始消失，留 15 分钟是保守上限。 */
+
+/** 连续死亡追踪——streak ≥ 3 时停止送装备去捡装备。 */
+const deathStreakTracker = new DeathStreakTracker({ resetWindowMs: 5 * 60_000 });
 const DEATH_RECOVERY_WINDOW_MS = 15 * 60_000;
 /** 距死点多近算"已到达"（掉落物碰撞拾取半径外扩）。 */
 const DEATH_RECOVERY_ARRIVAL_BLOCKS = 6;
@@ -176,14 +180,27 @@ export function assessSurvivalNeeds(
       now.getTime() - deathAgeMs <= DEATH_RECOVERY_WINDOW_MS &&
       distance > DEATH_RECOVERY_ARRIVAL_BLOCKS
     ) {
-      needs.push({
-        key: "DEATH_RECOVERY",
-        score: 85,
-        reason: `gear dropped ${Math.round(distance)} blocks away ${Math.round((now.getTime() - deathAgeMs) / 60_000)}min ago`,
-        title: "回收死亡掉落",
-        operatorGoal: `移动到坐标 x=${lastDeath.x} y=${lastDeath.y} z=${lastDeath.z} 附近，回收死亡掉落物`,
-        sourceBlock: null,
+      // Phase 1d：用 assessDropRecovery 做价值/风险/streak 评估
+      // （inventory 是近似——死亡时掉的就是死前有的）。
+      const assessment = assessDropRecovery({
+        drops: [...inventory.entries()].map(([itemId, info]) => ({ itemId, count: info.count })),
+        diedAtMs: deathAgeMs,
+        nowMs: now.getTime(),
+        distanceBlocks: Math.round(distance),
+        deathStreak: deathStreakTracker.streak,
+        sameDimension,
+        despawnWindowMs: DEATH_RECOVERY_WINDOW_MS,
       });
+      if (assessment.shouldRecover) {
+        needs.push({
+          key: "DEATH_RECOVERY",
+          score: 85,
+          reason: assessment.reason,
+          title: "回收死亡掉落",
+          operatorGoal: `移动到坐标 x=${lastDeath.x} y=${lastDeath.y} z=${lastDeath.z} 附近，回收死亡掉落物`,
+          sourceBlock: null,
+        });
+      }
     }
   }
 

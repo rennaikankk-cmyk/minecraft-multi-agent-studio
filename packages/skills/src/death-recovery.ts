@@ -111,17 +111,18 @@ export function assessDropRecovery(input: {
     };
   }
 
-  // 价值/风险比
+  // 价值/风险比（空背包=价值未知，保守允许恢复——Bot 死前可能有装备）
+  const hasKnownDrops = input.drops.length > 0;
   const travelTimeEstimateMs = input.distanceBlocks * 100; // ~100ms per block walk
   const riskOfDeathOnWay = input.distanceBlocks > 200 ? "high" : input.distanceBlocks > 50 ? "medium" : "low";
 
-  if (totalValue < 20 && input.distanceBlocks > 30) {
+  if (hasKnownDrops && totalValue < 20 && input.distanceBlocks > 30) {
     return { shouldRecover: false, reason: `low value (${totalValue}) far away (${input.distanceBlocks} blocks)`, totalValue, estimatedRisk: riskOfDeathOnWay, deathAgeMs };
   }
   if (travelTimeEstimateMs > remainingMs * 0.7) {
     return { shouldRecover: false, reason: "cannot reach before despawn", totalValue, estimatedRisk: riskOfDeathOnWay, deathAgeMs };
   }
-  if (riskOfDeathOnWay === "high" && totalValue < 200 && input.deathStreak >= 1) {
+  if (hasKnownDrops && riskOfDeathOnWay === "high" && totalValue < 200 && input.deathStreak >= 1) {
     return { shouldRecover: false, reason: "high risk + low value + prior death", totalValue, estimatedRisk: "high", deathAgeMs };
   }
 

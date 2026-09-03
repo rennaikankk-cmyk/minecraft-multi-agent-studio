@@ -30,6 +30,8 @@ import {
   MOVEMENT_PRIORITIES,
   MovementController,
   ServerBehaviorObserver,
+  ProvenanceStore,
+  authorizeHarvest,
   type MovementLease,
   SAFE_PATH_MAX_DISTANCE,
   SkillFault,
@@ -1130,6 +1132,8 @@ export class MineflayerBotClient implements BotClient {
   private chatBound = false;
   /** 服务器认证监听的清理函数（断线/spawn 重建时调用）。 */
   private serverAuthDetach: (() => void) | null = null;
+  /** Phase 3：Material Provenance——bot.dig 边界 HarvestAuthorization。 */
+  private readonly provenanceStore: ProvenanceStore | null = null;
   /** 服务器地址（auth store 按 host:port 隔离凭据用）。 */
   private readonly serverAddress: Readonly<{ host: string; port: number }> | null;
   /** 最近一次熔炉掠夺的物品名（诊断留痕，不参与计数）。 */
@@ -2872,6 +2876,21 @@ export class MineflayerBotClient implements BotClient {
 
     const wrappedDig = (async (...args: Parameters<Bot["dig"]>) => {
       const block = args[0];
+      // Phase 3：bot.dig 边界 HarvestAuthorization——own/team/facility 方块
+      // 无显式 salvage 授权时拒绝采集。无 provenance 记录=自然方块=放行。
+      if (this.provenanceStore !== null) {
+        const dimension = this.bot.game?.dimension ?? "minecraft:overworld";
+        const record = this.provenanceStore.get(block.position, dimension);
+        const nearOwnBase = false; // 空间检查待接入 Base registry 后补
+        const decision = authorizeHarvest({
+          record,
+          explicitSalvageAuthorized: false,
+          nearOwnBase,
+        });
+        if (!decision.allowed) {
+          throw new SkillFault("HARVEST_PROTECTED_ASSET");
+        }
+      }
       for (let attempt = 0; attempt <= COLLECT_SERVER_DIG_RETRIES; attempt += 1) {
         if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
         const confirmation = waitForServerConfirmation(block.position);
