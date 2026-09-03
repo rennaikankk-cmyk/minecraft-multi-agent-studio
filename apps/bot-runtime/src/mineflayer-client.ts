@@ -6,6 +6,7 @@ import pathfinderModule, {
 } from "mineflayer-pathfinder";
 import { plugin as collectBlockPlugin } from "mineflayer-collectblock";
 import { Vec3 } from "vec3";
+import { MovementSyncShaper, type MovementWire } from "./movement-sync.js";
 import type {
   L0SafetyAction,
   L0SafetyActionResult,
@@ -1143,6 +1144,8 @@ export class MineflayerBotClient implements BotClient {
   private chatBound = false;
   /** 服务器认证监听的清理函数（断线/spawn 重建时调用）。 */
   private serverAuthDetach: (() => void) | null = null;
+  /** Grim 过闸整形器清理函数（STUDIO_MOVEMENT_SHAPER=1 时安装）。 */
+  private movementShaperDetach: (() => void) | null = null;
   /** G1 spawn-escape：本连接首个出生点（重触发判定的参照原点）。 */
   private worldSpawnOrigin: { x: number; z: number } | null = null;
   /** spawn-escape 疾跑进行中（防同点重复派发；goto 落定后复位）。 */
@@ -1235,6 +1238,23 @@ export class MineflayerBotClient implements BotClient {
     );
     // 无规则档放开 PACKET_CRIT（微上移双包暴击）；反作弊档保持物理跳。
     this.combatAdapter.setCriticalPacketAllowed(this.anarchyNavigation);
+    // Grim 过闸整形器（movementSync v1，2026-09-04 luv 双向抓包定性）：
+    // setback 服从窗 + onGround 重建 + 出站速度钳制。env 门控验证期
+    // （STUDIO_MOVEMENT_SHAPER=1），过闸后并入 ServerCompatibility 基线。
+    if (process.env.STUDIO_MOVEMENT_SHAPER === "1") {
+      const wire = (bot as unknown as { _client?: MovementWire })._client;
+      if (wire && typeof wire.on === "function" && typeof wire.write === "function") {
+        const shaper = new MovementSyncShaper(
+          (pos) => {
+            const below = bot.blockAt(
+              new Vec3(Math.floor(pos.x), Math.floor(pos.y - 0.06), Math.floor(pos.z)),
+            );
+            return below !== null && below.type !== 0;
+          },
+        );
+        this.movementShaperDetach = shaper.install(wire);
+      }
+    }
     this.movementController = new MovementController({
       onPreempt: () => this.stopMovementPrimitives(),
       onRelease: () => this.stopMovementPrimitives(),
@@ -1433,6 +1453,11 @@ export class MineflayerBotClient implements BotClient {
       this.handlers?.onError(error);
     });
     bot.on("end", (reason) => {
+      // 整形器随 wire（连接）一起死，但显式恢复 write 防重连复用。
+      if (this.movementShaperDetach) {
+        this.movementShaperDetach();
+        this.movementShaperDetach = null;
+      }
       // end 的 reason 串同样只在明确含 timeout 语义时计 timeout。
       if (isTimeoutLikeReason(reason)) {
         const detail = safeDetail(reason);
