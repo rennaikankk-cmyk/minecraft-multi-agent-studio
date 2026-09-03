@@ -1,0 +1,38 @@
+{
+  "schemaVersion": "1.0",
+  "id": "simpfun-gray",
+  "botId": "studio-bot-01",
+  "purpose": "anarchy",
+  "networkScope": "public",
+  "host": "play.simpfun.cn",
+  "port": 16377,
+  "minecraftVersion": "auto",
+  "username": "StudioGray01",
+  "auth": "offline",
+  "combat": {
+    "enabled": true,
+    "stance": "preserve-life",
+    "whitelist": {
+      "usernames": ["StudioGray01"],
+      "uuids": []
+    }
+  },
+  "statusIntervalMs": 1000,
+  "heartbeatIntervalMs": 5000,
+  "stopGracePeriodMs": 5000,
+  "reconnect": {
+    "enabled": true,
+    "maxAttempts": 10,
+    "baseDelayMs": 3000,
+    "maxDelayMs": 30000
+  },
+  "_profileStatus": {
+    "probedAt": "2026-09-03T08:00:00Z",
+    "tcpReachable": true,
+    "slpResponsive": false,
+    "minecraftVersion": null,
+    "protocolVersion": null,
+    "serverKind": null,
+    "notes": "TCP connects but SLP times out. DNS resolves to 198.18.0.23 (proxy/VPN range). simpfun.cn platform may require server startup or is paused. Mark BLOCKED until SLP responsive."
+  }
+}
