@@ -18,6 +18,15 @@ const IMAGE = process.env.STUDIO_E2E_IMAGE?.trim() || "docker.m.daocloud.io/itzg
 const MC_VERSION = process.env.STUDIO_E2E_MC_VERSION?.trim() || "1.21.11";
 export const FIXTURE_LABEL = "studio.serverKind=e2e_fixture";
 
+/** fixture JVM 内存（G）：有界 1-8，垃圾值 fail-closed 回 2G。 */
+function fixtureMemoryGb() {
+  const raw = process.env.STUDIO_E2E_MEMORY?.trim();
+  if (raw === undefined || raw === "") return 2;
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isFinite(value) || value < 1 || value > 8) return 2;
+  return value;
+}
+
 let lock = Promise.resolve();
 
 function docker(args, timeoutMs = 60_000) {
@@ -134,7 +143,10 @@ export async function createE2EFixture() {
       "-e", "SEED=studio-e2e-fixed",
       "-e", "MODE=survival",
       "-e", "DIFFICULTY=peaceful",
-      "-e", "MEMORY=2G",
+      // 10-bot L7 实证（2026-09-03）：2G 下 10 玩家 tick 滞后、round2 墙钟翻倍、
+      // 20s 生产移动预算内过半超时。STUDIO_E2E_MEMORY 有界旋钮（1-8G，垃圾值
+      // fail-closed 回 2G），单 bot 场景不受影响。
+      "-e", `MEMORY=${fixtureMemoryGb()}G`,
       "-e", "SPAWN_PROTECTION=0",
       "-e", "VIEW_DISTANCE=6",
       IMAGE,
