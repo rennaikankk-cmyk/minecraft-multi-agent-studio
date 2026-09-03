@@ -188,6 +188,15 @@ test("creates and reloads a managed Bot through the loopback API", async (contex
   );
   assert.equal(createdProfile.purpose, "managed");
   assert.equal(createdProfile.networkScope, "loopback");
+  // 2026-09-03 复活缺陷修复：显式 start 的 bot 才有 desiredRunning=true，
+  // manager 重启后自动恢复；创建但从未 start 的 bot 一律保持 stopped。
+  const startResponse = await fetch(
+    `http://127.0.0.1:${address.port}/v1/bots/studio-bot-01/start`,
+    { method: "POST", headers: { Authorization: `Bearer ${TOKEN}` } },
+  );
+  assert.equal(startResponse.status, 200);
+  const manifest = JSON.parse(await readFile(path.join(runtimeRoot, "local-bots.json"), "utf8"));
+  assert.equal(manifest.bots[0].desiredRunning, true);
   await manager.stop();
 
   const reloaded = new StudioLocalManager(options);
@@ -386,7 +395,10 @@ function fakeStart(manager) {
     const config = manager.configs.get(botId);
     assert(config);
     config.processState = "running";
+    // 与真实 startBot 契约一致：显式 start 持久化 desiredRunning=true。
+    config.desiredRunning = true;
     config.updatedAt = new Date().toISOString();
+    await manager.writeManifest();
   };
 }
 
@@ -900,6 +912,47 @@ test("exit classification: late exit from a replaced runtime must not classify o
   assert.equal(config.exit, null, "stale exit must not classify over the new runtime");
   assert.equal(config.processState, "running");
   await cleanup();
+});
+
+test("DELETE removes a stopped bot from the manifest and frees its slot", async (context) => {
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "studio-manager-delete-test-"));
+  context.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  const options = {
+    repositoryRoot: process.cwd(),
+    runtimeRoot,
+    port: 0,
+    token: TOKEN,
+    slots: createLocalBotSlots(SECRET, 1),
+    aiStatus: unavailableStatus(),
+    environment: { STUDIO_SPARK_AUTO_DISCOVERY: "0" },
+    runtimeLinkPort: 3220,
+    packagedMode: false,
+  };
+  const manager = new StudioLocalManager(options);
+  manager.startBot = fakeStart(manager);
+  const address = await manager.start();
+  context.after(() => manager.stop());
+  const base = `http://127.0.0.1:${address.port}`;
+  const authHeaders = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
+  const createBody = JSON.stringify({
+    schemaVersion: "1.0",
+    username: "DeleteBot1",
+    serverHost: "127.0.0.1",
+    serverPort: 25565,
+    minecraftVersion: "auto",
+  });
+  const created = await fetch(`${base}/v1/bots`, { method: "POST", headers: authHeaders, body: createBody });
+  assert.equal(created.status, 201);
+  const deleteResponse = await fetch(`${base}/v1/bots/studio-bot-01`, {
+    method: "DELETE",
+    headers: authHeaders,
+  });
+  assert.equal(deleteResponse.status, 200);
+  const manifest = JSON.parse(await readFile(path.join(runtimeRoot, "local-bots.json"), "utf8"));
+  assert.equal(manifest.bots.length, 0);
+  // 槽位可复用：删除后同名 bot 可以再次创建
+  const recreated = await fetch(`${base}/v1/bots`, { method: "POST", headers: authHeaders, body: createBody });
+  assert.equal(recreated.status, 201);
 });
 
 test("exit classification metadata reaches the public Bot payload", async () => {

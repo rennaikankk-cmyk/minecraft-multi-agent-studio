@@ -334,7 +334,12 @@ export class StudioLocalManager {
     this.aiTimer = setInterval(() => void this.refreshAIStatus(), 10_000);
     this.aiTimer.unref?.();
     for (const botId of this.configs.keys()) {
-      await this.startBot(botId);
+      // 2026-09-03 复活缺陷：启动时无条件拉起全部历史 bot（复活已被用户
+      // stop 的 bot、连死端口）。manifest 现在持久化 desiredRunning——只有
+      // 上次确实在跑的 bot 才自动恢复；旧 manifest 无此字段 → 一律不启动。
+      if (this.configs.get(botId)?.desiredRunning === true) {
+        await this.startBot(botId);
+      }
     }
     const address = this.server.address();
     if (!address || typeof address === "string") {
@@ -633,6 +638,32 @@ export class StudioLocalManager {
           schemaVersion: "1.0",
           generatedAt: new Date().toISOString(),
           bot: this.publicBot(this.configs.get(botId)),
+        });
+        return;
+      }
+      // 2026-09-03 槽位枯竭缺陷：bot 只进不出（无删除端点），16 个槽位被
+      // 测试残留永久占满。DELETE：先停（拒绝删除运行中的），再从 manifest
+      // 移除——槽位回到可用池。
+      const deleteMatch = url.pathname.match(/^\/v1\/bots\/(studio-bot-[0-9]{2})$/u);
+      if (request.method === "DELETE" && deleteMatch) {
+        const botId = deleteMatch[1];
+        const config = this.configs.get(botId);
+        if (!config) {
+          this.writeError(response, 404, "BOT_NOT_FOUND", "未找到该本地 Bot 配置。");
+          return;
+        }
+        const managed = this.processes.get(botId);
+        if (managed && managed.child.exitCode === null) {
+          this.writeError(response, 409, "BOT_NOT_STOPPABLE", "Bot 正在运行：先 stop 再删除。");
+          return;
+        }
+        if (managed) this.processes.delete(botId);
+        this.configs.delete(botId);
+        await this.writeManifest();
+        this.writeJson(response, 200, {
+          schemaVersion: "1.0",
+          generatedAt: new Date().toISOString(),
+          deleted: botId,
         });
         return;
       }
@@ -1143,11 +1174,20 @@ export class StudioLocalManager {
       throw managedError("BOT_NOT_FOUND", "本地 Bot 配置没有可用认证槽位。", 404);
     }
     const running = this.processes.get(botId);
-    if (running && running.child.exitCode === null) return;
+    if (running && running.child.exitCode === null) {
+      // 已在跑：确保期望态为 running（升级后首次 start 的补偿路径）。
+      if (config.desiredRunning !== true) {
+        config.desiredRunning = true;
+        await this.writeManifest().catch(() => undefined);
+      }
+      return;
+    }
     await this.writeProfile(config);
     config.processState = "starting";
+    config.desiredRunning = true;
     config.lastError = null;
     config.updatedAt = new Date().toISOString();
+    await this.writeManifest().catch(() => undefined);
     const profilePath = this.profilePath(botId);
     const entry = path.join(
       this.options.repositoryRoot,
@@ -1371,6 +1411,10 @@ export class StudioLocalManager {
       if (config) {
         config.processState = "stopped";
         config.updatedAt = new Date().toISOString();
+        if (config.desiredRunning === true) {
+          config.desiredRunning = false;
+          await this.writeManifest().catch(() => undefined);
+        }
       }
       return;
     }
@@ -1437,6 +1481,10 @@ export class StudioLocalManager {
     if (!this.processes.has(botId) || this.processes.get(botId) === managed) {
       config.processState = "stopped";
       config.updatedAt = new Date().toISOString();
+      if (config.desiredRunning === true) {
+        config.desiredRunning = false;
+        await this.writeManifest().catch(() => undefined);
+      }
     }
   }
 
@@ -1663,6 +1711,7 @@ export class StudioLocalManager {
         minecraftVersion: config.minecraftVersion,
         ...(config.purpose === "anarchy" ? { purpose: "anarchy" } : {}),
         createdAt: config.createdAt,
+        desiredRunning: config.desiredRunning === true,
       })),
     };
     await atomicWrite(this.manifestPath, `${JSON.stringify(body, null, 2)}\n`);
@@ -1917,6 +1966,9 @@ function validatePersistedBot(input, slots) {
     botId: input.botId,
     ...normalized,
     createdAt,
+    // 期望态随 manifest 持久化；缺字段（旧格式）按 stopped 处理——
+    // manager 重启绝不复活用户已 stop 的 bot。
+    desiredRunning: input?.desiredRunning === true,
     updatedAt: new Date().toISOString(),
     processState: "stopped",
     lastError: null,
