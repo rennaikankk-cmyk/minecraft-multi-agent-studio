@@ -1154,18 +1154,23 @@ export class AutonomousDirector implements AutonomousTaskSource {
         }
       }
     }
-    this.nextGoalAt.set(
-      botId,
-      nowMs + (status === "completed"
-        ? this.options.intervalMs
-        : this.options.failureCooldownMs),
-    );
+    // 任务链衔接（用户产品方向 2026-09-04：完成一个立即接下一个，不卡）：
+    // 完成态只留 1s 微让步（事件循环/dashboard 换气），不再等整个 interval
+    // ——需求重评估是纯函数（零 AI），链间成本可忽略。intervalMs 只管
+    // 空闲轮询节奏；失败态仍走 failureCooldown 防打转。防热环：1s 下限。
+    const yieldMs =
+      status === "completed"
+        ? Math.min(1_000, this.options.intervalMs)
+        : this.options.failureCooldownMs;
+    this.nextGoalAt.set(botId, nowMs + yieldMs);
     const current = this.tasks.get(botId);
     if (!current || current.taskId !== taskId) return;
     this.setTask(botId, {
       ...current,
       status,
-      terminalExpiresAtMs: nowMs + this.options.terminalRetentionMs,
+      // 完成态的终态保留=链衔接窗（1s）——下一个任务立即顶上；失败/中断
+      // 走各自语义（中断分支已提前 return，这里是失败/完成的保留期）。
+      terminalExpiresAtMs: nowMs + (status === "completed" ? yieldMs : this.options.terminalRetentionMs),
     });
   }
 

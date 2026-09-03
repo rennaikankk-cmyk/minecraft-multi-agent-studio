@@ -557,6 +557,41 @@ describe("AutonomousDirector", () => {
     await director.stop();
   });
 
+  it("chains to the next goal within 1s after completion (任务链衔接)", async () => {
+    const record = readyRecord("studio-bot-01");
+    let nowMs = NOW.getTime();
+    const registry = {
+      list: vi.fn(() => [record]),
+      get: vi.fn(() => record),
+      subscribe: vi.fn(() => () => undefined),
+    };
+    // 第一发完成（拿到木镐假设），第二发应立即衔接
+    let call = 0;
+    const planAndDispatch = vi.fn(async () => {
+      call += 1;
+      return call === 1 ? completedPlanResult("collect.block", {}) : noopPlanResult();
+    });
+    const director = new AutonomousDirector({
+      registry,
+      planner: { planAndDispatch },
+      intervalMs: 60_000,
+      goalTimeoutMs: 60_000,
+      failureCooldownMs: 30_000,
+      terminalRetentionMs: 10_000,
+      now: () => new Date(nowMs),
+      randomId: uuidSequence(),
+    });
+    director.start();
+    await flushDirector();
+    expect(planAndDispatch).toHaveBeenCalledTimes(1);
+    // +1.1s：链式衔接（旧实现要等 interval 60s）
+    nowMs += 1_100;
+    registrySubscribeKick(registry, record);
+    await flushDirector();
+    expect(planAndDispatch).toHaveBeenCalledTimes(2);
+    await director.stop();
+  });
+
   it("rotates shelter direction, then suppresses the need after repeated failure", async () => {
     const record = readyRecord("studio-bot-01");
     record.currentStatus!.armorPoints = 20;
