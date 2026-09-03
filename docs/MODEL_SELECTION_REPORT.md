@@ -93,3 +93,21 @@
 - runtime-data/model-selection/controller-ab-{M1,M2}-formal.json
 - 切换五时点：M1 起 06:56:19→ready 07:04:46；M1 停 08:57:20-22；M2 起 08:57:22→ready ~09:12
 - 状态：Spark=mazinb@18300 运行中；ornith15-heretic 容器保留（stopped）；studio 运行中指向 M2；工作树 clean（除本报告）；stash 未动。
+
+---
+
+## 终局修订（2026-09-03，operator 决定）
+
+**MODEL_SELECTION_OPERATOR_DESIGNATED — A/B 判别路径取消，模型就地定格**
+
+- **定格配置**：M2 incumbent `qwen3.8-flash-next` @ `http://192.168.100.2:18300`
+  （vLLM seqs=4 / MTP2），即 .env.local 现值——operator 明示"现在就是这个模型，
+  之后可能换"。
+- 依据：operator 指令（2026-09-03）取代判别性证据路径。上方 BLOCKED 判定及其
+  全部对比数据保留（历史有效）；v2 评测电池（EVAL_CONTRACT v2，5e26364）**不废**，
+  作为未来换型时的即用基线。
+- 对门禁的后果：重跑链作废理由 #1（model selection 未冻结）就此解除；
+  L 链合规重跑（串行 + 生产默认 20s + 零 override）不再被选型门挡。
+- seqs=4 的容量定性（TTFT P50 14.7-53s @ ≥8 并发）：接受为当前约束——
+  10-bot 图景 = 确定性链为主 + 模型分支稀疏 + 公平轮转排队；G5 容量
+  结论以 L 链重跑实测为准。
