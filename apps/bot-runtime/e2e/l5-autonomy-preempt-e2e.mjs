@@ -130,5 +130,5 @@ await withE2EFixture(async (fixture) => {
   console.log("\n========== L5 RESULTS ==========");
   console.log(JSON.stringify(RESULTS, null, 2));
   console.log(`L5: ${RESULTS.passed ? "PASS" : "FAIL"}`);
-  process.exit(RESULTS.passed ? 0 : 2);
+  process.exitCode = RESULTS.passed ? 0 : 2;
 });

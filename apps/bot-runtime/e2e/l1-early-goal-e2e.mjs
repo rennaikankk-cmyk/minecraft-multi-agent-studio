@@ -40,7 +40,7 @@ await withE2EFixture(async (fixture) => {
   });
   const botId = created.body.bot?.botId;
   const username = created.body.bot?.username;
-  if (!botId) { log("FATAL: create bot failed"); process.exit(1); }
+  if (!botId) { log("FATAL: create bot failed"); process.exitCode = 1; return; }
   log(`bot ${username} created (${botId}) — NOT waiting for ready`);
 
   // ===== 2. 立即提交 Goal（bot 刚创建，肯定未 ready）=====
@@ -108,7 +108,7 @@ await withE2EFixture(async (fixture) => {
   console.log("\n========== L1 RESULTS ==========");
   console.log(JSON.stringify({ startedAt, endedAt, fixturePort, botId, username, goalId: requestId, ...RESULTS, passed }, null, 2));
   console.log(`L1: ${passed ? "PASS" : "FAIL"}`);
-  process.exit(passed ? 0 : 2);
+  process.exitCode = passed ? 0 : 2;
 });
 
 async function countBotCrashes() {

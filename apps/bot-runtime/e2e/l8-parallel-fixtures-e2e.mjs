@@ -80,7 +80,7 @@ try {
   const probeScript = `
     import('./fixture-manager.mjs').then(async (m) => {
       console.log('__RECLAIM__' + JSON.stringify(await m.reclaimStaleFixtures()));
-    }).catch((e) => { console.error('PROBE-ERR ' + e.message); process.exit(1); });
+    }).catch((e) => { console.error('PROBE-ERR ' + e.message); process.exitCode = 1; });
   `;
   const probe = await sh(
     "node",

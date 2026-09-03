@@ -205,5 +205,5 @@ await withE2EFixture(async (fixture) => {
   const l3p = RESULTS.L3?.passed ?? false;
   const l4p = RESULTS.L4?.passed ?? false;
   console.log(`L2: ${l2p ? "PASS" : "FAIL"} | L3: ${l3p ? "PASS" : "FAIL"} | L4: ${l4p ? "PASS" : "FAIL"}`);
-  process.exit(l2p && l3p && l4p ? 0 : 2);
+  process.exitCode = l2p && l3p && l4p ? 0 : 2;
 });

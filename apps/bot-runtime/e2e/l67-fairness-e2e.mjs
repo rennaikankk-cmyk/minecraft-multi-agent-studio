@@ -59,7 +59,7 @@ await withE2EFixture(async (fixture) => {
       body: JSON.stringify({ schemaVersion: "1.0", username: `${LABEL}B${i}${Date.now().toString(36).slice(-4)}`.slice(0, 16), serverHost: "127.0.0.1", serverPort: fixture.port, minecraftVersion: "auto" }),
     });
     const botId = created.body.bot?.botId;
-    if (!botId) { log(`FATAL: bot ${i} create failed`); process.exit(1); }
+    if (!botId) { log(`FATAL: bot ${i} create failed`); process.exitCode = 1; return; }
     bots.push(botId);
     RESULTS.perBot[botId] = { completed: 0, failed: 0, submitted: 0 };
   }
@@ -155,5 +155,5 @@ await withE2EFixture(async (fixture) => {
   for (const [botId, c] of Object.entries(RESULTS.perBot)) perBotShort[botId.slice(-6)] = c;
   console.log(JSON.stringify({ ...RESULTS, perBot: perBotShort }, null, 2));
   console.log(`${LABEL}: ${RESULTS.passed ? "PASS" : "FAIL"}`);
-  process.exit(RESULTS.passed ? 0 : 2);
+  process.exitCode = RESULTS.passed ? 0 : 2;
 });
