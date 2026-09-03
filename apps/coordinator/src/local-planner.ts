@@ -43,6 +43,8 @@ import {
   type TaskExecutionRecord,
 } from "@minecraft-studio/task-system";
 import { z } from "zod";
+import { appendFileSync, mkdirSync, openSync, statSync } from "node:fs";
+import { dirname } from "node:path";
 
 import type { BotRegistry, BotRegistryRecord } from "./bot-registry.js";
 import { InMemoryGoalLifecycleStore } from "./in-memory-goal-store.js";
@@ -904,6 +906,40 @@ export class CoordinatorLocalPlanner {
     const deadlineMs = startedAt.getTime() + request.timeoutMs;
     this.assertWithinDeadline(deadlineMs, request.signal);
     const initialRecord = this.requireAvailableBot(request.botId);
+    // S-12：回放语料采集——env 门控 STUDIO_REPLAY_CAPTURE=1，独立 JSONL，默认关；
+    // 协调器日志零 goal 原文（隐私契约不变）；采集失败绝不影响规划。
+    const s12Capture = openReplayCapture();
+    try {
+      const result = await this.planAndDispatchInner(request, startedAt, deadlineMs, initialRecord);
+      s12Capture?.({
+        at: new Date().toISOString(), traceId: request.traceId, taskId: request.taskId,
+        botId: request.botId, operatorGoal: request.operatorGoal.slice(0, 500),
+        skillCatalogSequence: initialRecord.skillCatalog?.sequence ?? null,
+        statusObservedAt: initialRecord.currentStatus?.observedAt ?? null,
+        outcome: result.action, reasonCode: result.reasonCode ?? null,
+        durationMs: this.validNow().getTime() - startedAt.getTime(),
+      });
+      return result;
+    } catch (cause) {
+      s12Capture?.({
+        at: new Date().toISOString(), traceId: request.traceId, taskId: request.taskId,
+        botId: request.botId, operatorGoal: request.operatorGoal.slice(0, 500),
+        skillCatalogSequence: initialRecord.skillCatalog?.sequence ?? null,
+        statusObservedAt: initialRecord.currentStatus?.observedAt ?? null,
+        outcome: "error",
+        errorCode: cause instanceof LocalPlannerError ? cause.code : "PLANNER_FAILED",
+        durationMs: this.validNow().getTime() - startedAt.getTime(),
+      });
+      throw cause;
+    }
+  }
+
+  private async planAndDispatchInner(
+    request: LocalPlanRequest,
+    startedAt: Date,
+    deadlineMs: number,
+    initialRecord: ReturnType<CoordinatorLocalPlanner["requireAvailableBot"]>,
+  ): Promise<LocalPlanResult> {
     let claim: PlannerExecutionClaim | null = null;
     try {
       const execution = await this.beginTaskExecution(
@@ -4709,4 +4745,31 @@ function injectTrustedServerProfile(
     output[key] = injectTrustedServerProfile(value, serverProfileId);
   }
   return output;
+}
+
+// ---- S-12 回放语料采集（env 门控 STUDIO_REPLAY_CAPTURE=1；有界 8MB；失败静默）----
+const REPLAY_CAPTURE_PATH = "runtime-data/replay-inputs.jsonl";
+const REPLAY_CAPTURE_MAX_BYTES = 8 * 1024 * 1024;
+let replayCaptureEnabled: boolean | null = null;
+
+function openReplayCapture(): ((entry: Record<string, unknown>) => void) | null {
+  if (replayCaptureEnabled === null) {
+    replayCaptureEnabled = process.env.STUDIO_REPLAY_CAPTURE === "1";
+  }
+  if (!replayCaptureEnabled) return null;
+  try {
+    const stat = statSync(REPLAY_CAPTURE_PATH);
+    if (stat.size >= REPLAY_CAPTURE_MAX_BYTES) return null;
+  } catch {
+    // 不存在：首次采集
+  }
+  try {
+    mkdirSync(dirname(REPLAY_CAPTURE_PATH), { recursive: true });
+    const fd = openSync(REPLAY_CAPTURE_PATH, "a");
+    return (entry) => {
+      try { appendFileSync(fd, JSON.stringify(entry) + "\n"); } catch { /* 采集失败静默 */ }
+    };
+  } catch {
+    return null;
+  }
 }
