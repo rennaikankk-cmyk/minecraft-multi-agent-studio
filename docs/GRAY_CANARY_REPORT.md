@@ -62,6 +62,30 @@
 4. 干净退出：EXPECTED_STOP、BOT_CRASH delta=0。
 5. 全程 kill switch 演练一次成功（停后 5s 内无新动作）。
 
+## P2：simpfun Forge 判定（A 意外配置 / B 有意模组服）——待决
+
+**已知事实**（全部有证据）：B 裸探针 PRE_LOGIN 2.2s kick，原文含 FML/Forge
+client-mods 要求（runtime-data/canary-evidence/2026-09-03T05-41-34-685Z）；
+SLP 屏蔽；C Runtime 因 SLP 屏蔽→版本自动探测失败（32s unknown，从未到达
+握手——P1 捕获代码已就绪但无触发条件）；P1 复验一次（纪律内）确认该缺口。
+
+**判定所需输入（用户提供其一即可）**：
+1. simpfun 控制台：服务端类型/核心（Forge/NeoForge 版本）、mod 列表、
+   2026-09-03 05:42:50 与 06:25:48 前后的服务端日志；
+2. 或官方客户端（同网络）登录一次 simpfun 的结果（能否进服、要求的 modpack）。
+
+**分支 A（意外开成 Forge/mod 服）**：
+- 控制台改为 Vanilla/Paper（与 Mineflayer 兼容的版本，记录确切版本号）；
+- 建立新 Server Profile revision（新 minecraftVersion + 探测事实）；
+- 官方客户端完成一次登录控制测试；再跑裸探针与 Runtime（新矩阵）。
+
+**分支 B（有意 Forge 模组服）**：
+- Forge 支持拆成独立兼容性工作流（minecraft-protocol-forge 评估在 P2 完成后，
+  现在不引入）；
+- 先取准确 Minecraft 版本、Forge/FML 版本、mod 列表、服务端日志；
+- 官方客户端 + 完整相同 modpack 完成控制测试；
+- 可行性评估后再决定是否开发——**不阻塞 luv 主线的 Vanilla/Paper 灰度**。
+
 ## 复现命令
 
 ```bash
