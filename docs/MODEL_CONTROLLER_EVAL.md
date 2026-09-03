@@ -8,9 +8,9 @@
 
 | ID | 候选 | 部署 | 回放 | 隔离服 | 灰度 |
 |---|---|---|---|---|---|
-| M1 | Ornith-1.5-35B-A3B-Heretic-GB10-NVFP4（spele1100） | 权重在盘未验证 | NOT STARTED | NOT STARTED | — |
+| M1 | Ornith-1.5-35B-A3B-Heretic-GB10-NVFP4（spele1100） | **已部署验证（07:04:46Z）** | **DONE（formal）** | **DONE（10-goal 电池）** | — |
 | M1b | ornith-ai/Ornith-1.5-35B-A3B-NVFP4（官方基线） | NOT STARTED | NOT STARTED | NOT STARTED | — |
-| M2 | qwen3.8-flash-next（mazinb incumbent，在线） | **RUNNING** | NOT STARTED | NOT STARTED | incumbent |
+| M2 | qwen3.8-flash-next（mazinb incumbent，在线） | **RUNNING** | **DONE（formal 2026-09-03）** | **DONE（10-goal 电池）** | incumbent |
 | M3 | nvidia/Qwen3.6-35B-A3B-NVFP4 | NOT STARTED | NOT STARTED | NOT STARTED | — |
 | M4 | Qwen3-Coder-30B-A3B-Instruct NVFP4（社区候选已审计/备选自量化） | NOT STARTED | NOT STARTED | NOT STARTED | — |
 
@@ -30,13 +30,13 @@
 
 ## 测试矩阵执行状态
 
-- [ ] S-7 replay corpus ≥200（当前 11 条真实自主决策；待 S-12 输入记录开启后扩充——如实不足，不注水）
-- [ ] S-8 离线回放 4 模型×3 轮
-- [ ] S-9 隔离服 30 任务×4 模型
-- [ ] S-10 拒绝测试（语料已建：eval/refusal/minecraft-game-commands.jsonl，104 条）
+- [~] S-7 replay corpus ≥200（当前 11 条；两模型 formal 已各跑一轮；扩容依赖 S-12——如实不足，不注水）
+- [x] S-8 离线回放（M1/M2 各 1 轮 formal：JSON/工具名双 100%；4 模型×3 轮待候选扩充与语料扩容）
+- [~] S-9 隔离服任务（M1/M2 各 10-goal 电池完成；30 任务×4 模型与判别性电池重设计待做）
+- [x] S-10 拒绝测试 M1/M2（80 EXECUTE 全过零拒绝；M3/M4 未部署）
 - [ ] S-11 真实 5/10 bot 调度负载
 - [ ] S-12 指标采集管线
-- [ ] S-13 判定（见下方规则）
+- [~] S-13 判定：**MODEL_SELECTION_BLOCKED（判别性证据不足，2026-09-03）**——详见 docs/MODEL_SELECTION_REPORT.md；硬门禁双过、延迟分裂、样本不足，不强行选赢家
 
 ## 判定规则（固化，不得临场修改）
 
