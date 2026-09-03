@@ -37,7 +37,8 @@
     "protocolVersion": null,
     "serverKind": null,
     "verdict": "BLOCKED_INCOMPATIBLE_MOD_LOADER",
-    "notes": "2026-09-03 P0 固化：verdict=BLOCKED_INCOMPATIBLE_MOD_LOADER（B 裸探针 PRE_LOGIN FML kick 证据在 runtime-data/canary-evidence/；C Runtime 复现闭环=P1 修复中）。P2 待判定：simpfun 是意外开成 Forge（A→换 Vanilla/Paper+新 Profile revision）还是有意 Forge 服（B→独立兼容工作流，不阻塞 luv 主线）。原 kick 原文与矩阵细节见前次记录（已归档）。"
+    "notes": "2026-09-03 P0 固化：verdict=BLOCKED_INCOMPATIBLE_MOD_LOADER（B 裸探针 PRE_LOGIN FML kick 证据在 runtime-data/canary-evidence/；C Runtime 复现闭环=P1 修复中）。P2 待判定：simpfun 是意外开成 Forge（A→换 Vanilla/Paper+新 Profile revision）还是有意 Forge 服（B→独立兼容工作流，不阻塞 luv 主线）。原 kick 原文与矩阵细节见前次记录（已归档）。",
+    "recheck": "2026-09-03T12:35Z（用户指示重试）：B 探针结果与 05:42 完全一致——仍为 Forge/FML 服（同 kick 原文）。控制台若已改类型则未生效。"
   },
   "connectHost": "43.248.103.155"
 }
