@@ -13,7 +13,9 @@
     "enabled": true,
     "stance": "preserve-life",
     "whitelist": {
-      "usernames": ["StudioGray01"],
+      "usernames": [
+        "StudioGray01"
+      ],
       "uuids": []
     }
   },
@@ -34,6 +36,8 @@
     "minecraftVersion": "26.1.2",
     "protocolVersion": 775,
     "serverKind": "Paper",
-    "notes": "SLP blocked by server (anarchy server anti-probe). TCP reachable. Bot login is the presence truth (confirmed in prior sessions). Version/protocol from prior verified E0 SLP before protection was enabled, and bot cross-version compatibility confirmed (1.21.11=774 accepted by 775 server)."
-  }
+    "notes": "SLP blocked by server (anarchy server anti-probe). TCP reachable. Bot login is the presence truth (confirmed in prior sessions). Version/protocol from prior verified E0 SLP before protection was enabled, and bot cross-version compatibility confirmed (1.21.11=774 accepted by 775 server). 2026-09-03 补：connectHost=202.189.13.131（DoH 真实 IP，绕本机 fake-ip DNS）；A=用户确认可登录；B/C 矩阵复测中。",
+    "matrixA": "USER_CONFIRMED_SUCCESS 2026-09-03（官方客户端同网络可登录）"
+  },
+  "connectHost": "202.189.13.131"
 }
