@@ -5822,10 +5822,25 @@ export class MineflayerBotClient implements BotClient {
     // v0.1 修复（2026-09-03 实测）：spawn 第一 tick bot 常在半空且 chunk
     // 未加载完——goto 17ms 内即拒绝。拒绝 ≠ 放弃：2s 后重试（等 chunk 追上），
     // 三试仍败才落原始疾跑兜底（此前兜底被 .catch 吞掉永远不跑）。
+    // v0.2 修复（2026-09-04 实测）：逃逸必须走 movement 租约仲裁（ESCAPE=20
+    // 优先级，天然高于 TASK_NAVIGATION=40）——此前裸调 pathfinder.goto 绕过
+    // arbiter，2s 重试循环把 autonomy 任务的运动逐个顶掉（SKILL_CANCELLED 连发，
+    // tasks=0 的表象）。租约被更高级持有（EMERGENCY/COMBAT）时让位跳过。
+    const escapeLease = this.movementController.acquire({
+      owner: "spawn-escape",
+      priority: MOVEMENT_PRIORITIES.ESCAPE,
+      goal: { x: targetX, y: Math.floor(pos.y), z: targetZ },
+    });
+    if (escapeLease === null) {
+      escapeLog("bot_runtime_spawn_escape_skipped", { reason: "MOVEMENT_BUSY" });
+      this.spawnEscapeActive = false;
+      return;
+    }
     const settle = (via: string) => {
       this.spawnEscapeActive = false;
       this.bot.setControlState("sprint", false);
       this.bot.setControlState("jump", false);
+      escapeLease.release("completed");
       const at = this.bot.entity?.position;
       escapeLog("bot_runtime_spawn_escape_settled", {
         via,
