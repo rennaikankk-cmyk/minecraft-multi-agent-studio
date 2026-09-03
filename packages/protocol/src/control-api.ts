@@ -389,6 +389,7 @@ export const controlApiErrorCodeSchema = z.enum([
   "AI_QUEUE_FULL",
   "GOAL_TIMEOUT",
   "GOAL_REJECTED",
+  "GOAL_STORAGE_DEGRADED",
   "INTERNAL_ERROR",
 ]);
 

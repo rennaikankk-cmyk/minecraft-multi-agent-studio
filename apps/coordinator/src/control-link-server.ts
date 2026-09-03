@@ -1298,6 +1298,28 @@ export class ControlLinkServer {
     // 不调 goalStore.begin()（不产生 running task/lease）。ready 后从队列取出
     // 走正常 begin→execute 流程。协调器重启后 initialize() 恢复未过期条目。
     if (!this.options.registry.goalExecutionReady(request.payload.botId)) {
+      // 原子性审计 Fix B：磁盘降级后的 accepted 是"假 202"——持久化承诺不
+      // 存在（内存队列，重启即丢）。降级时必须拒绝（503 语义），不是受理。
+      if (this.durableWaitingQueue.diskDegraded) {
+        for (const responder of pending.responders.values()) {
+          this.sendGoalFailure(
+            responder.session,
+            request,
+            "CONTROL_LINK_STORAGE_DEGRADED",
+            responder.requestMessageId,
+          );
+        }
+        if (this.pendingGoals.get(request.payload.operationId) === pending) {
+          this.pendingGoals.delete(request.payload.operationId);
+        }
+        safeLog(this.options.logger, "error", "coordinator_goal_storage_degraded_rejected", {
+          traceId: request.payload.operationId,
+          botId: request.payload.botId,
+        });
+        return;
+      }
+      // 就绪翻沿复路（此前 claim 过又回到未就绪）：清掉旧 claim 再重新排队。
+      this.durableWaitingQueue.completeClaim(request.payload.operationId);
       const enqueueResult = this.durableWaitingQueue.enqueue({
         operationId: request.payload.operationId,
         botId: request.payload.botId,
@@ -1344,6 +1366,9 @@ export class ControlLinkServer {
     let parked = false;
     try {
       const begin = await this.options.goalStore!.begin(request);
+      // 原子性审计 Fix A：begin 已定论（lease/result/busy/error 任一），
+      // durable 队列里的 claimed 条目使命完成，此刻删除——崩溃窗口闭合。
+      this.durableWaitingQueue.completeClaim(request.payload.operationId);
       this.applyGoalSnapshots([begin.snapshot], validNow(this.now()));
       if (begin.kind === "busy") {
         for (const responder of pending.responders.values()) {
@@ -1419,23 +1444,61 @@ export class ControlLinkServer {
     let assignmentLeaseId: string | null = null;
     let timedOut = false;
     try {
-      assignmentLeaseId = await this.acquireExecutionAssignment(request);
-      if (timedOut || controller.signal.aborted) {
-        throw new Error(timedOut ? "goal_timeout" : "goal_aborted");
+      // 2026-09-03 L5 实测：抢占 autonomy 的瞬间（abort → 旧 lease release →
+      // registry 记录/租约校验短暂竞态），acquireExecutionAssignment 的
+      // assignment.acquire 或 planAndDispatch 都会在几毫秒内抛出可用性类
+      // 错误（ASSIGNMENT_PREFERRED_BOT_UNAVAILABLE / requireAvailableBot /
+      // lease verifier）。对这类瞬时失败做有界重试——acquire+dispatch 整段
+      // 重来；其余错误不重试。
+      let planResult: Awaited<
+        ReturnType<CoordinatorLocalPlanner["planAndDispatch"]>
+      > | null = null;
+      for (let dispatchAttempt = 0; dispatchAttempt < 3; dispatchAttempt += 1) {
+        try {
+          if (assignmentLeaseId !== null) {
+            this.releaseExecutionAssignment(assignmentLeaseId);
+            assignmentLeaseId = null;
+          }
+          assignmentLeaseId = await this.acquireExecutionAssignment(request);
+          if (timedOut || controller.signal.aborted) {
+            throw new Error(timedOut ? "goal_timeout" : "goal_aborted");
+          }
+          planResult = await this.options.goalPlanner!.planAndDispatch({
+            requestId: request.payload.operationId,
+            traceId: request.payload.operationId,
+            taskId: request.payload.taskId,
+            botId: request.payload.botId,
+            operatorGoal: request.payload.operatorGoal,
+            timeoutMs: request.payload.timeoutMs,
+            assignmentLeaseOwner: lease.leaseOwner,
+            signal: controller.signal,
+          });
+          break;
+        } catch (dispatchCause) {
+          const transientAvailability =
+            dispatchCause instanceof LocalPlannerError &&
+            (dispatchCause.code === "PLANNER_BOT_UNAVAILABLE" ||
+              dispatchCause.code === "PLANNER_BOT_BUSY");
+          if (!transientAvailability || dispatchAttempt === 2) throw dispatchCause;
+          safeLog(
+            this.options.logger,
+            "warn",
+            "coordinator_control_link_goal_retry",
+            {
+              traceId: request.payload.operationId,
+              taskId: request.payload.taskId,
+              botId: request.payload.botId,
+              attempt: dispatchAttempt + 1,
+              code: dispatchCause.code,
+            },
+          );
+          await sleepMs(750);
+        }
       }
-      const planResult = await this.options.goalPlanner!.planAndDispatch({
-        requestId: request.payload.operationId,
-        traceId: request.payload.operationId,
-        taskId: request.payload.taskId,
-        botId: request.payload.botId,
-        operatorGoal: request.payload.operatorGoal,
-        timeoutMs: request.payload.timeoutMs,
-        assignmentLeaseOwner: lease.leaseOwner,
-        signal: controller.signal,
-      });
       if (timedOut || controller.signal.aborted) {
         throw new Error("goal_timeout");
       }
+      if (planResult === null) throw new Error("goal_dispatch_unreachable");
       const result = projectGoalDispatchResult(request.payload, planResult);
       const terminal = await this.options.goalStore!.recordResult(lease, result);
       this.applyGoalSnapshots([terminal], validNow(this.now()));
@@ -1584,7 +1647,9 @@ export class ControlLinkServer {
    */
   private resumeWaitingGoals(botId: string): void {
     if (this.stopped) return;
-    const entry = this.durableWaitingQueue.dequeueForBot(botId);
+    // 原子性审计 Fix A：CLAIM 而非删除——begin 落地前崩溃，initialize()
+    // 会把 claimed 重置回 waiting，goal 不丢（重执行而非丢失）。
+    const entry = this.durableWaitingQueue.claimForBot(botId);
     if (entry === null) return;
     safeLog(this.options.logger, "info", "coordinator_goal_durable_resumed", {
       traceId: entry.operationId,
@@ -1839,15 +1904,30 @@ export class ControlLinkServer {
     await this.options.autonomousTaskSource?.requestManualControl?.(
       request.payload.botId,
     );
-    const record = this.options.registry.get(
-      request.payload.botId,
-      validNow(this.now()),
-    );
-    if (
-      !record ||
-      record.connectionState !== "online" ||
-      record.currentStatus === null
-    ) {
+    // 2026-09-03 L5 实测：抢占 autonomy 的瞬间，被取消 skill 的 runtime 心跳
+    // 尚未恢复，registry 记录会短暂过期/缺 status（BOT_UNAVAILABLE 误报 +
+    // RUNTIME_LINK_RESULT_NOT_PENDING 佐证）。瞬时判死是误报——短重试等记录回来。
+    let record: BotRegistryRecord | null = null;
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      try {
+        const candidate = this.options.registry.get(
+          request.payload.botId,
+          validNow(this.now()),
+        );
+        if (
+          candidate &&
+          candidate.connectionState === "online" &&
+          candidate.currentStatus !== null
+        ) {
+          record = candidate;
+          break;
+        }
+      } catch {
+        // registry 记录尚未恢复：继续重试
+      }
+      await sleepMs(500);
+    }
+    if (record === null) {
       throw new LocalPlannerError(
         "PLANNER_BOT_UNAVAILABLE",
         "Target Bot is not currently available for a normal task.",
@@ -1857,7 +1937,7 @@ export class ControlLinkServer {
       return assignment.acquire({
         taskId: request.payload.taskId,
         serverProfileId: record.serverProfileId,
-        dimension: record.currentStatus.position.dimension,
+        dimension: record.currentStatus?.position.dimension ?? "overworld",
         requiredSkills: [],
         preferredBotId: request.payload.botId,
         leaseTtlMs: request.payload.timeoutMs,
@@ -2471,6 +2551,10 @@ function goalTaskActive(status: PublicCurrentTask["status"]): boolean {
     status === "waiting" ||
     status === "paused"
   );
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function selectCurrentTask(

@@ -943,6 +943,12 @@ export class ControlApiServer {
       this.writeError(response, 503, requestId, "AI_UNAVAILABLE", "Local AI Hub is unavailable.");
       return;
     }
+    // 原子性审计 Fix B：协调器磁盘降级时拒绝（不是假 202）——503 让提交方
+    // 稍后重试，而不是以为 goal 已被持久化受理。
+    if (code === "CONTROL_LINK_STORAGE_DEGRADED") {
+      this.writeError(response, 503, requestId, "GOAL_STORAGE_DEGRADED", "Coordinator cannot durably accept the goal right now.");
+      return;
+    }
     if (code === "AI_QUEUE_FULL" || code === "CONTROL_LINK_BACKPRESSURE") {
       this.writeError(response, 429, requestId, "AI_QUEUE_FULL", "Local AI request queue is full.");
       return;

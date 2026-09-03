@@ -757,6 +757,16 @@ export class AutonomousDirector implements AutonomousTaskSource {
         goal: goal.key,
         code: cause instanceof LocalPlannerError ? cause.code : "DIRECTOR_FAILED",
         error: boundedError(cause),
+        // 抢占证据链：planner 包装会吞掉原始 abort 消息，这里直接暴露
+        // AbortController 的 reason（manual_control_requested / director_shutdown）。
+        ...(controller.signal.aborted
+          ? {
+              abortReason:
+                controller.signal.reason instanceof Error
+                  ? controller.signal.reason.message
+                  : String(controller.signal.reason ?? "abort"),
+            }
+          : {}),
         ...(keepGoal ? { recovery: "retry_same_goal" } : {}),
       });
     }

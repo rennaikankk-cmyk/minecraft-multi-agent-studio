@@ -155,4 +155,57 @@ describe("DurableWaitingGoalQueue", () => {
     const files = fs.readdirSync(dir).filter((f: string) => f.startsWith("wq.json.corrupt-"));
     expect(files.length).toBe(1);
   });
+
+
+  // ---- 原子性审计（2026-09-03）：CLAIMED 态闭环 ----
+
+  it("claimForBot 标记不删除；completeClaim 才删除", () => {
+    const q = makeQueue();
+    q.enqueue(makeGoal());
+    const claimed = q.claimForBot("bot-1");
+    expect(claimed).not.toBeNull();
+    expect(q.size).toBe(1); // 仍在队列（claimed）
+    // claimed 条目不会被再次 claim/dequeue
+    expect(q.claimForBot("bot-1")).toBeNull();
+    expect(q.dequeueForBot("bot-1")).toBeNull();
+    q.completeClaim("op-1");
+    expect(q.size).toBe(0);
+    // 幂等：非 claimed 的 completeClaim 是 no-op
+    expect(() => q.completeClaim("op-1")).not.toThrow();
+  });
+
+  it("claim 后崩溃（重启恢复）→ claimed 重置回 waiting，goal 不丢", () => {
+    const q1 = makeQueue();
+    q1.enqueue(makeGoal());
+    q1.claimForBot("bot-1");
+    // 模拟 claim→begin 之间崩溃：新实例 initialize()
+    const q2 = makeQueue();
+    const result = q2.initialize();
+    expect(result.recovered).toBe(1);
+    // 恢复后可再次 claim（claimed 态被清除）
+    const reClaimed = q2.claimForBot("bot-1");
+    expect(reClaimed).not.toBeNull();
+    expect(reClaimed!.claimedAtMs).toBeDefined();
+  });
+
+  it("claim 后 completeClaim（begin 落地）→ 重启后不再恢复", () => {
+    const q1 = makeQueue();
+    q1.enqueue(makeGoal());
+    q1.claimForBot("bot-1");
+    q1.completeClaim("op-1");
+    const q2 = makeQueue();
+    const result = q2.initialize();
+    expect(result.recovered).toBe(0);
+    expect(q2.size).toBe(0);
+  });
+
+  it("FIFO：claim 只取最早的未认领条目", () => {
+    const q = makeQueue({ now: () => 0 });
+    q.enqueue(makeGoal("bot-1", "op-1"));
+    q.enqueue(makeGoal("bot-1", "op-2"));
+    const first = q.claimForBot("bot-1");
+    expect(first!.operationId).toBe("op-1");
+    const second = q.claimForBot("bot-1");
+    expect(second!.operationId).toBe("op-2");
+  });
 });

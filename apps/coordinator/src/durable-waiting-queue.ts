@@ -33,6 +33,13 @@ export interface DurableWaitingGoal {
   expiresAtMs: number;
   /** 入队时间。 */
   enqueuedAtMs: number;
+  /**
+   * 2026-09-03 原子性审计：dequeue→begin 之间崩溃会把 goal 丢掉（条目已从
+   * 磁盘删除但 store 还没有 running 记录）。CLAIMED 态补上这一段：
+   * claimForBot 只标记不删除；begin 落地后 completeClaim 才真正删除；
+   * initialize() 把遗留的 claimed 条目重置回 waiting（崩溃恢复重执行）。
+   */
+  claimedAtMs?: number;
 }
 
 export interface DurableWaitingQueueOptions {
@@ -79,6 +86,8 @@ export class DurableWaitingGoalQueue {
           expired += 1;
           continue;
         }
+        // 崩溃恢复：遗留的 claimed 条目（claim 后、begin 前崩溃）回到 waiting。
+        delete entry.claimedAtMs;
         this.entries.set(entry.operationId, entry);
       }
       this.persist();
@@ -107,12 +116,45 @@ export class DurableWaitingGoalQueue {
     return { accepted: true };
   }
 
+  /**
+   * CLAIMED（Phase 1b 原子性）：标记指定 bot 的最早未认领条目为 claimed
+   * （持久化但不删除）。begin 落地后调 completeClaim 删除。崩溃恢复时
+   * initialize() 会把 claimed 重置回 waiting——dequeue→begin 窗口不再丢 goal。
+   */
+  claimForBot(botId: string): DurableWaitingGoal | null {
+    const nowMs = this.now();
+    let earliest: DurableWaitingGoal | null = null;
+    for (const entry of this.entries.values()) {
+      if (entry.botId !== botId || entry.claimedAtMs !== undefined) continue;
+      if (entry.expiresAtMs <= nowMs) {
+        this.entries.delete(entry.operationId);
+        continue;
+      }
+      if (earliest === null || entry.enqueuedAtMs < earliest.enqueuedAtMs) {
+        earliest = entry;
+      }
+    }
+    if (earliest !== null) {
+      earliest.claimedAtMs = this.now();
+      this.persist();
+    }
+    return earliest;
+  }
+
+  /** begin 已落地（或已定论）：claimed 条目真正删除。非 claimed 时为 no-op。 */
+  completeClaim(operationId: string): void {
+    const entry = this.entries.get(operationId);
+    if (entry === undefined || entry.claimedAtMs === undefined) return;
+    this.entries.delete(operationId);
+    this.persist();
+  }
+
   /** 取出（并删除）指定 bot 的最早未过期条目。无则返回 null。 */
   dequeueForBot(botId: string): DurableWaitingGoal | null {
     const nowMs = this.now();
     let earliest: DurableWaitingGoal | null = null;
     for (const entry of this.entries.values()) {
-      if (entry.botId !== botId) continue;
+      if (entry.botId !== botId || entry.claimedAtMs !== undefined) continue;
       if (entry.expiresAtMs <= nowMs) {
         this.entries.delete(entry.operationId);
         continue;

@@ -321,6 +321,8 @@ export const controlLinkGoalErrorCodeSchema = z.enum([
   "CONTROL_LINK_INTERNAL_ERROR",
   // Round 6.6 生命周期：等待窗到期是诚实终态，不是注册期永久拒绝。
   "GOAL_EXPIRED_WAITING_FOR_BOT",
+  // 2026-09-03 原子性审计：磁盘降级时不能假装受理（假 202）——拒绝。
+  "CONTROL_LINK_STORAGE_DEGRADED",
 ]);
 
 const goalResponseIdentityShape = {
