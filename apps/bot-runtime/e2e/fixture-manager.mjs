@@ -86,8 +86,27 @@ export async function createE2EFixture() {
   const volumeName = `studio-e2e-world-${runId}`;
 
   const cleanup = async () => {
-    await docker(["rm", "-f", containerName], 60_000).catch(() => undefined);
-    await docker(["volume", "rm", "-f", volumeName], 30_000).catch(() => undefined);
+    // 2026-09-03 实测：docker rm 偶发失败被静默吞掉 → 脚本 exit 0 但容器泄漏。
+    // 清理必须重试，最终失败要大声报警（stderr），让"零残留"验收能看见漏网容器。
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const rm = await docker(["rm", "-f", containerName], 90_000).then(
+        () => true,
+        () => false,
+      );
+      if (rm) break;
+      if (attempt === 3) {
+        console.error(`[fixture-manager] CLEANUP FAILED: container ${containerName} still exists (run ${runId}) — remove it manually`);
+      } else {
+        await sleep(3_000);
+      }
+    }
+    const volumeGone = await docker(["volume", "rm", "-f", volumeName], 30_000).then(
+      () => true,
+      () => false,
+    );
+    if (!volumeGone) {
+      console.error(`[fixture-manager] CLEANUP FAILED: volume ${volumeName} still exists (run ${runId}) — remove it manually`);
+    }
   };
 
   await docker(["volume", "create", volumeName], 15_000);
