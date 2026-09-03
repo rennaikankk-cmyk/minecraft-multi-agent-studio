@@ -1,11 +1,11 @@
 {
   "schemaVersion": "1.0",
-  "id": "simpfun-gray",
+  "id": "luv-anarchy",
   "botId": "studio-bot-01",
   "purpose": "anarchy",
   "networkScope": "public",
-  "host": "play.simpfun.cn",
-  "port": 16377,
+  "host": "luv.mc6.cn",
+  "port": 22936,
   "minecraftVersion": "auto",
   "username": "StudioGray01",
   "auth": "offline",
@@ -27,12 +27,13 @@
     "maxDelayMs": 30000
   },
   "_profileStatus": {
-    "probedAt": "2026-09-03T08:00:00Z",
+    "probedAt": "2026-09-03T09:00:00Z",
     "tcpReachable": true,
     "slpResponsive": false,
-    "minecraftVersion": null,
-    "protocolVersion": null,
-    "serverKind": null,
-    "notes": "TCP connects but SLP times out. DNS resolves to 198.18.0.23 (proxy/VPN range). simpfun.cn platform may require server startup or is paused. Mark BLOCKED until SLP responsive."
+    "slpBlockedByServer": true,
+    "minecraftVersion": "26.1.2",
+    "protocolVersion": 775,
+    "serverKind": "Paper",
+    "notes": "SLP blocked by server (anarchy server anti-probe). TCP reachable. Bot login is the presence truth (confirmed in prior sessions). Version/protocol from prior verified E0 SLP before protection was enabled, and bot cross-version compatibility confirmed (1.21.11=774 accepted by 775 server)."
   }
 }
