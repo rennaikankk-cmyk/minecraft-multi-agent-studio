@@ -195,6 +195,30 @@ async function phaseBareProbe() {
   return { outcome, kicked: kicked ?? null };
 }
 
+// ---------- Phase V: 版本发现阶梯（接入新服自适应版本；一次性→profile 固化） ----------
+async function phaseVersionDiscovery() {
+  const { execFile } = await import("node:child_process");
+  const args = [
+    "eval/fingerprint/discover-version.mjs",
+    "--host", profile.host,
+    "--port", String(profile.port),
+    "--cooldown", process.env.CANARY_DISCOVER_COOLDOWN_MS ?? "20000",
+    "--observe", "15000",
+    ...(profile.connectHost !== undefined ? ["--ip", profile.connectHost] : []),
+  ];
+  const result = await new Promise((resolve) => {
+    execFile("node", args, { timeout: 12 * 60_000, windowsHide: true, cwd: ROOT }, (err, stdout) => {
+      resolve({ exitCode: err ? (err.status ?? -1) : 0, output: (stdout ?? "").slice(-1500) });
+    });
+  });
+  const m = result.output.match(/"verdict": "([^"]+)"/);
+  const vm = result.output.match(/"version": "([^"]+)"/);
+  facts.discoveredVersion = vm?.[1] ?? null;
+  facts.discoveryVerdict = m?.[1] ?? "UNKNOWN";
+  log("version discovery: " + (m?.[1] ?? "unknown") + " version=" + (vm?.[1] ?? "?") + " (exit " + result.exitCode + ")");
+  return { verdict: m?.[1] ?? null, version: vm?.[1] ?? null, exitCode: result.exitCode };
+}
+
 // ---------- Phase C: 完整 Studio Runtime ----------
 async function phaseStudioRuntime() {
   async function api(base, pathname, init) {
