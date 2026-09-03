@@ -228,6 +228,39 @@ describe("assessSurvivalNeeds", () => {
     const second = assess({ inventory: [], foodLevel: 20 });
     expect(first.map(({ key }) => key)).toEqual(second.map(({ key }) => key));
   });
+
+  it("emits RECON_PATROL only when a corridor is supplied and food allows travel", () => {
+    const patrol = {
+      goalText: "roof 扫描走廊：起点 x=0 y=128 z=0，沿 +x 扫 128 格",
+      reason: "grid cell 0,0 never scanned",
+    };
+    // 供给走廊 + 食物充足 → 出现，且排在 EXPLORATION 之前（同分裁决序）
+    const withPatrol = assess({ inventory: satisfied(), armorPoints: 20, shelterBuilt: true, reconPatrol: patrol });
+    expect(withPatrol.map(({ key }) => key)).toEqual(["RECON_PATROL", "EXPLORATION"]);
+    expect(withPatrol[0]).toMatchObject({ key: "RECON_PATROL", operatorGoal: patrol.goalText, score: 6 });
+
+    // 供给走廊 + 食物见底 → 不出现（不许带见底的储备远行——与探索同纪律）
+    const starving = assess({ inventory: [], foodLevel: 20, reconPatrol: patrol });
+    expect(starving.find((n) => n.key === "RECON_PATROL")).toBeUndefined();
+
+    // 不供给（默认/director 未接线）→ 不出现：旧行为逐字节不变
+    const noSupply = assess({ inventory: satisfied(), armorPoints: 20, shelterBuilt: true });
+    expect(noSupply.map(({ key }) => key)).toEqual(["EXPLORATION"]);
+  });
+
+  it("keeps survival needs above RECON_PATROL（仲裁：survival > manual > patrol）", () => {
+    const patrol = {
+      goalText: "roof 扫描走廊：起点 x=0 y=128 z=0，沿 +x 扫 128 格",
+      reason: "grid cell 0,0 never scanned",
+    };
+    // 有生存缺口（食物低于最低线）时 patrol 被食物闸拦下；
+    // 食物够但缺工具 → 工具梯队分数远高于 6，patrol 排不上首位
+    const needs = assess({ inventory: satisfied(), armorPoints: 20, shelterBuilt: true, reconPatrol: patrol });
+    const patrolIdx = needs.findIndex((n) => n.key === "RECON_PATROL");
+    for (let i = 0; i < patrolIdx; i += 1) {
+      expect(needs[i]!.score).toBeGreaterThanOrEqual(needs[patrolIdx]!.score);
+    }
+  });
 });
 
 function assess(options: {
@@ -236,6 +269,7 @@ function assess(options: {
   armorPoints?: number;
   shelterBuilt?: boolean;
   position?: { x: number; y: number; z: number };
+  reconPatrol?: { goalText: string; reason: string } | null;
   lastDeath?: {
     x: number;
     y: number;
@@ -248,6 +282,7 @@ function assess(options: {
 }): ReturnType<typeof assessSurvivalNeeds> {
   return assessSurvivalNeeds({
     shelterBuilt: options.shelterBuilt ?? false,
+    ...(options.reconPatrol !== undefined ? { reconPatrol: options.reconPatrol } : {}),
     record: record(
       options.inventory,
       options.foodLevel ?? 20,
