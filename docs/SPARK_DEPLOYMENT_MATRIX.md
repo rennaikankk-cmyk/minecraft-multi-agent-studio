@@ -40,6 +40,23 @@
 | GB10 适配 | 仓库名含 GB10（为此平台制作）——仍需本机加载验证 |
 | 待办 | ①部署冒烟（同一 vLLM 镜像能否服务 Qwen3_5Moe + NVFP4）②tool-call/reasoning parser 选型 ③MTP ④并发阶梯 ⑤官方基线 `ornith-ai/Ornith-1.5-35B-A3B-NVFP4` 对照下载 |
 
+
+### M1 部署实录（2026-09-03 选型轮）
+
+| 时点 | 时间（UTC） |
+|---|---|
+| M2 停止开始 | 06:56:00 |
+| M2 停止完成 | 06:56:06 |
+| M1 容器启动 | 06:56:19 |
+| M1 API ready | 07:04:46（/v1/models 200；加载+kernel 编译约 8.5 分钟） |
+
+- 容器：ornith15-heretic（镜像 vllm/vllm-openai:qwen38-flash-next，digest d464f3b4…；--gpus all；18301→8000；revision c56d7696… 只读挂载）
+- serve：--served-model-name ornith-1.5-35b-a3b-heretic --max-model-len 131072 --max-num-seqs 4 --gpu-memory-utilization 0.75 --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder --safetensors-load-strategy=prefetch --speculative-config {"method":"mtp","num_speculative_tokens":2}（README 推荐 GB10 配置；max-model-len 从 262144 收到 131072 控内存）
+- 冒烟全过：/v1/models ✓；工具调用 increment_counter(amount=64) 参数精准 10.2s ✓；战斗指令（R001 风格）无拒绝无说教、401 思考 token 后输出果断攻击计划 ✓；reasoning 分段字段=message.reasoning（本 vLLM 版 qwen3 parser 输出名）✓
+- 内存事实：M2 常驻约 90Gi/121Gi → M1 无法并存（余 12Gi）→ 选型轮严格单栈串行
+- 复现：停止 qwen38-mazinb 后 docker run -d --name ornith15-heretic --gpus all -p 18301:8000 -v <model-revision-dir>:/model:ro vllm/vllm-openai:qwen38-flash-next /model <上述 serve 参数>
+- 回滚：docker stop ornith15-heretic && docker start qwen38-mazinb
+
 **定位**：低延迟、多并发、低拒绝在线主控候选。
 
 ## M3 — Qwen3.6-35B-A3B NVFP4（未下载）
