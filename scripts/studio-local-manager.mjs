@@ -291,6 +291,14 @@ export class StudioLocalManager {
     // lifecycle operation registry：start/stop/restart/reset 返回 operationId，
     // 前端轮询最终 observed result（不做乐观成功）
     this.operations = new Map();
+    /**
+     * L7B-2（2026-09-03）：同服 peer 白名单生效重启防抖。阶梯式连续创建 N 个
+     * bot 时逐个重启 peer = O(N²) 重启风暴（L7 实测 bot-01 40s 内被 SIGTERM 4
+     * 次）。创建突发只触发一波延迟重启（PEER_RESTART_DEBOUNCE_MS 后执行，
+     * 期间新创建的 peer 合并进同一波），白名单语义保持。
+     */
+    this.pendingPeerRestarts = new Set();
+    this.peerRestartTimer = null;
     // reporterEventId → 已记录结果（spool 重放幂等去重；有界 LRU）
     this.incidentEventCache = new Map();
   }
@@ -349,6 +357,11 @@ export class StudioLocalManager {
   }
 
   async stop() {
+    if (this.peerRestartTimer !== null) {
+      clearTimeout(this.peerRestartTimer);
+      this.peerRestartTimer = null;
+    }
+    this.pendingPeerRestarts.clear();
     if (this.stopping) return;
     this.stopping = true;
     if (this.aiTimer) clearInterval(this.aiTimer);
@@ -1120,12 +1133,12 @@ export class StudioLocalManager {
     try {
       await this.refreshCombatProfilesForServer(config);
       await this.writeManifest();
-      // A running Runtime has already loaded its profile. Restart same-server
-      // peers after adding a Bot so their new whitelist is effective now.
+      // L7B-2：白名单生效需要的 peer 重启改为防抖批量——创建突发只重启一波。
       for (const peer of runningPeers) {
-        await this.stopBot(peer.botId);
-        await this.startBot(peer.botId);
+        if (peer.botId === config.botId) continue;
+        this.pendingPeerRestarts.add(peer.botId);
       }
+      this.schedulePeerRestartWave();
       await this.startBot(config.botId);
     } catch (cause) {
       config.processState = "error";
@@ -1137,7 +1150,35 @@ export class StudioLocalManager {
     return this.publicBot(config);
   }
 
-  sameServer(left, right) {
+  /**
+   * L7B-2 防抖批量重启：等待窗口内的新建合并，一波执行。
+   * 窗口默认 2500ms（阶梯创建 10 bot 约 10s 完成 → 1-2 波，而非 45 次重启）。
+   */
+  schedulePeerRestartWave() {
+    if (this.peerRestartTimer !== null) return; // 已有波在等
+    const delayMs = Number(process.env.STUDIO_PEER_RESTART_DEBOUNCE_MS ?? "2500");
+    this.peerRestartTimer = setTimeout(() => {
+      this.peerRestartTimer = null;
+      const wave = [...this.pendingPeerRestarts];
+      this.pendingPeerRestarts.clear();
+      void (async () => {
+        for (const botId of wave) {
+          if (!this.configs.has(botId)) continue; // 期间被删除
+          const managed = this.processes.get(botId);
+          if (!managed || managed.child.exitCode !== null) continue; // 不在跑
+          try {
+            await this.stopBot(botId);
+            await this.startBot(botId);
+          } catch {
+            // 单 peer 重启失败不阻断整波
+          }
+        }
+      })();
+    }, Number.isFinite(delayMs) && delayMs >= 500 ? delayMs : 2500);
+    this.peerRestartTimer.unref?.();
+  }
+
+    sameServer(left, right) {
     return (
       left.serverHost.toLowerCase() === right.serverHost.toLowerCase() &&
       left.serverPort === right.serverPort

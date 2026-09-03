@@ -4,7 +4,20 @@ import { z } from "zod";
 import { defineSkill } from "../types.js";
 
 export const SAFE_PATH_MAX_DISTANCE = 64;
-export const SAFE_PATH_TIMEOUT_MS = 20_000;
+
+/**
+ * L7B-1（2026-09-03）：单段安全寻路 20s 默认保持；10-bot 共享 fixture 的
+ * 拥挤场景可用 STUDIO_MOVEMENT_GOTO_TIMEOUT_MS 显式放宽（5s-300s 有界，
+ * 垃圾值 fail-closed 回默认）。E2E 场景脚本按需设置，不改变生产缺省契约。
+ */
+const MOVEMENT_TIMEOUT_OVERRIDE_MS = (() => {
+  const raw = process.env.STUDIO_MOVEMENT_GOTO_TIMEOUT_MS?.trim();
+  if (raw === undefined || raw === "") return 20_000;
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isFinite(value) || value < 5_000 || value > 300_000) return 20_000;
+  return value;
+})();
+export const SAFE_PATH_TIMEOUT_MS = MOVEMENT_TIMEOUT_OVERRIDE_MS;
 
 const dimensionSchema = z
   .string()
