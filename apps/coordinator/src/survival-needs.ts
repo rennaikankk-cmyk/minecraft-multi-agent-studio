@@ -42,6 +42,7 @@ export type SurvivalNeedKey =
   | "COAL_RESERVE"
   | "TORCH"
   | "CHEST"
+  | "RECON_PATROL"
   | "EXPLORATION";
 
 export type SurvivalNeed = Readonly<{
@@ -72,6 +73,13 @@ export type SurvivalAssessmentInput = Readonly<{
    * 只加不减、加权后钳到 95：重心改变"先做什么"，改不掉硬性生存需求。
    */
   focusBoosts?: Readonly<Record<string, number>> | undefined;
+  /**
+   * R5-RECON：侦察巡逻（L-巡逻层）。仅在 director 显式供给走廊 goal 时
+   * 参与（默认不供给 → 行为与旧版完全一致，场景期 STUDIO_AUTONOMY_ENABLED=0
+   * 天然不受影响）。goalText 来自 recon-patrol 网格分配器，格式与
+   * deterministic-goals 的 roof 模板严格对齐。
+   */
+  reconPatrol?: Readonly<{ goalText: string; reason: string }> | null;
   /** 可注入时钟（P0-A8）：不传则用 Date。一次读取贯穿整个评估。 */
   now?: Date;
 }>;
@@ -98,6 +106,7 @@ const PRIORITY_ORDER: readonly SurvivalNeedKey[] = Object.freeze([
   "COAL_RESERVE",
   "TORCH",
   "CHEST",
+  "RECON_PATROL",
   "EXPLORATION",
 ]);
 
@@ -389,6 +398,20 @@ export function assessSurvivalNeeds(
   // ---- 箱子：铁器时代后的储存基建（放箱子本身后续接入，先有物件）。
   if (pickaxeTier >= 2 && (inventory.get("chest")?.count ?? 0) === 0) {
     needs.push(itemNeed("CHEST", 18, "chest", "iron age reached without storage", 1, "oak_log"));
+  }
+
+  // ---- 侦察巡逻（R5-RECON）：与探索同级的"空闲行为"，同样被食物纪律
+  // 约束（储备见底不许远行）。分数 6 略高于通用探索 5：巡逻产出情报，
+  // 通用探索只产出地形。仅当 director 供给走廊时参与。
+  if (input.reconPatrol?.goalText && safeFood >= FOOD_MINIMUM) {
+    needs.push({
+      key: "RECON_PATROL",
+      score: 6,
+      reason: input.reconPatrol.reason,
+      title: "roof 侦察走廊扫描",
+      operatorGoal: input.reconPatrol.goalText,
+      sourceBlock: null,
+    });
   }
 
   // ---- 探索：唯一允许的"没有更好目标时"行为；食物吃紧时压到 0（不许
