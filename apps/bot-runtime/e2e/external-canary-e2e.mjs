@@ -254,9 +254,9 @@ async function phaseStudioRuntime() {
 }
 
 // ---------- 主流程（冷却纪律） ----------
-const MATRIX_RUNNERS = { ping: phasePing, B: phaseBareProbe, C: phaseStudioRuntime };
+const MATRIX_RUNNERS = { ping: phasePing, V: phaseVersionDiscovery, B: phaseBareProbe, C: phaseStudioRuntime };
 const results = {};
-const ordered = ["ping", "B", "C"].filter((k) => matrix.includes(k));
+const ordered = ["ping", "V", "B", "C"].filter((k) => matrix.includes(k));
 for (let i = 0; i < ordered.length; i += 1) {
   if (i > 0) {
     log(`cooldown 60s before ${ordered[i]}（每配置≤1 次、间隔≥60s 纪律）`);
@@ -273,6 +273,7 @@ const report = {
     ping: results.ping ? { responsive: results.ping } : undefined,
     bareProbe: results.B ? { outcome: results.B.outcome, kickedPlainText: results.B.kicked?.data?.plainText ?? null } : undefined,
     studioRuntime: results.C ? results.C : undefined,
+    versionDiscovery: results.V ?? undefined,
     officialClient_A: "PENDING_USER_ACTION（需用户在同网络用官方客户端登录一次，或提供 simpfun 控制台对应时间点的服务端日志）",
   },
   evidenceDir: path.relative(ROOT, EVIDENCE_DIR),
