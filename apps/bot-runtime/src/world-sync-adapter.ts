@@ -141,7 +141,9 @@ export type WorldSyncLimits = {
 };
 
 const DEFAULT_LIMITS: WorldSyncLimits = {
-  queueCapacity: 256,
+  // 与 D1 提取队列上限同量级：登录 burst（视距 81 列 × ~26 消息）不得
+  // 触发 overflow——overflow 只留给病态背压（§14），不是正常路径。
+  queueCapacity: 2048,
   maxInFlightMessages: 16,
   maxInFlightBytes: 8 * 1024 * 1024,
   ackTimeoutMs: 10_000,
@@ -614,9 +616,12 @@ export class WorldSyncAdapter {
     }
     this.span("world_sync.extract_column", this.clock() - began, {
       sections: extracted.sections.length,
+      overruns: extracted.sliceOverruns,
+      maxSliceMs: extracted.maxSliceMs,
       chunkX,
       chunkZ,
     });
+    this.metrics.extractSliceOverruns += extracted.sliceOverruns;
     this.enqueue({ kind: "chunkBegin", chunk: { x: chunkX, z: chunkZ }, build: (seq) => ({
       envelope: this.envelope(seq, { kind: "chunkBegin", chunkX, chunkZ }),
       transferBuffer: undefined,
@@ -636,6 +641,8 @@ export class WorldSyncAdapter {
       transferBuffer: undefined,
       bytes: 16,
     }) });
+    // 该 chunk 的提取窗口关闭：持有中的 update 补冲（Rust 侧按 loaded 应用）。
+    void this.flushUpdates();
     void this.pump();
   }
 
@@ -692,11 +699,20 @@ export class WorldSyncAdapter {
     }
   }
 
-  /** 冲刷合并 update 为一个 BlockUpdateBatch（测试可显式调用）。 */
+  /** 冲刷合并 update 为一个 BlockUpdateBatch（测试可显式调用）。
+   * 提取窗口内的 chunk（BEGIN 未达 Rust）其 update 持有回填——等该 chunk
+   * COMMIT 入队后再冲（§13：导入期 update 必须排队重放，不是 skip）。 */
   async flushUpdates(): Promise<void> {
     if (this.stopped || this.handle === null || this.coalesced.size === 0) return;
-    const entries = [...this.coalesced.values()];
-    this.coalesced.clear();
+    const entries: CoalescedUpdate[] = [];
+    for (const [key, entry] of [...this.coalesced.entries()]) {
+      if (this.extractionSessions.has(`${entry.x >> 4},${entry.z >> 4}`)) {
+        continue; // 提取中：保留在合并表（COMMIT 后再冲）
+      }
+      entries.push(entry);
+      this.coalesced.delete(key);
+    }
+    if (entries.length === 0) return;
     let sourceFirst = Infinity;
     let sourceLast = 0;
     let eventCount = 0;
@@ -747,6 +763,7 @@ export class WorldSyncAdapter {
     }
     this.queue.push(item);
     this.metrics.queueDepthMax = Math.max(this.metrics.queueDepthMax, this.queue.length);
+    this.span("world_sync.enqueue", 0, { queueDepth: this.queue.length });
   }
 
   private inFlightBytes(): number {
@@ -780,6 +797,7 @@ export class WorldSyncAdapter {
         timer: null,
       };
       this.inFlight.set(seq, inFlight);
+      this.metrics.inFlightBytesMax = Math.max(this.metrics.inFlightBytesMax, this.inFlightBytes());
       this.metrics.sent += 1;
       const postBegan = this.clock();
       this.transport

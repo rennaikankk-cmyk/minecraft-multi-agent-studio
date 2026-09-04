@@ -33,6 +33,10 @@ export type ExtractedChunk = {
   pendingUpdates: ReadonlyArray<{ x: number; y: number; z: number; stateId: number; sequence: number }>;
   /** 提取用时统计（ms）。 */
   extractMs: number;
+  /** P5-D2d 预算指标：section 内部分片超预算次数（可观测不静默）。 */
+  sliceOverruns: number;
+  /** 单分片（两次预算检查之间）的最大耗时（ms）。 */
+  maxSliceMs: number;
 };
 
 /** CHUNK_BEGIN 后的提取会话：记录 block update、处理 unload/reset 取消。 */
@@ -82,14 +86,6 @@ export class ChunkExtractionSession {
   }
 }
 
-/** 检查 section 是否全 stateId=0（显式空）。 */
-function isSectionAllZero(section: { data: { get(index: number): number } }): boolean {
-  for (let i = 0; i < 4096; i += 1) {
-    if (section.data.get(i) !== 0) return false;
-  }
-  return true;
-}
-
 /** 从真实 ChunkColumn 提取单 section。 */
 function extractSection(
   section: { data: { get(index: number): number } } | null | undefined,
@@ -133,13 +129,29 @@ export function extractColumnSync(
     sections,
     pendingUpdates: [],
     extractMs: performance.now() - began,
+    sliceOverruns: 0,
+    maxSliceMs: 0,
   };
 }
 
+/** section 内部预算检查的小批次大小（§17：约 128/256 格一批）。 */
+const SECTION_SLICE_BATCH = 256;
+
+/** 单个 data.get 异常不得让队列永久卡死：带上 sectionY 上下文抛出。 */
+class SectionExtractionError extends Error {
+  constructor(sectionY: number, cause: unknown) {
+    super(
+      `section ${sectionY} extraction failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+    );
+  }
+}
+
 /**
- * 预算分片提取：每片消耗 ≤ sliceBudgetMs 后经 setImmediate 让出。
- * 返回异步迭代器——生产路径消费。提取完成后把 session 累积的 update
- * 附在结果上（调用方 COMMIT 后重放）。
+ * 预算分片提取：section **内部**每 256 格检查（§17——"零 Block 对象分配"
+ * 不保证 <3ms，真实 get 可能有额外成本）；检查面=performance.now 超支
+ * 计数 + abort/unload/reset + 超支即让出（setImmediate/注入调度器——
+ * 禁止 process.nextTick 自排队、禁止固定 sleep）。返回异步迭代器——
+ * 生产路径消费。提取完成后把 session 累积的 update 附在结果上。
  */
 export async function extractColumnBudgeted(
   column: {
@@ -155,14 +167,58 @@ export async function extractColumnBudgeted(
 ): Promise<ExtractedChunk> {
   const began = performance.now();
   const sections: ExtractedSection[] = [];
+  let sliceOverruns = 0;
+  let maxSliceMs = 0;
+  let sliceBegan = performance.now();
+  const checkBudget = (): { overran: boolean } => {
+    if (session.isCancelled) {
+      throw new Error(`extraction cancelled: ${session.cancelReasonOrNull}`);
+    }
+    const now = performance.now();
+    const sliceMs = now - sliceBegan;
+    if (sliceMs > maxSliceMs) maxSliceMs = sliceMs;
+    if (sliceMs > sliceBudgetMs) sliceOverruns += 1;
+    sliceBegan = now;
+    return { overran: sliceMs > sliceBudgetMs };
+  };
+
   for (let i = 0; i < column.numSections; i += 1) {
     if (session.isCancelled) {
       throw new Error(`extraction cancelled: ${session.cancelReasonOrNull}`);
     }
-    if (i > 0 && performance.now() - began >= sliceBudgetMs) {
-      await yieldFn();
+    const sectionY = (column.minY >> 4) + i;
+    const raw = column.sections[i];
+    if (raw === null || raw === undefined) {
+      sections.push({ sectionY, status: "not-present", stateIds: null });
+      if (i > 0) {
+        const { overran } = checkBudget();
+        if (overran) await yieldFn();
+      }
+      continue;
     }
-    sections.push(extractSection(column.sections[i], (column.minY >> 4) + i));
+    try {
+      const stateIds = new Uint32Array(4096);
+      let allZero = true;
+      // section 内部小批次推进：每 256 格一次预算/abort 检查，超支即让出。
+      for (let base = 0; base < 4096; base += SECTION_SLICE_BATCH) {
+        const { overran } = checkBudget();
+        if (overran && base > 0) await yieldFn();
+        for (let j = 0; j < SECTION_SLICE_BATCH; j += 1) {
+          const index = base + j;
+          const value = raw.data.get(index);
+          stateIds[index] = value;
+          if (value !== 0) allZero = false;
+        }
+      }
+      sections.push({
+        sectionY,
+        status: allZero ? "empty" : "data",
+        stateIds: allZero ? null : stateIds,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("extraction cancelled")) throw error;
+      throw new SectionExtractionError(sectionY, error);
+    }
   }
   return {
     chunkX,
@@ -170,6 +226,8 @@ export async function extractColumnBudgeted(
     sections,
     pendingUpdates: session.drainUpdates(),
     extractMs: performance.now() - began,
+    sliceOverruns,
+    maxSliceMs,
   };
 }
 
