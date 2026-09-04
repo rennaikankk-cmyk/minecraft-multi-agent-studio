@@ -1797,6 +1797,15 @@ export class CoordinatorLocalPlanner {
                 (item) => item.itemName === step.itemName,
               )?.count ?? 0
             : 0;
+          this.options.logger?.info?.("coordinator_step_inventory_check", {
+            taskId: request.taskId,
+            botId: request.botId,
+            stepKind: step.kind,
+            itemName: step.itemName,
+            inventoryHeld,
+            producedCount: "producedCount" in step ? step.producedCount : null,
+            statusInventoryCount: (heldRecord?.currentStatus?.inventory ?? []).length,
+          });
           const outcome = stepOutcomeFromResult(step, result, inventoryHeld);
           if (outcome.ok && step.kind === "place-station") {
             // Recorded from the Runtime's read-back position, which it produces
@@ -2031,6 +2040,7 @@ export class CoordinatorLocalPlanner {
       dimension,
       currentRecord.serverProfileId,
       binding,
+      currentRecord,
     );
     if (input === null) return null;
     let trustedInput: SkillJsonValue;
@@ -2075,6 +2085,7 @@ export class CoordinatorLocalPlanner {
     dimension: string,
     serverProfileId: string,
     binding: PlanStepBinding,
+    currentRecord: BotRegistryRecord,
   ): SkillJsonValue | null {
     if (step.kind === "mine") {
       if (!step.targetBlock) return null;
@@ -4462,6 +4473,18 @@ function safeBotContext(record: BotRegistryRecord, taskId: string) {
     minecraftVersion: record.minecraftVersion?.resolvedVersion ?? null,
     currentDimension: status.position?.dimension ?? null,
   };
+}
+
+function heldCountFor(
+  step: PlanStep,
+  record: BotRegistryRecord,
+): number {
+  if (!("itemName" in step)) return 0;
+  return (
+    (record.currentStatus?.inventory ?? []).find(
+      (item) => item.itemName === step.itemName,
+    )?.count ?? 0
+  );
 }
 
 function plannerInventoryFromRecord(

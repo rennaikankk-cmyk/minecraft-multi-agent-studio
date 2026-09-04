@@ -4376,7 +4376,15 @@ export class MineflayerBotClient implements BotClient {
     }
 
     const inventoryBefore = this.countInventoryItem(input.data.itemName);
-    if (inventoryBefore >= input.data.count) {
+    // 配方次数→产出量对齐（闭环轮根因 #2）：input.count 是**配方次数**
+    // （oak_planks 一次配方产 4 个），快速通道此前拿"手持个数 ≥ 配方次数"
+    // 比对——手持 2 木板 ≥1 次配方 = 误判已满足零产出，而步骤需要 4 个。
+    // 正确判定：先把 count 折算成产出目标数（count × 单次配方产量）再比。
+    const yieldProbe = this.bot.recipesAll(itemType.id, null, false)[0]
+      ?? this.bot.recipesAll(itemType.id, null, true)[0];
+    const yieldPerCraft = Math.max(1, yieldProbe?.result?.count ?? 1);
+    const targetItemCount = input.data.count * yieldPerCraft;
+    if (inventoryBefore >= targetItemCount) {
       return craftItemCapabilityOutputSchema.parse({
         itemName: input.data.itemName,
         requestedCount: input.data.count,
@@ -4384,7 +4392,7 @@ export class MineflayerBotClient implements BotClient {
         usedCraftingTable: false,
       });
     }
-    const shortfall = input.data.count - inventoryBefore;
+    const shortfall = targetItemCount - inventoryBefore;
 
     let craftingTable = null;
     if (input.data.craftingTable) {
