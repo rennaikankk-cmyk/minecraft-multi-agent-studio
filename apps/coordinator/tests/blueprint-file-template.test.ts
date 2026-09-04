@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { parseBlueprintFileGoal } from "../src/deterministic-goals.js";
 import {
+  blueprintBatchMaterialDeficit,
   blueprintCellsForDispatch,
   blueprintFileSchema,
   loadBlueprintFiles,
@@ -177,5 +178,44 @@ describe("仓库自带蓝图（apps/coordinator/blueprints）", () => {
 
   it("schema 可直接复用校验（导出的 blueprintFileSchema）", () => {
     expect(blueprintFileSchema.safeParse(VALID).success).toBe(true);
+  });
+});
+
+describe("blueprintBatchMaterialDeficit（材料预采集）", () => {
+  it("starter-base-v1 批 1 全缺料 → 圆石 18 缺口", () => {
+    const repoDir = path.resolve(import.meta.dirname, "..", "blueprints");
+    const base = loadBlueprintFiles(repoDir).get("starter-base-v1")!;
+    expect(blueprintBatchMaterialDeficit(base, 0, new Map())).toEqual([
+      { itemName: "cobblestone", count: 18 },
+    ]);
+  });
+
+  it("部分持有 → 只报差值", () => {
+    const repoDir = path.resolve(import.meta.dirname, "..", "blueprints");
+    const base = loadBlueprintFiles(repoDir).get("starter-base-v1")!;
+    expect(
+      blueprintBatchMaterialDeficit(base, 0, new Map([["cobblestone", 7]])),
+    ).toEqual([{ itemName: "cobblestone", count: 11 }]);
+  });
+
+  it("批 5（尾部 13 格）→ 木板/熔炉/工作台/箱子/火把混合缺口", () => {
+    const repoDir = path.resolve(import.meta.dirname, "..", "blueprints");
+    const base = loadBlueprintFiles(repoDir).get("starter-base-v1")!;
+    const goals = blueprintBatchMaterialDeficit(base, 72, new Map());
+    const byName = new Map(goals.map((g) => [g.itemName, g.count]));
+    expect(byName.get("torch")).toBe(2);
+    expect(byName.get("furnace")).toBe(1);
+    expect(byName.get("crafting_table")).toBe(1);
+    expect(byName.get("chest")).toBe(1);
+    expect((byName.get("oak_planks") ?? 0) > 0).toBe(true);
+  });
+
+  it("齐料 → 空缺口；越界 startIndex → 空缺口", () => {
+    const repoDir = path.resolve(import.meta.dirname, "..", "blueprints");
+    const base = loadBlueprintFiles(repoDir).get("starter-base-v1")!;
+    expect(
+      blueprintBatchMaterialDeficit(base, 0, new Map([["cobblestone", 30]])),
+    ).toEqual([]);
+    expect(blueprintBatchMaterialDeficit(base, 999, new Map())).toEqual([]);
   });
 });

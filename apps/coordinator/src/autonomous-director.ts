@@ -37,6 +37,7 @@ import {
   type SurvivalNeed,
   type SurvivalNeedKey,
 } from "./survival-needs.js";
+import { BasePhaseTracker, type BasePhaseKey } from "./base-phase-state.js";
 
 type PublicTask = NonNullable<PublicBotDetailV1["currentTask"]>;
 type TaskStatus = PublicTask["status"];
@@ -88,6 +89,24 @@ type InternalTask = PublicTask & {
   reason: string;
   terminalExpiresAtMs: number | null;
 };
+
+/** 进行中的蓝图施工（批间链）：锚点+进度，从 skill 派发的可信载荷提取。 */
+type BaseBuildProgress = Readonly<{
+  blueprintName: string;
+  anchor: Readonly<{ x: number; y: number; z: number }>;
+  nextIndex: number;
+  totalCells: number;
+}>;
+
+/** 多批蓝图施工型需求：完成语义=全部格放完（非单批 skill 成功）。 */
+const BASE_BUILD_NEED_KEYS: ReadonlySet<SurvivalNeedKey> = new Set([
+  "BASE_MAIN_CONSTRUCTION",
+  "BASE_FACILITY_COBBLE",
+  "BASE_FACILITY_FARM",
+]);
+
+/** goal 文本里的蓝图名提取（与 deterministic-goals 的解析器同格式）。 */
+const BLUEPRINT_GOAL_NAME = /使用蓝图文件\s+([a-z0-9][a-z0-9-]{0,63})\s*施工/u;
 
 type ActiveRun = Readonly<{
   taskId: string;
@@ -183,6 +202,18 @@ export class AutonomousDirector implements AutonomousTaskSource {
   private readonly active = new Map<string, ActiveRun>();
   private readonly nextGoalAt = new Map<string, number>();
   private readonly shelterBuilt = new Set<string>();
+  /**
+   * 基地阶段真值（Implementation Prompt V1 · Phase 1）：7 门快照驱动
+   * BASE_* 需求的顺序放行。进程内完成态，与 shelterBuilt 同语义——重启
+   * 后重来是安全侧失败（不会跳阶段）。
+   */
+  private readonly basePhase = new BasePhaseTracker();
+  /**
+   * 每 bot 进行中的蓝图施工进度（批间链）：锚点钉死在首批解析结果上，
+   * 续派 goal 显式携带锚点+startIndex，避免 auto-anchor 随 bot 移动漂移。
+   * completed=true 时清除。
+   */
+  private readonly baseBuilds = new Map<string, BaseBuildProgress>();
   private readonly consecutiveNeedFailures = new Map<string, number>();
   private readonly needSuppressedUntil = new Map<string, number>();
   private readonly explorationCursor = new Map<string, number>();
@@ -553,6 +584,9 @@ export class AutonomousDirector implements AutonomousTaskSource {
     const needs = assessSurvivalNeeds({
       record,
       shelterBuilt: this.shelterBuilt.has(record.botId),
+      // 基地阶段真值（Phase 1）：BASE_* 需求的顺序门。快照恒供给——
+      // 门全 false 时 survival-needs 整段静默（语义同未传入）。
+      basePhase: this.basePhase.snapshotFor(record.botId),
       recoveredDeaths: [
         ...(this.recoveredDeaths.get(record.botId) ?? []),
       ],
@@ -680,6 +714,116 @@ export class AutonomousDirector implements AutonomousTaskSource {
     ]!;
   }
 
+  /**
+   * 批间链 goal 重写（Phase 1）：BASE_* 施工需求存在进行中进度时，goal
+   * 改为显式锚点+startIndex 续派文本（与 deterministic-goals 模板逐字
+   * 对齐）。无进度/非蓝图 goal → 原文返回。锚点钉死是正确性前提：
+   * auto-anchor=bot 当前位置+2，第二批起 bot 已在工地附近移动，不钉死
+   * 就会在漂移位置重建一份残缺结构。
+   */
+  private blueprintContinuationGoal(
+    botId: string,
+    needKey: SurvivalNeedKey,
+    operatorGoal: string,
+  ): string {
+    if (!BASE_BUILD_NEED_KEYS.has(needKey)) return operatorGoal;
+    const nameMatch = BLUEPRINT_GOAL_NAME.exec(operatorGoal);
+    if (nameMatch === null) return operatorGoal;
+    const progress = this.baseBuilds.get(botId);
+    if (progress === undefined || progress.blueprintName !== nameMatch[1]) {
+      return operatorGoal;
+    }
+    if (progress.nextIndex <= 0 || progress.nextIndex >= progress.totalCells) {
+      return operatorGoal;
+    }
+    return `使用蓝图文件 ${progress.blueprintName} 施工：锚点 x=${progress.anchor.x} y=${progress.anchor.y} z=${progress.anchor.z}，从第 ${progress.nextIndex} 格开始`;
+  }
+
+  /**
+   * 从 skill 派发结果提取蓝图施工进度。可信来源：invocation.input 是
+   * 协调器自己构造的派发输入（含解析后的锚点），output 是 runtime 逐格
+   * 回执的汇总（nextIndex/totalCells/completed）。仅成功批提取（失败批
+   * 的部分完成格数不可知，续派从上次已知进度重走——place-safe 对已就位
+   * 格幂等）。completed=true 清除进度。
+   */
+  private updateBaseBuildProgress(
+    botId: string,
+    needKey: SurvivalNeedKey,
+    operatorGoal: string,
+    result: AutonomousPlanResult,
+  ): void {
+    if (!BASE_BUILD_NEED_KEYS.has(needKey)) return;
+    if (result.action !== "skill_result") return;
+    if (result.invocation.payload.skillId !== "build.blueprint") return;
+    const payload = (result.result as { payload?: unknown }).payload as
+      | {
+          outcome?: unknown;
+          output?: {
+            completed?: unknown;
+            nextIndex?: unknown;
+            totalCells?: unknown;
+          } | null;
+        }
+      | null
+      | undefined;
+    if (!payload || payload.outcome !== "completed") return;
+    const output = payload.output;
+    if (
+      output === null ||
+      typeof output !== "object" ||
+      typeof output.nextIndex !== "number" ||
+      typeof output.totalCells !== "number" ||
+      !Number.isFinite(output.nextIndex) ||
+      !Number.isFinite(output.totalCells)
+    ) {
+      return;
+    }
+    const input = result.invocation.payload.input as {
+      blueprint?: { anchor?: { x?: unknown; y?: unknown; z?: unknown } };
+    } | null;
+    const anchor = input?.blueprint?.anchor;
+    if (
+      !anchor ||
+      typeof anchor.x !== "number" ||
+      typeof anchor.y !== "number" ||
+      typeof anchor.z !== "number"
+    ) {
+      return;
+    }
+    const nameMatch = BLUEPRINT_GOAL_NAME.exec(operatorGoal);
+    if (nameMatch === null) return;
+    if (output.completed === true || output.nextIndex >= output.totalCells) {
+      this.baseBuilds.delete(botId);
+      this.log("info", "coordinator_autonomous_build_complete", {
+        botId,
+        needKey,
+        blueprint: nameMatch[1],
+        totalCells: output.totalCells,
+      });
+      return;
+    }
+    const existing = this.baseBuilds.get(botId);
+    this.baseBuilds.set(botId, {
+      blueprintName: nameMatch[1]!,
+      anchor: { x: anchor.x, y: anchor.y, z: anchor.z },
+      nextIndex: Math.max(existing?.nextIndex ?? 0, output.nextIndex),
+      totalCells: output.totalCells,
+    });
+    this.log("info", "coordinator_autonomous_build_progress", {
+      botId,
+      needKey,
+      blueprint: nameMatch[1],
+      nextIndex: output.nextIndex,
+      totalCells: output.totalCells,
+    });
+  }
+
+  /** 多批蓝图需求是否仍有进行中施工（完成语义门控）。 */
+  private hasOngoingBaseBuild(botId: string, needKey: SurvivalNeedKey): boolean {
+    if (!BASE_BUILD_NEED_KEYS.has(needKey)) return false;
+    return this.baseBuilds.has(botId);
+  }
+
   private async runTask(
     record: BotRegistryRecord,
     taskId: string,
@@ -708,12 +852,19 @@ export class AutonomousDirector implements AutonomousTaskSource {
       reason: goal.reason,
     });
     try {
+      // 多批蓝图批间链：有进行中的施工时，goal 显式携带钉死锚点+startIndex
+      // （auto-anchor 会随 bot 移动漂移，第二批起必须钉住首批锚点）。
+      const dispatchGoal = this.blueprintContinuationGoal(
+        record.botId,
+        goal.needKey,
+        goal.operatorGoal,
+      );
       let result = await this.options.planner.planAndDispatch({
         requestId: taskId,
         traceId: taskId,
         taskId,
         botId: record.botId,
-        operatorGoal: goal.operatorGoal,
+        operatorGoal: dispatchGoal,
         timeoutMs: this.options.goalTimeoutMs,
         signal: controller.signal,
       });
@@ -735,6 +886,8 @@ export class AutonomousDirector implements AutonomousTaskSource {
           status = taskStatusFromPlanResult(result, controller.signal);
         }
       }
+      // 施工进度提取（失败批也提取：失败前已完成的格也是真进度）。
+      this.updateBaseBuildProgress(record.botId, goal.needKey, goal.operatorGoal, result);
       this.finishTask(record.botId, taskId, goal, status, keepGoal, failureCode);
       this.log("info", "coordinator_autonomous_goal_finished", {
         botId: record.botId,
@@ -1121,6 +1274,18 @@ export class AutonomousDirector implements AutonomousTaskSource {
     if (status === "completed") {
       this.consecutiveNeedFailures.set(failureKey, 0);
       if (goal.needKey === "SHELTER") this.shelterBuilt.add(botId);
+      // 阶段门置位（Phase 1）：多批蓝图需求只在整图放完（无进行中施工）
+      // 时置门——单批 skill 成功 ≠ 建成。批间链由 runTask 的续派 goal 承接。
+      if (!this.hasOngoingBaseBuild(botId, goal.needKey)) {
+        const gated = this.basePhase.recordNeedCompletion(botId, goal.needKey);
+        if (gated !== null) {
+          this.log("info", "coordinator_autonomous_base_phase_gate", {
+            botId,
+            needKey: goal.needKey,
+            phase: gated,
+          });
+        }
+      }
       if (goal.needKey === "DEATH_RECOVERY") {
         const record = this.options.registry.get(botId, validDate(this.now()));
         const diedAt = record?.currentStatus?.lastDeath?.diedAt;

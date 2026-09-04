@@ -82,6 +82,7 @@ const SUBSTITUTIONS: Readonly<Record<SurvivalNeedKey, readonly string[]>> = Obje
   DEATH_RECOVERY: Object.freeze([]),
   SHIELD: Object.freeze([]),
   SHELTER: Object.freeze([]),
+  BED: Object.freeze([]),
   FOOD_SECURITY: Object.freeze([]),
   DIAMOND_PROGRESSION: Object.freeze(["diamond"]),
   DIAMOND_ARMOR: Object.freeze(["diamond"]),

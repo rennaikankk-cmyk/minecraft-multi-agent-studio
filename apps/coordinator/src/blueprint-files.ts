@@ -174,3 +174,28 @@ export function blueprintCellsForDispatch(blueprint: BlueprintFile) {
     face: cell.face ?? { x: 0, y: 1, z: 0 },
   }));
 }
+
+/**
+ * 蓝图批用料缺口（材料预采集，Implementation Prompt V1）：本批
+ * （startIndex..startIndex+batchSize）用料与背包比对。返回"需要-持有"
+ * 的采集目标；空数组=无缺口。纯函数：同一蓝图+背包永远同一结果。
+ */
+export function blueprintBatchMaterialDeficit(
+  blueprint: BlueprintFile,
+  startIndex: number,
+  inventory: ReadonlyMap<string, number>,
+): readonly { itemName: string; count: number }[] {
+  const from = Math.max(0, Math.min(startIndex, blueprint.cells.length));
+  const to = Math.min(from + blueprint.batchSize, blueprint.cells.length);
+  const required = new Map<string, number>();
+  for (let index = from; index < to; index += 1) {
+    const item = blueprint.cells[index]!.item;
+    required.set(item, (required.get(item) ?? 0) + 1);
+  }
+  const goals: Array<{ itemName: string; count: number }> = [];
+  for (const [itemName, count] of required) {
+    const have = inventory.get(itemName) ?? 0;
+    if (have < count) goals.push({ itemName, count: count - have });
+  }
+  return goals;
+}

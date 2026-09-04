@@ -17,6 +17,7 @@ import { DeathStreakTracker, assessDropRecovery } from "@minecraft-studio/skills
 // ---------------------------------------------------------------------------
 
 import type { BotRegistryRecord } from "./bot-registry.js";
+import type { BasePhaseSnapshot } from "./base-phase-state.js";
 
 /** 安全食物名册（与 runtime L0 的 safeFoodItems 口径对齐：能吃的、无副作用的）。 */
 import { SAFE_FOOD_ITEMS as CATALOG_SAFE_FOOD, totalWoodUnits } from "@minecraft-studio/skills";
@@ -37,6 +38,7 @@ export type SurvivalNeedKey =
   | "IRON_RESERVE"
   | "SHIELD"
   | "SHELTER"
+  | "BED"
   | "DIAMOND_PROGRESSION"
   | "DIAMOND_ARMOR"
   | "DIAMOND_TOOLS"
@@ -86,8 +88,12 @@ export type SurvivalAssessmentInput = Readonly<{
    * deterministic-goals 的 roof 模板严格对齐。
    */
   reconPatrol?: Readonly<{ goalText: string; reason: string }> | null;
-  /** 基地自动设施状态（钻套后基地建造触发条件）。 */
-  baseFacilities?: Readonly<{ hasCobbleGenerator: boolean; hasFarm: boolean }> | null;
+  /**
+   * 基地阶段真值（Implementation Prompt V1 · Phase 1）：7 个结构化阶段门
+   * 快照，来自 BasePhaseTracker。未传入 = 基地流水线能力未接线 →
+   * BASE_* needs 全部静默（防幽灵需求）。
+   */
+  basePhase?: BasePhaseSnapshot | null;
   /** 可注入时钟（P0-A8）：不传则用 Date。一次读取贯穿整个评估。 */
   now?: Date;
 }>;
@@ -109,6 +115,7 @@ const PRIORITY_ORDER: readonly SurvivalNeedKey[] = Object.freeze([
   "IRON_RESERVE",
   "SHIELD",
   "SHELTER",
+  "BED",
   "DIAMOND_PROGRESSION",
   "DIAMOND_ARMOR",
   "DIAMOND_TOOLS",
@@ -373,7 +380,9 @@ export function assessSurvivalNeeds(
   if (!input.shelterBuilt && (pickaxeTier >= 1 || takingDamage)) {
     needs.push({
       key: "SHELTER",
-      score: takingDamage ? 72 : 28,
+      // 51（Implementation Prompt V1）：避难所压过整个钻石梯队（甲 50/工具
+      // 49/剑 48）——先有庇护再谈发育；受伤分支 72 仍是硬紧急。
+      score: takingDamage ? 72 : 51,
       reason: takingDamage
         ? `health ${healthCurrent.toFixed(1)}/${healthMaximum} — dig in before the next hit`
         : "stone age reached without a dug shelter",
@@ -383,8 +392,28 @@ export function assessSurvivalNeeds(
     });
   }
 
+  // ---- 床（Implementation Prompt V1 · Phase 2）：避难所之后的重生点。
+  // 50 分压过钻套（50 同分但 PRIORITY_ORDER 在前）——有庇护就该有重生点。
+  // 最佳努力：采集链经 white_wool（可徒手挖的方块）；荒野无羊毛时失败→
+  // 抑制→流水线继续。放置/睡下设重生点在基地阶段承接（starter base 落成
+  // 后床入箱），此处只保证"有床"。
+  if (input.shelterBuilt && pickaxeTier >= 1 && (inventory.get("bed")?.count ?? 0) === 0) {
+    needs.push(itemNeed("BED", 50, "bed", "shelter ready but no bed for a respawn point", 1, "white_wool"));
+  }
+
   // ---- 钻石推进：铁镐之后的下一个台阶，先攒镐+剑的本钱再谈甲。
   const diamonds = inventory.get("diamond")?.count ?? 0;
+  // 全套钻装（甲 4 件+镐+剑；钻石工具不在内——工具 49 分自然先于选址 47
+  // 完成，无需重复判定）。函数级声明：基地阶段门块在钻石块之外消费。
+  const hasFullDiamondSet =
+    pickaxeTier >= 3 &&
+    bestSwordTier >= 3 &&
+    firstMissing([
+      "diamond_helmet",
+      "diamond_chestplate",
+      "diamond_leggings",
+      "diamond_boots",
+    ], inventory) === null;
   if (pickaxeTier === 2 && diamonds < DIAMOND_PICKAXE_RESERVE) {
     needs.push(itemNeed("DIAMOND_PROGRESSION", 48, "diamond", `diamond reserve ${diamonds} < ${DIAMOND_PICKAXE_RESERVE} for a diamond pickaxe`, DIAMOND_PICKAXE_RESERVE - diamonds, "diamond_ore"));
   }
@@ -414,21 +443,21 @@ export function assessSurvivalNeeds(
       needs.push(itemNeed("DIAMOND_WEAPON", 48, "diamond_sword", "diamond set incomplete: diamond_sword missing", 1, "diamond_ore"));
     }
 
-    // ---- 基地选址+建造（用户产品方向 2026-09-04：钻套完成→自动选址建基地）
-    // 触发条件：全套钻装齐（甲+镐+剑）且已有临时避难所（shelterBuilt=true，
-    // 避难所是钻套前生存需求——基地是钻套后的长期设施，不抢避难所的优先级）。
-    // 顺序：选址(47) → 主体建造(46) → 刷石机(45) → 农场(44)。
-    // 选址=远离出生点+当前所在位置（exploration 已扫过的区域优先）。
-    // 主体=使用蓝图文件 cobble-generator 施工（auto-anchor 就地建造）。
-    // 床/箱子从 CHEST/避难所需求自然衔接（已有）。
-    const hasFullDiamondSet =
-      missingDiamondArmor === null &&
-      pickaxeTier >= 3 &&
-      bestSwordTier >= 3;
-    // 基地选址：钻套齐+避难所已建 → 开始找长期基地位置
-    // （避难所未建时不触发——避难所是更原始的生存需求）
-    // baseFacilities 未传入=基地能力未接线 → 不触发（防幽灵需求）
-    if (hasFullDiamondSet && input.shelterBuilt && input.baseFacilities) {
+    // ---- 基地选址+建造（用户产品方向 2026-09-04；Implementation Prompt V1
+    // Phase 1 改为阶段门驱动）。全套钻装齐（甲+镐+剑）后，基地流水线由
+    // basePhase 七门顺序放行：选址(47) → 主体(46) → 刷石机(45) → 农场(44)。
+    // 阶段门判定在下方统一的 basePhase 块（函数级作用域）。
+  }
+
+  // ---- 基地阶段门（Implementation Prompt V1 · Phase 1）：
+  // basePhase 未传入 = 阶段真值能力未接线 → 整段不触发（防幽灵需求，
+  // 与旧 baseFacilities=null 语义一致）。传入后每门只在前序门就绪且
+  // 自身未就绪时开口：不并发平级、不跳级。
+  if (input.basePhase) {
+    const phase = input.basePhase;
+    // 选址：钻套齐 + 避难所就绪 + 尚未圈地（避难所未就绪时基地不抢位——
+    // 避难所是更原始的生存需求，且 SHELTER(51) 分数本来就在本门之上）。
+    if (hasFullDiamondSet && phase.SHELTER_MINIMAL_READY && !phase.BASE_SITE_RESERVED) {
       needs.push({
         key: "BASE_SITE_SELECTION",
         score: 47,
@@ -438,28 +467,21 @@ export function assessSurvivalNeeds(
         sourceBlock: null,
       });
     }
-  }
-
-  // 基地建造（在选址后触发——shelterBuilt 记忆由避难所需求写入，
-  // 这里用 bed/箱子作为"基地已建"的代理判定）。
-  // 注意：这些 needs 的 operatorGoal 是蓝图模板——确定性通道执行。
-  if (pickaxeTier >= 3 && input.baseFacilities) {
-    const hasBed = (inventory.get("bed")?.count ?? 0) > 0;
-    const hasChestPlaced = input.shelterBuilt; // 简化：有避难所=有箱子
-    if (hasBed && !hasChestPlaced) {
+    // 主体：已圈地 + starter_base_v1 未建成。旧判据（hasBed && !shelterBuilt）
+    // 是死代码：与选址前置 shelterBuilt 自相矛盾，永远不触发。
+    if (phase.BASE_SITE_RESERVED && !phase.STARTER_BASE_ACTIVE) {
       needs.push({
         key: "BASE_MAIN_CONSTRUCTION",
         score: 46,
-        reason: "site selected but no main structure",
+        reason: "site selected but starter base not built",
         title: "建造基地主体",
-        operatorGoal: "使用蓝图文件 cobble-generator 施工",
+        operatorGoal: "使用蓝图文件 starter-base-v1 施工",
         sourceBlock: null,
       });
     }
-    if (input.shelterBuilt && input.baseFacilities && pickaxeTier >= 3) {
-      // 基地自动设施：仅在 baseFacilities 状态传入时触发（未传入=能力未接线，
-      // 不产生幽灵需求）。顺序：刷石机(45) → 农场(44)。
-      if (!input.baseFacilities.hasCobbleGenerator) {
+    // 设施：主体就绪后刷石机先行（挖矿耗材自给），农场随后（食物自给）。
+    if (phase.STARTER_BASE_ACTIVE) {
+      if (!phase.COBBLE_FACILITY_ACTIVE) {
         needs.push({
           key: "BASE_FACILITY_COBBLE",
           score: 45,
@@ -469,7 +491,7 @@ export function assessSurvivalNeeds(
           sourceBlock: null,
         });
       }
-      if (!input.baseFacilities.hasFarm) {
+      if (!phase.FOOD_FACILITY_ACTIVE) {
         needs.push({
           key: "BASE_FACILITY_FARM",
           score: 44,

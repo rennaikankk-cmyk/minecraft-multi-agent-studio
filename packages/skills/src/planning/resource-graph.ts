@@ -197,6 +197,18 @@ export const vanillaResourceRecipes: readonly ResourceRecipe[] = Object.freeze([
     station: "crafting_table",
   }),
 
+  // ---- 床（Implementation Prompt V1 · Phase 2：避难所后的重生点）----
+  // 最佳努力链：white_wool 是可徒手挖的方块（村庄/羊圈周边存在）。荒野
+  // 无羊毛时采集失败→需求抑制→流水线继续，不锁死下游（阶段门只认
+  // shelter.dig 的 sealed 真值，不用可能不可得的材料做硬前置）。
+  recipe({ itemName: "white_wool", kind: "mine", sourceBlock: "white_wool" }),
+  recipe({
+    itemName: "bed",
+    kind: "craft",
+    inputs: [need("white_wool", 3), need("oak_planks", 3)],
+    station: "crafting_table",
+  }),
+
   // ---- 工具阶梯 ----
   recipe({
     itemName: "wooden_pickaxe",

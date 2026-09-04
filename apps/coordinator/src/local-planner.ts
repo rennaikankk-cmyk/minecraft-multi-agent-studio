@@ -67,6 +67,7 @@ import {
   type DeterministicSkillDecision,
 } from "./deterministic-goals.js";
 import {
+  blueprintBatchMaterialDeficit,
   blueprintCellsForDispatch,
   loadBlueprintFiles,
   type BlueprintFile,
@@ -1489,6 +1490,28 @@ export class CoordinatorLocalPlanner {
   }
 
   /**
+   * 蓝图批用料缺口（材料预采集）：本批（startIndex..startIndex+batchSize）
+   * 的用料与 bot 背包比对。返回缺料采集目标；null=无缺口（或蓝图不存在，
+   * 交由后续分支按原语义拒绝）。背包来自 registry 快照（心跳上报），
+   * 采集目标按"需要-持有"计，不重复要求已持有的部分。
+   */
+  private blueprintMaterialDeficit(
+    parsed: Readonly<{ kind: "build-blueprint-file"; name: string; startIndex: number }>,
+    record: BotRegistryRecord,
+  ): readonly { itemName: string; count: number }[] | null {
+    const blueprint = this.blueprintFiles.get(parsed.name);
+    if (blueprint === undefined) return null;
+    if (blueprint.cells.length === 0) return null;
+    const onHand = new Map(
+      (record.currentStatus?.inventory ?? []).map((entry) => [
+        entry.itemName as string,
+        entry.count as number,
+      ]),
+    );
+    return blueprintBatchMaterialDeficit(blueprint, parsed.startIndex, onHand);
+  }
+
+  /**
    * Derives a decision for the coordinator's own goal templates without a
    * model round-trip. Returns null for every goal shape that is not one of
    * the fixed templates or a single unambiguous acquisition — those must keep
@@ -1538,6 +1561,26 @@ export class CoordinatorLocalPlanner {
         },
         skill: null,
       };
+    }
+    if (parsed.kind === "build-blueprint-file") {
+      // 材料预采集（Implementation Prompt V1 · 端到端缺口修复）：本批用料
+      // 与背包比对，缺料时不派 build（批中段缺货=结构性失败），改派确定性
+      // 采集（资源图覆盖全部蓝图物料：圆石/木板/火把/熔炉/工作台/箱子）。
+      // 采集完成→director 重选同一需求→重派蓝图（批间进度记忆保持
+      // 锚点+startIndex 不漂移）。
+      const materialGoals = this.blueprintMaterialDeficit(parsed, record);
+      if (materialGoals !== null) {
+        return {
+          planItems: {
+            action: "plan_items",
+            botId: request.botId,
+            taskId: request.taskId,
+            goals: materialGoals,
+            reasonCode: "DETERMINISTIC_BLUEPRINT_MATERIALS",
+          },
+          skill: null,
+        };
+      }
     }
     const dimension =
       record.currentStatus?.position.dimension ?? "minecraft:overworld";
@@ -1708,7 +1751,13 @@ export class CoordinatorLocalPlanner {
       itemName,
       count,
     }));
-    assertPlanGoalsGrounded(goals, request.operatorGoal);
+    // Grounding 护栏防的是模型幻觉物品（goal 文本没提到的资源不许进计划）。
+    // DETERMINISTIC_BLUEPRINT_MATERIALS 是协调器自己从加载期 zod 校验过的
+    // 蓝图文件+registry 背包快照推导的采集目标——信任链与
+    // DETERMINISTIC_BLUEPRINT_FILE 的 cells 同源，不经模型，放行多目标。
+    if (decision.reasonCode !== "DETERMINISTIC_BLUEPRINT_MATERIALS") {
+      assertPlanGoalsGrounded(goals, request.operatorGoal);
+    }
     if (
       goals.some(
         ({ itemName }) =>

@@ -772,10 +772,11 @@ describe("AutonomousDirector", () => {
     expect(planAndDispatch.mock.calls[0]?.[0].operatorGoal).toContain(
       "安全避难所",
     );
-    // Fully-equipped, sheltered bot keeps working: exploration toward the
-    // next tier's ore instead of looping on wood or re-digging shelters.
-    expect(planAndDispatch.mock.calls[1]?.[0].operatorGoal).toMatch(
-      /^移动到坐标 x=-?\d+ y=64 z=-?\d+ 附近，继续观察 diamond_ore 方块$/,
+    // Fully-equipped, sheltered bot keeps working（Phase 1 阶段门接线后）：
+    // 钻套齐+避难所就绪 → 基地选址(47)压过无限探索(6)。goal 复用探索
+    // 游标语义（远离出生点），由确定性通道派发。
+    expect(planAndDispatch.mock.calls[1]?.[0].operatorGoal).toBe(
+      "向外探索新区域",
     );
   });
 });

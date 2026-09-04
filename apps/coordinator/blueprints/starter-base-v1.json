@@ -1,0 +1,734 @@
+{
+  "schemaVersion": "1.0",
+  "name": "starter-base-v1",
+  "description": "5x5 生存小屋（starter_base_v1 代码函数的 JSON 投影）：y=0 圆石地板 25，周界橡木板墙 y=1..2（南墙中心 (2,4) 留 2 高门洞），y=3 向心屋顶 25，室内熔炉/工作台/箱子，2 火把。与 packages/skills/src/base-registry.ts starterBaseV1() 严格同构（改布局须两处同步）。",
+  "batchSize": 18,
+  "staging": [
+    {
+      "batch": 1,
+      "offset": {
+        "x": 2,
+        "y": 1,
+        "z": 2
+      }
+    },
+    {
+      "batch": 2,
+      "offset": {
+        "x": 2,
+        "y": 1,
+        "z": 2
+      }
+    },
+    {
+      "batch": 3,
+      "offset": {
+        "x": 2,
+        "y": 1,
+        "z": 2
+      }
+    },
+    {
+      "batch": 4,
+      "offset": {
+        "x": 2,
+        "y": 1,
+        "z": 2
+      }
+    },
+    {
+      "batch": 5,
+      "offset": {
+        "x": 2,
+        "y": 1,
+        "z": 2
+      }
+    }
+  ],
+  "cells": [
+    {
+      "offset": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 0,
+        "y": 0,
+        "z": 1
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 0,
+        "y": 0,
+        "z": 2
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 0,
+        "y": 0,
+        "z": 3
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 0,
+        "y": 0,
+        "z": 4
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 1,
+        "y": 0,
+        "z": 0
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 1,
+        "y": 0,
+        "z": 1
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 1,
+        "y": 0,
+        "z": 2
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 1,
+        "y": 0,
+        "z": 3
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 1,
+        "y": 0,
+        "z": 4
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 2,
+        "y": 0,
+        "z": 0
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 2,
+        "y": 0,
+        "z": 1
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 2,
+        "y": 0,
+        "z": 2
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 2,
+        "y": 0,
+        "z": 3
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 2,
+        "y": 0,
+        "z": 4
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 3,
+        "y": 0,
+        "z": 0
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 3,
+        "y": 0,
+        "z": 1
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 3,
+        "y": 0,
+        "z": 2
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 3,
+        "y": 0,
+        "z": 3
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 3,
+        "y": 0,
+        "z": 4
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 4,
+        "y": 0,
+        "z": 0
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 4,
+        "y": 0,
+        "z": 1
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 4,
+        "y": 0,
+        "z": 2
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 4,
+        "y": 0,
+        "z": 3
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 4,
+        "y": 0,
+        "z": 4
+      },
+      "item": "cobblestone"
+    },
+    {
+      "offset": {
+        "x": 0,
+        "y": 1,
+        "z": 0
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 0,
+        "y": 1,
+        "z": 1
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 0,
+        "y": 1,
+        "z": 2
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 0,
+        "y": 1,
+        "z": 3
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 0,
+        "y": 1,
+        "z": 4
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 1,
+        "y": 1,
+        "z": 0
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 1,
+        "y": 1,
+        "z": 4
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 2,
+        "y": 1,
+        "z": 0
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 3,
+        "y": 1,
+        "z": 0
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 3,
+        "y": 1,
+        "z": 4
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 4,
+        "y": 1,
+        "z": 0
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 4,
+        "y": 1,
+        "z": 1
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 4,
+        "y": 1,
+        "z": 2
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 4,
+        "y": 1,
+        "z": 3
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 4,
+        "y": 1,
+        "z": 4
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 0,
+        "y": 2,
+        "z": 0
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 0,
+        "y": 2,
+        "z": 1
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 0,
+        "y": 2,
+        "z": 2
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 0,
+        "y": 2,
+        "z": 3
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 0,
+        "y": 2,
+        "z": 4
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 1,
+        "y": 2,
+        "z": 0
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 1,
+        "y": 2,
+        "z": 4
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 2,
+        "y": 2,
+        "z": 0
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 3,
+        "y": 2,
+        "z": 0
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 3,
+        "y": 2,
+        "z": 4
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 4,
+        "y": 2,
+        "z": 0
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 4,
+        "y": 2,
+        "z": 1
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 4,
+        "y": 2,
+        "z": 2
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 4,
+        "y": 2,
+        "z": 3
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 4,
+        "y": 2,
+        "z": 4
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 0,
+        "y": 3,
+        "z": 0
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 0,
+        "y": 3,
+        "z": 1
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 0,
+        "y": 3,
+        "z": 2
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 0,
+        "y": 3,
+        "z": 3
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 0,
+        "y": 3,
+        "z": 4
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 1,
+        "y": 3,
+        "z": 0
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 1,
+        "y": 3,
+        "z": 4
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 2,
+        "y": 3,
+        "z": 0
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 2,
+        "y": 3,
+        "z": 4
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 3,
+        "y": 3,
+        "z": 0
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 3,
+        "y": 3,
+        "z": 4
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 4,
+        "y": 3,
+        "z": 0
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 4,
+        "y": 3,
+        "z": 1
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 4,
+        "y": 3,
+        "z": 2
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 4,
+        "y": 3,
+        "z": 3
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 4,
+        "y": 3,
+        "z": 4
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 1,
+        "y": 3,
+        "z": 1
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 1,
+        "y": 3,
+        "z": 2
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 1,
+        "y": 3,
+        "z": 3
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 2,
+        "y": 3,
+        "z": 1
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 2,
+        "y": 3,
+        "z": 3
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 3,
+        "y": 3,
+        "z": 1
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 3,
+        "y": 3,
+        "z": 2
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 3,
+        "y": 3,
+        "z": 3
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 2,
+        "y": 3,
+        "z": 2
+      },
+      "item": "oak_planks"
+    },
+    {
+      "offset": {
+        "x": 1,
+        "y": 1,
+        "z": 1
+      },
+      "item": "furnace",
+      "blockClass": "utility"
+    },
+    {
+      "offset": {
+        "x": 3,
+        "y": 1,
+        "z": 1
+      },
+      "item": "crafting_table",
+      "blockClass": "utility"
+    },
+    {
+      "offset": {
+        "x": 1,
+        "y": 1,
+        "z": 3
+      },
+      "item": "chest",
+      "blockClass": "utility"
+    },
+    {
+      "offset": {
+        "x": 3,
+        "y": 1,
+        "z": 3
+      },
+      "item": "torch"
+    },
+    {
+      "offset": {
+        "x": 2,
+        "y": 1,
+        "z": 2
+      },
+      "item": "torch"
+    }
+  ],
+  "notes": "站位=室内中心 (2,1,2)，全格水平距离 ≤2.83。地板会替换自然地面（地形自适应放置：先挖后放）。门洞朝 +z（南）。材料：圆石 25、橡木板 55、熔炉/工作台/箱子各 1、火把 2。"
+}
