@@ -129,13 +129,33 @@ pub enum MirrorMessage {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum MirrorError {
-    StaleSessionEpoch { expected: u64, got: u64 },
-    StaleDimensionEpoch { expected: u64, got: u64 },
-    StaleSequence { chunk: ChunkKey, applied: u64, got: u64 },
-    UnknownChunk { chunk: ChunkKey },
-    SectionWithoutBegin { chunk: ChunkKey },
-    CommitWithoutBegin { chunk: ChunkKey },
-    InvalidSectionLength { chunk: ChunkKey, section_y: i32, len: usize },
+    StaleSessionEpoch {
+        expected: u64,
+        got: u64,
+    },
+    StaleDimensionEpoch {
+        expected: u64,
+        got: u64,
+    },
+    StaleSequence {
+        chunk: ChunkKey,
+        applied: u64,
+        got: u64,
+    },
+    UnknownChunk {
+        chunk: ChunkKey,
+    },
+    SectionWithoutBegin {
+        chunk: ChunkKey,
+    },
+    CommitWithoutBegin {
+        chunk: ChunkKey,
+    },
+    InvalidSectionLength {
+        chunk: ChunkKey,
+        section_y: i32,
+        len: usize,
+    },
     RegistryMissing,
 }
 
@@ -199,7 +219,11 @@ impl SnapshotHandle {
                 SectionStatus::Data => {
                     let local = section_local_index(x, y, z);
                     let palette_index = section.palette_indices[local] as usize;
-                    let mask = self.registry.get(palette_index).copied().unwrap_or(CLASS_UNKNOWN_BIT);
+                    let mask = self
+                        .registry
+                        .get(palette_index)
+                        .copied()
+                        .unwrap_or(CLASS_UNKNOWN_BIT);
                     CellQuery::Mask(mask)
                 }
             },
@@ -344,7 +368,11 @@ impl WorldMirror {
 
     pub fn apply(&mut self, message: MirrorMessage) -> Result<ApplyOutcome, MirrorError> {
         match message {
-            MirrorMessage::WorldReset { session_epoch, dimension_epoch, sequence } => {
+            MirrorMessage::WorldReset {
+                session_epoch,
+                dimension_epoch,
+                sequence,
+            } => {
                 // 权威恢复路径：豁免序号闸/缺口闸——DESYNCED 后唯一被接受
                 // 的消息族（epoch 权威在 TS supervisor，Rust 仅校验）。
                 if session_epoch < self.session_epoch {
@@ -379,7 +407,12 @@ impl WorldMirror {
                 self.generation += 1;
                 Ok(ApplyOutcome::Applied)
             }
-            MirrorMessage::ChunkBegin { session_epoch, dimension_epoch, chunk, sequence } => {
+            MirrorMessage::ChunkBegin {
+                session_epoch,
+                dimension_epoch,
+                chunk,
+                sequence,
+            } => {
                 if session_epoch != self.session_epoch {
                     return Err(MirrorError::StaleSessionEpoch {
                         expected: self.session_epoch,
@@ -416,7 +449,11 @@ impl WorldMirror {
                 self.record_applied(KIND_CHUNK_BEGIN, sequence);
                 Ok(ApplyOutcome::Applied)
             }
-            MirrorMessage::ChunkSectionData { chunk, sequence, payload } => {
+            MirrorMessage::ChunkSectionData {
+                chunk,
+                sequence,
+                payload,
+            } => {
                 if let Some(outcome) = self.sequence_gate(KIND_SECTION_DATA, sequence) {
                     if matches!(outcome, ApplyOutcome::GapDesynced) {
                         self.desynced = true;
@@ -545,7 +582,11 @@ impl WorldMirror {
                 self.generation += 1;
                 Ok(ApplyOutcome::Applied)
             }
-            MirrorMessage::BlockUpdate { position, state_id, sequence } => {
+            MirrorMessage::BlockUpdate {
+                position,
+                state_id,
+                sequence,
+            } => {
                 if let Some(outcome) = self.sequence_gate(KIND_BLOCK_UPDATE, sequence) {
                     if matches!(outcome, ApplyOutcome::GapDesynced) {
                         self.desynced = true;
@@ -591,9 +632,18 @@ impl WorldMirror {
         }
     }
 
-    fn apply_block_update_internal(&mut self, position: (i32, i32, i32), state_id: u32, sequence: u64) {
+    fn apply_block_update_internal(
+        &mut self,
+        position: (i32, i32, i32),
+        state_id: u32,
+        sequence: u64,
+    ) {
         let chunk = (position.0 >> 4, position.2 >> 4);
-        let mask = self.registry.get(state_id as usize).copied().unwrap_or(CLASS_UNKNOWN_BIT);
+        let mask = self
+            .registry
+            .get(state_id as usize)
+            .copied()
+            .unwrap_or(CLASS_UNKNOWN_BIT);
         // 先做 palette 去重（借用结束后再动 chunks，避免交叉借用）。
         let mut registry_vec: Vec<BlockClassMask> = (*self.registry).clone();
         let index = match registry_vec.iter().position(|&m| m == mask) {
@@ -604,10 +654,14 @@ impl WorldMirror {
             }
         };
         let chunks = self.chunks_mut();
-        let Some(state) = chunks.get_mut(&chunk) else { return };
+        let Some(state) = chunks.get_mut(&chunk) else {
+            return;
+        };
         let mutable = Arc::make_mut(state);
         let section_y = position.1 >> 4;
-        let Some(section) = mutable.sections.get_mut(&section_y) else { return };
+        let Some(section) = mutable.sections.get_mut(&section_y) else {
+            return;
+        };
         if section.status != SectionStatus::Data {
             // 非 Data section 上的 update = 提取器漏导入：fail-closed 保持
             // 原状（P5-D shadow oracle 会对出该差异）。

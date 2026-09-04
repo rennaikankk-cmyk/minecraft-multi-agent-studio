@@ -44,9 +44,14 @@ const MAX_LEAP: i32 = 4;
 #[derive(Clone, Copy)]
 pub enum Goal {
     Point(Pos),
-    Near { center: Pos, radius: i32 },
+    Near {
+        center: Pos,
+        radius: i32,
+    },
     /// 到达与任意该 class 方块四向/上下相邻的站立位（挖矿：邻接矿脉）。
-    ClassAdjacent { class: u8 },
+    ClassAdjacent {
+        class: u8,
+    },
 }
 
 impl Goal {
@@ -57,7 +62,12 @@ impl Goal {
                 (p.x - center.x).abs() + (p.y - center.y).abs() + (p.z - center.z).abs() <= *radius
             }
             Goal::ClassAdjacent { class } => [
-                (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+                (1, 0, 0),
+                (-1, 0, 0),
+                (0, 1, 0),
+                (0, -1, 0),
+                (0, 0, 1),
+                (0, 0, -1),
             ]
             .iter()
             .any(|(dx, dy, dz)| vol.class(p.x + dx, p.y + dy, p.z + dz) == Some(*class)),
@@ -68,11 +78,10 @@ impl Goal {
     /// 有界体积内可接受；挖掘目标稀疏时由 max_nodes/timeout 兜底）。
     fn heuristic(&self, p: Pos) -> f64 {
         match self {
-            Goal::Point(g) => {
-                ((p.x - g.x).abs() + (p.y - g.y).abs() + (p.z - g.z).abs()) as f64
-            }
+            Goal::Point(g) => ((p.x - g.x).abs() + (p.y - g.y).abs() + (p.z - g.z).abs()) as f64,
             Goal::Near { center, radius } => {
-                let m = ((p.x - center.x).abs() + (p.y - center.y).abs() + (p.z - center.z).abs()) as f64;
+                let m = ((p.x - center.x).abs() + (p.y - center.y).abs() + (p.z - center.z).abs())
+                    as f64;
                 (m - *radius as f64).max(0.0)
             }
             Goal::ClassAdjacent { .. } => 0.0,
@@ -133,7 +142,11 @@ pub struct FindOptions {
 impl Default for FindOptions {
     fn default() -> Self {
         // 预算对齐 JS 侧既有 think 预算量级；worker 线程上跑不挤事件循环。
-        FindOptions { max_nodes: 200_000, timeout_ms: 5_000, allow_dig: true }
+        FindOptions {
+            max_nodes: 200_000,
+            timeout_ms: 5_000,
+            allow_dig: true,
+        }
     }
 }
 
@@ -185,14 +198,20 @@ fn expand(vol: &Volume, from: Pos, opts: &FindOptions, out: &mut Vec<Step>) {
             && vol.class(from.x, from.y + 2, from.z) == Some(CLASS_PASSABLE)
             && !hazard_adjacent(vol, nx, jy, nz)
         {
-            out.push(Step { to: Pos { x: nx, y: jy, z: nz }, cost: JUMP_COST });
+            out.push(Step {
+                to: Pos {
+                    x: nx,
+                    y: jy,
+                    z: nz,
+                },
+                cost: JUMP_COST,
+            });
         }
         // 3) 下落 ≤3
         for drop in 1..=MAX_FALL {
             let fy = from.y - drop;
-            let column_clear = (1..=drop).all(|d| {
-                vol.class(nx, from.y - d, nz) == Some(CLASS_PASSABLE)
-            });
+            let column_clear =
+                (1..=drop).all(|d| vol.class(nx, from.y - d, nz) == Some(CLASS_PASSABLE));
             if !column_clear {
                 break;
             }
@@ -201,7 +220,11 @@ fn expand(vol: &Volume, from: Pos, opts: &FindOptions, out: &mut Vec<Step>) {
             }
             if can_stand(vol, nx, fy, nz) {
                 out.push(Step {
-                    to: Pos { x: nx, y: fy, z: nz },
+                    to: Pos {
+                        x: nx,
+                        y: fy,
+                        z: nz,
+                    },
                     cost: 1.0 + FALL_COST_PER_BLOCK * drop as f64,
                 });
                 break; // 落到第一个可站立层
@@ -228,17 +251,22 @@ fn expand(vol: &Volume, from: Pos, opts: &FindOptions, out: &mut Vec<Step>) {
                         break;
                     }
                     if drop > 0 {
-                        let landing_clear = (1..=drop).all(|d| {
-                            vol.class(lx, from.y - d, lz) == Some(CLASS_PASSABLE)
-                        });
+                        let landing_clear = (1..=drop)
+                            .all(|d| vol.class(lx, from.y - d, lz) == Some(CLASS_PASSABLE));
                         if !landing_clear {
                             break;
                         }
                     }
                     if can_stand(vol, lx, ly, lz) {
                         out.push(Step {
-                            to: Pos { x: lx, y: ly, z: lz },
-                            cost: gap as f64 * 1.1 + LEAP_COST * 0.0 + FALL_COST_PER_BLOCK * drop as f64,
+                            to: Pos {
+                                x: lx,
+                                y: ly,
+                                z: lz,
+                            },
+                            cost: gap as f64 * 1.1
+                                + LEAP_COST * 0.0
+                                + FALL_COST_PER_BLOCK * drop as f64,
                         });
                         break;
                     }
@@ -257,7 +285,11 @@ fn expand(vol: &Volume, from: Pos, opts: &FindOptions, out: &mut Vec<Step>) {
             && vol.class(from.x, from.y - 2, from.z) != Some(CLASS_HAZARD)
         {
             out.push(Step {
-                to: Pos { x: from.x, y: from.y - 1, z: from.z },
+                to: Pos {
+                    x: from.x,
+                    y: from.y - 1,
+                    z: from.z,
+                },
                 cost: 1.0 + DIG_COST,
             });
         }
@@ -265,7 +297,14 @@ fn expand(vol: &Volume, from: Pos, opts: &FindOptions, out: &mut Vec<Step>) {
 }
 
 /// 平走（目标同层）：目标脚/头要么已可通行，要么 diggable 且允许挖。
-fn try_walk_or_dig(vol: &Volume, from: Pos, nx: i32, ny: i32, nz: i32, opts: &FindOptions) -> Option<Step> {
+fn try_walk_or_dig(
+    vol: &Volume,
+    from: Pos,
+    nx: i32,
+    ny: i32,
+    nz: i32,
+    opts: &FindOptions,
+) -> Option<Step> {
     let feet = vol.class(nx, ny, nz)?;
     let head = vol.class(nx, ny + 1, nz)?;
     let ground = vol.class(nx, ny - 1, nz);
@@ -274,7 +313,14 @@ fn try_walk_or_dig(vol: &Volume, from: Pos, nx: i32, ny: i32, nz: i32, opts: &Fi
         return None;
     }
     if feet == CLASS_PASSABLE && head == CLASS_PASSABLE {
-        return Some(Step { to: Pos { x: nx, y: ny, z: nz }, cost: 1.0 });
+        return Some(Step {
+            to: Pos {
+                x: nx,
+                y: ny,
+                z: nz,
+            },
+            cost: 1.0,
+        });
     }
     if !opts.allow_dig {
         return None;
@@ -291,7 +337,14 @@ fn try_walk_or_dig(vol: &Volume, from: Pos, nx: i32, ny: i32, nz: i32, opts: &Fi
         return None;
     }
     let _ = from;
-    Some(Step { to: Pos { x: nx, y: ny, z: nz }, cost: 1.0 + DIG_COST * digs })
+    Some(Step {
+        to: Pos {
+            x: nx,
+            y: ny,
+            z: nz,
+        },
+        cost: 1.0 + DIG_COST * digs,
+    })
 }
 
 #[derive(PartialEq)]
@@ -339,7 +392,10 @@ pub fn find_path(vol: &Volume, start: Pos, goal: Goal, opts: &FindOptions) -> Fi
 
     let start_key = key(vol, start);
     g_score[start_key] = 0.0;
-    open.push(OpenEntry { f: goal.heuristic(start), pos: start });
+    open.push(OpenEntry {
+        f: goal.heuristic(start),
+        pos: start,
+    });
 
     let mut visited: usize = 0;
     let mut best_key = start_key;
@@ -383,7 +439,10 @@ pub fn find_path(vol: &Volume, start: Pos, goal: Goal, opts: &FindOptions) -> Fi
             if tentative < g_score[nk] {
                 g_score[nk] = tentative;
                 came_from[nk] = k as u32;
-                open.push(OpenEntry { f: tentative + goal.heuristic(step.to), pos: step.to });
+                open.push(OpenEntry {
+                    f: tentative + goal.heuristic(step.to),
+                    pos: step.to,
+                });
             }
         }
     }
@@ -430,7 +489,12 @@ mod tests {
                 }
             }
         }
-        Volume { sx, sy, sz, classes }
+        Volume {
+            sx,
+            sy,
+            sz,
+            classes,
+        }
     }
 
     #[test]
@@ -442,7 +506,11 @@ mod tests {
             Goal::Point(Pos { x: 15, y: 2, z: 1 }),
             &FindOptions::default(),
         );
-        assert!(result.success, "should reach, visited={}", result.visited_nodes);
+        assert!(
+            result.success,
+            "should reach, visited={}",
+            result.visited_nodes
+        );
         assert_eq!(result.path.len(), 16);
         assert_eq!(result.path.last().unwrap().x, 15);
     }
@@ -456,14 +524,30 @@ mod tests {
                 vol.classes[((y * vol.sz + z) * vol.sx + 8) as usize] = CLASS_DIGGABLE;
             }
         }
-        let opts = FindOptions { allow_dig: true, ..FindOptions::default() };
-        let result = find_path(&vol, Pos { x: 4, y: 2, z: 1 }, Goal::Point(Pos { x: 12, y: 2, z: 1 }), &opts);
+        let opts = FindOptions {
+            allow_dig: true,
+            ..FindOptions::default()
+        };
+        let result = find_path(
+            &vol,
+            Pos { x: 4, y: 2, z: 1 },
+            Goal::Point(Pos { x: 12, y: 2, z: 1 }),
+            &opts,
+        );
         assert!(result.success);
         // 挖穿成本体现在路径之外别无绕路（z 向只有 3 格仍走直线）
         assert!(result.path.iter().any(|p| p.x == 8));
 
-        let no_dig = FindOptions { allow_dig: false, ..FindOptions::default() };
-        let blocked = find_path(&vol, Pos { x: 4, y: 2, z: 1 }, Goal::Point(Pos { x: 12, y: 2, z: 1 }), &no_dig);
+        let no_dig = FindOptions {
+            allow_dig: false,
+            ..FindOptions::default()
+        };
+        let blocked = find_path(
+            &vol,
+            Pos { x: 4, y: 2, z: 1 },
+            Goal::Point(Pos { x: 12, y: 2, z: 1 }),
+            &no_dig,
+        );
         assert!(!blocked.success);
     }
 
@@ -481,7 +565,10 @@ mod tests {
             Goal::Point(Pos { x: 12, y: 2, z: 1 }),
             &FindOptions::default(),
         );
-        assert!(!result.success, "hazard corridor must not be pathed through");
+        assert!(
+            !result.success,
+            "hazard corridor must not be pathed through"
+        );
     }
 
     #[test]
@@ -492,7 +579,10 @@ mod tests {
             &vol,
             Pos { x: 0, y: 2, z: 1 },
             Goal::Point(Pos { x: 63, y: 2, z: 1 }),
-            &FindOptions { max_nodes: 50, ..FindOptions::default() },
+            &FindOptions {
+                max_nodes: 50,
+                ..FindOptions::default()
+            },
         );
         assert!(!result.success);
         assert!(!result.path.is_empty(), "best-effort partial path expected");
@@ -531,8 +621,8 @@ mod tests {
 
 #[cfg(test)]
 mod behavior_tests {
-    use super::*;
     use super::tests::flat_world;
+    use super::*;
 
     /// 埋点起点（脱困）：bot 被困在 diggable 里，路径首步即挖出。
     #[test]
@@ -540,8 +630,13 @@ mod behavior_tests {
         let mut vol = flat_world(12, 8, 3, 2);
         // (4,2..3,1) 埋在 diggable 里（四周+头顶）
         for (dx, dy, dz) in [
-            (0, 0, 0), (0, 1, 0), (0, 2, 0),
-            (1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1),
+            (0, 0, 0),
+            (0, 1, 0),
+            (0, 2, 0),
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 0, 1),
+            (0, 0, -1),
         ] {
             let idx = (((2 + dy) * vol.sz + (1 + dz)) * vol.sx + (4 + dx)) as usize;
             vol.classes[idx] = CLASS_DIGGABLE;
@@ -553,7 +648,11 @@ mod behavior_tests {
             Goal::Point(Pos { x: 10, y: 2, z: 1 }),
             &FindOptions::default(),
         );
-        assert!(result.success, "buried start must dig out, visited={}", result.visited_nodes);
+        assert!(
+            result.success,
+            "buried start must dig out, visited={}",
+            result.visited_nodes
+        );
     }
 
     /// 跑酷跳：3 格沟（两层深），两端平台——走路绕不过去，必须跳。
@@ -625,18 +724,23 @@ mod behavior_tests {
         let mining = find_path(
             &vol2,
             Pos { x: 2, y: 2, z: 1 },
-            Goal::ClassAdjacent { class: CLASS_DIGGABLE },
+            Goal::ClassAdjacent {
+                class: CLASS_DIGGABLE,
+            },
             &FindOptions::default(),
         );
         assert!(mining.success);
         let end = mining.path.last().unwrap();
         let adjacent = [
-            (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
         ]
         .iter()
-        .any(|(dx, dy, dz)| {
-            vol2.class(end.x + dx, end.y + dy, end.z + dz) == Some(CLASS_DIGGABLE)
-        });
+        .any(|(dx, dy, dz)| vol2.class(end.x + dx, end.y + dy, end.z + dz) == Some(CLASS_DIGGABLE));
         assert!(adjacent, "path must end adjacent to the target class");
     }
 
@@ -653,11 +757,21 @@ mod behavior_tests {
         let result = find_path(
             &vol,
             Pos { x: 2, y: 3, z: 1 },
-            Goal::Near { center: Pos { x: 8, y: 0, z: 1 }, radius: 1 },
+            Goal::Near {
+                center: Pos { x: 8, y: 0, z: 1 },
+                radius: 1,
+            },
             &FindOptions::default(),
         );
-        assert!(result.success, "drop in a shaft must be reachable by dig+fall");
+        assert!(
+            result.success,
+            "drop in a shaft must be reachable by dig+fall"
+        );
         let end = *result.path.last().unwrap();
-        assert!(end.x == 8 && end.y <= 1, "must reach the drop column, got {:?}", end);
+        assert!(
+            end.x == 8 && end.y <= 1,
+            "must reach the drop column, got {:?}",
+            end
+        );
     }
 }
