@@ -1254,11 +1254,12 @@ export class MineflayerBotClient implements BotClient {
     );
     // 无规则档放开 PACKET_CRIT（微上移双包暴击）；反作弊档保持物理跳。
     this.combatAdapter.setCriticalPacketAllowed(this.anarchyNavigation);
-    // Grim 过闸整形器（movementSync v1，2026-09-04 luv 双向抓包定性 + 实测解锁
-    // delta 0.03→10.98、setback 141→3）：setback 服从窗 + onGround 重建 + 出站
-    // 速度钳制。默认开启（正确性特性——只让包更合法，同 server-confirmed
-    // digging 纪律）；STUDIO_MOVEMENT_SHAPER=0 为调试熔断。
-    if (process.env.STUDIO_MOVEMENT_SHAPER !== "0") {
+    // Grim 过闸整形器（movementSync v1，2026-09-04 luv 双向抓包定性）：
+    // setback 服从窗 + onGround 重建 + 出站速度钳制。**默认关闭**（用户
+    // 产品决策：本地/干净服务器上弊端多于收益——服从窗改写位置导致
+    // 幽灵锚定、速度钳制在正常移动上产生额外约束）。仅在明确要过
+    // GrimAC 类反作弊的服务器上显式开启：STUDIO_MOVEMENT_SHAPER=1。
+    if (process.env.STUDIO_MOVEMENT_SHAPER === "1") {
       const wire = (bot as unknown as { _client?: MovementWire })._client;
       if (wire && typeof wire.on === "function" && typeof wire.write === "function") {
         const shaper = new MovementSyncShaper(
