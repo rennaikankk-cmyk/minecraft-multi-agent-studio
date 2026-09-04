@@ -1152,6 +1152,8 @@ export class MineflayerBotClient implements BotClient {
   private movementShaperDetach: (() => void) | null = null;
   /** 追击循环定时器（PursuitController tick 驱动；断线时清除）。 */
   private pursuitTimer: ReturnType<typeof setInterval> | null = null;
+  /** 活跃追击控制器（租约持有者；stopPursuit 必须调它的 stop() 释放租约）。 */
+  private activePursuit: { stop: (reason: string) => void } | null = null;
   /** G1 spawn-escape：本连接首个出生点（重触发判定的参照原点）。 */
   private worldSpawnOrigin: { x: number; z: number } | null = null;
   /** spawn-escape 疾跑进行中（防同点重复派发；goto 落定后复位）。 */
@@ -2483,7 +2485,7 @@ export class MineflayerBotClient implements BotClient {
   }
 
   private engagePursuit(entityId: number): void {
-    if (this.pursuitTimer !== null) return; // 已在追击
+    if (this.activePursuit !== null || this.pursuitTimer !== null) return; // 已在追击
     const botRef = this.bot;
     const controller = new PursuitController(
       {
@@ -2547,6 +2549,7 @@ export class MineflayerBotClient implements BotClient {
       },
     );
     if (!controller.engage(entityId)) return;
+    this.activePursuit = controller;
     this.pursuitTimer = setInterval(() => {
       if (!controller.tick()) {
         this.stopPursuit();
@@ -2556,6 +2559,12 @@ export class MineflayerBotClient implements BotClient {
   }
 
   private stopPursuit(): void {
+    // 租约必须显式释放（闭环轮实测：局部 controller 的租约泄漏导致
+    // collect.block 全 BOT_MOVEMENT_BUSY——追击结束后任务全饿死）。
+    if (this.activePursuit !== null) {
+      this.activePursuit.stop("client_stop");
+      this.activePursuit = null;
+    }
     if (this.pursuitTimer !== null) {
       clearInterval(this.pursuitTimer);
       this.pursuitTimer = null;
