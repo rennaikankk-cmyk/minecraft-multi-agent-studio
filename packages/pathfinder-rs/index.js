@@ -39,6 +39,23 @@ let worker = null;
 let jobId = 0;
 const pending = new Map();
 
+// 空闲回收（Phase 2：eval worker 不随 unref 退出——smoke 挂起实测）。
+// 寻路是窥发动作：无在途任务且 60s 无新请求即 terminate，下次调用重新
+// 拉起（spawn ~30ms，相对寻路频率可忽略）。
+const WORKER_IDLE_TERMINATE_MS = 60_000;
+let idleTimer = null;
+
+function scheduleIdleTerminate() {
+  if (idleTimer !== null) clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => {
+    if (pending.size > 0 || worker === null) return;
+    const dying = worker;
+    worker = null;
+    void dying.terminate();
+  }, WORKER_IDLE_TERMINATE_MS);
+  if (typeof idleTimer.unref === "function") idleTimer.unref();
+}
+
 function ensureWorker() {
   if (worker) return worker;
   worker = new Worker(WORKER_SOURCE, {
@@ -52,6 +69,7 @@ function ensureWorker() {
     const entry = pending.get(message.id);
     if (!entry) return;
     pending.delete(message.id);
+    if (pending.size === 0) scheduleIdleTerminate();
     if (message.ok) entry.resolve(message.result);
     else entry.reject(new Error(`pathfinder-rs worker: ${message.error}`));
   });
@@ -73,6 +91,10 @@ function findPathAsync(input) {
     return Promise.reject(new TypeError("findPathAsync requires world, start, goal"));
   }
   const id = ++jobId;
+  if (idleTimer !== null) {
+    clearTimeout(idleTimer);
+    idleTimer = null;
+  }
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
     ensureWorker().postMessage({ id, world, start, goal, options: options ?? null });
@@ -90,4 +112,20 @@ function findPathSync(world, start, goal, options) {
   );
 }
 
-module.exports = { CLASS, findPathAsync, findPathSync };
+/** 显式回收 worker（bot stop / 测试 teardown 用；在途任务会 reject）。 */
+function terminateWorker() {
+  if (idleTimer !== null) {
+    clearTimeout(idleTimer);
+    idleTimer = null;
+  }
+  if (worker === null) return Promise.resolve();
+  const dying = worker;
+  worker = null;
+  for (const [, entry] of pending) {
+    entry.reject(new Error("pathfinder-rs worker terminated"));
+  }
+  pending.clear();
+  return dying.terminate();
+}
+
+module.exports = { CLASS, findPathAsync, findPathSync, terminateWorker };

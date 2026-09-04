@@ -7,6 +7,22 @@
 
 import { monitorEventLoopDelay } from "node:perf_hooks";
 
+/**
+ * 布尔旋钮探针（Phase 2c）：门语义严格对齐 `=== "1"`。
+ * "1"=开；"0"/空=关；**其他任何值（"true"/"yes"/"on"/垃圾）都是显式降级**
+ * ——按关处理并打 invalid 标记，让 typo 在 runtime_env_probe 里可见，
+ * 而不是悄悄当 false（§10.5：无效值不许静默）。
+ */
+export function probeBooleanKnob(
+  raw: string | undefined,
+): { effective: boolean; source: "default" | "env"; raw: string | null; invalid: boolean } {
+  if (raw === undefined) return { effective: false, source: "default", raw: null, invalid: false };
+  // 与消费点严格同语义：不 trim（" 1 " 在门那里是 falsy，探针不能报开）。
+  if (raw === "1") return { effective: true, source: "env", raw, invalid: false };
+  if (raw === "0" || raw === "") return { effective: false, source: "env", raw, invalid: false };
+  return { effective: false, source: "env", raw, invalid: true };
+}
+
 export type LoopMonitorStop = () => void;
 
 export function startLoopMonitor(

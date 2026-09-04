@@ -258,6 +258,16 @@ const EXPLICIT: Readonly<Record<string, FailureCategory>> = Object.freeze({
   SERVER_RECONNECT_LOOP: "TRANSIENT",
   // pathfinder 抛错常是一次性的（区块没加载、目标瞬时被占）：先原样重试。
   PATHFINDER_GOTO_FAILED: "TRANSIENT",
+  // 意外编程/加载错误（如 ESM require ReferenceError 被旧逻辑误包装成寻路失败
+  // 三连重试）：永久性，不重试，cause 全文在 reason。
+  MOVEMENT_INTERNAL_ERROR: "CONTRACT_BUG",
+  // Rust 引擎路由错码（Phase 2 入册）：跟随器语义与世界漂移/可达性，
+  // 不进 transient 重试集——由 rustGoto 内部的有界重算承担恢复。
+  RUST_PATH_NOT_FOUND: "OUT_OF_REACH",
+  RUST_PATH_STUCK: "STALE_WORLD",
+  RUST_PATH_DIG_FAILED: "TRANSIENT",
+  RUST_PATH_ARRIVAL_MISMATCH: "STALE_WORLD",
+  RUST_PATH_NO_STATS: "CONTRACT_BUG",
   // 思考预算用尽（pathfinder 的 `Timeout`）。它**没有**证明目标不可达：实测
   // 在 runtime 的 tickTimeout 下，一个 700ms 就判得出 noPath 的搜索会被切片到
   // 5010ms 后报 "Took to long to decide path to goal!"。所以只能按偶发处置——

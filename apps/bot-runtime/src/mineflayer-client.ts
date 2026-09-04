@@ -2752,6 +2752,17 @@ export class MineflayerBotClient implements BotClient {
         distanceToTarget,
       });
     } catch (error) {
+      this.stopPathfinder();
+      // pathfinder 用 error.name 区分 NoPath / Timeout / GoalChanged /
+      // PathStopped（lib/goto.js:26-40），全丢掉就只剩一个"走不过去"，
+      // 运维侧再也分不出是没有路还是思考预算不够。屏蔽码保持不变，
+      // 原因走 onFault 进宿主日志。
+      //
+      // 错误分类纪律（Phase 2，ESM 事故 2026-09-04 病理）：PATHFINDER_GOTO_FAILED
+      // 在 movement retryPolicy 里可重试（NoPath 在 chunk 流追载窗口是瞬态，
+      // G0 修复语义）。非 SkillFault 的意外异常（编程错误：ReferenceError/
+      // TypeError/插件加载失败）若包装成它就进三连重试伪装成寻路失败——
+      // 这类改走 MOVEMENT_INTERNAL_ERROR（不可重试），cause 全文保留。
       if (error instanceof SkillFault) throw error;
       if (request.signal.aborted) {
         throw new SkillFault("SKILL_CANCELLED");
@@ -2759,16 +2770,26 @@ export class MineflayerBotClient implements BotClient {
       if (lease.signal.aborted || !lease.isCurrent()) {
         throw new SkillFault("SKILL_CANCELLED");
       }
-      this.stopPathfinder();
-      // pathfinder 用 error.name 区分 NoPath / Timeout / GoalChanged /
-      // PathStopped（lib/goto.js:26-40），全丢掉就只剩一个"走不过去"，
-      // 运维侧再也分不出是没有路还是思考预算不够。屏蔽码保持不变，
-      // 原因走 onFault 进宿主日志。
+      const errorName = error instanceof Error ? error.name : "";
+      const KNOWN_PATHFINDER_REJECTIONS = new Set([
+        "NoPath",
+        "Timeout",
+        "GoalChanged",
+        "PathStopped",
+      ]);
+      if (KNOWN_PATHFINDER_REJECTIONS.has(errorName)) {
+        throw new SkillFault(
+          "PATHFINDER_GOTO_FAILED",
+          error instanceof Error && error.message.trim().length > 0
+            ? `${error.name}: ${error.message.trim()}`
+            : "pathfinder rejected without a message.",
+        );
+      }
       throw new SkillFault(
-        "PATHFINDER_GOTO_FAILED",
-        error instanceof Error && error.message.trim().length > 0
-          ? `${error.name}: ${error.message.trim()}`
-          : "pathfinder rejected without a message.",
+        "MOVEMENT_INTERNAL_ERROR",
+        error instanceof Error
+          ? `${error.name}: ${error.message}`
+          : String(error),
       );
     } finally {
       lease.release(lease.signal.aborted ? "cancelled" : "completed");

@@ -1,4 +1,4 @@
-import { startLoopMonitor, type LoopMonitorStop } from "./loop-monitor.js";
+import { probeBooleanKnob, startLoopMonitor, type LoopMonitorStop } from "./loop-monitor.js";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -680,10 +680,25 @@ export class SingleBotRuntime {
     this.stopping = false;
     this.reconnectAttempts = 0;
     this.loopMonitorStop ??= startLoopMonitor(this.dependencies.logger);
+    // 旋钮探针（Phase 2c allowlist）：严格门语义（=1 开，=0/空 关，其他=显式
+    // 降级并标 invalid）；只输出非敏感旋钮名与解析结果，绝不输出任何密钥类变量。
+    const probeKnob = (name: string) => {
+      const probed = probeBooleanKnob(process.env[name]);
+      return {
+        effective: probed.effective,
+        source: probed.source,
+        ...(probed.raw !== null ? { raw: probed.raw } : {}),
+        ...(probed.invalid ? { invalid: true } : {}),
+      };
+    };
     this.dependencies.logger.info?.("runtime_env_probe", {
-      rustPathfinder: process.env.STUDIO_RUST_PATHFINDER ?? null,
-      noHunger: process.env.STUDIO_NO_HUNGER ?? null,
-      l0Stop: process.env.STUDIO_L0_EMERGENCY_STOP ?? null,
+      schemaVersion: "1.0",
+      knobs: {
+        STUDIO_RUST_PATHFINDER: probeKnob("STUDIO_RUST_PATHFINDER"),
+        STUDIO_NO_HUNGER: probeKnob("STUDIO_NO_HUNGER"),
+        STUDIO_L0_EMERGENCY_STOP: probeKnob("STUDIO_L0_EMERGENCY_STOP"),
+        STUDIO_PURSUIT: probeKnob("STUDIO_PURSUIT"),
+      },
       envKeyCount: Object.keys(process.env).length,
     });
     this.connect();
