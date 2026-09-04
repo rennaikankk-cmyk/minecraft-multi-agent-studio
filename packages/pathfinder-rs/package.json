@@ -1,0 +1,13 @@
+{
+  "name": "@minecraft-studio/pathfinder-rs",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Rust voxel A* pathfinder (napi addon) with worker-thread isolation. Clean-room: Baritone-inspired architecture, no Baritone code. Node side owns MC block classification; the engine only sees voxel classes.",
+  "main": "index.js",
+  "scripts": {
+    "build": "node ../../scripts/build-pathfinder-rs.mjs",
+    "test": "cargo test",
+    "smoke": "node smoke.js"
+  },
+  "types": "index.d.ts"
+}
