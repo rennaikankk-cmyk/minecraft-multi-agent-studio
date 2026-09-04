@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+@page { size: A4; margin: 0; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { background: #0f172a; font-family: "Microsoft YaHei", "SimHei", sans-serif; color: #e2e8f0; }
+.page { width: 210mm; min-height: 297mm; padding: 18mm 16mm; page-break-after: always; position: relative; }
+.page:last-child { page-break-after: auto; }
+
+/* Cover */
+.cover { background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%); display: flex; flex-direction: column; justify-content: center; padding: 30mm 24mm; }
+.cover .kicker { font-size: 14pt; letter-spacing: 6pt; color: #38bdf8; margin-bottom: 8mm; }
+.cover h1 { font-size: 42pt; font-weight: 900; line-height: 1.2; margin-bottom: 6mm; color: #f8fafc; }
+.cover .subtitle { font-size: 16pt; color: #94a3b8; margin-bottom: 16mm; }
+.cover .meta { font-size: 11pt; color: #64748b; line-height: 1.8; }
+.cover .highlight { display: inline-block; background: rgba(56,189,248,0.1); border: 1pt solid rgba(56,189,248,0.3); border-radius: 4pt; padding: 8pt 16pt; font-size: 10pt; color: #38bdf8; margin-top: 12mm; }
+
+/* Body */
+h2 { font-size: 20pt; color: #38bdf8; margin: 8mm 0 4mm; padding-bottom: 2mm; border-bottom: 1pt solid #334155; }
+h3 { font-size: 14pt; color: #a5b4fc; margin: 6mm 0 3mm; }
+p { font-size: 10pt; line-height: 1.7; margin: 2mm 0; color: #cbd5e1; }
+ul { margin: 2mm 0 4mm 6mm; }
+li { font-size: 10pt; line-height: 1.7; margin: 1mm 0; color: #cbd5e1; }
+li::marker { color: #38bdf8; }
+
+/* Tables */
+table { width: 100%; border-collapse: collapse; margin: 4mm 0; font-size: 9pt; }
+th { background: #1e293b; color: #38bdf8; padding: 2.5mm 3mm; text-align: left; border: 0.5pt solid #334155; font-weight: 600; }
+td { padding: 2.5mm 3mm; border: 0.5pt solid #334155; color: #cbd5e1; line-height: 1.5; }
+tr:nth-child(even) td { background: rgba(30,41,59,0.3); }
+
+/* Badges */
+.pass { color: #4ade80; font-weight: 700; }
+.fail { color: #f87171; font-weight: 700; }
+.partial { color: #fbbf24; font-weight: 700; }
+.commit { color: #818cf8; font-family: monospace; font-size: 8.5pt; }
+.gate { display: inline-block; padding: 1pt 6pt; border-radius: 3pt; font-size: 8pt; font-weight: 700; }
+.gate-pass { background: rgba(74,222,128,0.15); color: #4ade80; }
+.gate-fail { background: rgba(248,113,113,0.15); color: #f87171; }
+.gate-partial { background: rgba(251,191,36,0.15); color: #fbbf24; }
+
+/* Code style */
+code { font-family: Consolas, monospace; font-size: 8.5pt; color: #7dd3fc; background: rgba(56,189,248,0.08); padding: 0.5pt 3pt; border-radius: 2pt; }
+
+/* Section dividers */
+.divider { height: 0.5pt; background: #334155; margin: 6mm 0; }
+</style>
+</head>
+<body>
+
+<!-- ==================== COVER ==================== -->
+<div class="page cover">
+  <div class="kicker">PROJECT STATUS REPORT</div>
+  <h1>Minecraft Multi-Agent Studio<br>进展与问题报告</h1>
+  <div class="subtitle">2026-09-03 至 2026-09-04 闭环开发轮</div>
+  <div class="meta">
+    <strong>仓库：</strong>rennaikankk-cmyk/minecraft-multi-agent-studio<br>
+    <strong>最新 HEAD：</strong><span class="commit">da8c770</span><br>
+    <strong>测试基线：</strong>coordinator 416/416 · skills 880/880 · runtime 375/375 · combat 385/385 · protocol 106/106<br>
+    <strong>服务器：</strong>luv.mc6.cn:22936 (Paper 26.1.2) · 本地测试 192.168.5.28:25598 (1.21.11)
+  </div>
+  <div class="highlight">涵盖：L 链修复 · 钻套发育 · 追击系统 · Grim 反作弊工程 · 基地建造 · 全部 Bug 追踪</div>
+</div>
+
+<!-- ==================== SECTION 1: OVERVIEW ==================== -->
+<div class="page">
+  <h2>1. 项目定位与当前状态</h2>
+  <p><strong>Minecraft Multi-Agent Studio</strong> 是一个无规则服 bot 系统——对决使用外挂客户端的真人玩家。核心技术栈：TypeScript pnpm monorepo（coordinator / bot-runtime / control-api / dashboard / skills / combat / protocol 等）。</p>
+
+  <h3>1.1 核心架构</h3>
+  <table>
+    <tr><th>组件</th><th>职责</th><th>当前状态</th></tr>
+    <tr><td>Coordinator</td><td>自治需求梯 · 确定性规划 · 租约仲裁 · 中断恢复</td><td class="pass">416/416</td></tr>
+    <td>Bot Runtime</td><td>Mineflayer · 战斗驱动 · 逃逸 · 移动整形器 · Provenance</td><td class="pass">375/375</td></tr>
+    <td>Skills</td><td>23 技能 · 契约闸 G1-G9 · progressContract</td><td class="pass">880/880</td></tr>
+    <td>Combat</td><td>威胁分析 · 撤退 · 追击 · 命令控制</td><td class="pass">385/385</td></tr>
+    <td>Protocol</td><td>Zod 严格 schema · 运行时契约</td><td class="pass">106/106</td></tr>
+  </table>
+
+  <h3>1.2 2026-09-03/04 交付概览</h3>
+  <table>
+    <tr><th>域</th><th>交付</th><th>Commit</th></tr>
+    <tr><td>L 链生命周期修复</td><td>5 个真实 bug（idempotent / NoPath / 握手余量 / exit 纪律 / 内存旋钮）→ L1-L6 PASS</td><td class="commit">c8b4042..804e14e</td></tr>
+    <td>Grim 反作弊工程</td><td>抓包定性 → movementSync 整形器（默认关）→ NoHunger 诊断 → 语义对齐</td><td class="commit">5b650d8..237bfc1</td></tr>
+    <td>战斗系统</td><td>PursuitController 追击 + 中断-恢复语义 + 任务链衔接</td><td class="commit">6f62296..d098363</td></tr>
+    <td>钻套需求梯</td><td>全身钻甲(50)→工具(49)→剑(48) + 需求语义修正</td><td class="commit">26c7fdb..a5b22f4</td></tr>
+    <td>基地建造</td><td>地形自适应（挖障+参考回退）+ auto-anchor + 基地需求梯</td><td class="commit">e36adfa..da8c770</td></tr>
+  </table>
+</div>
+
+<!-- ==================== SECTION 2: TIMELINE ==================== -->
+<div class="page">
+  <h2>2. 时间线进展</h2>
+  <table>
+    <tr><th>时间</th><th>里程碑</th><th>验证</th></tr>
+    <tr><td>09-03 深夜</td><td>L 链五修复 → L1-L6 首次同链全 PASS</td><td class="pass">rcon 真值</td></tr>
+    <tr><td>09-03 凌晨</td><td>G1 luv 实弹：登录+保号实证 · 移动腿被环境阻断 → PARTIAL</td><td class="partial">服务器真值</td></tr>
+    <tr><td>09-04 早</td><td>伤害法证：不是围猎是出生井坠落+怪坑；NoHunger maximum 自签空中行走签名</td><td class="pass">探针实测</td></tr>
+    <tr><td>09-04 早</td><td>PursuitController 追击落地（GoalFollow+承诺窗+脱离条件）</td><td class="pass">7 单测</td></tr>
+    <tr><td>09-04 早</td><td>中断-恢复语义 + 任务链衔接（完成→1s 接下一个）</td><td class="pass">coordinator 416</td></tr>
+    <tr><td>09-04 早</td><td>钻套需求梯 + 储备语义修正（赤字→总量）+ 钻工具配方补齐</td><td class="pass">880</td></tr>
+    <tr><td>09-04 上午</td><td>移动租约 TTL + 追击租约泄漏修复 → 钻套发育无卡死（10min→石镐）</td><td class="pass">rcon 真值</td></tr>
+    <tr><td>09-04 上午</td><td>整形器默认关（用户决策）+ craft 产量语义对齐</td><td class="pass">416</td></tr>
+    <tr><td>09-04 上午</td><td>地形自适应放置（挖障+参考回退）+ auto-anchor + 基地需求梯</td><td class="partial">375/416</td></tr>
+  </table>
+</div>
+
+<!-- ==================== SECTION 3: BUGS FIXED ==================== -->
+<div class="page">
+  <h2>3. 已修复的 Bug（按发现时间）</h2>
+  <table>
+    <tr><th>#</th><th>Bug</th><th>根因</th><th>修复</th></tr>
+    <tr><td>1</td><td>L2 goal 恢复后秒失败</td><td>movement.goto idempotent=false → L0 STUCK 取消后必死</td><td>idempotent=true（c8b4042）</td></tr>
+    <tr><td>2</td><td>NoPath 55ms 终态死</td><td>durable 队列 catalog 后 100ms 派发，chunk 未加载</td><td>3×750ms 重试（94bfedc）</td></tr>
+    <tr><td>3</td><td>goal 临完成前被杀</td><td>dispatch 起 20s vs runtime 执行起 20s——握手 ~3s 被吞</td><td>协调器 +10s 余量（e37897f）</td></tr>
+    <tr><td>4</td><td>fixture 泄漏双服并存</td><td>process.exit 跳过 finally cleanup</td><td>exitCode+return（975c96f）</td></tr>
+    <tr><td>5</td><td>10-bot 断连波</td><td>2G 内存下 tick 滞后</td><td>STUDIO_E2E_MEMORY 旋钮（804e14e）</td></tr>
+    <tr><td>6</td><td>WOOD_RESERVE 1Hz 幽灵循环</td><td>赤字语义"获取 4 个"被规划器读总量 ≥4 秒完成</td><td>改传总量（a5b22f4）</td></tr>
+    <tr><td>7</td><td>craft completed craftedCount=0 循环</td><td>快速通道拿手持 2≥1 次配方=误判，步骤需 4</td><td>count×yieldPerCraft（1f0dfdb）</td></tr>
+    <tr><td>8</td><td>collect.block 全 BUSY 饿死</td><td>追击 controller 局部变量租约泄漏</td><td>activePursuit 成员+显式 stop（7a7df0c）</td></tr>
+    <tr><td>9</td><td>任何租约不还就永久锁死</td><td>移动租约无 TTL</td><td>60s TTL 超龄自动过期（5cb899c）</td></tr>
+    <tr><td>10</td><td>RETRY_SAME 同 tick 重发</td><td>租约持有者在正常窗口内重试必再 BUSY×4</td><td>500ms→1s→2s 退避</td></tr>
+    <tr><td>11</td><td>蓝图 goal 走模型分支</td><td>Git Bash curl 中文编码损坏</td><td>文件方式+charset=utf-8</td></tr>
+    <tr><td>12</td><td>goalPreview 泄漏隐私</td><td>operator goal 文本进日志</td><td>已移除（隐私测试抓到）</td></tr>
+  </table>
+</div>
+
+<!-- ==================== SECTION 4: OPEN ISSUES ==================== -->
+<div class="page">
+  <h2>4. 当前遗留问题（按优先级）</h2>
+  <table>
+    <tr><th>优先级</th><th>问题</th><th>状态</th><th>下一棒方向</th></tr>
+    <tr><td class="fail">P0</td><td>baseFacilities 状态未接入 director</td><td class="partial">需求梯已写好（4 个 need），但 director 不传 baseFacilities → 永不触发</td><td>从 BaseRegistry/ProvenanceStore 派生传入</td></tr>
+    <tr><td class="fail">P0</td><td>L7 10-bot 公平性</td><td class="fail">runtime churn 未根因修完</td><td>查 bot-runtime 实例换代机制</td></tr>
+    <tr><td class="partial">P1</td><td>移动模板 goal 在 luv 走模型</td><td class="partial">fixture 同文本走确定性——anarchy/managed 路由差异</td><td>对比派发路径</td></tr>
+    <tr><td class="partial">P1</td><td>luv IP 热度</td><td class="partial">今晚几十会话 → 40s 断链</td><td>冷却数小时后单次干净会话</td></tr>
+    <tr><td class="partial">P1</td><td>spawn-escape 未实测（Grim 关后）</td><td class="partial">v0.3 疾跑优先已实现</td><td>冷却后验证</td></tr>
+    <tr><td class="partial">P2</td><td>60min soak</td><td class="partial">bot-02 抖动 1/38 未归因</td><td>干净环境重跑</td></tr>
+    <tr><td class="partial">P2</td><td>图表 羊毛→床 切片未做</td><td>用户路线①前置</td><td>entity harvest 技能</td></tr>
+    <tr><td class="partial">P3</td><td>下界合金甲 · 附魔</td><td>用户路线③④</td><td>nether portal + enchant 技能</td></tr>
+  </table>
+
+  <h2>5. 操作纪律（踩坑记录）</h2>
+  <ul>
+    <li><strong>中文 goal 一律文件方式</strong>：node JSON.stringify → tmp-goal.json → curl --data-binary @file + charset=utf-8（bash 内联必乱码）</li>
+    <li><strong>goal timeoutMs ≤ 120000</strong>：协议 schema max，超了 INVALID_REQUEST</li>
+    <li><strong>测试前 peaceful+day</strong>：怪物围攻+异步 chunk = bot 死循环</li>
+    <li><strong>goalPreview 不进日志</strong>：隐私测试断言 operator goal 不出现</li>
+    <li><strong>不要内联 node -e 写复杂内容</strong>：模板字面量必炸，用 Edit 工具</li>
+    <li><strong>rcon tp 前确认 chunk 已加载</strong>：异步 chunk = 永久 FALLING</li>
+    <li><strong>测试服世界重置</strong>：docker rm -f studio-local-test-mc + volume rm studio-local-test-data + manager start</li>
+    <li><strong>push 网络断连</strong>：等 30-60 秒重试即可恢复</li>
+  </ul>
+</div>
+
+<!-- ==================== SECTION 5: NEXT STEPS ==================== -->
+<div class="page">
+  <h2>6. 下一棒待办（按优先级）</h2>
+  <h3>P0 — 基地建造闭环</h3>
+  <ul>
+    <li>director 接入 baseFacilities（从 BaseRegistry / ProvenanceStore 派生 hasCobbleGenerator/hasFarm）</li>
+    <li>蓝图施工实测（peaceful + day 环境）</li>
+    <li>基地需求梯与避难所 needs 的衔接测试</li>
+  </ul>
+
+  <h3>P1 — L 链收口</h3>
+  <ul>
+    <li>L7 runtime churn 根因（bot-runtime 实例换代）</li>
+    <li>60min soak（干净环境）</li>
+    <li>最终干净链 L1→L8 一遍过</li>
+    <li>G0 重开判定</li>
+  </ul>
+
+  <h3>P1 — luv 灰度恢复</h3>
+  <ul>
+    <li>冷却后单次干净会话验证 NoHunger-off + shaper-off 组合</li>
+    <li>G1 剩余腿（稳定会话 30-60min）</li>
+    <li>spawn-escape v0.3 实测</li>
+  </ul>
+
+  <h3>P2 — 用户路线①②③④</h3>
+  <ul>
+    <li>①基地（避难所+存放+床重生点）——羊毛获取技能</li>
+    <li>②基地自动设施——蓝图编排接线</li>
+    <li>③下界合金甲——nether portal 能力</li>
+    <li>④附魔——附魔台+书+经验</li>
+  </ul>
+
+  <h3>P3 — 长期</h3>
+  <ul>
+    <li>R5-RECON 技能实现（nether.portal.enter / roof.access / chunk census）</li>
+    <li>R1 登出点记录器</li>
+    <li>10-bot 错峰登录 + 存在性实测</li>
+    <li>MOVEMENT_SHAPED 正式 compat 枚举</li>
+  </ul>
+
+  <div class="divider"></div>
+  <p style="text-align:center; color:#64748b; margin-top:12mm">Generated 2026-09-04 · HEAD da8c770 · All test suites green</p>
+</div>
+
+</body>
+</html>
