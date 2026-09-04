@@ -804,6 +804,10 @@ const PLANNED_ITEM_GOAL_ALIASES: Readonly<Record<string, readonly string[]>> =
       "diamond_pickaxe",
       "钻石镐",
     ]),
+    diamond_axe: Object.freeze(["diamond axe", "diamond_axe", "钻石斧"]),
+    diamond_shovel: Object.freeze(["diamond shovel", "diamond_shovel", "钻石铲"]),
+    diamond_hoe: Object.freeze(["diamond hoe", "diamond_hoe", "钻石锄"]),
+    obsidian: Object.freeze(["obsidian", "黑曜石"]),
     diamond_sword: Object.freeze([
       "diamond sword",
       "diamond_sword",

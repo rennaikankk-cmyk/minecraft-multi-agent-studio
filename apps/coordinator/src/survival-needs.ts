@@ -292,9 +292,9 @@ export function assessSurvivalNeeds(
 
   // ---- 木料储备：工具之外持续补充的建筑/燃料本钱。
   if (woodUnits < WOOD_CRITICAL) {
-    needs.push(itemNeed("WOOD_RESERVE", 68, "oak_log", `wood reserve ${woodUnits} < critical ${WOOD_CRITICAL}`, deficitCount(WOOD_MINIMUM, woodUnits), "oak_log"));
+    needs.push(itemNeed("WOOD_RESERVE", 68, "oak_log", `wood reserve ${woodUnits} < critical ${WOOD_CRITICAL}`, WOOD_MINIMUM, "oak_log"));
   } else if (woodUnits < WOOD_MINIMUM) {
-    needs.push(itemNeed("WOOD_RESERVE", 30, "oak_log", `wood reserve ${woodUnits} < minimum ${WOOD_MINIMUM}`, deficitCount(WOOD_MINIMUM, woodUnits), "oak_log"));
+    needs.push(itemNeed("WOOD_RESERVE", 30, "oak_log", `wood reserve ${woodUnits} < minimum ${WOOD_MINIMUM}`, WOOD_MINIMUM, "oak_log"));
   }
 
   // ---- 武器：石器时代之后必须有；铁器时代升铁剑。
@@ -345,7 +345,7 @@ export function assessSurvivalNeeds(
   // ---- 铁储备：铁器时代的持续本钱（工具链自己会要铁，这里补余量）。
   const ironUnits = (inventory.get("raw_iron")?.count ?? 0) + (inventory.get("iron_ingot")?.count ?? 0);
   if (pickaxeTier >= 1 && ironUnits < IRON_MINIMUM) {
-    needs.push(itemNeed("IRON_RESERVE", 35, "raw_iron", `iron reserve ${ironUnits} < minimum ${IRON_MINIMUM}`, deficitCount(IRON_MINIMUM, ironUnits), "iron_ore"));
+    needs.push(itemNeed("IRON_RESERVE", 35, "raw_iron", `iron reserve ${ironUnits} < minimum ${IRON_MINIMUM}`, IRON_MINIMUM, "iron_ore"));
   }
 
   // ---- 盾牌：铁器时代后的保命件。
@@ -408,10 +408,10 @@ export function assessSurvivalNeeds(
   // ---- 煤/火把：照明与燃料的低权持续维护。
   const coalUnits = (inventory.get("coal")?.count ?? 0) + (inventory.get("charcoal")?.count ?? 0);
   if (pickaxeTier >= 1 && coalUnits < COAL_MINIMUM) {
-    needs.push(itemNeed("COAL_RESERVE", 25, "coal", `coal reserve ${coalUnits} < minimum ${COAL_MINIMUM}`, deficitCount(COAL_MINIMUM, coalUnits), "coal_ore"));
+    needs.push(itemNeed("COAL_RESERVE", 25, "coal", `coal reserve ${coalUnits} < minimum ${COAL_MINIMUM}`, COAL_MINIMUM, "coal_ore"));
   }
   if (pickaxeTier >= 1 && coalUnits >= 1 && (inventory.get("torch")?.count ?? 0) < TORCH_MINIMUM) {
-    needs.push(itemNeed("TORCH", 20, "torch", `torches ${inventory.get("torch")?.count ?? 0} < minimum ${TORCH_MINIMUM}`, deficitCount(TORCH_MINIMUM, inventory.get("torch")?.count ?? 0), "coal_ore"));
+    needs.push(itemNeed("TORCH", 20, "torch", `torches ${inventory.get("torch")?.count ?? 0} < minimum ${TORCH_MINIMUM}`, TORCH_MINIMUM, "coal_ore"));
   }
 
   // ---- 箱子：铁器时代后的储存基建（放箱子本身后续接入，先有物件）。
