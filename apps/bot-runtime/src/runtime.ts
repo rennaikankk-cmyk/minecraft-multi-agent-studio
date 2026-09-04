@@ -1,5 +1,7 @@
 import { probeBooleanKnob, startLoopMonitor, type LoopMonitorStop } from "./loop-monitor.js";
 import { PerfSpanTracker, startPerfTelemetry } from "./perf-spans.js";
+import { currentPerfAbMode } from "./perf-ab-gate.js";
+import { rustShadowPlan } from "./rust-pathfinder.js";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -672,6 +674,9 @@ export class SingleBotRuntime {
   }
 
   private loopMonitorStop: LoopMonitorStop | null = null;
+  /** Phase 4 诊断门：skip_worldstate 模式下 L0 复用的最近快照。 */
+  private lastAbSnapshot: BotClientSnapshot | null = null;
+
   /** Phase 3 测量面：分段计时（只观测不改行为；STUDIO_PERF_SPANS=0 关）。 */
   readonly perfSpans = new PerfSpanTracker();
   private perfTelemetryStop: (() => void) | null = null;
@@ -684,6 +689,15 @@ export class SingleBotRuntime {
     this.stopping = false;
     this.reconnectAttempts = 0;
     this.loopMonitorStop ??= startLoopMonitor(this.dependencies.logger);
+    const shadowTimer = setInterval(() => {
+      if (currentPerfAbMode() !== "shadow_rust") return;
+      if (this.state !== "online" || !this.client) return;
+      const client = this.client as unknown as { bot?: unknown };
+      const bot = (client as { bot?: { entity?: { position: unknown } } }).bot;
+      if (!bot || !(bot as { entity?: unknown }).entity) return;
+      void this.perfSpans.spanAsync("rust.shadow.plan", () => rustShadowPlan(bot as never));
+    }, 1_000);
+    shadowTimer.unref?.();
     this.perfTelemetryStop ??= startPerfTelemetry({
       logger: this.dependencies.logger,
       tracker: this.perfSpans,
@@ -1193,6 +1207,7 @@ export class SingleBotRuntime {
       const client = this.dependencies.createClient(this.profile, this.worldState);
       this.client = client;
       client.setPerfSpanWrap?.((category, fn) => this.perfSpans.spanSync(category, fn));
+      client.setPerfRecorder?.((category, durationMs, detail) => this.perfSpans.record(category, durationMs, detail));
       client.setHandlers({
         onSpawn: () => this.handleSpawn(activeGeneration),
         onStateChanged: () => this.requestStatus(activeGeneration),
@@ -1485,9 +1500,17 @@ export class SingleBotRuntime {
       if (this.client) {
         // Phase 3 子段：物理拍高频链的三步分别计时（测量面收口——90ms 级
         // 尖峰定位到具体步骤，Phase 4 才做归因/修复）。
+        const abSkipWorldState = currentPerfAbMode() === "skip_worldstate";
+        if (abSkipWorldState) {
+          if (this.lastAbSnapshot !== null) {
+            this.evaluateSafetySnapshot(generation, this.lastAbSnapshot);
+          }
+          return;
+        }
         const snapshot = this.perfSpans.spanSync("tick.requestStatus.snapshot", () => this.client!.snapshot());
         this.perfSpans.spanSync("tick.requestStatus.worldState", () => this.updateWorldState(snapshot));
         this.perfSpans.spanSync("tick.requestStatus.safety", () => this.evaluateSafetySnapshot(generation, snapshot));
+        this.lastAbSnapshot = snapshot;
       }
     } catch (cause) {
       // A bare code cannot distinguish a field the server has not sent yet
@@ -1535,6 +1558,10 @@ export class SingleBotRuntime {
       return;
     }
     this.clearTimer("deferredStatus");
+
+    // Phase 4 诊断门（no_telemetry）：跳过序列化+发送；安全评估在
+    // requestStatus 链保留。仅本地归因窗口，禁止生产。
+    if (currentPerfAbMode() === "no_telemetry") return;
 
     try {
       const snapshot = this.perfSpans.spanSync("telemetry.snapshot", () => this.client!.snapshot());

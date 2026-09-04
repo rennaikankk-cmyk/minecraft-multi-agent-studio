@@ -1642,11 +1642,22 @@ export class MineflayerBotClient implements BotClient {
    * ask an LLM for inventory or nearby workstation state.
    */
   worldStateSnapshot(): WorldStateSnapshot {
+    // Phase 4 子段计时：total 包整函数；各阶段独立段（计数进 detail，
+    // 仅慢段保留明细；correlation 用 nowMs 对齐父级 world.snapshot.build）。
+    const phaseBegan = performance.now();
+    try {
+      return this.worldStateSnapshotInner();
+    } finally {
+      this.perfRecord?.("world.snapshot.total", performance.now() - phaseBegan, { at: Date.now() });
+    }
+  }
+
+  private worldStateSnapshotInner(): WorldStateSnapshot {
     const current = this.snapshot();
     const serverProfileId = this.serverProfileId ?? "unknown-server";
     const nowMs = Date.now();
     const now = new Date(nowMs).toISOString();
-    const inventory: InventoryItemState[] = this.bot.inventory.items().map((item) => {
+    const inventory: InventoryItemState[] = this.perfSpan("world.snapshot.inventory", () => this.bot.inventory.items().map((item) => {
       const candidate = item as typeof item & {
         durabilityUsed?: number;
         maxDurability?: number;
@@ -1658,7 +1669,7 @@ export class MineflayerBotClient implements BotClient {
         ? Math.max(0, maxDurability - candidate.durabilityUsed!)
         : null;
       return { name: item.name, count: item.count, durability, maxDurability };
-    });
+    }), { items: this.bot.inventory.items().length });
     const origin = {
       x: current.position.x,
       y: current.position.y,
@@ -1667,11 +1678,12 @@ export class MineflayerBotClient implements BotClient {
       serverProfileId,
     } as const;
     const scanContext = `${serverProfileId}|${current.position.dimension}`;
-    if (
+    const blockScanCacheMiss =
       scanContext !== this.lastNearbyBlockScanContext ||
       nowMs < this.lastNearbyBlockScanAt ||
-      nowMs - this.lastNearbyBlockScanAt >= this.worldStateBlockScanIntervalMs
-    ) {
+      nowMs - this.lastNearbyBlockScanAt >= this.worldStateBlockScanIntervalMs;
+    if (blockScanCacheMiss) {
+      const scanBegan = performance.now();
       const nearbyBlocks: NearbyBlockState[] = [];
       const registry = this.bot.registry as unknown as {
         blocksByName?: Record<string, { id: number } | undefined>;
@@ -1715,8 +1727,18 @@ export class MineflayerBotClient implements BotClient {
       this.nearbyBlockScanCache = Object.freeze(nearbyBlocks);
       this.lastNearbyBlockScanAt = nowMs;
       this.lastNearbyBlockScanContext = scanContext;
+      this.perfRecord?.("world.snapshot.blocks.scan", performance.now() - scanBegan, {
+        cache: "miss",
+        names: importantBlockNames.length,
+        found: nearbyBlocks.length,
+        at: nowMs,
+      });
+    } else {
+      this.perfRecord?.("world.snapshot.blocks.scan", 0, { cache: "hit", at: nowMs });
     }
     const entities: EntityState[] = [];
+    const entityInputCount = Object.keys(this.bot.entities ?? {}).length;
+    const entitiesBegan = performance.now();
     const hostileNames = new Set(["zombie", "skeleton", "creeper", "spider", "enderman", "witch", "pillager", "vindicator", "phantom", "blaze", "ghast", "magma_cube", "slime", "warden"]);
     for (const entity of Object.values(this.bot.entities ?? {})) {
       const id = String(entity.id ?? "");
@@ -1732,6 +1754,11 @@ export class MineflayerBotClient implements BotClient {
         confidence: 1,
       });
     }
+    this.perfRecord?.("world.snapshot.entities.enumerate", performance.now() - entitiesBegan, {
+      in: entityInputCount,
+      out: entities.length,
+      at: nowMs,
+    });
     const movementLease = this.movementController.currentLease();
     const navigationTarget = this.movementGoalPosition(movementLease?.goal);
     this.worldState.observe({
@@ -6343,6 +6370,23 @@ export class MineflayerBotClient implements BotClient {
 
   setPerfSpanWrap(wrap: (category: string, fn: () => void) => void): void {
     this.perfSpanWrap = wrap;
+  }
+
+  private perfRecord: ((category: string, durationMs: number, detail?: Readonly<Record<string, unknown>>) => void) | null = null;
+
+  setPerfRecorder(record: (category: string, durationMs: number, detail?: Readonly<Record<string, unknown>>) => void): void {
+    this.perfRecord = record;
+  }
+
+  /** 子段计时（Phase 4）：低扰动——时钟差+计数，仅慢段(≥50ms)落明细。 */
+  private perfSpan<T>(category: string, fn: () => T, detail?: Readonly<Record<string, unknown>>): T {
+    if (this.perfRecord === null) return fn();
+    const began = performance.now();
+    try {
+      return fn();
+    } finally {
+      this.perfRecord(category, performance.now() - began, detail);
+    }
   }
 
   private perfSink(category: string): void {

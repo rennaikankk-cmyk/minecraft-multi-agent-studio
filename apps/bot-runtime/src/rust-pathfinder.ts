@@ -290,3 +290,29 @@ export async function rustGoto(options: {
   if (stats === null) throw new SkillFault("RUST_PATH_NO_STATS");
   return stats;
 }
+
+/**
+ * Phase 4 shadow 模式（诊断门专用）：以 bot 为中心做一次真实分类+worker
+ * 寻路（目标=附近 16 格），**不执行任何移动**。测量主线程分类成本与
+ * worker 往返；结果丢弃。仅供 perf-ab gate 的 shadow_rust 模式调用。
+ */
+export async function rustShadowPlan(bot: Bot): Promise<void> {
+  const adapter = loadAdapter();
+  const start = bot.entity.position;
+  const sx = 33, sy = 16, sz = 33;
+  const origin = {
+    x: Math.floor(start.x) - 16,
+    y: Math.max(-64, Math.floor(start.y) - 8),
+    z: Math.floor(start.z) - 16,
+  };
+  const t0 = Date.now();
+  const { classes } = classifyVolume(bot, origin, sx, sy, sz);
+  const classifyMs = Date.now() - t0;
+  await adapter.findPathAsync({
+    world: { sx, sy, sz, classes },
+    start: { x: 16, y: 8, z: 16 },
+    goal: { x: 24, y: 8, z: 24 },
+    options: { timeoutMs: 1000 },
+  });
+  void classifyMs;
+}

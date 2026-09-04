@@ -119,6 +119,8 @@ export interface BotClient {
   setHandlers(handlers: BotClientHandlers): void;
   /** Phase 3 测量面（可选）：高频事件→状态回调链的分段计时包装。 */
   setPerfSpanWrap?(wrap: (category: string, fn: () => void) => void): void;
+  /** Phase 4 测量面（可选）：客户端内部子段计时记录器。 */
+  setPerfRecorder?(record: (category: string, durationMs: number, detail?: Readonly<Record<string, unknown>>) => void): void;
   snapshot(): BotClientSnapshot;
   executeSafetyAction(action: L0SafetyAction): Promise<L0SafetyActionResult>;
   /** Stop ordinary gathering/pathfinding before a higher-priority reaction. */

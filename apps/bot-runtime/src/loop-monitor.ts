@@ -29,7 +29,7 @@ export function startLoopMonitor(
   logger: { info?: (event: string, fields?: Record<string, unknown>) => void },
   intervalMs = 30_000,
 ): LoopMonitorStop {
-  // 口径（Phase 3 校准）：resolution=1ns 让 P50 不被桶宽淹没（Windows
+  // 口径（Phase 3 校准）：resolution=1ms（采样分辨率；直方图输出值仍是纳秒，/1e6 换算在下方唯一换算点）（Windows
   // 定时器粒度仍影响下限，报告须连同平台说明）；warmup 一窗不计（启动
   // require/连接峰值不混入正式窗口）；每窗 reset；ns→ms 在此唯一换算点
   // 统一，调用方禁止自行转换。
