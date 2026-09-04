@@ -1686,6 +1686,9 @@ export class CoordinatorLocalPlanner {
         traceId: request.traceId,
         taskId: request.taskId,
         botId: request.botId,
+        // 闭环轮诊断：goal 到达 planner 时的前 60 字符（隐私审计过——蓝图
+        // goal 无敏感字段；一次性定位 safeOperatorGoal/transport 层是否改写）
+        goalPreview: request.operatorGoal.slice(0, 60),
         bindableCount: bindability.bindable.length,
         excludedCount: bindability.excluded.length,
         exclusionReasons: reasonCounts,
