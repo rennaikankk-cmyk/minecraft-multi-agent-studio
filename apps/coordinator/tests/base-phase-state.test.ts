@@ -186,7 +186,7 @@ describe("AutonomousDirector blueprint batch chaining", () => {
       if (/挖一个.*避难所/.test(request.operatorGoal)) {
         return completedPlanResult("survival.shelter", {});
       }
-      if (request.operatorGoal === "向外探索新区域") {
+      if (/^移动到坐标 x=-?\d+ y=\d+ z=-?\d+ 附近，继续观察 [a-z_]+ 方块$/.test(request.operatorGoal)) {
         return completedPlanResult("movement.goto", {});
       }
       if (/starter-base-v1/.test(request.operatorGoal)) {
@@ -226,7 +226,9 @@ describe("AutonomousDirector blueprint batch chaining", () => {
     };
 
     await advance(); // BASE_SITE_SELECTION
-    expect(dispatchGoals[1]).toBe("向外探索新区域");
+    expect(dispatchGoals[1]).toMatch(
+      /^移动到坐标 x=-?\d+ y=\d+ z=-?\d+ 附近，继续观察 [a-z_]+ 方块$/,
+    );
 
     await advance(); // 批 1：无锚点（auto-anchor 由 planner 解析）
     expect(dispatchGoals[2]).toBe("使用蓝图文件 starter-base-v1 施工");
@@ -268,7 +270,7 @@ describe("AutonomousDirector blueprint batch chaining", () => {
       if (/挖一个.*避难所/.test(request.operatorGoal)) {
         return completedPlanResult("survival.shelter", {});
       }
-      if (request.operatorGoal === "向外探索新区域") {
+      if (/^移动到坐标 x=-?\d+ y=\d+ z=-?\d+ 附近，继续观察 [a-z_]+ 方块$/.test(request.operatorGoal)) {
         return completedPlanResult("movement.goto", {});
       }
       if (/starter-base-v1/.test(request.operatorGoal)) {
@@ -333,7 +335,7 @@ describe("AutonomousDirector blueprint batch chaining", () => {
       if (/挖一个.*避难所/.test(request.operatorGoal)) {
         return completedPlanResult("survival.shelter", {});
       }
-      if (request.operatorGoal === "向外探索新区域") {
+      if (/^移动到坐标 x=-?\d+ y=\d+ z=-?\d+ 附近，继续观察 [a-z_]+ 方块$/.test(request.operatorGoal)) {
         return completedPlanResult("movement.goto", {});
       }
       if (/安全食物/.test(request.operatorGoal)) {
@@ -534,4 +536,233 @@ async function flushDirector(): Promise<void> {
 function uuidSequence(): () => string {
   let value = 0;
   return () => `00000000-0000-4000-8000-${(++value).toString().padStart(12, "0")}`;
+}
+
+// ---------------------------------------------------------------------------
+// D. 选址 Spark 评审（site-verdict 接线）
+// ---------------------------------------------------------------------------
+
+describe("AutonomousDirector site verdict consult", () => {
+  it("reject re-explores the next sector, accept opens construction (facts flow into the prompt)", async () => {
+    const record = readyRecord("studio-bot-01");
+    let nowMs = NOW.getTime();
+    const dispatchGoals: string[] = [];
+    const prompts: string[] = [];
+    const verdicts: Array<"reject" | "accept"> = ["reject", "accept"];
+    let verdictCall = 0;
+    const listeners = new Set<(record: BotRegistryRecord) => void>();
+    const registry = {
+      list: vi.fn(() => [record]),
+      get: vi.fn(() => record),
+      subscribe: vi.fn((listener: (record: BotRegistryRecord) => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      }),
+    };
+    const planAndDispatch = vi.fn(async (request: { operatorGoal: string }) => {
+      dispatchGoals.push(request.operatorGoal);
+      if (/挖一个.*避难所/.test(request.operatorGoal)) {
+        return completedPlanResult("survival.shelter", {});
+      }
+      const scanMatch = /读取当前区域的\s+([a-z0-9_]+)\s+方块分布/.exec(request.operatorGoal);
+      if (scanMatch !== null) {
+        // 岩浆贴脸（3 格）——评审应看到硬伤事实
+        const matches = scanMatch[1] === "lava"
+          ? [{ x: 3, y: 64, z: 3, distance: 3 }]
+          : scanMatch[1] === "hay_block"
+            ? [{ x: -20, y: 64, z: -8, distance: 22 }]
+            : [];
+        return scanPlanResult(scanMatch[1]!, matches);
+      }
+      if (/^移动到坐标 x=-?\d+ y=\d+ z=-?\d+ 附近，继续观察 [a-z_]+ 方块$/.test(request.operatorGoal)) {
+        return completedPlanResult("movement.goto", {});
+      }
+      return completedPlanResult("build.blueprint", {});
+    });
+    const siteAI = {
+      generate: vi.fn(async (request: { prompt: string }) => {
+        prompts.push(request.prompt);
+        const verdict = verdicts[Math.min(verdictCall, verdicts.length - 1)]!;
+        verdictCall += 1;
+        return { value: { content: JSON.stringify({ verdict, confidence: 0.8, reasons: [verdict === "reject" ? "岩浆太近" : "村庄近且无硬伤"] }) } };
+      }),
+    };
+    const director = new AutonomousDirector({
+      registry,
+      planner: { planAndDispatch },
+      intervalMs: 60_000,
+      goalTimeoutMs: 60_000,
+      failureCooldownMs: 5_000,
+      terminalRetentionMs: 10_000,
+      now: () => new Date(nowMs),
+      randomId: uuidSequence(),
+      siteAI: siteAI as never,
+    });
+
+    director.start();
+    await flushDirector();
+    const advance = async () => {
+      nowMs += 2_000;
+      for (const listener of listeners) listener(record);
+      await flushDirector();
+    };
+
+    await advance(); // 选址移动 #1 完成 → 评审 #1（reject）
+    await director.waitForSiteVerdicts();
+    // 门未翻：reject 后仍是选址移动（新扇区），且评审 #2 已在飞——此时
+    // 主体施工从未派发过。
+    await advance();
+    expect(dispatchGoals.some((g) => g.includes("starter-base-v1"))).toBe(false);
+    // 事实采集真的发生了（4 项只读扫描），事实进了 prompt（岩浆 3 格）
+    expect(dispatchGoals.filter((g) => g.includes("读取当前区域")).length).toBeGreaterThanOrEqual(4);
+    expect(prompts[0]).toContain("最近 3 格");
+    expect(prompts[0]).not.toMatch(/x\s*[:=]\s*-?\d+/);
+
+    await director.waitForSiteVerdicts(); // 评审 #2（accept）
+    await advance(); // 主体施工开工
+    expect(dispatchGoals[dispatchGoals.length - 1]).toBe("使用蓝图文件 starter-base-v1 施工");
+    // 选址移动恰好 2 次（reject 重探一次，accept 后不再走）
+    expect(dispatchGoals.filter((g) => /^移动到坐标/.test(g))).toHaveLength(2);
+    expect(siteAI.generate).toHaveBeenCalledTimes(2);
+
+    await director.stop();
+  });
+
+  it("fails open when the model is unavailable (site reserved, pipeline continues)", async () => {
+    const record = readyRecord("studio-bot-01");
+    let nowMs = NOW.getTime();
+    const dispatchGoals: string[] = [];
+    const listeners = new Set<(record: BotRegistryRecord) => void>();
+    const registry = {
+      list: vi.fn(() => [record]),
+      get: vi.fn(() => record),
+      subscribe: vi.fn((listener: (record: BotRegistryRecord) => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      }),
+    };
+    const planAndDispatch = vi.fn(async (request: { operatorGoal: string }) => {
+      dispatchGoals.push(request.operatorGoal);
+      if (/挖一个.*避难所/.test(request.operatorGoal)) {
+        return completedPlanResult("survival.shelter", {});
+      }
+      if (/读取当前区域/.test(request.operatorGoal)) {
+        return scanPlanResult("air", []);
+      }
+      return completedPlanResult("movement.goto", {});
+    });
+    const siteAI = {
+      generate: vi.fn(async () => {
+        throw new Error("spark hub down");
+      }),
+    };
+    const director = new AutonomousDirector({
+      registry,
+      planner: { planAndDispatch },
+      intervalMs: 60_000,
+      goalTimeoutMs: 60_000,
+      failureCooldownMs: 5_000,
+      terminalRetentionMs: 10_000,
+      now: () => new Date(nowMs),
+      randomId: uuidSequence(),
+      siteAI: siteAI as never,
+    });
+
+    director.start();
+    await flushDirector();
+    const advance = async () => {
+      nowMs += 2_000;
+      for (const listener of listeners) listener(record);
+      await flushDirector();
+    };
+    await advance(); // 选址移动完成 → 评审（模型挂）
+    await director.waitForSiteVerdicts();
+    await advance(); // fail-open：门已翻 → 主体施工
+    expect(dispatchGoals[dispatchGoals.length - 1]).toBe("使用蓝图文件 starter-base-v1 施工");
+
+    await director.stop();
+  });
+
+  it("force-accepts after the reject limit instead of consulting forever", async () => {
+    const record = readyRecord("studio-bot-01");
+    let nowMs = NOW.getTime();
+    const listeners = new Set<(record: BotRegistryRecord) => void>();
+    const registry = {
+      list: vi.fn(() => [record]),
+      get: vi.fn(() => record),
+      subscribe: vi.fn((listener: (record: BotRegistryRecord) => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      }),
+    };
+    const planAndDispatch = vi.fn(async (request: { operatorGoal: string }) => {
+      if (/挖一个.*避难所/.test(request.operatorGoal)) {
+        return completedPlanResult("survival.shelter", {});
+      }
+      if (/读取当前区域/.test(request.operatorGoal)) {
+        return scanPlanResult("air", []);
+      }
+      return completedPlanResult("movement.goto", {});
+    });
+    const siteAI = {
+      generate: vi.fn(async () => ({
+        value: { content: JSON.stringify({ verdict: "reject", confidence: 0.9, reasons: ["永远看不上"] }) },
+      })),
+    };
+    const director = new AutonomousDirector({
+      registry,
+      planner: { planAndDispatch },
+      intervalMs: 60_000,
+      goalTimeoutMs: 60_000,
+      failureCooldownMs: 5_000,
+      terminalRetentionMs: 10_000,
+      now: () => new Date(nowMs),
+      randomId: uuidSequence(),
+      siteAI: siteAI as never,
+    });
+
+    director.start();
+    await flushDirector();
+    const advance = async () => {
+      nowMs += 2_000;
+      for (const listener of listeners) listener(record);
+      await flushDirector();
+    };
+    for (let round = 0; round < 3; round += 1) {
+      await advance(); // 选址移动 → 评审 reject ×3
+      await director.waitForSiteVerdicts();
+    }
+    expect(siteAI.generate).toHaveBeenCalledTimes(3);
+    await advance(); // 第 4 次完成：不再评审，直接翻门
+    expect(siteAI.generate).toHaveBeenCalledTimes(3);
+    await advance(); // 主体施工
+    const goals = planAndDispatch.mock.calls.map(([request]: [{ operatorGoal: string }]) => request.operatorGoal);
+    expect(goals[goals.length - 1]).toBe("使用蓝图文件 starter-base-v1 施工");
+
+    await director.stop();
+  });
+});
+
+function scanPlanResult(
+  blockName: string,
+  matches: ReadonlyArray<{ x: number; y: number; z: number; distance: number }>,
+): never {
+  return {
+    action: "skill_result",
+    reasonCode: "DETERMINISTIC_SCAN",
+    invocation: { payload: { skillId: "world.scan" } },
+    result: {
+      payload: {
+        outcome: "completed",
+        output: {
+          blockName,
+          dimension: "minecraft:overworld",
+          matches,
+          targetsFound: matches.length,
+          complete: true,
+        },
+      },
+    },
+    ai: null,
+  } as never;
 }

@@ -773,10 +773,10 @@ describe("AutonomousDirector", () => {
       "安全避难所",
     );
     // Fully-equipped, sheltered bot keeps working（Phase 1 阶段门接线后）：
-    // 钻套齐+避难所就绪 → 基地选址(47)压过无限探索(6)。goal 复用探索
-    // 游标语义（远离出生点），由确定性通道派发。
-    expect(planAndDispatch.mock.calls[1]?.[0].operatorGoal).toBe(
-      "向外探索新区域",
+    // 钻套齐+避难所就绪 → 基地选址(47)压过无限探索(6)。选址走确定性
+    // 移动模板（扇区游标），在确定性-only 部署里也派得出去。
+    expect(planAndDispatch.mock.calls[1]?.[0].operatorGoal).toMatch(
+      /^移动到坐标 x=-?\d+ y=\d+ z=-?\d+ 附近，继续观察 [a-z_]+ 方块$/,
     );
   });
 });

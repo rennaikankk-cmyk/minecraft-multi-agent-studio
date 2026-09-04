@@ -38,6 +38,15 @@ import {
   type SurvivalNeedKey,
 } from "./survival-needs.js";
 import { BasePhaseTracker, type BasePhaseKey } from "./base-phase-state.js";
+import {
+  askSiteVerdict,
+  buildSiteVerdictPrompt,
+  SITE_VERDICT_REJECT_LIMIT,
+  SITE_VERDICT_TIMEOUT_MS,
+  type SiteFactDimension,
+  type SiteFacts,
+  type SiteVerdict,
+} from "./site-verdict.js";
 
 type PublicTask = NonNullable<PublicBotDetailV1["currentTask"]>;
 type TaskStatus = PublicTask["status"];
@@ -76,6 +85,13 @@ export type AutonomousDirectorOptions = Readonly<{
    * 完全确定性运转。模型只能从白名单菜单选择，见 replan-oracle.ts。
    */
   replanAI?: { generate: ScheduledAIRouter["generate"] };
+  /**
+   * 基地选址评审（可选，Spark）：选址 goal 完成后采集候选点事实快照
+   * （村庄标记/水/岩浆/木材的相对距离），模型做 accept/reject 裁决。
+   * 未注入 = 旧行为（走到哪算哪，完成即翻门）。模型缺位/超时/不合法
+   * 输出一律 fail-open accept——选址永不因模型死锁。见 site-verdict.ts。
+   */
+  siteAI?: { generate: ScheduledAIRouter["generate"] };
   /**
    * 游戏内聊天指挥入口：白名单玩家的话由 runtime 上报、registry 分发到
    * 这里。返回 true 表示被接单。未注入时聊天指挥不可用（生存不受影响）。
@@ -214,6 +230,12 @@ export class AutonomousDirector implements AutonomousTaskSource {
    * completed=true 时清除。
    */
   private readonly baseBuilds = new Map<string, BaseBuildProgress>();
+  /**
+   * 选址评审（Spark）：连续 reject 计数（达 SITE_VERDICT_REJECT_LIMIT 强制
+   * accept）与在途评审（防同 bot 并发评审/需求在评审期间重触发）。
+   */
+  private readonly siteRejects = new Map<string, number>();
+  private readonly siteVerdictInFlight = new Map<string, Promise<void>>();
   private readonly consecutiveNeedFailures = new Map<string, number>();
   private readonly needSuppressedUntil = new Map<string, number>();
   private readonly explorationCursor = new Map<string, number>();
@@ -637,6 +659,22 @@ export class AutonomousDirector implements AutonomousTaskSource {
         directionalMining: false,
       };
     }
+    if (need.key === "BASE_SITE_SELECTION") {
+      // 选址 = 确定性扇区游走的移动目标（修复：原"向外探索新区域"自由
+      // 文本不匹配任何模板，确定性-only 部署会落模型分支 AI_UNAVAILABLE
+      // 无限失败循环）。走到候选点后由 site-verdict 评审（接线时）。
+      const target = this.explorationTarget(record);
+      if (target === null) return null;
+      return {
+        needKey: need.key,
+        key: "base-site-selection",
+        title: `${need.title} (扇区 x=${target.x} z=${target.z})`,
+        operatorGoal: `移动到坐标 x=${target.x} y=${target.y} z=${target.z} 附近，继续观察 ${target.blockName} 方块`,
+        reason: need.reason,
+        blockName: target.blockName,
+        directionalMining: false,
+      };
+    }
     if (need.key === "SHELTER") {
       const direction = this.nextShelterDirection(record.botId);
       const seal = shelterMaterial(record) ?? "dirt";
@@ -822,6 +860,146 @@ export class AutonomousDirector implements AutonomousTaskSource {
   private hasOngoingBaseBuild(botId: string, needKey: SurvivalNeedKey): boolean {
     if (!BASE_BUILD_NEED_KEYS.has(needKey)) return false;
     return this.baseBuilds.has(botId);
+  }
+
+  /**
+   * 选址评审是否应启动：siteAI 已接线 + 门未翻 + 无在途评审 + 未达
+   * reject 上限（达上限后下个完成直接翻门，不再浪费模型调用）。
+   */
+  private shouldConsultSiteVerdict(botId: string): boolean {
+    if (!this.options.siteAI) return false;
+    if (this.basePhase.snapshotFor(botId).BASE_SITE_RESERVED) return false;
+    if (this.siteVerdictInFlight.has(botId)) return false;
+    if ((this.siteRejects.get(botId) ?? 0) >= SITE_VERDICT_REJECT_LIMIT) {
+      return false;
+    }
+    return true;
+  }
+
+  /** 启动一次选址评审：抑制选址+探索需求（扫描期间别把 bot 派走），
+   *  预算超时自动解抑（防挂起吞掉需求节拍）。恢复时只回收自己设的闸。 */
+  private beginSiteVerdict(botId: string, goal: AutonomousGoal): void {
+    const nowMs = validDate(this.now()).getTime();
+    const hold = nowMs + SITE_VERDICT_TIMEOUT_MS * 2;
+    const prior: Array<[string, number]> = [];
+    for (const key of [`${botId}:BASE_SITE_SELECTION`, `${botId}:EXPLORATION`]) {
+      prior.push([key, this.needSuppressedUntil.get(key) ?? 0]);
+      this.needSuppressedUntil.set(key, hold);
+    }
+    const promise = this.consultSiteVerdict(botId, goal)
+      .catch(() => undefined)
+      .finally(() => {
+        this.siteVerdictInFlight.delete(botId);
+        for (const [key, was] of prior) {
+          if ((this.needSuppressedUntil.get(key) ?? 0) !== hold) continue;
+          if (was > 0) this.needSuppressedUntil.set(key, was);
+          else this.needSuppressedUntil.delete(key);
+        }
+      });
+    this.siteVerdictInFlight.set(botId, promise);
+  }
+
+  /**
+   * 选址评审主体：采集事实（4 项只读扫描，相对距离）→ 模型裁决 →
+   * accept/限额/模型缺位=翻门，未达限额的 reject=不翻门（需求重新触发，
+   * 扇区游标已推进，走下一个候选点）。单项扫描失败=该事实缺失，不是
+   * 整次评审失败。
+   */
+  private async consultSiteVerdict(
+    botId: string,
+    goal: AutonomousGoal,
+  ): Promise<void> {
+    const ai = this.options.siteAI;
+    if (!ai) return;
+    const record = this.options.registry.get(botId, validDate(this.now()));
+    if (!record || record.connectionState !== "online") return;
+    let verdict: SiteVerdict | null = null;
+    try {
+      const facts = await this.gatherSiteFacts(record);
+      if (!this.started) return;
+      const requestId = identifierSchema.parse(this.randomId());
+      verdict = await askSiteVerdict({
+        ai,
+        requestId,
+        botId,
+        traceId: requestId,
+        prompt: buildSiteVerdictPrompt(facts),
+      });
+    } catch {
+      verdict = null;
+    }
+    if (!this.started) return;
+    const rejects = this.siteRejects.get(botId) ?? 0;
+    if (verdict !== null && verdict.verdict === "reject" && rejects < SITE_VERDICT_REJECT_LIMIT) {
+      this.siteRejects.set(botId, rejects + 1);
+      this.log("info", "coordinator_autonomous_site_rejected", {
+        botId,
+        goal: goal.key,
+        rejects: rejects + 1,
+        limit: SITE_VERDICT_REJECT_LIMIT,
+        reasons: verdict.reasons.join(" | "),
+      });
+      return;
+    }
+    const fallback = verdict === null; // 模型缺位/超时/不合法 → fail-open
+    const forcedByLimit = verdict !== null && verdict.verdict === "reject";
+    this.siteRejects.set(botId, 0);
+    this.basePhase.forcePhase(botId, "BASE_SITE_RESERVED");
+    this.log("info", "coordinator_autonomous_site_accepted", {
+      botId,
+      goal: goal.key,
+      fallback,
+      forcedByLimit,
+      ...(verdict !== null ? { reasons: verdict.reasons.join(" | ") } : {}),
+    });
+  }
+
+  /**
+   * 选址事实快照：4 项只读扫描（村庄干草捆/水/岩浆/橡木），全部转成
+   * 相对距离与数量——绝对坐标不出协调器（prompt 保密纪律）。
+   */
+  private async gatherSiteFacts(
+    record: BotRegistryRecord,
+  ): Promise<SiteFacts> {
+    const controller = new AbortController();
+    const scans: ReadonlyArray<[keyof SiteFacts, string]> = [
+      ["village", "hay_block"],
+      ["water", "water"],
+      ["lava", "lava"],
+      ["wood", "oak_log"],
+    ];
+    const facts: Record<keyof SiteFacts, SiteFactDimension | null> = {
+      village: null,
+      water: null,
+      lava: null,
+      wood: null,
+    };
+    for (const [key, blockName] of scans) {
+      try {
+        const result = await this.dispatchInternal(
+          record.botId,
+          `读取当前区域的 ${blockName} 方块分布并给出扫描结果，只读`,
+          controller,
+        );
+        const positions = scannedResourcePositions(result, blockName);
+        if (positions.length > 0) {
+          facts[key] = {
+            nearestDistance: Math.max(0, Math.round(positions[0]!.distance)),
+            count: positions.length,
+          };
+        }
+      } catch {
+        // 单项扫描失败 = 该事实缺失（null），评审继续。
+      }
+    }
+    return facts;
+  }
+
+  /** 等待所有在途选址评审结束（测试与停机观测用）。 */
+  async waitForSiteVerdicts(): Promise<void> {
+    while (this.siteVerdictInFlight.size > 0) {
+      await Promise.all([...this.siteVerdictInFlight.values()]);
+    }
   }
 
   private async runTask(
@@ -1276,14 +1454,23 @@ export class AutonomousDirector implements AutonomousTaskSource {
       if (goal.needKey === "SHELTER") this.shelterBuilt.add(botId);
       // 阶段门置位（Phase 1）：多批蓝图需求只在整图放完（无进行中施工）
       // 时置门——单批 skill 成功 ≠ 建成。批间链由 runTask 的续派 goal 承接。
+      // 选址例外（Spark 评审）：siteAI 接线时门不即时翻——评审异步裁决，
+      // accept 才 forcePhase；评审期间需求被抑制（防重触发竞态）。
       if (!this.hasOngoingBaseBuild(botId, goal.needKey)) {
-        const gated = this.basePhase.recordNeedCompletion(botId, goal.needKey);
-        if (gated !== null) {
-          this.log("info", "coordinator_autonomous_base_phase_gate", {
-            botId,
-            needKey: goal.needKey,
-            phase: gated,
-          });
+        if (
+          goal.needKey === "BASE_SITE_SELECTION" &&
+          this.shouldConsultSiteVerdict(botId)
+        ) {
+          this.beginSiteVerdict(botId, goal);
+        } else {
+          const gated = this.basePhase.recordNeedCompletion(botId, goal.needKey);
+          if (gated !== null) {
+            this.log("info", "coordinator_autonomous_base_phase_gate", {
+              botId,
+              needKey: goal.needKey,
+              phase: gated,
+            });
+          }
         }
       }
       if (goal.needKey === "DEATH_RECOVERY") {

@@ -314,7 +314,14 @@ async function main(): Promise<void> {
       logger,
       // 配置了 Local AI 时把调度路由交给重规划神谕；确定性模式不注入，
       // 神谕路径完全不激活。12 路并发预算见 LOCAL_AI_MAX_CONCURRENCY。
-      ...(aiScheduler ? { replanAI: new ScheduledAIRouter(aiRouter!, aiScheduler) } : {}),
+      // 选址评审（site-verdict）与 replan 共用同一 router/scheduler——
+      // 并发预算统一受管，模型缺位时两条路径都 fail-open。
+      ...(aiScheduler
+        ? (() => {
+            const ai = new ScheduledAIRouter(aiRouter!, aiScheduler);
+            return { replanAI: ai, siteAI: ai };
+          })()
+        : {}),
       onChatGoal: (botId, speaker, message) =>
         autonomousDirector?.handleChatMessage(botId, speaker, message) ?? false,
     });

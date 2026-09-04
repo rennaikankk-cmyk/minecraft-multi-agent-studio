@@ -782,6 +782,8 @@ const PLANNED_ITEM_GOAL_ALIASES: Readonly<Record<string, readonly string[]>> =
     iron_ingot: Object.freeze(["iron ingot", "iron_ingot", "铁锭"]),
     diamond: Object.freeze(["diamond", "diamonds", "钻石"]),
     furnace: Object.freeze(["furnace", "熔炉", "炉子"]),
+    white_wool: Object.freeze(["white wool", "white_wool", "白羊毛", "羊毛"]),
+    bed: Object.freeze(["bed", "床"]),
     wooden_pickaxe: Object.freeze([
       "wooden pickaxe",
       "wooden_pickaxe",
@@ -1569,7 +1571,10 @@ export class CoordinatorLocalPlanner {
       // 采集完成→director 重选同一需求→重派蓝图（批间进度记忆保持
       // 锚点+startIndex 不漂移）。
       const materialGoals = this.blueprintMaterialDeficit(parsed, record);
-      if (materialGoals !== null) {
+      // 空数组=材料齐备→落回 invoke_skill 正常派建（实测事故 2026-09-04：
+      // 空缺口被当"有缺口"派了零目标 plan_items→PLANNER_GOAL_UNSUPPORTED
+      // blockedOn="" 空串，施工首派即死循环）。
+      if (materialGoals !== null && materialGoals.length > 0) {
         return {
           planItems: {
             action: "plan_items",
