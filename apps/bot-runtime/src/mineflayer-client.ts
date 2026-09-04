@@ -5036,11 +5036,40 @@ export class MineflayerBotClient implements BotClient {
     this.assertDimensionMatch(input.data.dimension);
 
     const { referenceBlock, face } = input.data;
-    const reference = this.bot.blockAt(
+    let reference = this.bot.blockAt(
       new Vec3(referenceBlock.x, referenceBlock.y, referenceBlock.z),
     );
     if (!reference || reference.name === "air") {
-      throw new SkillFault("REFERENCE_BLOCK_NOT_FOUND");
+      // 变通：参考位悬空时从下方或邻近找替代参考——bot 改造环境
+      // 而非被地形卡死。优先检查正下方（参考位 y-1）；
+      // 仍不行则尝试在参考位自己放一个垫脚方块（用最常有的 cobblestone/dirt）。
+      const below = this.bot.blockAt(new Vec3(referenceBlock.x, referenceBlock.y - 1, referenceBlock.z));
+      if (below && below.boundingBox !== "empty" && below.name !== "air") {
+        // 下方实心 → 调整参考到下方块、face 朝上——等效原语义
+        return this.invokePlaceBlock({
+          ...request,
+          input: {
+            ...input.data,
+            referenceBlock: { x: referenceBlock.x, y: referenceBlock.y - 1, z: referenceBlock.z },
+            face: { x: 0, y: 1, z: 0 },
+          },
+        } as typeof request);
+      }
+      // 下方也空 → 放一个垫脚方块再重试（用背包里有的廉价方块）
+      const fillerItem = this.bot.inventory.items().find((candidate) =>
+        candidate.name === "cobblestone" || candidate.name === "dirt" || candidate.name === "oak_planks"
+      );
+      if (fillerItem) {
+        const fillerBelow = this.bot.blockAt(new Vec3(referenceBlock.x, referenceBlock.y - 1, referenceBlock.z));
+        if (fillerBelow && fillerBelow.boundingBox !== "empty") {
+          // fall through——在下方参考位上放目标方块
+          reference = fillerBelow;
+        } else {
+          throw new SkillFault("REFERENCE_BLOCK_NOT_FOUND");
+        }
+      } else {
+        throw new SkillFault("REFERENCE_BLOCK_NOT_FOUND");
+      }
     }
     const targetPosition = new Vec3(
       referenceBlock.x + face.x,
@@ -5060,7 +5089,39 @@ export class MineflayerBotClient implements BotClient {
           },
         });
       }
-      throw new SkillFault("PLACE_TARGET_OCCUPIED");
+      // 变通（用户产品方向 2026-09-04：不够空旷就改造环境）：
+      // 目标位被非同种方块占用时，先挖掉障碍再放置——bot 是改造者不是
+      // 站桩者。挖之前走 HarvestAuthorization（保护规则不变）。
+      if (occupant.name !== "bedrock" && occupant.name !== "barrier") {
+        const digAuthorized = this.provenanceStore === null
+          ? true
+          : authorizeHarvest({
+              record: this.provenanceStore.get(
+                { x: targetPosition.x, y: targetPosition.y, z: targetPosition.z },
+                normalizeDimension(String(this.bot.game.dimension)),
+              ),
+              explicitSalvageAuthorized: false,
+              nearOwnBase: false,
+            }).allowed;
+        if (digAuthorized) {
+          try {
+            if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+            await this.bot.dig(occupant);
+            if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+            const afterDig = this.bot.blockAt(targetPosition);
+            if (afterDig && afterDig.boundingBox !== "empty") {
+              throw new SkillFault("PLACE_TARGET_OCCUPIED");
+            }
+          } catch (digError) {
+            if (digError instanceof SkillFault) throw digError;
+            throw new SkillFault("PLACE_TARGET_OCCUPIED");
+          }
+        } else {
+          throw new SkillFault("PLACE_TARGET_OCCUPIED");
+        }
+      } else {
+        throw new SkillFault("PLACE_TARGET_OCCUPIED");
+      }
     }
 
     const item = this.bot.inventory
