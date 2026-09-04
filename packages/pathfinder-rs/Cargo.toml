@@ -6,7 +6,7 @@ description = "Voxel A* pathfinder for minecraft-studio (clean-room: Baritone-in
 license = "MIT"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 napi = { version = "2", default-features = false, features = ["napi4"] }

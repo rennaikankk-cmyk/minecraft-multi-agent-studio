@@ -3,6 +3,7 @@
 //! 调用（见 index.js 的 worker 包装），否则又把计算塞回事件循环。
 
 mod astar;
+pub mod world_mirror;
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
