@@ -247,6 +247,14 @@ export class PlanSupervisor {
             }),
           );
         }
+        // TRANSIENT 重试退避（闭环轮实测）：RETRY_SAME 此前在同一 tick 立即
+        // 重发——上一个技能的移动租约还在 TTL 窗口内正常持有，重试必然再
+        // BUSY，4 次用完直接放弃。bot 的移动操作通常 5-30 秒量级；指数退避
+        // 500ms→1s→2s 给持有者一个真实的释放窗口（不改变恢复梯语义）。
+        if (decision.action === "RETRY_SAME" && !settled) {
+          const backoffMs = Math.min(2_000, 500 * 2 ** (attempt - 1));
+          await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
+        }
         if (decision.action === "ACQUIRE_RESOURCES_THEN_RETRY") {
           const reject = (reason: string): void => {
             record({

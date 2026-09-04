@@ -1511,7 +1511,22 @@ export class CoordinatorLocalPlanner {
     const parsed: DeterministicGoal | null =
       parseDeterministicGoal(operatorGoal, plannedItemNames) ??
       parseBlueprintFileGoal(operatorGoal, new Set(this.blueprintFiles.keys()));
-    if (parsed === null) return null;
+    if (parsed === null) {
+      // 蓝图 goal 诊断（闭环轮）：goal 含"蓝图"但两个解析器都 null 时
+      // 输出 goal 前缀与已知蓝图名——直接定位模板匹配断裂点。
+      if (/蓝图/.test(operatorGoal)) {
+        this.options.logger?.info?.(
+          "coordinator_blueprint_goal_unparsed",
+          {
+            taskId: request.taskId,
+            botId: request.botId,
+            goalPreview: operatorGoal.slice(0, 120),
+            knownBlueprints: [...this.blueprintFiles.keys()].join(","),
+          },
+        );
+      }
+      return null;
+    }
     if (parsed.kind === "acquire-item") {
       return {
         planItems: {
