@@ -59,13 +59,17 @@ const CLASS = Object.freeze({
   HAZARD: 3,
 } as const);
 
-/** 分类单格：hazard > 保护性 SOLID > 空=可通行 > 其余=可挖。 */
-function classifyBlock(name: string, boundingBox: string): number {
+/** 分类单格：hazard > 保护性 SOLID > 空=可通行 > 其余=可挖。
+ * （P5-D2 起导出：WorldSyncAdapter 的 registry 表构建复用同一分类器——
+ * 寻路体素类与镜像 class mask 的方块知识必须同源，禁止两份分类表。） */
+export function classifyBlock(name: string, boundingBox: string): number {
   if (HAZARD_NAMES.has(name)) return CLASS.HAZARD;
   if (SOLID_NAMES.has(name)) return CLASS.SOLID;
   if (boundingBox === "empty") return CLASS.PASSABLE;
   return CLASS.DIGGABLE;
 }
+
+export { CLASS as BLOCK_CLASS };
 
 /** 分类体积（体素布局 [(y*sz+z)*sx+x]，origin=体数据(0,0,0)的世界坐标）。 */
 export function classifyVolume(
@@ -98,6 +102,29 @@ function newLocalVec3(x: number, y: number, z: number): BlockAtPosition {
   const Vec3Ctor = nodeRequire("vec3") as unknown as
     new (x: number, y: number, z: number) => unknown;
   return new Vec3Ctor(x, y, z) as BlockAtPosition;
+}
+
+/**
+ * P5-D2c：worker 通道的 mirror 传输面（与寻路共用同一 addon 加载器与
+ * 同一 worker——唯一 sender 语义由 WorldSyncAdapter 保证）。灰度门
+ * STUDIO_WORLD_MIRROR_SYNC=1 开启时才调用（flag 关=零加载零行为）。
+ */
+export function mirrorTransport() {
+  const adapter = loadAdapter();
+  return {
+    mirrorCreate: adapter.mirrorCreate.bind(adapter),
+    mirrorSubmitEnvelope: adapter.mirrorSubmitEnvelope.bind(adapter),
+    mirrorSubmitControl: adapter.mirrorSubmitControl.bind(adapter),
+    mirrorHealth: adapter.mirrorHealth.bind(adapter),
+    mirrorDispose: adapter.mirrorDispose.bind(adapter),
+  };
+}
+
+/** 测试 teardown：回收共享 worker（与 mirrorTransport 同一模块实例——
+ * vitest 的 ESM import 与 createRequire 可能加载两份 CJS 实例，混用会
+ * 杀错 worker）。 */
+export function terminatePathfinderWorker(): Promise<void> {
+  return loadAdapter().terminateWorker();
 }
 
 /** 每阶段耗时（runtime 日志归因用）。 */

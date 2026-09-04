@@ -3,6 +3,7 @@
 //! 调用（见 index.js 的 worker 包装），否则又把计算塞回事件循环。
 
 mod astar;
+pub mod mirror_napi;
 pub mod world_mirror;
 pub mod world_mirror_protocol;
 

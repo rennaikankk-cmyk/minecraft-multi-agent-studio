@@ -2666,3 +2666,27 @@ describe("collectReachableTargets", () => {
     }
   });
 });
+
+describe("P5-D2c WorldMirror 灰度门（STUDIO_WORLD_MIRROR_SYNC）", () => {
+  const probe = (client: MineflayerBotClient): unknown =>
+    (client as unknown as { worldSyncAdapter: unknown }).worldSyncAdapter;
+
+  it("flag 关闭（默认）：spawn 后零额外行为——不创建 adapter", () => {
+    delete process.env.STUDIO_WORLD_MIRROR_SYNC;
+    const emitter = new EventEmitter();
+    const bot = emitter as unknown as Bot;
+    const client = new MineflayerBotClient(bot, "auto");
+    emitter.emit("spawn");
+    expect(probe(client)).toBeNull();
+  });
+
+  it("flag 开启但 registry 未就绪：优雅无操作（不崩溃不伪造）", () => {
+    process.env.STUDIO_WORLD_MIRROR_SYNC = "1";
+    const emitter = new EventEmitter();
+    const bot = emitter as unknown as Bot;
+    const client = new MineflayerBotClient(bot, "auto");
+    emitter.emit("spawn"); // 无 registry → bootWorldSync 早退
+    expect(probe(client)).toBeNull();
+    delete process.env.STUDIO_WORLD_MIRROR_SYNC;
+  });
+});

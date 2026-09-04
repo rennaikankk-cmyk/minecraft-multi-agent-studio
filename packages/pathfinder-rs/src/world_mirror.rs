@@ -584,7 +584,6 @@ impl WorldMirror {
         section.palette_indices[local] = index as u16;
         section.revision = section.revision.max(source_sequence);
         mutable.revision = mutable.revision.max(source_sequence);
-        drop(mutable);
         self.registry = Arc::new(registry_vec);
         self.generation += 1;
     }

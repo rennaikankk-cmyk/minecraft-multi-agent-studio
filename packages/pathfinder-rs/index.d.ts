@@ -49,4 +49,135 @@ declare module "@minecraft-studio/pathfinder-rs" {
     goal: PathPoint,
     options?: FindOptionsJs | null,
   ): PathResult;
+
+  // ------------------------------------------------------------------
+  // P5-D2 WorldMirror 同步通道（与寻路共用 worker；唯一 sender 由
+  // bot-runtime WorldSyncAdapter 保证）。epoch/序号=number（i64 边界）；
+  // fingerprint=十进制字符串（完整 u64，TS 侧 BigInt 核对）。
+  // ------------------------------------------------------------------
+
+  export type MirrorAckStatus =
+    | "applied"
+    | "semanticRejected"
+    | "ignoredDuplicate"
+    | "ignoredStale"
+    | "gapDesynced"
+    | "protocolConflict"
+    | "wrongEpoch"
+    | "unsupportedProtocol"
+    | "malformedEnvelope"
+    | "resetRequired"
+    | "queuedUntilCommit"
+    | "resetApplied"
+    | "registryReady"
+    | "stopping"
+    | "healthy";
+
+  export interface MirrorAck {
+    protocolVersion: number;
+    sessionEpoch: number;
+    dimensionEpoch: number;
+    transportSequence: number;
+    status: MirrorAckStatus;
+    mirrorGeneration: number;
+    registryRevision?: number | null;
+    chunkRevision?: number | null;
+    reason?: string | null;
+    payloadFingerprint?: string | null;
+    skippedUpdates?: number | null;
+  }
+
+  export interface MirrorHealth {
+    desynced: boolean;
+    stopped: boolean;
+    loadedChunks: number;
+    pendingImports: number;
+    queuedUpdates: number;
+    registryReady: boolean;
+    registryRevision: number;
+    lastTransportSequence: number;
+    replayWindowLen: number;
+    replayWindowFloor?: number | null;
+    mirrorGeneration: number;
+    skippedUpdatesTotal: number;
+  }
+
+  /** 宽松 tagged 信封（Rust 侧 fail-closed 解析；缺字段=malformedEnvelope）。 */
+  export interface MirrorEnvelopeWire {
+    protocolVersion: number;
+    sessionEpoch: number;
+    dimensionEpoch: number;
+    transportSequence: number;
+    message: MirrorMessageWire;
+  }
+
+  export type MirrorMessageWire =
+    | {
+        kind: "registryTable";
+        revision: number;
+        /** stateId→mask 全表（LE u32 字节流；Uint8Array view of Uint32Array）。 */
+        masks: Uint8Array;
+        minecraftVersion?: string;
+        serverProfileId?: string;
+      }
+    | { kind: "chunkBegin"; chunkX: number; chunkZ: number }
+    | {
+        kind: "sectionData";
+        chunkX: number;
+        chunkZ: number;
+        /** payload 三态扁平化（Rust 侧 tagged object）：data|empty|notPresent。 */
+        payloadKind: "data" | "empty" | "notPresent";
+        sectionY: number;
+        fillStateId?: number;
+        /** 长 4096 的 palette 索引（LE u16 字节流）。 */
+        paletteIndices?: Uint8Array;
+        paletteEntries?: number[];
+      }
+    | { kind: "chunkCommit"; chunkX: number; chunkZ: number }
+    | { kind: "chunkUnload"; chunkX: number; chunkZ: number }
+    | {
+        kind: "blockUpdateBatch";
+        sourceFirstSequence: number;
+        sourceLastSequence: number;
+        sourceEventCount: number;
+        coalescedEventCount?: number;
+        /** flat [x,y,z,stateId]×N。 */
+        updatesFlat: number[];
+      };
+
+  export type MirrorControlWire =
+    | {
+        kind: "worldReset";
+        newSessionEpoch: number;
+        newDimensionEpoch: number;
+        reason: "sessionRestart" | "dimensionChange" | "desyncRecovery" | "operatorRequest";
+        resyncToken?: number;
+      }
+    | { kind: "stop" }
+    | { kind: "healthProbe" };
+
+  export function mirrorCreate(options: {
+    sessionEpoch: number;
+    dimensionEpoch: number;
+    replayCapacity?: number | null;
+  }): Promise<number>;
+
+  /** transferList 可传 [paletteIndices.buffer]——传输后主线程视图立即 detached。 */
+  export function mirrorSubmitEnvelope(
+    handle: number,
+    envelope: MirrorEnvelopeWire,
+    transferList?: ArrayBuffer[],
+  ): Promise<MirrorAck>;
+
+  export function mirrorSubmitControl(handle: number, control: MirrorControlWire): Promise<MirrorAck>;
+
+  export function mirrorHealth(handle: number): Promise<MirrorHealth>;
+
+  export function mirrorDispose(handle: number): Promise<boolean>;
+
+  /** 测试用：活镜像会话计数（idle 保活审计）。 */
+  export function mirrorAliveSessions(): number;
+
+  /** 显式回收 worker（测试 teardown；在途任务会 reject）。 */
+  export function terminateWorker(): Promise<void>;
 }

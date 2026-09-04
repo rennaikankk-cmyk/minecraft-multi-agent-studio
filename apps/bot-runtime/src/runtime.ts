@@ -734,6 +734,9 @@ export class SingleBotRuntime {
         STUDIO_NO_HUNGER: probeKnob("STUDIO_NO_HUNGER"),
         STUDIO_L0_EMERGENCY_STOP: probeKnob("STUDIO_L0_EMERGENCY_STOP"),
         STUDIO_PURSUIT: probeKnob("STUDIO_PURSUIT"),
+        // P5-D2c WorldMirror 同步通道灰度门（默认关；与 Rust Pathfinder 门
+        // 分离——两者可独立 AB）。无效值显式降级标 invalid（§20）。
+        STUDIO_WORLD_MIRROR_SYNC: probeKnob("STUDIO_WORLD_MIRROR_SYNC"),
       },
       envKeyCount: Object.keys(process.env).length,
     });

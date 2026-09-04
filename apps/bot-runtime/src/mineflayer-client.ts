@@ -85,7 +85,8 @@ import {
   } from "@minecraft-studio/combat";
 import { MineflayerCombatAdapter } from "./combat-mineflayer-adapter.js";
 import { observeSite, digShelter } from "./site-shelter-adapter.js";
-import { rustGoto, type RustPathStats } from "./rust-pathfinder.js";
+import { mirrorTransport, rustGoto, type RustPathStats } from "./rust-pathfinder.js";
+import { buildRegistryTable, WorldSyncAdapter } from "./world-sync-adapter.js";
 import { classifyMovementRejection, goalColumnLoaded } from "./movement-rejection.js";
 
 import type {
@@ -1164,6 +1165,10 @@ export class MineflayerBotClient implements BotClient {
   private worldSpawnOrigin: { x: number; z: number } | null = null;
   /** 最近一次 Rust 路由的各阶段耗时（runtime 技能完成时上报；null=未启用）。 */
   rustPathStats: RustPathStats | null = null;
+  /** P5-D2c WorldMirror 同步适配器（STUDIO_WORLD_MIRROR_SYNC=1 时创建）。 */
+  private worldSyncAdapter: WorldSyncAdapter | null = null;
+  /** world 事件订阅清理（连接终止时解除）。 */
+  private worldSyncDetach: (() => void) | null = null;
   /** spawn-escape 疾跑进行中（防同点重复派发；goto 落定后复位）。 */
   private spawnEscapeActive = false;
   /**
@@ -1292,6 +1297,13 @@ export class MineflayerBotClient implements BotClient {
       onPreempt: () => this.stopMovementPrimitives(),
       onRelease: () => this.stopMovementPrimitives(),
     });
+    // P5-D2c WorldMirror 同步通道（灰度门默认关；flag=STUDIO_WORLD_MIRROR_SYNC=1）：
+    // flag 关闭=零行为——不创建 adapter、不订阅世界事件、不构建 registry 表。
+    // 该通道 D2 只做同步（ACK/背压/恢复），不接 Snapshot Provider/SpatialIndex/
+    // Pathfinder（P5-D3+）。
+    if (process.env.STUDIO_WORLD_MIRROR_SYNC === "1") {
+      this.bootWorldSync();
+    }
     bot.on("login", () => {
       this.loginSeen = true;
     });
@@ -1301,6 +1313,8 @@ export class MineflayerBotClient implements BotClient {
         ? Number(bot.health)
         : null;
       this.bindInventoryEvents();
+      // WorldMirror 通道 boot（registry 就绪后一次性创建；重复 spawn 幂等）。
+      this.bootWorldSync();
       // 服务器注册/登录自动认证（AuthMe 等）——全自动，不需要人配任何东西。
       //
       // 密码来源优先级：
@@ -1491,6 +1505,8 @@ export class MineflayerBotClient implements BotClient {
         this.movementShaperDetach();
         this.movementShaperDetach = null;
       }
+      // WorldMirror 通道随连接终止（有界排空+dispose；worker 不 terminate）。
+      this.teardownWorldSync();
       // 追击随连接终止。
       this.stopPursuit();
       // end 的 reason 串同样只在明确含 timeout 语义时计 timeout。
@@ -2624,6 +2640,116 @@ export class MineflayerBotClient implements BotClient {
 
   resetCombat(): void {
     this.combatAdapter.reset();
+  }
+
+  /**
+   * P5-D2c：WorldMirror 通道 boot（spawn 时 registry 已就绪；幂等）。
+   * 失败=诚实降级（记录 + 不影响 bot 主流程——通道是观测面不是控制面）。
+   */
+  private bootWorldSync(): void {
+    if (process.env.STUDIO_WORLD_MIRROR_SYNC !== "1") return;
+    if (this.worldSyncAdapter !== null) return;
+    const registry = (this.bot as unknown as {
+      registry?: {
+        blocksArray?: Array<{
+          name: string;
+          minStateId: number;
+          maxStateId: number;
+          boundingBox?: string;
+        }>;
+      };
+    }).registry;
+    if (!registry?.blocksArray?.length) return;
+    const adapter = new WorldSyncAdapter({
+      transport: mirrorTransport(),
+      registryTable: buildRegistryTable(registry.blocksArray, {
+        revision: 1,
+        minecraftVersion: this.bot.version ?? String(this.configuredVersion ?? ""),
+        serverProfileId: this.serverProfileId ?? undefined,
+      }),
+      sessionEpoch: Date.now(),
+      dimensionEpoch: 1,
+      logger: {
+        info: (event, fields) => this.logWorldSync("info", event, fields),
+        warn: (event, fields) => this.logWorldSync("warn", event, fields),
+        error: (event, fields) => this.logWorldSync("error", event, fields),
+      },
+      onIncident: (incident) => {
+        // 结构化事件（D2 范围=日志通道；IncidentStore 映射在接线方升级）。
+        this.logWorldSync("error", "world_sync_incident", { incident: incident.kind, ...incident });
+      },
+    });
+    this.worldSyncAdapter = adapter;
+    void adapter
+      .start()
+      .then(() => this.subscribeWorldSync(adapter))
+      .catch((error: unknown) => {
+        this.logWorldSync("error", "world_sync_start_failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        void adapter.stop();
+        if (this.worldSyncAdapter === adapter) this.worldSyncAdapter = null;
+      });
+  }
+
+  private subscribeWorldSync(adapter: WorldSyncAdapter): void {
+    const world = this.bot.world;
+    const onColumnLoad = (corner: { x: number; z: number }): void => {
+      const chunkX = corner.x / 16;
+      const chunkZ = corner.z / 16;
+      const column = world.getColumn(chunkX, chunkZ);
+      if (column != null) {
+        adapter.onChunkColumnLoad(
+          column as unknown as Parameters<WorldSyncAdapter["onChunkColumnLoad"]>[0],
+          chunkX,
+          chunkZ,
+        );
+      }
+    };
+    const onColumnUnload = (corner: { x: number; z: number }): void => {
+      adapter.onChunkColumnUnload(corner.x / 16, corner.z / 16);
+    };
+    const onBlockUpdate = (
+      _oldBlock: unknown,
+      newBlock: { position?: { x: number; y: number; z: number }; stateId?: number },
+    ): void => {
+      const position = newBlock?.position;
+      if (position === undefined) return;
+      adapter.onBlockUpdate(
+        Math.floor(position.x),
+        Math.floor(position.y),
+        Math.floor(position.z),
+        Number(newBlock.stateId ?? 0),
+      );
+    };
+    world.on("chunkColumnLoad", onColumnLoad);
+    world.on("chunkColumnUnload", onColumnUnload);
+    this.bot.on("blockUpdate", onBlockUpdate);
+    this.worldSyncDetach = () => {
+      world.off("chunkColumnLoad", onColumnLoad);
+      world.off("chunkColumnUnload", onColumnUnload);
+      this.bot.off("blockUpdate", onBlockUpdate);
+    };
+  }
+
+  private teardownWorldSync(): void {
+    if (this.worldSyncDetach !== null) {
+      this.worldSyncDetach();
+      this.worldSyncDetach = null;
+    }
+    const adapter = this.worldSyncAdapter;
+    this.worldSyncAdapter = null;
+    if (adapter !== null) void adapter.stop();
+  }
+
+  private logWorldSync(
+    level: "info" | "warn" | "error",
+    event: string,
+    fields?: Record<string, unknown>,
+  ): void {
+    // 复用 mineflayer 输出通道（bot-runtime 统一由 runtime 捕获）。
+    const emitter = this.bot as unknown as { emit?: (event: string, ...args: unknown[]) => void };
+    emitter.emit?.("log", `[world-sync:${level}] ${event}`, JSON.stringify(fields ?? {}));
   }
 
   setCombatClock(clock: () => number): void {
