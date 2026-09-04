@@ -392,7 +392,7 @@ describe("AutonomousDirector", () => {
     // The first exploration ring is 48 blocks from the real position (0, 64, 0).
     const coords = /x=(-?\d+) y=(-?\d+) z=(-?\d+)/.exec(explorationGoal)!;
     const distance = Math.hypot(Number(coords[1]), Number(coords[3]));
-    expect(distance).toBeGreaterThanOrEqual(40);
+    expect(distance).toBeGreaterThanOrEqual(28); // 首环 32 格（钳到 SAFE_PATH_MAX_DISTANCE=64 内）
     expect(director.getCurrentTask("studio-bot-01")).toMatchObject({
       status: "failed",
       title: expect.stringContaining("wooden_pickaxe"),

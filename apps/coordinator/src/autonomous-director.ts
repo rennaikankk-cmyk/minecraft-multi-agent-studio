@@ -127,7 +127,7 @@ const AUTONOMOUS_MAX_RESOURCE_CANDIDATES = 4;
 const AUTONOMOUS_RECOVERY_TIMEOUT_MS = 30_000;
 const AUTONOMOUS_EXPLORATION_COOLDOWN_MS = 60_000;
 /** 探索半径逐次放大；坐标永远来自 Bot 真实位置的确定性偏移。 */
-const AUTONOMOUS_EXPLORATION_RADII = Object.freeze([48, 96, 160, 224]);
+const AUTONOMOUS_EXPLORATION_RADII = Object.freeze([32, 48, 56, 64]);
 const AUTONOMOUS_SHELTER_DIRECTIONS = Object.freeze([
   "north",
   "east",
