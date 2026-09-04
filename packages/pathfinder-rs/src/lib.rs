@@ -4,6 +4,7 @@
 
 mod astar;
 pub mod world_mirror;
+pub mod world_mirror_protocol;
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -63,7 +64,10 @@ pub fn find_path(
     let sz = world.sz;
     let expected = (sx as i64) * (sy as i64) * (sz as i64);
     if expected <= 0 || expected > 64 * 1024 * 1024 {
-        return Err(Error::new(Status::InvalidArg, "world volume dimensions out of range"));
+        return Err(Error::new(
+            Status::InvalidArg,
+            "world volume dimensions out of range",
+        ));
     }
     if world.classes.len() != expected as usize {
         return Err(Error::new(
@@ -75,30 +79,61 @@ pub fn find_path(
             ),
         ));
     }
-    let volume = astar::Volume { sx, sy, sz, classes: world.classes.to_vec() };
+    let volume = astar::Volume {
+        sx,
+        sy,
+        sz,
+        classes: world.classes.to_vec(),
+    };
     let defaults = astar::FindOptions::default();
     let goal_kind = opts.as_ref().and_then(|o| o.goal_kind.as_deref());
     let goal = match goal_kind {
         Some("near") => astar::Goal::Near {
-            center: astar::Pos { x: goal_x, y: goal_y, z: goal_z },
-            radius: opts.as_ref().and_then(|o| o.goal_radius).unwrap_or(1).max(0),
+            center: astar::Pos {
+                x: goal_x,
+                y: goal_y,
+                z: goal_z,
+            },
+            radius: opts
+                .as_ref()
+                .and_then(|o| o.goal_radius)
+                .unwrap_or(1)
+                .max(0),
         },
         Some("classAdjacent") => astar::Goal::ClassAdjacent {
-            class: opts.as_ref().and_then(|o| o.goal_class).unwrap_or(astar::CLASS_DIGGABLE) & 0x03,
+            class: opts
+                .as_ref()
+                .and_then(|o| o.goal_class)
+                .unwrap_or(astar::CLASS_DIGGABLE)
+                & 0x03,
         },
-        _ => astar::Goal::Point(astar::Pos { x: goal_x, y: goal_y, z: goal_z }),
+        _ => astar::Goal::Point(astar::Pos {
+            x: goal_x,
+            y: goal_y,
+            z: goal_z,
+        }),
     };
     let options = match opts {
         Some(o) => astar::FindOptions {
-            max_nodes: o.max_nodes.map(|v| v as usize).unwrap_or(defaults.max_nodes),
-            timeout_ms: o.timeout_ms.map(|v| v.max(1.0) as u64).unwrap_or(defaults.timeout_ms),
+            max_nodes: o
+                .max_nodes
+                .map(|v| v as usize)
+                .unwrap_or(defaults.max_nodes),
+            timeout_ms: o
+                .timeout_ms
+                .map(|v| v.max(1.0) as u64)
+                .unwrap_or(defaults.timeout_ms),
             allow_dig: o.allow_dig.unwrap_or(defaults.allow_dig),
         },
         None => defaults,
     };
     let result = astar::find_path(
         &volume,
-        astar::Pos { x: start_x, y: start_y, z: start_z },
+        astar::Pos {
+            x: start_x,
+            y: start_y,
+            z: start_z,
+        },
         goal,
         &options,
     );
@@ -109,7 +144,11 @@ pub fn find_path(
         path: result
             .path
             .into_iter()
-            .map(|p| PathPoint { x: p.x, y: p.y, z: p.z })
+            .map(|p| PathPoint {
+                x: p.x,
+                y: p.y,
+                z: p.z,
+            })
             .collect(),
     })
 }
