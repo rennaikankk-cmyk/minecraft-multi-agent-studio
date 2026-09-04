@@ -174,6 +174,8 @@ pub enum AckStatus {
     /// 协议顺序错误（如 RegistryReady 前收到 chunk）——数据已丢，必须
     /// Reset→Registry 握手→truth 重建，不能当普通拒绝继续。
     ResetRequired,
+    /// 导入事务期间到达的 batch：已按 source 序号排队，COMMIT 后重放。
+    QueuedUntilCommit,
     // ---- 控制面回执 ----
     ResetApplied,
     /// RegistryTable 安装成功的握手回执（revision + 表 fingerprint 供 TS 核对）。
@@ -210,12 +212,15 @@ pub struct MirrorAck {
     /// admission 记录的 payload fingerprint（RegistryReady=表 fingerprint；
     /// duplicate/conflict=窗口内存储值）——TS 据此核对。
     pub payload_fingerprint: Option<u64>,
+    /// 批次中被跳过的 update 数（目标 chunk 未加载/非 Data section——
+    /// 可观测不静默；正常稳态应为 0）。
+    pub skipped_updates: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
-// FNV-1a 64（无外部依赖；非密码学，用途与碰撞策略见模块头）。
 // ---------------------------------------------------------------------------
-
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
@@ -383,11 +388,11 @@ pub fn payload_fingerprint(message: &MirrorMessage) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// 结构有效性（admission 第 1 步）：字段级不变量。结构损坏 → MalformedEnvelope
+// ---------------------------------------------------------------------------
 // （无法可靠规范化/fingerprint），不消费传输槽；业务前置条件（chunk 存在等）
 // 属 SemanticRejected，由业务层在 admission 之后判定（§9）。
 // ---------------------------------------------------------------------------
-
+// ---------------------------------------------------------------------------
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum StructureError {
     /// transportSequence 从 1 开始；0 是非法信封。
@@ -468,9 +473,9 @@ pub fn validate_message_structure(message: &MirrorMessage) -> Result<(), Structu
 }
 
 // ---------------------------------------------------------------------------
-// 有界 replay window：定长 (sequence, fingerprint) 环。
 // ---------------------------------------------------------------------------
-
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 #[derive(Debug)]
 pub struct ReplayWindow {
     entries: VecDeque<(u64, u64)>,
@@ -520,9 +525,9 @@ impl ReplayWindow {
 }
 
 // ---------------------------------------------------------------------------
-// AdmissionGate：序号闸 + fingerprint replay 检测（§7）。
 // ---------------------------------------------------------------------------
-
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AdmissionVerdict {
     /// seq == last+1：槽位已在 admission 消费（先记录后 apply——语义拒绝
@@ -643,133 +648,9 @@ impl AdmissionGate {
     pub fn replay_floor(&self) -> Option<u64> {
         self.replay.floor()
     }
-}
 
-// ---------------------------------------------------------------------------
-// 临时迁移桥（D2a §21 步骤 7）：把 P5-C 旧式带序号消息适配进新协议形态。
-// D2b 把 world_mirror 核心迁到新业务 enum 后，新代码一律直接构造
-// Envelope/Control；本桥只服务迁移期（测试/调用方逐步换轨）。
-// ---------------------------------------------------------------------------
-
-use crate::world_mirror::MirrorMessage as LegacyMessage;
-
-pub enum LegacyAdapted {
-    Data(MirrorEnvelope),
-    Control(MirrorControl),
-    /// Rust 内部诊断消息（MarkDesynced）——非传输消息，无协议对应物。
-    Internal,
-}
-
-/// 旧式消息 → (Envelope|Control)。legacy 无 epoch 的变体用参数补齐；
-/// legacy Empty 无 fillStateId——P5-C 定义 Empty=全 stateId 0 section，
-/// 故 fill_state_id=0 是诚实的等价（新版协议由 TS 提取器显式声明）。
-/// legacy BlockUpdate 的 sequence 同时充当 source 与 transport 序号
-/// （旧形态无分离信息——迁移桥如实标注这一语义合并）。
-pub fn adapt_legacy(
-    message: LegacyMessage,
-    session_epoch: u64,
-    dimension_epoch: u64,
-) -> LegacyAdapted {
-    fn envelope(
-        sequence: u64,
-        session_epoch: u64,
-        dimension_epoch: u64,
-        message: MirrorMessage,
-    ) -> LegacyAdapted {
-        LegacyAdapted::Data(MirrorEnvelope {
-            protocol_version: MIRROR_PROTOCOL_VERSION,
-            session_epoch,
-            dimension_epoch,
-            transport_sequence: sequence,
-            message,
-        })
-    }
-    match message {
-        LegacyMessage::WorldReset {
-            session_epoch,
-            dimension_epoch,
-            ..
-        } => LegacyAdapted::Control(MirrorControl::WorldReset {
-            new_session_epoch: session_epoch,
-            new_dimension_epoch: dimension_epoch,
-            reason: WorldResetReason::SessionRestart,
-            resync_token: 0,
-        }),
-        LegacyMessage::RegistryTable { sequence, masks } => envelope(
-            sequence,
-            session_epoch,
-            dimension_epoch,
-            MirrorMessage::RegistryTable {
-                revision: 0,
-                masks,
-                minecraft_version: None,
-                server_profile_id: None,
-            },
-        ),
-        LegacyMessage::ChunkBegin {
-            chunk, sequence, ..
-        } => envelope(
-            sequence,
-            session_epoch,
-            dimension_epoch,
-            MirrorMessage::ChunkBegin { chunk },
-        ),
-        LegacyMessage::ChunkSectionData {
-            chunk,
-            sequence,
-            payload,
-        } => {
-            let section_y = payload.section_y;
-            let converted = match payload.status {
-                crate::world_mirror::SectionStatus::Data => SectionPayload::Data {
-                    section_y,
-                    palette_indices: payload.palette_indices,
-                    palette_entries: payload.palette_entries,
-                },
-                crate::world_mirror::SectionStatus::Empty => SectionPayload::Empty {
-                    section_y,
-                    fill_state_id: 0,
-                },
-                _ => SectionPayload::NotPresent { section_y },
-            };
-            envelope(
-                sequence,
-                session_epoch,
-                dimension_epoch,
-                MirrorMessage::SectionData {
-                    chunk,
-                    payload: converted,
-                },
-            )
-        }
-        LegacyMessage::ChunkCommit { chunk, sequence } => envelope(
-            sequence,
-            session_epoch,
-            dimension_epoch,
-            MirrorMessage::ChunkCommit { chunk },
-        ),
-        LegacyMessage::ChunkUnload { chunk, sequence } => envelope(
-            sequence,
-            session_epoch,
-            dimension_epoch,
-            MirrorMessage::ChunkUnload { chunk },
-        ),
-        LegacyMessage::BlockUpdate {
-            position,
-            state_id,
-            sequence,
-        } => envelope(
-            sequence,
-            session_epoch,
-            dimension_epoch,
-            MirrorMessage::BlockUpdateBatch {
-                source_first_sequence: sequence,
-                source_last_sequence: sequence,
-                source_event_count: 1,
-                coalesced_event_count: None,
-                updates: vec![BlockUpdateEntry { position, state_id }],
-            },
-        ),
-        LegacyMessage::MarkDesynced { .. } => LegacyAdapted::Internal,
+    /// 窗口内某序号的已记录 fingerprint（duplicate ack 回显用）。
+    pub fn replay_fingerprint(&self, sequence: u64) -> Option<u64> {
+        self.replay.lookup(sequence)
     }
 }

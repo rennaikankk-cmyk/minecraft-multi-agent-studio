@@ -442,66 +442,12 @@ fn section_payload_helpers() {
 }
 
 #[test]
-fn legacy_adapter_maps_all_transportable_variants() {
-    use pathfinder_rs::world_mirror as legacy;
-    // ChunkBegin：epoch 从变体取出、sequence→transport_sequence
-    let adapted = adapt_legacy(
-        legacy::MirrorMessage::ChunkBegin {
-            session_epoch: 7,
-            dimension_epoch: 1,
-            chunk: (4, 5),
-            sequence: 12,
-        },
-        7,
-        1,
+fn gate_replay_fingerprint_echo() {
+    let mut gate = AdmissionGate::new(7, 1);
+    gate.admit(&envelope(1, begin((0, 0))));
+    assert_eq!(
+        gate.replay_fingerprint(1),
+        Some(payload_fingerprint(&begin((0, 0))))
     );
-    match adapted {
-        LegacyAdapted::Data(env) => {
-            assert_eq!(env.transport_sequence, 12);
-            assert_eq!(env.session_epoch, 7);
-            assert_eq!(env.dimension_epoch, 1);
-            assert_eq!(env.message, MirrorMessage::ChunkBegin { chunk: (4, 5) });
-        }
-        _ => panic!("expected Data"),
-    }
-    // BlockUpdate → 批大小 1（旧序号同时充当 source 与 transport）
-    let adapted = adapt_legacy(
-        legacy::MirrorMessage::BlockUpdate {
-            position: (1, 2, 3),
-            state_id: 9,
-            sequence: 4,
-        },
-        7,
-        1,
-    );
-    match adapted {
-        LegacyAdapted::Data(env) => match env.message {
-            MirrorMessage::BlockUpdateBatch {
-                source_first_sequence,
-                source_last_sequence,
-                updates,
-                ..
-            } => {
-                assert_eq!((source_first_sequence, source_last_sequence), (4, 4));
-                assert_eq!(updates.len(), 1);
-                assert_eq!(updates[0].position, (1, 2, 3));
-            }
-            other => panic!("expected batch, got {other:?}"),
-        },
-        _ => panic!("expected Data"),
-    }
-    // WorldReset → Control（旧序号丢弃：control 不占传输槽）
-    let adapted = adapt_legacy(
-        legacy::MirrorMessage::WorldReset {
-            session_epoch: 8,
-            dimension_epoch: 2,
-            sequence: 99,
-        },
-        7,
-        1,
-    );
-    assert!(matches!(adapted, LegacyAdapted::Control(_)));
-    // MarkDesynced → Internal（非传输消息）
-    let adapted = adapt_legacy(legacy::MirrorMessage::MarkDesynced { chunk: (0, 0) }, 7, 1);
-    assert!(matches!(adapted, LegacyAdapted::Internal));
+    assert_eq!(gate.replay_fingerprint(99), None);
 }
