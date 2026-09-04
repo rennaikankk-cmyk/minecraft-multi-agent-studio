@@ -677,6 +677,19 @@ export class SingleBotRuntime {
   /** Phase 4 诊断门：skip_worldstate 模式下 L0 复用的最近快照。 */
   private lastAbSnapshot: BotClientSnapshot | null = null;
 
+  /**
+   * P5-B 单一 Snapshot Provider：worldStateSnapshot 构建收口（Phase 4 实锤
+   * 双调用点泄漏——requestStatus 与 emitStatus 各自触发 blocks.scan miss，
+   * 最坏 2 miss/s）。TTL 内复用同一构建（同 generation）；TTL 过期由首个
+   * 消费者重建。这是 B1 形态：旧扫描仍是数据源，Rust WorldMirror 是 B2。
+   */
+  private worldSnapshotProvider: {
+    snapshot: unknown;
+    generation: number;
+    capturedAtMs: number;
+  } = { snapshot: null, generation: 0, capturedAtMs: 0 };
+  private static readonly WORLD_SNAPSHOT_TTL_MS = 600;
+
   /** Phase 3 测量面：分段计时（只观测不改行为；STUDIO_PERF_SPANS=0 关）。 */
   readonly perfSpans = new PerfSpanTracker();
   private perfTelemetryStop: (() => void) | null = null;
@@ -1787,7 +1800,22 @@ export class SingleBotRuntime {
     };
     let worldSnapshot: WorldStateSnapshot | null = null;
     try {
-      worldSnapshot = this.perfSpans.spanSync("world.snapshot.build", () => this.client?.worldStateSnapshot?.() ?? null);
+      const nowMsForProvider = this.now().getTime();
+      if (
+        this.worldSnapshotProvider.snapshot !== null &&
+        nowMsForProvider - this.worldSnapshotProvider.capturedAtMs < SingleBotRuntime.WORLD_SNAPSHOT_TTL_MS
+      ) {
+        worldSnapshot = this.worldSnapshotProvider.snapshot as NonNullable<typeof worldSnapshot>;
+      } else {
+        worldSnapshot = this.perfSpans.spanSync("world.snapshot.build", () => this.client?.worldStateSnapshot?.() ?? null);
+        if (worldSnapshot !== null) {
+          this.worldSnapshotProvider = {
+            snapshot: worldSnapshot,
+            generation: this.worldSnapshotProvider.generation + 1,
+            capturedAtMs: nowMsForProvider,
+          };
+        }
+      }
     } catch {
       worldSnapshot = null;
     }
