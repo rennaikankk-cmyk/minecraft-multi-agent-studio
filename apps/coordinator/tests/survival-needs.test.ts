@@ -67,6 +67,9 @@ describe("assessSurvivalNeeds", () => {
     const needs = assess({
       inventory: [
         { itemName: "diamond_pickaxe", count: 1 },
+    { itemName: "diamond_axe", count: 1 },
+    { itemName: "diamond_shovel", count: 1 },
+    { itemName: "diamond_hoe", count: 1 },
         { itemName: "iron_chestplate", count: 1 },
       ],
       armorPoints: 0,
@@ -120,6 +123,9 @@ describe("assessSurvivalNeeds", () => {
     const diamondAge = assess({
       inventory: [
         { itemName: "diamond_pickaxe", count: 1 },
+    { itemName: "diamond_axe", count: 1 },
+    { itemName: "diamond_shovel", count: 1 },
+    { itemName: "diamond_hoe", count: 1 },
         { itemName: "diamond", count: 3 },
       ],
     });
@@ -356,6 +362,9 @@ function satisfied(): ReadonlyArray<{ itemName: string; count: number }> {
     { itemName: "cooked_beef", count: 12 },
     { itemName: "oak_log", count: 16 },
     { itemName: "diamond_pickaxe", count: 1 },
+    { itemName: "diamond_axe", count: 1 },
+    { itemName: "diamond_shovel", count: 1 },
+    { itemName: "diamond_hoe", count: 1 },
     { itemName: "diamond_sword", count: 1 },
     { itemName: "diamond_helmet", count: 1 },
     { itemName: "diamond_chestplate", count: 1 },

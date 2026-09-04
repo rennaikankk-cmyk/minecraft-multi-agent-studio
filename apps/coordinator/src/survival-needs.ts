@@ -39,6 +39,8 @@ export type SurvivalNeedKey =
   | "SHELTER"
   | "DIAMOND_PROGRESSION"
   | "DIAMOND_ARMOR"
+  | "DIAMOND_TOOLS"
+  | "DIAMOND_WEAPON"
   | "COAL_RESERVE"
   | "TORCH"
   | "CHEST"
@@ -103,6 +105,8 @@ const PRIORITY_ORDER: readonly SurvivalNeedKey[] = Object.freeze([
   "SHELTER",
   "DIAMOND_PROGRESSION",
   "DIAMOND_ARMOR",
+  "DIAMOND_TOOLS",
+  "DIAMOND_WEAPON",
   "COAL_RESERVE",
   "TORCH",
   "CHEST",
@@ -382,10 +386,22 @@ export function assessSurvivalNeeds(
       "diamond_boots",
     ], inventory);
     if (missingDiamondArmor !== null) {
-      // 用户产品方向（2026-09-04）：发育到一套钻甲【优先于一切副业】——50 分
-      // 压过盾牌(33)/铁储备(35)/武器(44)/避难所(28)/煤火箱等；只让位于
-      // 生存底线（食物曲线/死亡回收 85/工具耐久 68/木料临界 68）。
+      // 用户产品方向（2026-09-04）：发育到一套完整钻装【优先于一切副业】——
+      // 全身钻甲(50) → 钻石工具斧/铲/锄(49) → 钻石剑(48)，全部压过
+      // 盾牌(33)/铁储备(35)/武器(44)/避难所(28)/煤火箱等；只让位于生存
+      // 底线（食物曲线/死亡回收 85/工具耐久 68/木料临界 68）。
       needs.push(itemNeed("DIAMOND_ARMOR", 50, missingDiamondArmor, `diamond age reached but ${missingDiamondArmor} missing`, 1, "diamond_ore"));
+    }
+    const missingDiamondTool = firstMissing([
+      "diamond_axe",
+      "diamond_shovel",
+      "diamond_hoe",
+    ], inventory);
+    if (missingDiamondTool !== null) {
+      needs.push(itemNeed("DIAMOND_TOOLS", 49, missingDiamondTool, `diamond set incomplete: ${missingDiamondTool} missing`, 1, "diamond_ore"));
+    }
+    if (bestSwordTier < 3) {
+      needs.push(itemNeed("DIAMOND_WEAPON", 48, "diamond_sword", "diamond set incomplete: diamond_sword missing", 1, "diamond_ore"));
     }
   }
 
