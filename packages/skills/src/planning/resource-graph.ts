@@ -222,6 +222,34 @@ export const vanillaResourceRecipes: readonly ResourceRecipe[] = Object.freeze([
     inputs: [need("diamond", 3), need("stick", 2)],
     station: "crafting_table",
   }),
+  // 钻石工具套装（用户钻套方向 2026-09-04：斧→铲→锄，DIAMOND_TOOLS 需求依赖）
+  recipe({
+    itemName: "diamond_axe",
+    kind: "craft",
+    inputs: [need("diamond", 3), need("stick", 2)],
+    station: "crafting_table",
+  }),
+  recipe({
+    itemName: "diamond_shovel",
+    kind: "craft",
+    inputs: [need("diamond", 1), need("stick", 2)],
+    station: "crafting_table",
+  }),
+  recipe({
+    itemName: "diamond_hoe",
+    kind: "craft",
+    inputs: [need("diamond", 2), need("stick", 2)],
+    station: "crafting_table",
+  }),
+
+  // ---- 附魔前置（用户后钻套时代路线：基地→下界合金→附魔）----
+  // 黑曜石：钻石镐可采（天然黑曜石，钻石档）。
+  recipe({
+    itemName: "obsidian",
+    kind: "mine",
+    sourceBlock: "obsidian",
+    toolTier: "diamond",
+  }),
 
   // ---- 武器阶梯（钻石前每档都要一把，杀动物取食与自卫共用） ----
   recipe({
