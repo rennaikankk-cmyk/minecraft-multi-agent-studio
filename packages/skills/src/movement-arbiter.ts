@@ -8,6 +8,9 @@
  * token.  A lower numeric priority wins (P0 is the highest priority).
  */
 
+/** 租约 TTL：超龄的旧租约在下次 acquire 时过期释放（防泄漏永久化）。 */
+const MOVEMENT_LEASE_TTL_MS = 60_000;
+
 export const MOVEMENT_PRIORITIES = Object.freeze({
   EMERGENCY: 0,
   COMBAT: 10,
@@ -306,9 +309,16 @@ export class MovementArbiter {
 
     const previous = this.current;
     if (previous !== null) {
-      // Lower number wins. Equal priority is intentionally rejected to avoid
-      // two peer skills interleaving pathfinder goals nondeterministically.
-      if (priority >= previous.priority) return null;
+      // TTL 防泄漏（2026-09-04 闭环轮实测：战斗/追击持走租约后不还，
+      // collect.block 全 BOT_MOVEMENT_BUSY 饿死——租约无过期=泄漏永久化）。
+      // 超过 TTL 的旧租约视同过期释放，同优先级新请求可接管。
+      if (this.now() - previous.acquiredAt >= MOVEMENT_LEASE_TTL_MS) {
+        this.release(previous, "ttl_expired");
+      } else {
+        // Lower number wins. Equal priority is intentionally rejected to avoid
+        // two peer skills interleaving pathfinder goals nondeterministically.
+        if (priority >= previous.priority) return null;
+      }
     }
 
     this.tokenGeneration += 1;
