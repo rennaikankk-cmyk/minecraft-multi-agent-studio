@@ -3021,7 +3021,7 @@ describe("CoordinatorLocalPlanner", () => {
     expect(new Set(sendSkillInvocation.mock.calls.map(([invocation]) =>
       invocation.payload.authorization.decisionId,
     )).size).toBe(4);
-    expect(get).toHaveBeenCalledTimes(8);
+    expect(get).toHaveBeenCalledTimes(12);
     expect(requestFreshStatus).toHaveBeenCalledTimes(1);
     expect(sendSkillInvocation.mock.calls[0]![0].payload.input).toMatchObject({
       blockName: "oak_log",

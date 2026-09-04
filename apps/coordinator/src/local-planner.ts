@@ -1790,7 +1790,14 @@ export class CoordinatorLocalPlanner {
             bound.signal,
           );
           last = { step, invocation: bound.invocation, result };
-          const outcome = stepOutcomeFromResult(step, result);
+          // 已有快速通道对齐：从 registry 活快照取当前持有量传给满足判定
+          const heldRecord = this.options.registry.get(request.botId, this.validNow());
+          const inventoryHeld = "itemName" in step
+            ? (heldRecord?.currentStatus?.inventory ?? []).find(
+                (item) => item.itemName === step.itemName,
+              )?.count ?? 0
+            : 0;
+          const outcome = stepOutcomeFromResult(step, result, inventoryHeld);
           if (outcome.ok && step.kind === "place-station") {
             // Recorded from the Runtime's read-back position, which it produces
             // only after confirming a block is really there.
@@ -3904,9 +3911,10 @@ function roundedPositiveSafeInteger(value: number): number | null {
 function stepOutcomeFromResult(
   step: PlanStep,
   result: SkillExecutionResultV1,
+  inventoryHeld: number = 0,
 ): StepOutcome {
   if (result.payload.outcome === "completed") {
-    return completedOutputSatisfiesStep(step, result.payload.output)
+    return completedOutputSatisfiesStep(step, result.payload.output, inventoryHeld)
       ? { ok: true }
       : { ok: false, errorCode: "STEP_OUTPUT_INSUFFICIENT" };
   }
@@ -4256,10 +4264,20 @@ function smeltInputsForStep(step: PlanStep): SmeltStepInputs | null {
 function completedOutputSatisfiesStep(
   step: PlanStep,
   output: SkillJsonValue,
+  inventoryHeld: number = 0,
 ): boolean {
   if (!output || typeof output !== "object" || Array.isArray(output)) {
     return false;
   }
+  // 已有快速通道（2026-09-04 闭环轮根因修复）：技能层发现目标物品手持量
+  // 已满足时直接报 completed + craftedCount/smeltedCount:0（零产出）。
+  // 此前 completedOutputSatisfiesStep 只认"本次产出达标"，两层语义打架
+  // →STEP_OUTPUT_INSUFFICIENT→NON_IDEMPOTENT 循环失败抑制。对齐：零产出
+  // + 手持已满足（inventoryHeld ≥ 产出需求）同样算步骤满足。
+  const alreadySatisfied =
+    Number.isSafeInteger(inventoryHeld) &&
+    inventoryHeld >= step.producedCount &&
+    inventoryHeld > 0;
   if (step.kind === "mine") {
     return (
       output.blockName === step.targetBlock &&
@@ -4277,7 +4295,8 @@ function completedOutputSatisfiesStep(
       output.requestedCount === step.runs &&
       typeof output.craftedCount === "number" &&
       Number.isInteger(output.craftedCount) &&
-      output.craftedCount >= step.producedCount &&
+      (output.craftedCount >= step.producedCount ||
+        (output.craftedCount === 0 && alreadySatisfied)) &&
       output.usedCraftingTable === (step.station !== null)
     );
   }
