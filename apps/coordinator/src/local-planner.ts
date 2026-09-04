@@ -1547,6 +1547,7 @@ export class CoordinatorLocalPlanner {
       dimension,
       availableSkills,
       this.blueprintFiles,
+      record,
     );
     if (decision === null) return null;
     return { planItems: null, skill: decision };
@@ -1686,9 +1687,6 @@ export class CoordinatorLocalPlanner {
         traceId: request.traceId,
         taskId: request.taskId,
         botId: request.botId,
-        // 闭环轮诊断：goal 到达 planner 时的前 60 字符（隐私审计过——蓝图
-        // goal 无敏感字段；一次性定位 safeOperatorGoal/transport 层是否改写）
-        goalPreview: request.operatorGoal.slice(0, 60),
         bindableCount: bindability.bindable.length,
         excludedCount: bindability.excluded.length,
         exclusionReasons: reasonCounts,
@@ -1815,15 +1813,6 @@ export class CoordinatorLocalPlanner {
                 (item) => item.itemName === step.itemName,
               )?.count ?? 0
             : 0;
-          this.options.logger?.info?.("coordinator_step_inventory_check", {
-            taskId: request.taskId,
-            botId: request.botId,
-            stepKind: step.kind,
-            itemName: step.itemName,
-            inventoryHeld,
-            producedCount: "producedCount" in step ? step.producedCount : null,
-            statusInventoryCount: (heldRecord?.currentStatus?.inventory ?? []).length,
-          });
           const outcome = stepOutcomeFromResult(step, result, inventoryHeld);
           if (outcome.ok && step.kind === "place-station") {
             // Recorded from the Runtime's read-back position, which it produces
@@ -4066,6 +4055,7 @@ function deterministicSkillDecision(
   dimension: string,
   availableSkills: readonly BotSkillCatalogEntryV1[],
   blueprintFilesForDecision: ReadonlyMap<string, BlueprintFile>,
+  record?: BotRegistryRecord,
 ): DeterministicSkillDecision | null {
   const advertisedVersion = (skillId: string): string | null => {
     const entry = availableSkills.find(
@@ -4170,6 +4160,21 @@ function deterministicSkillDecision(
     // 锚点。批界/站位由文件声明；批间移动由编排层显式 movement goal 完成。
     const blueprint = blueprintFilesForDecision.get(parsed.name);
     if (blueprint === undefined) return null;
+    // 锚点自动选取（就地建造）：goal 不带锚点时取 bot 当前位置为锚——
+    // y 用脚下位置（reference 在 y-1 自然是 bot 踩着的方块），
+    // x/z 偏移 2 格避免 PLACE_TARGET_OCCUPIED（bot 自己站位）。这消除了
+    // 人工指定坐标导致的三连拒（空中 y/占用/不可达）。
+    const botPos = record?.currentStatus?.position ?? null;
+    const anchor = parsed.anchor !== null
+      ? parsed.anchor
+      : botPos !== null
+        ? {
+            x: Math.floor(botPos.x) + 2,
+            y: Math.floor(botPos.y),
+            z: Math.floor(botPos.z),
+          }
+        : null;
+    if (anchor === null) return null;
     return {
       action: "invoke_skill",
       botId: request.botId,
@@ -4178,7 +4183,7 @@ function deterministicSkillDecision(
       skillVersion: blueprintVersion,
       input: {
         blueprint: {
-          anchor: parsed.anchor,
+          anchor,
           dimension,
           serverProfileId: TRUSTED_SERVER_PROFILE_PLACEHOLDER,
           cells: blueprintCellsForDispatch(blueprint),

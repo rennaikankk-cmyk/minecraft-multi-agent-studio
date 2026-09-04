@@ -39,7 +39,7 @@ describe("parseBlueprintFileGoal", () => {
   });
 
   it("缺锚点/缺施工关键词 → null", () => {
-    expect(parseBlueprintFileGoal("使用蓝图文件 cobble-generator 施工", NAMES)).toBeNull();
+    // 缺锚点 → 现在合法（auto-anchor，anchor=null 交给协调器 bot 位置 fallback）
     expect(parseBlueprintFileGoal("使用蓝图文件 cobble-generator：锚点 x=0 y=64 z=0", NAMES)).toBeNull();
   });
 

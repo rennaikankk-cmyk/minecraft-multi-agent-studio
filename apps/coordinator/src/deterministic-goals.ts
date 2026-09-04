@@ -125,7 +125,7 @@ export type ParsedBlueprintGoal = Readonly<{
 export type ParsedBlueprintFileGoal = Readonly<{
   kind: "build-blueprint-file";
   name: string;
-  anchor: Readonly<{ x: number; y: number; z: number }>;
+  anchor: Readonly<{ x: number; y: number; z: number }> | null;
   startIndex: number;
 }>;
 
@@ -138,16 +138,19 @@ export function parseBlueprintFileGoal(
   if (nameMatch === null) return null;
   const name = nameMatch[1]!;
   if (!knownBlueprintNames.has(name)) return null;
+  // 锚点可选：缺省"就地建造"——协调器用 bot 当前位置做锚点（省去人工
+  // 指定坐标、避免 y 在空中的 REFERENCE_BLOCK_NOT_FOUND 三连拒）。
   const anchorMatch = /锚点\s*x\s*[:=]?\s*(-?\d+)\s*y\s*[:=]?\s*(-?\d+)\s*z\s*[:=]?\s*(-?\d+)/u.exec(
     operatorGoal,
   );
-  if (anchorMatch === null) return null;
+  // 不再在这里 early return null——无锚点也要返回（anchor=null 交给上层）。
   const startMatch = /从第\s*(\d{1,3})\s*格开始/u.exec(operatorGoal);
   const startIndex = startMatch !== null ? Math.max(0, Number(startMatch[1]!)) : 0;
   return {
     kind: "build-blueprint-file",
     name,
-    anchor: {
+    // 无锚点 → null → 协调器取 bot 当前位置（就地建造，省去手动坐标）
+    anchor: anchorMatch === null ? null : {
       x: Number(anchorMatch[1]!),
       y: Number(anchorMatch[2]!),
       z: Number(anchorMatch[3]!),
