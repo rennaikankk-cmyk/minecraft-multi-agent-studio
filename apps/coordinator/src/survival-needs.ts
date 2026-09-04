@@ -382,7 +382,10 @@ export function assessSurvivalNeeds(
       "diamond_boots",
     ], inventory);
     if (missingDiamondArmor !== null) {
-      needs.push(itemNeed("DIAMOND_ARMOR", 30, missingDiamondArmor, `diamond age reached but ${missingDiamondArmor} missing`, 1, "diamond_ore"));
+      // 用户产品方向（2026-09-04）：发育到一套钻甲【优先于一切副业】——50 分
+      // 压过盾牌(33)/铁储备(35)/武器(44)/避难所(28)/煤火箱等；只让位于
+      // 生存底线（食物曲线/死亡回收 85/工具耐久 68/木料临界 68）。
+      needs.push(itemNeed("DIAMOND_ARMOR", 50, missingDiamondArmor, `diamond age reached but ${missingDiamondArmor} missing`, 1, "diamond_ore"));
     }
   }
 
