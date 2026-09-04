@@ -1,3 +1,4 @@
+import { startLoopMonitor, type LoopMonitorStop } from "./loop-monitor.js";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -669,6 +670,8 @@ export class SingleBotRuntime {
     this.emitHeartbeat();
   }
 
+  private loopMonitorStop: LoopMonitorStop | null = null;
+
   start(): void {
     if (this.state !== "offline" || this.client || this.reconnectTimer) {
       throw new Error("Bot Runtime has already been started.");
@@ -676,6 +679,13 @@ export class SingleBotRuntime {
     this.stopPromise = null;
     this.stopping = false;
     this.reconnectAttempts = 0;
+    this.loopMonitorStop ??= startLoopMonitor(this.dependencies.logger);
+    this.dependencies.logger.info?.("runtime_env_probe", {
+      rustPathfinder: process.env.STUDIO_RUST_PATHFINDER ?? null,
+      noHunger: process.env.STUDIO_NO_HUNGER ?? null,
+      l0Stop: process.env.STUDIO_L0_EMERGENCY_STOP ?? null,
+      envKeyCount: Object.keys(process.env).length,
+    });
     this.connect();
 
   }
@@ -787,6 +797,9 @@ export class SingleBotRuntime {
             // a single log line reveals whether a verification run actually did
             // useful work. Never contains credentials or raw world state.
             telemetry: skillResultTelemetryDigest(result),
+            ...(this.client && "rustPathStats" in this.client && (this.client as { rustPathStats: unknown }).rustPathStats
+              ? { rustPath: (this.client as { rustPathStats: Record<string, unknown> }).rustPathStats }
+              : {}),
             ...("errorCode" in result.payload
               ? { errorCode: result.payload.errorCode }
               : {}),
@@ -2001,6 +2014,20 @@ export class SingleBotRuntime {
           }
           let result: L0SafetyActionResult;
           if (action.kind === "EMERGENCY_STOP") {
+            // 断线保号保险丝（STUDIO_L0_EMERGENCY_STOP=0 关闭）：本地测试/
+            // 死亡代价可控的场景里，"危急血量+血量在降→断线"会反复打停 bot
+            // （卡方块窒息、地形伤等非战斗源），关掉后由受击反应/撤退/吃食物
+            // 这些就地反射接手。生产 anarchy 语义（死亡=掉全部）默认保持开启。
+            if (process.env.STUDIO_L0_EMERGENCY_STOP === "0") {
+              this.dependencies.logger.warn(
+                "l0_emergency_stop_suppressed",
+                this.logFields({
+                  code: "EMERGENCY_STOP_DISABLED_BY_ENV",
+                  risk: action.risk,
+                }),
+              );
+              continue;
+            }
             const stopOutcome = await this.stop(
               "l0_emergency_stop",
               this.traceId,

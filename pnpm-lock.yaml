@@ -40,6 +40,9 @@ importers:
       '@minecraft-studio/observability':
         specifier: workspace:*
         version: link:../../packages/observability
+      '@minecraft-studio/pathfinder-rs':
+        specifier: workspace:*
+        version: link:../../packages/pathfinder-rs
       '@minecraft-studio/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -293,6 +296,8 @@ importers:
       vitest:
         specifier: 4.1.10
         version: 4.1.10(@types/node@26.1.1)(vite@8.1.5(@types/node@26.1.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.12))
+
+  packages/pathfinder-rs: {}
 
   packages/protocol:
     dependencies:

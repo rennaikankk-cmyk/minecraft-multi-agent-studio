@@ -85,6 +85,7 @@ import {
   } from "@minecraft-studio/combat";
 import { MineflayerCombatAdapter } from "./combat-mineflayer-adapter.js";
 import { observeSite, digShelter } from "./site-shelter-adapter.js";
+import { rustGoto, type RustPathStats } from "./rust-pathfinder.js";
 
 import type {
   BotClient,
@@ -270,6 +271,10 @@ const SAFE_FORAGE_EXPLORATION_DIRECTIONS = Object.freeze([
 const SAFE_FORAGE_MAX_DISTANCE = 48;
 const SAFE_FORAGE_REACH_DISTANCE = 3.1;
 const SAFE_FORAGE_TOTAL_BUDGET_MS = 20_000;
+/** 落水自救定向游岸预算：浮出后朝最近岸游的有界时长（用户实测 2026-09-04）。 */
+const SWIM_TO_SHORE_BUDGET_MS = 6_000;
+/** 游岸途中有界挖掘数：岸壁阻挡时最多挖开的方块数（防失控连挖）。 */
+const SWIM_TO_SHORE_MAX_DIGS = 4;
 /** food.secure 的总预算：略低于技能超时（120s），给读回与收尾留余量。 */
 const SECURE_FOOD_TOTAL_BUDGET_MS = 110_000;
 /**
@@ -1156,6 +1161,8 @@ export class MineflayerBotClient implements BotClient {
   private activePursuit: { stop: (reason: string) => void } | null = null;
   /** G1 spawn-escape：本连接首个出生点（重触发判定的参照原点）。 */
   private worldSpawnOrigin: { x: number; z: number } | null = null;
+  /** 最近一次 Rust 路由的各阶段耗时（runtime 技能完成时上报；null=未启用）。 */
+  rustPathStats: RustPathStats | null = null;
   /** spawn-escape 疾跑进行中（防同点重复派发；goto 落定后复位）。 */
   private spawnEscapeActive = false;
   /**
@@ -1176,6 +1183,13 @@ export class MineflayerBotClient implements BotClient {
   private lastCraftingTableCreatedAt = 0;
   private lastCraftingTablePlacedAt = 0;
   private lastCraftingTablePosition: Vec3 | null = null;
+  /**
+   * 本会话自置的工作台位置（"x,y,z" 键）：合成完成后回收打包（挖回背包），
+   * 游荡型 Bot 随身携带工作站——修"走过的路全是工作台"（旧台超出扫描/
+   * 加载范围后每处新营地都重造一个）。世界已有/复用的台不在此集合，
+   * 永不回收（那是别人的资产）。
+   */
+  private readonly sessionPlacedCraftingTables = new Set<string>();
   private lastFurnacePlacedAt = 0;
   private lastFurnacePosition: Vec3 | null = null;
   private lastNearbyBlockScanAt = Number.NEGATIVE_INFINITY;
@@ -1822,6 +1836,13 @@ export class MineflayerBotClient implements BotClient {
           ["jump"],
           movementLease,
         );
+        // 落水自救第二步（用户实测观察 2026-09-04："在水里应该先自救浮
+        // 起来然后到岸边"）：浮出后定向游向最近岸线。湖心 16 格无岸时
+        // 保持纯上浮，交 L0 下一轮重估。
+        const shoreYaw = this.nearestShoreYaw();
+        if (shoreYaw !== null) {
+          await this.swimTowardShore(shoreYaw, movementLease);
+        }
         movementLease.assertCurrent();
         return { outcome: "executed", errorCode: null };
       }
@@ -2462,13 +2483,14 @@ export class MineflayerBotClient implements BotClient {
     signal: AbortSignal,
   ): Promise<CombatActionAcknowledgement> {
     const promise = this.combatAdapter.execute(action, signal);
-    // 追击移交（用户实测 2026-09-04：反击几秒后目标跑开就撒手——反应窗
-    // 没有"追"的概念）。近战命中玩家目标且 anarchy 档 → PursuitController
-    // 接管持续交战（GoalFollow 动态追踪+攻击节奏+承诺窗，设计参考
-    // mineflayer-pvp clean-room）。任务侧由中断-恢复语义在追击结束后接管。
+    // 追击移交（用户实测 2026-09-04 两轮：①"反击几下就停"②"压根不追"——
+    // 第二轮实锤 anarchyNavigation 闸把非 anarchy bot 的追击全关了，本地
+    // 测试服永远验不到）。修正：追击对所有导航档生效，STUDIO_PURSUIT=0
+    // 是唯一熔断。近战命中玩家目标 → PursuitController 接管持续交战
+    // （GoalFollow 动态追踪+攻击节奏+承诺窗，设计参考 mineflayer-pvp
+    // clean-room）。任务侧由中断-恢复语义在追击结束后接管。
     void promise.then((ack) => {
       if (
-        this.anarchyNavigation &&
         process.env.STUDIO_PURSUIT !== "0" &&
         action.kind === "MELEE_ATTACK" &&
         ack.outcome === "executed" &&
@@ -2605,6 +2627,11 @@ export class MineflayerBotClient implements BotClient {
     if (!input.success) {
       throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
     }
+    // 起步前打包会话自置工作台（用户实测 2026-09-04 第二轮："仍然放好几个
+    // 工作台"——只在合成成功后回收覆盖不了失败路径；改为移动离开时收台：
+    // 本地重试期间台保持可用，真正要走远路前才挖回背包）。只收 reach 内
+    // 的台；已经走远的留原地（下个营地复用扫描不认它们，已知限制）。
+    await this.packUpReachableSessionCraftingTables(request.signal);
     const currentDimension = normalizeDimension(String(this.bot.game.dimension));
     if (input.data.target.serverProfileId !== this.serverProfileId) {
       throw new SkillFault("TARGET_SERVER_PROFILE_MISMATCH");
@@ -2656,14 +2683,48 @@ export class MineflayerBotClient implements BotClient {
       if (request.signal.aborted || lease.signal.aborted) {
         throw new SkillFault("SKILL_CANCELLED");
       }
-      await this.bot.pathfinder.goto(
-        new goals.GoalNear(
-          input.data.target.x,
-          input.data.target.y,
-          input.data.target.z,
-          pathfinderRadius,
-        ),
-      );
+      // Rust 引擎路由（STUDIO_RUST_PATHFINDER=1）：分类→worker 寻路→跟随。
+      // 默认关（正确性特性门控，live 验证后转正）。各阶段耗时进
+      // rustPathStats，runtime 在技能完成时上报——"哪里计算高"的数据面。
+      this.rustPathStats = null;
+      if (process.env.STUDIO_RUST_PATHFINDER === "1") {
+        this.rustPathStats = await rustGoto({
+          bot: this.bot,
+          target: {
+            x: input.data.target.x,
+            y: input.data.target.y,
+            z: input.data.target.z,
+          },
+          radius: Math.max(1, input.data.radius),
+          signal: request.signal,
+          lease: {
+            isCurrent: () => lease.isCurrent(),
+            assertCurrent: () => lease.assertCurrent(),
+            signal: lease.signal,
+          },
+          digTool: async () => {
+            const pick = this.bot.inventory
+              .items()
+              .find((item) => item.name.endsWith("pickaxe"));
+            if (pick) {
+              try {
+                await this.bot.equip(pick, "hand");
+              } catch {
+                /* 装备尽力而为：徒手也能挖（慢） */
+              }
+            }
+          },
+        });
+      } else {
+        await this.bot.pathfinder.goto(
+          new goals.GoalNear(
+            input.data.target.x,
+            input.data.target.y,
+            input.data.target.z,
+            pathfinderRadius,
+          ),
+        );
+      }
       if (!lease.isCurrent()) {
         throw new SkillFault("SKILL_CANCELLED");
       }
@@ -4480,6 +4541,12 @@ export class MineflayerBotClient implements BotClient {
       0,
       this.countInventoryItem(input.data.itemName) - inventoryBefore,
     );
+    // 合成成功后回收打包会话自置的工作台（用户观察 2026-09-04：游荡路径
+    // 上全是工作台）。best-effort、只收自置台；结果快照先于回收——
+    // craftedCount 是合成产出，不含回收回来的台。
+    if (craftingTable) {
+      await this.packUpSessionCraftingTable(craftingTable, request.signal);
+    }
     return craftItemCapabilityOutputSchema.parse({
       itemName: input.data.itemName,
       requestedCount: input.data.count,
@@ -4568,6 +4635,7 @@ export class MineflayerBotClient implements BotClient {
             },
           });
           this.lastCraftingTablePosition = placed.position.clone();
+          this.sessionPlacedCraftingTables.add(craftingTablePositionKey(placed.position));
           return placed;
         }
 
@@ -4620,9 +4688,90 @@ export class MineflayerBotClient implements BotClient {
           },
         });
         this.lastCraftingTablePosition = placed.position.clone();
+        this.sessionPlacedCraftingTables.add(craftingTablePositionKey(placed.position));
         return placed;
       },
     );
+  }
+
+  /**
+   * 打包 reach 范围内的全部会话自置工作台（移动起步前调用）。best-effort：
+   * 单台失败不阻断移动。
+   */
+  private async packUpReachableSessionCraftingTables(signal: AbortSignal): Promise<void> {
+    if (this.sessionPlacedCraftingTables.size === 0) return;
+    if (typeof this.bot.dig !== "function") return;
+    const eye = this.bot.entity?.position;
+    if (!eye) return;
+    for (const key of [...this.sessionPlacedCraftingTables]) {
+      if (signal.aborted) return;
+      const [xs, ys, zs] = key.split(",");
+      const position = new Vec3(Number(xs), Number(ys), Number(zs));
+      if (!Number.isFinite(position.x) || eye.distanceTo(position) > 4.5) {
+        continue;
+      }
+      const live = this.bot.blockAt(position);
+      if (!live || live.name !== "crafting_table") {
+        this.sessionPlacedCraftingTables.delete(key);
+        continue;
+      }
+      try {
+        this.grantSalvage([{ position }]);
+        const inventoryBefore = this.countInventoryItem("crafting_table");
+        const inventoryIncrease = this.observeCollectedInventoryIncrease(
+          this.countInventoryTotal(),
+          signal,
+        );
+        try {
+          await this.bot.dig(live);
+          await this.pickupDugItem(live, inventoryBefore, inventoryIncrease, signal);
+          this.sessionPlacedCraftingTables.delete(key);
+        } finally {
+          inventoryIncrease.cancel();
+        }
+      } catch {
+        // 单台回收失败：留原地，不阻断移动。
+      }
+    }
+  }
+
+  /**
+   * 合成完成后回收打包会话自置的工作台（用户实测观察 2026-09-04："走过的
+   * 路全是工作台"）。只挖本会话放置的台（世界已有/复用的永不动）；挖掘走
+   * wrapped dig——先 grantSalvage 过 provenance（自置台记的是 structural，
+   * 没有授权会被自己的 HarvestAuthorization 拦住）。best-effort：任何失败
+   * 只记日志不失败合成结果（物品已入包，台留原地可下次再收）。
+   */
+  private async packUpSessionCraftingTable(
+    table: MineflayerBlock,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const key = craftingTablePositionKey(table.position);
+    if (!this.sessionPlacedCraftingTables.has(key)) return;
+    try {
+      if (signal.aborted) return;
+      const live = this.bot.blockAt(table.position);
+      if (!live || live.name !== "crafting_table") {
+        this.sessionPlacedCraftingTables.delete(key);
+        return;
+      }
+      this.grantSalvage([{ position: table.position }]);
+      const inventoryBefore = this.countInventoryItem("crafting_table");
+      const inventoryIncrease = this.observeCollectedInventoryIncrease(
+        this.countInventoryTotal(),
+        signal,
+      );
+      try {
+        await this.bot.dig(live);
+        await this.pickupDugItem(live, inventoryBefore, inventoryIncrease, signal);
+        this.sessionPlacedCraftingTables.delete(key);
+        this.lastCraftingTablePosition = null;
+      } finally {
+        inventoryIncrease.cancel();
+      }
+    } catch {
+      // best-effort：台留原地，下次合成路径可再收（集合里保留 key）。
+    }
   }
 
   /** Resolve all observed instances of one bounded utility-station policy. */
@@ -6153,6 +6302,112 @@ export class MineflayerBotClient implements BotClient {
     }
   }
 
+  /**
+   * 落水自救定向（用户实测 2026-09-04）：以 bot 当前位置为心，8 个水平
+   * 方向 × 16 格探测最近的"岸"——与眼同高的列脚位是实心非水、头上是
+   * 空气（可立足）。返回最近方向的 yaw；null=全是水（湖心）。
+   * 纯本地 blockAt 读，零网络副作用。
+   */
+  private nearestShoreYaw(): number | null {
+    const eye = this.bot.entity.position;
+    const surfaceY = Math.floor(eye.y);
+    let best: { yaw: number; dist: number } | null = null;
+    for (let sector = 0; sector < 8; sector += 1) {
+      const yaw = (sector / 8) * Math.PI * 2;
+      // mineflayer 前向 = (-sin(yaw), cos(yaw))
+      const dx = -Math.sin(yaw);
+      const dz = Math.cos(yaw);
+      for (let dist = 2; dist <= 16; dist += 1) {
+        const x = Math.floor(eye.x + dx * dist);
+        const z = Math.floor(eye.z + dz * dist);
+        const feet = this.bot.blockAt(new Vec3(x, surfaceY, z));
+        if (!feet || feet.name === "water" || feet.boundingBox === "empty") {
+          continue;
+        }
+        const head = this.bot.blockAt(new Vec3(x, surfaceY + 1, z));
+        if (head && head.boundingBox === "empty") {
+          if (best === null || dist < best.dist) best = { yaw, dist };
+          break;
+        }
+      }
+    }
+    return best?.yaw ?? null;
+  }
+
+  /**
+   * 定向游向岸（配合 nearestShoreYaw）：look 定向 + forward/jump 控制态
+   * 有界循环，脚位出水即停。租约被抢占时同步清控制态（finally 保护）。
+   *
+   * 岸壁挖掘（用户实测 2026-09-04："岸上这边有泥土挡着 他应该挖开泥土
+   * 过去"）：前进受阻且面前是可挖实心方块时，先挖开再继续游。挖掘走
+   * wrapped dig——provenance 拦 own/team 资产，天然泥岸放行；有界次数
+   * 防失控连挖。
+   */
+  private async swimTowardShore(yaw: number, lease: MovementLease): Promise<void> {
+    lease.assertCurrent();
+    this.bot.clearControlStates();
+    const canLook =
+      typeof this.bot.look === "function" &&
+      typeof this.bot.setControlState === "function" &&
+      typeof this.bot.clearControlStates === "function";
+    if (!canLook) return;
+    const tickWait =
+      typeof this.bot.waitForTicks === "function"
+        ? () => this.bot.waitForTicks(1)
+        : () => new Promise<void>((resolve) => setTimeout(resolve, 100));
+    const forward = new Vec3(-Math.sin(yaw), 0, Math.cos(yaw));
+    const deadline = Date.now() + SWIM_TO_SHORE_BUDGET_MS;
+    let digs = 0;
+    try {
+      this.bot.look(yaw, 0, true);
+      while (Date.now() < deadline && !lease.signal.aborted) {
+        const feet = this.bot.blockAt(this.bot.entity.position.floored());
+        if (feet && feet.name !== "water") break;
+        lease.assertCurrent();
+        // 岸壁阻挡：面前脚位/头位是实心非水方块 → 挖开（≤4 块）再游。
+        if (digs < SWIM_TO_SHORE_MAX_DIGS) {
+          const eye = this.bot.entity.position;
+          const aheadFeet = this.bot.blockAt(
+            new Vec3(
+              Math.floor(eye.x + forward.x * 1.2),
+              Math.floor(eye.y),
+              Math.floor(eye.z + forward.z * 1.2),
+            ),
+          );
+          const aheadHead = this.bot.blockAt(
+            new Vec3(
+              Math.floor(eye.x + forward.x * 1.2),
+              Math.floor(eye.y + 1),
+              Math.floor(eye.z + forward.z * 1.2),
+            ),
+          );
+          const blocking =
+            aheadHead && aheadHead.boundingBox !== "empty" && aheadHead.name !== "water"
+              ? aheadHead
+              : aheadFeet && aheadFeet.boundingBox !== "empty" && aheadFeet.name !== "water"
+                ? aheadFeet
+                : null;
+          if (blocking && typeof this.bot.dig === "function") {
+            try {
+              await this.bot.dig(blocking);
+              digs += 1;
+              continue;
+            } catch {
+              // 挖失败（保护资产/超时）：放弃挖掘，继续游（可能有别的出口）
+            }
+          }
+        }
+        this.bot.setControlState("forward", true);
+        this.bot.setControlState("jump", true);
+        await tickWait();
+      }
+    } catch {
+      // 游泳中断（租约易主/断线）：控制态清理由 finally 兜底
+    } finally {
+      if (lease.isCurrent()) this.bot.clearControlStates();
+    }
+  }
+
   private stopMovementPrimitives(): void {
     try {
       const cancelTask = this.bot.collectBlock?.cancelTask;
@@ -6212,6 +6467,11 @@ function resolveOnlinePassword(botId: string): string {
 function provenancePersistPath(serverProfileId: string): string {
   const safe = serverProfileId.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 128);
   return path.join(process.cwd(), "runtime-data", "provenance", `${safe}.json`);
+}
+
+/** 会话自置工作台的位置键（x,y,z 整数化）。 */
+function craftingTablePositionKey(position: { x: number; y: number; z: number }): string {
+  return `${Math.floor(position.x)},${Math.floor(position.y)},${Math.floor(position.z)}`;
 }
 
 export function createMineflayerClient(
