@@ -226,6 +226,7 @@ describe("assessSurvivalNeeds", () => {
 
   it("keeps exploring once everything is satisfied", () => {
     const needs = assess({ inventory: satisfied(), armorPoints: 20, shelterBuilt: true });
+    // baseFacilities 未传入 → 基地 needs 不触发（能力未接线=无幽灵需求）
     expect(needs.map(({ key }) => key)).toEqual(["EXPLORATION"]);
   });
 
@@ -370,6 +371,7 @@ function satisfied(): ReadonlyArray<{ itemName: string; count: number }> {
     { itemName: "diamond_chestplate", count: 1 },
     { itemName: "diamond_leggings", count: 1 },
     { itemName: "diamond_boots", count: 1 },
+    { itemName: "bed", count: 1 },
     { itemName: "diamond", count: 3 },
     { itemName: "iron_ingot", count: 6 },
     { itemName: "shield", count: 1 },

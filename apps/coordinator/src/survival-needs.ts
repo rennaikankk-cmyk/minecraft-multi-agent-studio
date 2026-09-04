@@ -41,6 +41,10 @@ export type SurvivalNeedKey =
   | "DIAMOND_ARMOR"
   | "DIAMOND_TOOLS"
   | "DIAMOND_WEAPON"
+  | "BASE_SITE_SELECTION"
+  | "BASE_MAIN_CONSTRUCTION"
+  | "BASE_FACILITY_COBBLE"
+  | "BASE_FACILITY_FARM"
   | "COAL_RESERVE"
   | "TORCH"
   | "CHEST"
@@ -82,6 +86,8 @@ export type SurvivalAssessmentInput = Readonly<{
    * deterministic-goals 的 roof 模板严格对齐。
    */
   reconPatrol?: Readonly<{ goalText: string; reason: string }> | null;
+  /** 基地自动设施状态（钻套后基地建造触发条件）。 */
+  baseFacilities?: Readonly<{ hasCobbleGenerator: boolean; hasFarm: boolean }> | null;
   /** 可注入时钟（P0-A8）：不传则用 Date。一次读取贯穿整个评估。 */
   now?: Date;
 }>;
@@ -107,6 +113,10 @@ const PRIORITY_ORDER: readonly SurvivalNeedKey[] = Object.freeze([
   "DIAMOND_ARMOR",
   "DIAMOND_TOOLS",
   "DIAMOND_WEAPON",
+  "BASE_SITE_SELECTION",
+  "BASE_MAIN_CONSTRUCTION",
+  "BASE_FACILITY_COBBLE",
+  "BASE_FACILITY_FARM",
   "COAL_RESERVE",
   "TORCH",
   "CHEST",
@@ -402,6 +412,73 @@ export function assessSurvivalNeeds(
     }
     if (bestSwordTier < 3) {
       needs.push(itemNeed("DIAMOND_WEAPON", 48, "diamond_sword", "diamond set incomplete: diamond_sword missing", 1, "diamond_ore"));
+    }
+
+    // ---- 基地选址+建造（用户产品方向 2026-09-04：钻套完成→自动选址建基地）
+    // 触发条件：全套钻装齐（甲+镐+剑）且已有临时避难所（shelterBuilt=true，
+    // 避难所是钻套前生存需求——基地是钻套后的长期设施，不抢避难所的优先级）。
+    // 顺序：选址(47) → 主体建造(46) → 刷石机(45) → 农场(44)。
+    // 选址=远离出生点+当前所在位置（exploration 已扫过的区域优先）。
+    // 主体=使用蓝图文件 cobble-generator 施工（auto-anchor 就地建造）。
+    // 床/箱子从 CHEST/避难所需求自然衔接（已有）。
+    const hasFullDiamondSet =
+      missingDiamondArmor === null &&
+      pickaxeTier >= 3 &&
+      bestSwordTier >= 3;
+    // 基地选址：钻套齐+避难所已建 → 开始找长期基地位置
+    // （避难所未建时不触发——避难所是更原始的生存需求）
+    // baseFacilities 未传入=基地能力未接线 → 不触发（防幽灵需求）
+    if (hasFullDiamondSet && input.shelterBuilt && input.baseFacilities) {
+      needs.push({
+        key: "BASE_SITE_SELECTION",
+        score: 47,
+        reason: "full diamond set acquired, shelter ready, seeking permanent base site",
+        title: "基地选址",
+        operatorGoal: "向外探索新区域", // 复用探索游标：远离出生点找合适位置
+        sourceBlock: null,
+      });
+    }
+  }
+
+  // 基地建造（在选址后触发——shelterBuilt 记忆由避难所需求写入，
+  // 这里用 bed/箱子作为"基地已建"的代理判定）。
+  // 注意：这些 needs 的 operatorGoal 是蓝图模板——确定性通道执行。
+  if (pickaxeTier >= 3 && input.baseFacilities) {
+    const hasBed = (inventory.get("bed")?.count ?? 0) > 0;
+    const hasChestPlaced = input.shelterBuilt; // 简化：有避难所=有箱子
+    if (hasBed && !hasChestPlaced) {
+      needs.push({
+        key: "BASE_MAIN_CONSTRUCTION",
+        score: 46,
+        reason: "site selected but no main structure",
+        title: "建造基地主体",
+        operatorGoal: "使用蓝图文件 cobble-generator 施工",
+        sourceBlock: null,
+      });
+    }
+    if (input.shelterBuilt && input.baseFacilities && pickaxeTier >= 3) {
+      // 基地自动设施：仅在 baseFacilities 状态传入时触发（未传入=能力未接线，
+      // 不产生幽灵需求）。顺序：刷石机(45) → 农场(44)。
+      if (!input.baseFacilities.hasCobbleGenerator) {
+        needs.push({
+          key: "BASE_FACILITY_COBBLE",
+          score: 45,
+          reason: "base established but no cobble generator",
+          title: "建造刷石机",
+          operatorGoal: "使用蓝图文件 cobble-generator 施工",
+          sourceBlock: null,
+        });
+      }
+      if (!input.baseFacilities.hasFarm) {
+        needs.push({
+          key: "BASE_FACILITY_FARM",
+          score: 44,
+          reason: "base established but no food farm",
+          title: "建造农场",
+          operatorGoal: "使用蓝图文件 carrot-farm-9x9 施工",
+          sourceBlock: null,
+        });
+      }
     }
   }
 

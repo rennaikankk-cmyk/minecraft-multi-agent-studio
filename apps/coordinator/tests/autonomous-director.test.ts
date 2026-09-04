@@ -827,6 +827,7 @@ function satisfiedInventory(): ReadonlyArray<{ itemName: string; count: number }
     { itemName: "diamond_chestplate", count: 1 },
     { itemName: "diamond_leggings", count: 1 },
     { itemName: "diamond_boots", count: 1 },
+    { itemName: "bed", count: 1 },
     { itemName: "diamond", count: 3 },
     { itemName: "iron_ingot", count: 6 },
     { itemName: "shield", count: 1 },
