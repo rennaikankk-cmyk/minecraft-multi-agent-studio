@@ -86,6 +86,7 @@ import {
 import { MineflayerCombatAdapter } from "./combat-mineflayer-adapter.js";
 import { observeSite, digShelter } from "./site-shelter-adapter.js";
 import { rustGoto, type RustPathStats } from "./rust-pathfinder.js";
+import { classifyMovementRejection, goalColumnLoaded } from "./movement-rejection.js";
 
 import type {
   BotClient,
@@ -1368,9 +1369,9 @@ export class MineflayerBotClient implements BotClient {
       }
       this.handlers?.onStateChanged();
     });
-    bot.on("breath", () => this.handlers?.onStateChanged());
-    bot.on("move", () => this.handlers?.onStateChanged());
-    bot.on("physicsTick", () => this.handlers?.onStateChanged());
+    bot.on("breath", () => this.perfSink?.("event.breath.stateChanged"));
+    bot.on("move", () => this.perfSink?.("event.move.stateChanged"));
+    bot.on("physicsTick", () => this.perfSink?.("tick.physics.stateChanged"));
     // 死亡不是断线：连接保持，但背包清空、位置漂移到重生点。先上报事实
     // （runtime 取消进行中的技能并失效世界状态），再自动写重生包——
     // mineflayer 不会自动 respawn，不写这条包 Bot 会停在死亡屏上直到
@@ -2771,13 +2772,32 @@ export class MineflayerBotClient implements BotClient {
         throw new SkillFault("SKILL_CANCELLED");
       }
       const errorName = error instanceof Error ? error.name : "";
-      const KNOWN_PATHFINDER_REJECTIONS = new Set([
-        "NoPath",
-        "Timeout",
-        "GoalChanged",
-        "PathStopped",
-      ]);
-      if (KNOWN_PATHFINDER_REJECTIONS.has(errorName)) {
+      // 拒绝名语义映射（Phase 3 前置检查，movement-rejection.ts）：
+      // GoalChanged=旧 goal 被替换（不重试）；PathStopped 窗口内=我方主动
+      // 停止（抢占，不重试）；NoPath 且目标列已加载=真不可达终态（不重试）；
+      // NoPath 目标列未加载=chunk 追载中、Timeout=思考预算尽、非主动
+      // PathStopped=条件可能仍成立 → 有界重试（PATHFINDER_GOTO_FAILED）。
+      if (errorName === "NoPath" || errorName === "Timeout" || errorName === "GoalChanged" || errorName === "PathStopped") {
+        const columnLoaded = goalColumnLoaded(
+          this.bot.world as unknown as { getColumn: (x: number, z: number) => unknown },
+          input.data.target.x,
+          input.data.target.z,
+        );
+        const decision = classifyMovementRejection(errorName, {
+          msSinceIntentionalStop:
+            this.lastIntentionalPathfinderStopAt > 0
+              ? Date.now() - this.lastIntentionalPathfinderStopAt
+              : null,
+          goalColumnLoaded: columnLoaded,
+        });
+        if (!decision.retryable) {
+          throw new SkillFault(
+            decision.code,
+            error instanceof Error && error.message.trim().length > 0
+              ? `${error.name}: ${error.message.trim()}`
+              : "pathfinder rejected without a message.",
+          );
+        }
         throw new SkillFault(
           "PATHFINDER_GOTO_FAILED",
           error instanceof Error && error.message.trim().length > 0
@@ -6315,7 +6335,26 @@ export class MineflayerBotClient implements BotClient {
     }
   }
 
+  /** Phase 3 测量面：高频事件回调链的计时包装（runtime 注入；null=直通）。 */
+  private perfSpanWrap: ((category: string, fn: () => void) => void) | null = null;
+
+  /** 最近一次我方主动 stopPathfinder 的时刻（PathStopped 归因窗口）。 */
+  private lastIntentionalPathfinderStopAt = 0;
+
+  setPerfSpanWrap(wrap: (category: string, fn: () => void) => void): void {
+    this.perfSpanWrap = wrap;
+  }
+
+  private perfSink(category: string): void {
+    if (this.perfSpanWrap !== null) {
+      this.perfSpanWrap(category, () => this.handlers?.onStateChanged());
+    } else {
+      this.handlers?.onStateChanged();
+    }
+  }
+
   private stopPathfinder(): void {
+    this.lastIntentionalPathfinderStopAt = Date.now();
     try {
       this.bot.pathfinder?.stop();
     } catch {

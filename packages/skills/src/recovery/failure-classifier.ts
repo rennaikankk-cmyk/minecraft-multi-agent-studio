@@ -268,6 +268,10 @@ const EXPLICIT: Readonly<Record<string, FailureCategory>> = Object.freeze({
   RUST_PATH_DIG_FAILED: "TRANSIENT",
   RUST_PATH_ARRIVAL_MISMATCH: "STALE_WORLD",
   RUST_PATH_NO_STATS: "CONTRACT_BUG",
+  // 拒绝名语义拆分（Phase 3 前置）：替换/抢占不重试，真不可达不重试。
+  MOVEMENT_GOAL_REPLACED: "STALE_WORLD",
+  MOVEMENT_PATH_PREEMPTED: "SAFETY_INTERRUPT",
+  MOVEMENT_NO_PATH_CONFIRMED: "OUT_OF_REACH",
   // 思考预算用尽（pathfinder 的 `Timeout`）。它**没有**证明目标不可达：实测
   // 在 runtime 的 tickTimeout 下，一个 700ms 就判得出 noPath 的搜索会被切片到
   // 5010ms 后报 "Took to long to decide path to goal!"。所以只能按偶发处置——

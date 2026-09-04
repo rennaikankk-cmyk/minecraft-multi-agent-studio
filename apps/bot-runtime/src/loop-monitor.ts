@@ -29,17 +29,29 @@ export function startLoopMonitor(
   logger: { info?: (event: string, fields?: Record<string, unknown>) => void },
   intervalMs = 30_000,
 ): LoopMonitorStop {
-  const histogram = monitorEventLoopDelay({ resolution: 20 });
+  // 口径（Phase 3 校准）：resolution=1ns 让 P50 不被桶宽淹没（Windows
+  // 定时器粒度仍影响下限，报告须连同平台说明）；warmup 一窗不计（启动
+  // require/连接峰值不混入正式窗口）；每窗 reset；ns→ms 在此唯一换算点
+  // 统一，调用方禁止自行转换。
+  const histogram = monitorEventLoopDelay({ resolution: 1 });
   histogram.enable();
+  let warmupWindowSkipped = false;
   const timer = setInterval(() => {
-    // percentile() 返回纳秒——转毫秒再报。
+    if (!warmupWindowSkipped) {
+      warmupWindowSkipped = true;
+      histogram.reset();
+      return;
+    }
+    // percentile() 返回纳秒——转毫秒再报（唯一换算点）。
     const p50 = histogram.percentile(50) / 1e6;
+    const p95 = histogram.percentile(95) / 1e6;
     const p99 = histogram.percentile(99) / 1e6;
     const max = histogram.max / 1e6;
     const mean = histogram.mean / 1e6;
     histogram.reset();
     logger.info?.("runtime_event_loop_delay", {
       p50Ms: round(p50),
+      p95Ms: round(p95),
       p99Ms: round(p99),
       maxMs: round(max),
       meanMs: round(mean),

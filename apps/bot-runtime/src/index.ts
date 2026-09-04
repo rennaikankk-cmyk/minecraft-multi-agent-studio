@@ -1,4 +1,5 @@
 import { createStructuredLogger } from "@minecraft-studio/observability";
+import { PerfSpanTracker } from "./perf-spans.js";
 
 import {
   RuntimeLinkClientError,
@@ -12,7 +13,11 @@ import { loadServerProfile, ServerProfileError } from "./server-profile.js";
 const logger = createStructuredLogger({
   service: "bot-runtime",
   instanceId: `bot-runtime-${process.pid}`,
+  onWriteSpan: (durationMs) => bootPerfSpans.record("log.write", durationMs),
 });
+// Phase 3 测量面：日志写入耗时进 span 追踪器（环形缓冲，零逐次日志）。
+// 运行时实例创建后再接完整窗口采集；boot 期只留 write 计时。
+const bootPerfSpans = new PerfSpanTracker();
 
 async function main(): Promise<void> {
   const profile = await loadServerProfile();

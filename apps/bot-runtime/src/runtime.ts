@@ -1,4 +1,5 @@
 import { probeBooleanKnob, startLoopMonitor, type LoopMonitorStop } from "./loop-monitor.js";
+import { PerfSpanTracker, startPerfTelemetry } from "./perf-spans.js";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -671,6 +672,9 @@ export class SingleBotRuntime {
   }
 
   private loopMonitorStop: LoopMonitorStop | null = null;
+  /** Phase 3 测量面：分段计时（只观测不改行为；STUDIO_PERF_SPANS=0 关）。 */
+  readonly perfSpans = new PerfSpanTracker();
+  private perfTelemetryStop: (() => void) | null = null;
 
   start(): void {
     if (this.state !== "offline" || this.client || this.reconnectTimer) {
@@ -680,6 +684,11 @@ export class SingleBotRuntime {
     this.stopping = false;
     this.reconnectAttempts = 0;
     this.loopMonitorStop ??= startLoopMonitor(this.dependencies.logger);
+    this.perfTelemetryStop ??= startPerfTelemetry({
+      logger: this.dependencies.logger,
+      tracker: this.perfSpans,
+      context: () => ({ runtimeGeneration: this.generation, state: this.state }),
+    });
     // 旋钮探针（Phase 2c allowlist）：严格门语义（=1 开，=0/空 关，其他=显式
     // 降级并标 invalid）；只输出非敏感旋钮名与解析结果，绝不输出任何密钥类变量。
     const probeKnob = (name: string) => {
@@ -1183,6 +1192,7 @@ export class SingleBotRuntime {
     try {
       const client = this.dependencies.createClient(this.profile, this.worldState);
       this.client = client;
+      client.setPerfSpanWrap?.((category, fn) => this.perfSpans.spanSync(category, fn));
       client.setHandlers({
         onSpawn: () => this.handleSpawn(activeGeneration),
         onStateChanged: () => this.requestStatus(activeGeneration),
@@ -1473,9 +1483,11 @@ export class SingleBotRuntime {
     if (generation !== this.generation || this.state !== "online") return;
     try {
       if (this.client) {
-        const snapshot = this.client.snapshot();
-        this.updateWorldState(snapshot);
-        this.evaluateSafetySnapshot(generation, snapshot);
+        // Phase 3 子段：物理拍高频链的三步分别计时（测量面收口——90ms 级
+        // 尖峰定位到具体步骤，Phase 4 才做归因/修复）。
+        const snapshot = this.perfSpans.spanSync("tick.requestStatus.snapshot", () => this.client!.snapshot());
+        this.perfSpans.spanSync("tick.requestStatus.worldState", () => this.updateWorldState(snapshot));
+        this.perfSpans.spanSync("tick.requestStatus.safety", () => this.evaluateSafetySnapshot(generation, snapshot));
       }
     } catch (cause) {
       // A bare code cannot distinguish a field the server has not sent yet
@@ -1525,12 +1537,12 @@ export class SingleBotRuntime {
     this.clearTimer("deferredStatus");
 
     try {
-      const snapshot = this.client.snapshot();
+      const snapshot = this.perfSpans.spanSync("telemetry.snapshot", () => this.client!.snapshot());
       this.updateWorldState(snapshot);
       if (evaluateSafety) this.evaluateSafetySnapshot(generation, snapshot);
       const sequence = this.nextSequence();
       const observedAt = this.now().toISOString();
-      const message: BotStatusV1 = botStatusV1Schema.parse({
+      const message: BotStatusV1 = this.perfSpans.spanSync("telemetry.serialize", () => botStatusV1Schema.parse({
         ...this.envelope("bot.status.v1"),
         payload: {
           serverProfileId: this.profile.id,
@@ -1558,12 +1570,14 @@ export class SingleBotRuntime {
             ? { minecraftVersion: this.minecraftVersionCompatibility }
             : {}),
         },
-      });
+      }));
       this.lastStatusSequence = sequence;
       this.lastStatusAt = this.now().getTime();
       this.statusEmittedForConnection = true;
-      this.emit(message);
-      this.emitWorldState(generation);
+      this.perfSpans.spanSync("telemetry.send", () => {
+        this.emit(message);
+        this.emitWorldState(generation);
+      });
     } catch (cause) {
       // Without the originating reason this event cannot distinguish a
       // transient pre-first-packet field from a real boundary violation or a
@@ -1746,12 +1760,12 @@ export class SingleBotRuntime {
     };
     let worldSnapshot: WorldStateSnapshot | null = null;
     try {
-      worldSnapshot = this.client?.worldStateSnapshot?.() ?? null;
+      worldSnapshot = this.perfSpans.spanSync("world.snapshot.build", () => this.client?.worldStateSnapshot?.() ?? null);
     } catch {
       worldSnapshot = null;
     }
     if (worldSnapshot !== null) {
-      this.worldState.observe({
+      this.perfSpans.spanSync("world.state.observe", () => this.worldState.observe({
         observedAt,
         position: worldSnapshot.position,
         inventory: worldSnapshot.inventory,
@@ -1759,7 +1773,7 @@ export class SingleBotRuntime {
         replaceNearbyBlocks: true,
         entities: worldSnapshot.entities,
         navigation: worldSnapshot.navigation,
-      });
+      }));
       const inventoryFingerprint = worldSnapshot.inventory
         .map((item) => `${item.name}:${item.count}:${item.durability ?? ""}`)
         .join("|");

@@ -29,6 +29,8 @@ export type StructuredLoggerOptions = Readonly<{
   instanceId: string;
   now?: () => Date;
   sink?: (record: StructuredLogRecord) => void;
+  /** Phase 3 测量面（可选）：单次日志写入（sanitize+sink）耗时回调。 */
+  onWriteSpan?: (durationMs: number) => void;
 }>;
 
 export const lifecycleMetricNames = [
@@ -188,6 +190,7 @@ export function createStructuredLogger(
     if (!Number.isFinite(timestamp.getTime())) {
       throw new TypeError("Logger clock returned an invalid date.");
     }
+    const writeBegan = globalThis.performance?.now?.() ?? Date.now();
     const sanitized = sanitizeFields(fields);
     sink({
       timestamp: timestamp.toISOString(),
@@ -202,6 +205,7 @@ export function createStructuredLogger(
       modelName: correlationValue(sanitized.modelName),
       ...withoutReservedFields(sanitized),
     });
+    options.onWriteSpan?.((globalThis.performance?.now?.() ?? Date.now()) - writeBegan);
   };
 
   return {
