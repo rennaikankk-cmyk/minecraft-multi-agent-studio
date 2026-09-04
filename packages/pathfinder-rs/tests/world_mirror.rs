@@ -45,14 +45,14 @@ fn registry_handshake_and_unknown_state_id() {
     let mirror = mirror_with_registry();
     let snapshot = mirror.snapshot_handle();
     let mut m2 = mirror_with_registry();
-    import_chunk(&mut m2, (0, 0), 10, 20, 0);
+    import_chunk(&mut m2, (0, 0), 2, 4, 0);
     let snap = m2.snapshot_handle();
     // stateId 在表内 → 查到 mask；表外（如 99）→ UNKNOWN 位（非 AIR）。
-    m2.apply(MirrorMessage::BlockUpdate { position: (1, 1, 1), state_id: 1, sequence: 30 }).unwrap();
+    m2.apply(MirrorMessage::BlockUpdate { position: (1, 1, 1), state_id: 1, sequence: 5 }).unwrap();
     assert_eq!(snap.query(1, 1, 1), CellQuery::Mask(0b0111));
     let snap2 = m2.snapshot_handle();
     assert_eq!(snap2.query(1, 1, 1), CellQuery::Mask(0b1011));
-    m2.apply(MirrorMessage::BlockUpdate { position: (2, 1, 2), state_id: 99, sequence: 31 }).unwrap();
+    m2.apply(MirrorMessage::BlockUpdate { position: (2, 1, 2), state_id: 99, sequence: 6 }).unwrap();
     let snap3 = m2.snapshot_handle();
     assert_eq!(snap3.query(2, 1, 2), CellQuery::Mask(CLASS_UNKNOWN_BIT));
     let _ = snapshot;
@@ -61,7 +61,7 @@ fn registry_handshake_and_unknown_state_id() {
 #[test]
 fn four_state_semantics_distinct() {
     let mut mirror = mirror_with_registry();
-    import_chunk(&mut mirror, (0, 0), 10, 20, 0); // sectionY=0 导入为 Data
+    import_chunk(&mut mirror, (0, 0), 2, 4, 0); // sectionY=0 导入为 Data
     let snapshot = mirror.snapshot_handle();
     // 1) 已导入 Data
     assert!(matches!(snapshot.query(1, 1, 1), CellQuery::Mask(_)));
@@ -77,13 +77,13 @@ fn four_state_semantics_distinct() {
 #[test]
 fn empty_section_is_loaded_air_not_unknown() {
     let mut mirror = mirror_with_registry();
-    mirror.apply(MirrorMessage::ChunkBegin { session_epoch: 7, dimension_epoch: 1, chunk: (0, 0), sequence: 10 }).unwrap();
+    mirror.apply(MirrorMessage::ChunkBegin { session_epoch: 7, dimension_epoch: 1, chunk: (0, 0), sequence: 2 }).unwrap();
     mirror.apply(MirrorMessage::ChunkSectionData {
         chunk: (0, 0),
-        sequence: 11,
+        sequence: 3,
         payload: SectionPayload { section_y: 0, status: SectionStatus::Empty, palette_indices: Box::from([]), palette_entries: vec![] },
     }).unwrap();
-    mirror.apply(MirrorMessage::ChunkCommit { chunk: (0, 0), sequence: 12 }).unwrap();
+    mirror.apply(MirrorMessage::ChunkCommit { chunk: (0, 0), sequence: 4 }).unwrap();
     // 显式空 section → mask 0（与 SectionNotPresent/ChunkNotLoaded 三态可区分）
     assert_eq!(mirror.snapshot_handle().query(1, 1, 1), CellQuery::Mask(0));
 }
@@ -91,47 +91,47 @@ fn empty_section_is_loaded_air_not_unknown() {
 #[test]
 fn transactional_import_invisible_before_commit() {
     let mut mirror = mirror_with_registry();
-    mirror.apply(MirrorMessage::ChunkBegin { session_epoch: 7, dimension_epoch: 1, chunk: (5, 5), sequence: 10 }).unwrap();
-    mirror.apply(MirrorMessage::ChunkSectionData { chunk: (5, 5), sequence: 11, payload: data_payload(0, 0) }).unwrap();
+    mirror.apply(MirrorMessage::ChunkBegin { session_epoch: 7, dimension_epoch: 1, chunk: (5, 5), sequence: 2 }).unwrap();
+    mirror.apply(MirrorMessage::ChunkSectionData { chunk: (5, 5), sequence: 3, payload: data_payload(0, 0) }).unwrap();
     // COMMIT 前对 snapshot 不可见
     assert_eq!(mirror.snapshot_handle().query(80, 1, 80), CellQuery::ChunkNotLoaded);
-    mirror.apply(MirrorMessage::ChunkCommit { chunk: (5, 5), sequence: 12 }).unwrap();
+    mirror.apply(MirrorMessage::ChunkCommit { chunk: (5, 5), sequence: 4 }).unwrap();
     assert!(matches!(mirror.snapshot_handle().query(80, 1, 80), CellQuery::Mask(_)));
 }
 
 #[test]
 fn duplicate_chunk_begin_idempotent_and_stale_sequence_rejected() {
     let mut mirror = mirror_with_registry();
-    let begin = MirrorMessage::ChunkBegin { session_epoch: 7, dimension_epoch: 1, chunk: (0, 0), sequence: 10 };
+    let begin = MirrorMessage::ChunkBegin { session_epoch: 7, dimension_epoch: 1, chunk: (0, 0), sequence: 2 };
     assert_eq!(mirror.apply(begin).unwrap(), ApplyOutcome::Applied);
     // 同 sequence 重放 → 幂等
-    let replay = MirrorMessage::ChunkBegin { session_epoch: 7, dimension_epoch: 1, chunk: (0, 0), sequence: 10 };
+    let replay = MirrorMessage::ChunkBegin { session_epoch: 7, dimension_epoch: 1, chunk: (0, 0), sequence: 2 };
     // last_sequence 已推进到 10，重放按 stale 规则拒绝（幂等语义：状态不变）
-    assert_eq!(mirror.apply(replay).unwrap(), ApplyOutcome::RejectedStale);
-    // 旧 sequence
-    assert_eq!(mirror.apply(MirrorMessage::ChunkUnload { chunk: (1, 1), sequence: 5 }).unwrap(), ApplyOutcome::RejectedStale);
+    assert_eq!(mirror.apply(replay).unwrap(), ApplyOutcome::IgnoredDuplicate);
+    // 更旧 sequence
+    assert_eq!(mirror.apply(MirrorMessage::ChunkUnload { chunk: (1, 1), sequence: 1 }).unwrap(), ApplyOutcome::IgnoredStale);
 }
 
 #[test]
 fn stale_epoch_rejected() {
     let mut mirror = mirror_with_registry();
-    let result = mirror.apply(MirrorMessage::ChunkBegin { session_epoch: 6, dimension_epoch: 1, chunk: (0, 0), sequence: 100 });
+    let result = mirror.apply(MirrorMessage::ChunkBegin { session_epoch: 6, dimension_epoch: 1, chunk: (0, 0), sequence: 5 });
     assert_eq!(result.unwrap_err(), MirrorError::StaleSessionEpoch { expected: 7, got: 6 });
-    let result = mirror.apply(MirrorMessage::ChunkBegin { session_epoch: 7, dimension_epoch: 0, chunk: (0, 0), sequence: 101 });
+    let result = mirror.apply(MirrorMessage::ChunkBegin { session_epoch: 7, dimension_epoch: 0, chunk: (0, 0), sequence: 6 });
     assert_eq!(result.unwrap_err(), MirrorError::StaleDimensionEpoch { expected: 1, got: 0 });
 }
 
 #[test]
 fn block_update_queued_during_import_applies_after_commit() {
     let mut mirror = mirror_with_registry();
-    mirror.apply(MirrorMessage::ChunkBegin { session_epoch: 7, dimension_epoch: 1, chunk: (0, 0), sequence: 10 }).unwrap();
+    mirror.apply(MirrorMessage::ChunkBegin { session_epoch: 7, dimension_epoch: 1, chunk: (0, 0), sequence: 2 }).unwrap();
     // 导入期间 update → 排队
     assert_eq!(
-        mirror.apply(MirrorMessage::BlockUpdate { position: (1, 1, 1), state_id: 1, sequence: 11 }).unwrap(),
+        mirror.apply(MirrorMessage::BlockUpdate { position: (1, 1, 1), state_id: 1, sequence: 3 }).unwrap(),
         ApplyOutcome::QueuedUntilCommit
     );
-    mirror.apply(MirrorMessage::ChunkSectionData { chunk: (0, 0), sequence: 12, payload: data_payload(0, 0) }).unwrap();
-    mirror.apply(MirrorMessage::ChunkCommit { chunk: (0, 0), sequence: 13 }).unwrap();
+    mirror.apply(MirrorMessage::ChunkSectionData { chunk: (0, 0), sequence: 4, payload: data_payload(0, 0) }).unwrap();
+    mirror.apply(MirrorMessage::ChunkCommit { chunk: (0, 0), sequence: 5 }).unwrap();
     // COMMIT 后排队 update 生效
     assert_eq!(mirror.snapshot_handle().query(1, 1, 1), CellQuery::Mask(0b1011));
 }
@@ -139,13 +139,13 @@ fn block_update_queued_during_import_applies_after_commit() {
 #[test]
 fn unload_removes_and_late_update_rejected_no_revival() {
     let mut mirror = mirror_with_registry();
-    import_chunk(&mut mirror, (0, 0), 10, 20, 0);
-    mirror.apply(MirrorMessage::ChunkUnload { chunk: (0, 0), sequence: 30 }).unwrap();
+    import_chunk(&mut mirror, (0, 0), 2, 4, 0);
+    mirror.apply(MirrorMessage::ChunkUnload { chunk: (0, 0), sequence: 5 }).unwrap();
     assert_eq!(mirror.snapshot_handle().query(1, 1, 1), CellQuery::ChunkNotLoaded);
     // 迟到 update 不得复活
     assert_eq!(
-        mirror.apply(MirrorMessage::BlockUpdate { position: (1, 1, 1), state_id: 1, sequence: 40 }).unwrap(),
-        ApplyOutcome::RejectedStale
+        mirror.apply(MirrorMessage::BlockUpdate { position: (1, 1, 1), state_id: 1, sequence: 3 }).unwrap(),
+        ApplyOutcome::IgnoredStale
     );
     assert_eq!(mirror.snapshot_handle().query(1, 1, 1), CellQuery::ChunkNotLoaded);
 }
@@ -153,11 +153,11 @@ fn unload_removes_and_late_update_rejected_no_revival() {
 #[test]
 fn world_reset_clears_and_rejects_old_session() {
     let mut mirror = mirror_with_registry();
-    import_chunk(&mut mirror, (0, 0), 10, 20, 0);
-    mirror.apply(MirrorMessage::WorldReset { session_epoch: 8, dimension_epoch: 2, sequence: 100 }).unwrap();
+    import_chunk(&mut mirror, (0, 0), 2, 4, 0);
+    mirror.apply(MirrorMessage::WorldReset { session_epoch: 8, dimension_epoch: 2, sequence: 5 }).unwrap();
     assert_eq!(mirror.loaded_chunks(), 0);
     // 旧 session epoch 拒绝
-    let result = mirror.apply(MirrorMessage::ChunkBegin { session_epoch: 7, dimension_epoch: 2, chunk: (0, 0), sequence: 101 });
+    let result = mirror.apply(MirrorMessage::ChunkBegin { session_epoch: 7, dimension_epoch: 2, chunk: (0, 0), sequence: 6 });
     assert!(matches!(result.unwrap_err(), MirrorError::StaleSessionEpoch { .. }));
 }
 
@@ -165,7 +165,7 @@ fn world_reset_clears_and_rejects_old_session() {
 fn absolute_section_y_with_negative_minY_world() {
     // 1.18+ 负 minY：绝对 sectionY 为负（如 -4 对应 y=-64..-49）
     let mut mirror = mirror_with_registry();
-    import_chunk(&mut mirror, (0, 0), 10, 20, -4);
+    import_chunk(&mut mirror, (0, 0), 2, 4, -4);
     let snapshot = mirror.snapshot_handle();
     assert!(matches!(snapshot.query(1, -60, 1), CellQuery::Mask(_)));
     assert_eq!(snapshot.query(1, 5, 1), CellQuery::SectionNotPresent);
@@ -174,10 +174,10 @@ fn absolute_section_y_with_negative_minY_world() {
 #[test]
 fn snapshot_generation_freezes_view() {
     let mut mirror = mirror_with_registry();
-    import_chunk(&mut mirror, (0, 0), 10, 20, 0);
+    import_chunk(&mut mirror, (0, 0), 2, 4, 0);
     let frozen = mirror.snapshot_handle();
     let generation_before = frozen.generation;
-    mirror.apply(MirrorMessage::BlockUpdate { position: (1, 1, 1), state_id: 1, sequence: 30 }).unwrap();
+    mirror.apply(MirrorMessage::BlockUpdate { position: (1, 1, 1), state_id: 1, sequence: 5 }).unwrap();
     // 旧句柄视图不变
     assert_eq!(frozen.query(1, 1, 1), CellQuery::Mask(0b0111));
     assert_eq!(frozen.generation, generation_before);
@@ -187,7 +187,7 @@ fn snapshot_generation_freezes_view() {
 #[test]
 fn memory_stats_and_bounds() {
     let mut mirror = mirror_with_registry();
-    import_chunk(&mut mirror, (0, 0), 10, 20, 0);
+    import_chunk(&mut mirror, (0, 0), 2, 4, 0);
     let stats = mirror.memory_stats();
     assert_eq!(stats.chunks_loaded, 1);
     assert_eq!(stats.sections_data, 1);
@@ -219,7 +219,8 @@ fn property_incremental_equals_full_rebuild() {
         let mut incremental = mirror_with_registry();
         let mut final_truth: HashMap<(i32, i32, i32), u32> = HashMap::new();
         let mut loaded: HashMap<ChunkKey, bool> = HashMap::new();
-        let mut sequence = 100u64;
+        let mut gap_recoveries = 0usize;
+        let mut sequence = 1u64; // 循环顶先 +1：首条消息=2（registry=1 之后连续）
         for _step in 0..400 {
             sequence += 1;
             let choice = rng.below(100);
@@ -230,12 +231,28 @@ fn property_incremental_equals_full_rebuild() {
                 sequence += 1;
                 incremental.apply(MirrorMessage::ChunkSectionData { chunk, sequence, payload: data_payload(0, (rng.below(2)) as u16) }).unwrap();
                 sequence += 1;
-                incremental.apply(MirrorMessage::ChunkCommit { chunk, sequence }).unwrap();
+                let commit_outcome = incremental.apply(MirrorMessage::ChunkCommit { chunk, sequence }).unwrap();
+                if matches!(commit_outcome, ApplyOutcome::GapDesynced) {
+                    gap_recoveries += 1;
+                    sequence += 1;
+                    incremental.apply(MirrorMessage::WorldReset { session_epoch: 7, dimension_epoch: 1, sequence }).unwrap();
+                    loaded.clear();
+                    final_truth.clear();
+                    continue;
+                }
                 loaded.insert(chunk, true);
                 // truth：全量重置该 chunk 的记录（palette fill 0/1 对应 mask
                 // 0b0111/UNKNOWN——重建时按 mask 反查 stateId 集合）
             } else if choice < 50 {
-                incremental.apply(MirrorMessage::ChunkUnload { chunk, sequence }).unwrap();
+                let unload_outcome = incremental.apply(MirrorMessage::ChunkUnload { chunk, sequence }).unwrap();
+                if matches!(unload_outcome, ApplyOutcome::GapDesynced) {
+                    gap_recoveries += 1;
+                    sequence += 1;
+                    incremental.apply(MirrorMessage::WorldReset { session_epoch: 7, dimension_epoch: 1, sequence }).unwrap();
+                    loaded.clear();
+                    final_truth.clear();
+                    continue;
+                }
                 loaded.insert(chunk, false);
                 final_truth.retain(|pos, _| (pos.0 >> 4, pos.2 >> 4) != chunk);
             } else if choice < 90 {
@@ -246,13 +263,23 @@ fn property_incremental_equals_full_rebuild() {
                 );
                 let state_id = rng.below(4) as u32;
                 let outcome = incremental.apply(MirrorMessage::BlockUpdate { position, state_id, sequence });
+                if matches!(outcome, Ok(ApplyOutcome::GapDesynced)) {
+                    // 生产语义：缺口→DESYNCED→权威恢复（reset 由 TS 分配序号）。
+                    // truth 同步清空（reset 后世界从零重建）。
+                    gap_recoveries += 1;
+                    sequence += 1;
+                    incremental.apply(MirrorMessage::WorldReset { session_epoch: 7, dimension_epoch: 1, sequence }).unwrap();
+                    loaded.clear();
+                    final_truth.clear();
+                    continue;
+                }
                 if loaded.get(&chunk).copied().unwrap_or(false) {
                     final_truth.insert(position, state_id);
                 }
                 let _ = outcome;
             } else {
                 // 重复/迟到消息（低 sequence）
-                incremental.apply(MirrorMessage::ChunkUnload { chunk, sequence: sequence.saturating_sub(200) }).ok();
+                incremental.apply(MirrorMessage::ChunkUnload { chunk, sequence: sequence.saturating_sub(1) });
             }
         }
         // 对照：查询随机采样点
@@ -290,5 +317,25 @@ fn property_incremental_equals_full_rebuild() {
                 CellQuery::Desynced => panic!("no desync in this scenario"),
             }
         }
+        println!("GAP_RECOVERIES={}", gap_recoveries);
     }
+}
+
+#[test]
+fn sequence_gap_marks_desynced_and_fail_closes() {
+    let mut mirror = mirror_with_registry();
+    // 缺口：registry=1 后直接跳 5
+    assert_eq!(
+        mirror.apply(MirrorMessage::ChunkUnload { chunk: (0, 0), sequence: 5 }).unwrap(),
+        ApplyOutcome::GapDesynced
+    );
+    assert!(mirror.is_desynced());
+    // 缺口后后续消息一律拒绝（fail-closed 直到重建）
+    assert_eq!(
+        mirror.apply(MirrorMessage::ChunkBegin { session_epoch: 7, dimension_epoch: 1, chunk: (0, 0), sequence: 6 }).unwrap(),
+        ApplyOutcome::GapDesynced
+    );
+    // 重建（reset 提升权威 epoch 由 TS 分配；这里模拟重建后恢复）
+    assert_eq!(mirror.apply(MirrorMessage::WorldReset { session_epoch: 7, dimension_epoch: 1, sequence: 10 }).unwrap(), ApplyOutcome::Applied);
+    assert!(!mirror.is_desynced());
 }

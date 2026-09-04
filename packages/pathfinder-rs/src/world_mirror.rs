@@ -18,6 +18,13 @@
 //!    TS 侧）负责 (blockY - minY) >> 4 的换算并传绝对值）。
 //!  - 内存：避免稠密 u32 stateId（4096×4B/section 的膨胀源）。每 section
 //!    存 palette 索引 u16（8KB/section）+ 每 chunk 一张去重 palette。
+//!  - **epoch 权威**：sessionEpoch/dimensionEpoch 只由 TS session supervisor
+//!    分配；Rust 仅校验相等并回显，绝不自行递增（防两侧漂移）。
+//!  - **读取结果=四种可用性状态 + Desynced 覆盖态**：Data/Empty/
+//!    SectionNotPresent/ChunkNotLoaded，Desynced 是可叠加的降级覆盖——
+//!    调用方必须先检查覆盖态再解释四种状态（漏检 Desynced 会把不可信
+//!    数据当真）。SnapshotHandle 的 map 克隆是 O(loaded_chunks) 指针复制
+//!    （P5-D 基准项：确认不构成 worker 内新的周期性成本）。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,6 +33,15 @@ use std::sync::Arc;
 pub type BlockClassMask = u32;
 /// UNKNOWN 类别位（握手表项全 0 视为未分类=UNKNOWN，非 AIR）。
 pub const CLASS_UNKNOWN_BIT: BlockClassMask = 1 << 31;
+
+/// 消息 kind 标签（完全重复判定的组成部分：同 kind+同 sequence=幂等重放）。
+const KIND_RESET: u8 = 1;
+const KIND_REGISTRY: u8 = 2;
+const KIND_CHUNK_BEGIN: u8 = 3;
+const KIND_SECTION_DATA: u8 = 4;
+const KIND_CHUNK_COMMIT: u8 = 5;
+const KIND_CHUNK_UNLOAD: u8 = 6;
+const KIND_BLOCK_UPDATE: u8 = 7;
 
 pub type ChunkKey = (i32, i32); // (chunkX, chunkZ)——维度内
 pub type SectionKey = (i32, i32, i32); // (chunkX, 绝对 sectionY, chunkZ)
@@ -126,10 +142,13 @@ pub enum MirrorError {
 #[derive(Debug, PartialEq, Eq)]
 pub enum ApplyOutcome {
     Applied,
-    /// 同 sequence 重放（幂等不重复索引/不推进 generation）。
-    DuplicateReplay,
-    /// 旧 sequence/迟到更新被拒。
-    RejectedStale,
+    /// **完全重复**（同 kind+同 sequence 重放）：幂等 no-op，不产 Incident。
+    IgnoredDuplicate,
+    /// **更旧 sequence**（迟到/乱序旧消息）：拒绝，不产 Incident。
+    IgnoredStale,
+    /// **sequence 缺口**：不能静默接受——镜像标记 DESYNCED（覆盖态），
+    /// 调用方必须安排有界重建后才可继续信任查询。
+    GapDesynced,
     /// 排队等待所属 chunk 的 COMMIT。
     QueuedUntilCommit,
 }
@@ -232,6 +251,10 @@ pub struct WorldMirror {
     /// 导入期间到达的 block update（COMMIT 后按 sequence 应用）。
     queued_updates: Vec<((i32, i32, i32), u32, u64)>,
     last_sequence: u64,
+    /// 最近一次已应用消息的 (kind 标签, sequence)——完全重复的判定依据。
+    last_applied: Option<(u8, u64)>,
+    /// DESYNCED 覆盖态（sequence 缺口后置位；有界重建完成前查询 fail-closed）。
+    desynced: bool,
     generation: u64,
 }
 
@@ -245,8 +268,15 @@ impl WorldMirror {
             pending_imports: HashMap::new(),
             queued_updates: Vec::new(),
             last_sequence: 0,
+            last_applied: None,
+            desynced: false,
             generation: 0,
         }
+    }
+
+    /// DESYNCED 覆盖态查询（调用方必须先检查再解释四种可用性状态）。
+    pub fn is_desynced(&self) -> bool {
+        self.desynced
     }
 
     pub fn generation(&self) -> u64 {
@@ -282,6 +312,32 @@ impl WorldMirror {
     /// 写访问：直接改 owned map——已发 snapshot 持有克隆 map + 共享 chunk Arc，
     /// 本侧变更对旧快照不可见（generation 语义由句柄携带）；chunk 级
     /// COW 用 Arc::make_mut 惰性拷贝。
+    /// 统一序号闸：三分判定（P5-D 前置约束）。
+    /// 返回 None=可接受；Some(outcome)=调用方应直接返回该结果。
+    fn sequence_gate(&self, kind: u8, sequence: u64) -> Option<ApplyOutcome> {
+        if sequence == self.last_sequence {
+            if let Some((applied_kind, applied_seq)) = self.last_applied {
+                if applied_kind == kind && applied_seq == sequence {
+                    return Some(ApplyOutcome::IgnoredDuplicate);
+                }
+            }
+            return Some(ApplyOutcome::IgnoredStale);
+        }
+        if sequence < self.last_sequence {
+            return Some(ApplyOutcome::IgnoredStale);
+        }
+        if self.last_sequence > 0 && sequence > self.last_sequence + 1 {
+            // 缺口：置位由调用方负责（借用限制）——返回信号。
+            return Some(ApplyOutcome::GapDesynced);
+        }
+        None
+    }
+
+    fn record_applied(&mut self, kind: u8, sequence: u64) {
+        self.last_sequence = sequence;
+        self.last_applied = Some((kind, sequence));
+    }
+
     fn chunks_mut(&mut self) -> &mut HashMap<ChunkKey, Arc<ChunkState>> {
         &mut self.chunks
     }
@@ -289,17 +345,20 @@ impl WorldMirror {
     pub fn apply(&mut self, message: MirrorMessage) -> Result<ApplyOutcome, MirrorError> {
         match message {
             MirrorMessage::WorldReset { session_epoch, dimension_epoch, sequence } => {
+                // 权威恢复路径：豁免序号闸/缺口闸——DESYNCED 后唯一被接受
+                // 的消息族（epoch 权威在 TS supervisor，Rust 仅校验）。
                 if session_epoch < self.session_epoch {
                     return Err(MirrorError::StaleSessionEpoch {
                         expected: self.session_epoch,
                         got: session_epoch,
                     });
                 }
-                if sequence <= self.last_sequence && self.last_sequence > 0 {
-                    return Ok(ApplyOutcome::RejectedStale);
-                }
+                // （序号闸豁免：reset 自带权威 sequence，重放由 TS 侧保证不发生）
                 self.session_epoch = session_epoch;
                 self.dimension_epoch = dimension_epoch;
+                self.desynced = false;
+                self.last_sequence = sequence;
+                self.last_applied = Some((KIND_RESET, sequence));
                 self.pending_imports.clear();
                 self.queued_updates.clear();
                 self.chunks = HashMap::new();
@@ -308,11 +367,15 @@ impl WorldMirror {
                 Ok(ApplyOutcome::Applied)
             }
             MirrorMessage::RegistryTable { sequence, masks } => {
-                if sequence <= self.last_sequence && self.last_sequence > 0 {
-                    return Ok(ApplyOutcome::RejectedStale);
+                if let Some(outcome) = self.sequence_gate(KIND_REGISTRY, sequence) {
+                    if matches!(outcome, ApplyOutcome::GapDesynced) {
+                        self.desynced = true;
+                        return Ok(outcome);
+                    }
+                    return Ok(outcome);
                 }
                 self.registry = Arc::new(masks);
-                self.last_sequence = sequence;
+                self.record_applied(KIND_REGISTRY, sequence);
                 self.generation += 1;
                 Ok(ApplyOutcome::Applied)
             }
@@ -329,12 +392,16 @@ impl WorldMirror {
                         got: dimension_epoch,
                     });
                 }
-                if sequence <= self.last_sequence && self.last_sequence > 0 {
-                    return Ok(ApplyOutcome::RejectedStale);
+                if let Some(outcome) = self.sequence_gate(KIND_CHUNK_BEGIN, sequence) {
+                    if matches!(outcome, ApplyOutcome::GapDesynced) {
+                        self.desynced = true;
+                        return Ok(outcome);
+                    }
+                    return Ok(outcome);
                 }
                 if let Some(existing) = self.pending_imports.get(&chunk) {
                     if existing.begin_sequence == sequence {
-                        return Ok(ApplyOutcome::DuplicateReplay);
+                        return Ok(ApplyOutcome::IgnoredDuplicate);
                     }
                 }
                 self.pending_imports.insert(
@@ -346,12 +413,16 @@ impl WorldMirror {
                         sections: HashMap::new(),
                     },
                 );
-                self.last_sequence = sequence;
+                self.record_applied(KIND_CHUNK_BEGIN, sequence);
                 Ok(ApplyOutcome::Applied)
             }
             MirrorMessage::ChunkSectionData { chunk, sequence, payload } => {
-                if sequence <= self.last_sequence && self.last_sequence > 0 {
-                    return Ok(ApplyOutcome::RejectedStale);
+                if let Some(outcome) = self.sequence_gate(KIND_SECTION_DATA, sequence) {
+                    if matches!(outcome, ApplyOutcome::GapDesynced) {
+                        self.desynced = true;
+                        return Ok(outcome);
+                    }
+                    return Ok(outcome);
                 }
                 let import = self
                     .pending_imports
@@ -365,12 +436,16 @@ impl WorldMirror {
                     });
                 }
                 import.sections.insert(payload.section_y, payload);
-                self.last_sequence = sequence;
+                self.record_applied(KIND_SECTION_DATA, sequence);
                 Ok(ApplyOutcome::Applied)
             }
             MirrorMessage::ChunkCommit { chunk, sequence } => {
-                if sequence <= self.last_sequence && self.last_sequence > 0 {
-                    return Ok(ApplyOutcome::RejectedStale);
+                if let Some(outcome) = self.sequence_gate(KIND_CHUNK_COMMIT, sequence) {
+                    if matches!(outcome, ApplyOutcome::GapDesynced) {
+                        self.desynced = true;
+                        return Ok(outcome);
+                    }
+                    return Ok(outcome);
                 }
                 let import = self
                     .pending_imports
@@ -442,41 +517,59 @@ impl WorldMirror {
                 }
                 self.queued_updates = remaining;
                 let _ = applied_from_queue;
+                self.record_applied(KIND_CHUNK_COMMIT, sequence);
                 Ok(ApplyOutcome::Applied)
             }
             MirrorMessage::ChunkUnload { chunk, sequence } => {
-                if sequence <= self.last_sequence && self.last_sequence > 0 {
-                    return Ok(ApplyOutcome::RejectedStale);
+                if let Some(outcome) = self.sequence_gate(KIND_CHUNK_UNLOAD, sequence) {
+                    if matches!(outcome, ApplyOutcome::GapDesynced) {
+                        self.desynced = true;
+                        return Ok(outcome);
+                    }
+                    return Ok(outcome);
                 }
+                let outcome_kind = KIND_CHUNK_UNLOAD;
                 let chunks = self.chunks_mut();
                 if chunks.remove(&chunk).is_none() {
                     // 卸载未加载 chunk：幂等成功（不复活不报错）。
-                    self.last_sequence = sequence;
-                    return Ok(ApplyOutcome::DuplicateReplay);
+                    self.record_applied(outcome_kind, sequence);
+                    return Ok(ApplyOutcome::IgnoredDuplicate);
                 }
                 // 淘汰更旧的排队 delta（unload 覆盖未处理 update）。
                 self.queued_updates
                     .retain(|(position, _, _)| (position.0 >> 4, position.2 >> 4) != chunk);
-                self.last_sequence = sequence;
+                // 卸载同时丢弃未完成导入：否则迟到 COMMIT 会复活已卸载 chunk
+                //（属性测试 seed=2 实锤）。
+                self.pending_imports.remove(&chunk);
+                self.record_applied(KIND_CHUNK_UNLOAD, sequence);
                 self.generation += 1;
                 Ok(ApplyOutcome::Applied)
             }
             MirrorMessage::BlockUpdate { position, state_id, sequence } => {
-                if sequence <= self.last_sequence && self.last_sequence > 0 {
-                    return Ok(ApplyOutcome::RejectedStale);
+                if let Some(outcome) = self.sequence_gate(KIND_BLOCK_UPDATE, sequence) {
+                    if matches!(outcome, ApplyOutcome::GapDesynced) {
+                        self.desynced = true;
+                        return Ok(outcome);
+                    }
+                    return Ok(outcome);
                 }
                 let chunk = (position.0 >> 4, position.2 >> 4);
                 if self.pending_imports.contains_key(&chunk) {
-                    // 导入期间：排队（COMMIT 后按 sequence 应用）。
+                    // 导入期间：排队（COMMIT 后按 sequence 应用）。排队也占住
+                    // sequence——后续消息不得跨过它形成假缺口。
                     self.queued_updates.push((position, state_id, sequence));
+                    self.record_applied(KIND_BLOCK_UPDATE, sequence);
                     return Ok(ApplyOutcome::QueuedUntilCommit);
                 }
                 if !self.chunks.contains_key(&chunk) {
-                    // unload 后迟到更新：拒绝（不得复活 chunk）。
-                    return Ok(ApplyOutcome::RejectedStale);
+                    // unload 后迟到更新：拒绝（不得复活 chunk）。注意这是**新
+                    // sequence 的语义拒绝**——传输序号已被消费，必须推进
+                    // last_sequence，否则下一条合法消息会被误判为缺口。
+                    self.record_applied(KIND_BLOCK_UPDATE, sequence);
+                    return Ok(ApplyOutcome::IgnoredStale);
                 }
                 self.apply_block_update_internal(position, state_id, sequence);
-                self.last_sequence = sequence;
+                self.record_applied(KIND_BLOCK_UPDATE, sequence);
                 self.generation += 1;
                 Ok(ApplyOutcome::Applied)
             }
