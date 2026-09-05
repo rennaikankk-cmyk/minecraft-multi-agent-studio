@@ -21,6 +21,12 @@ const BINDABLE = [
 ];
 
 describe("deterministic goal parsing", () => {
+  it("parses only the bounded crop maintenance template", () => {
+    expect(parseDeterministicGoal("维护农场 carrots min x=-3 y=63 z=-3 max x=3 y=64 z=3", BINDABLE)).toMatchObject({
+      kind: "maintain-farm", crop: "carrots", min: { x: -3, y: 63, z: -3 }, max: { x: 3, y: 64, z: 3 },
+    });
+    expect(parseDeterministicGoal("维护农场 tnt min x=0 y=63 z=0 max x=3 y=64 z=3", BINDABLE)).toBeNull();
+  });
   it("parses a plain single-item acquisition with a default count of one", () => {
     expect(parseAcquisitionGoal("获取 oak_log", BINDABLE)).toEqual({
       kind: "acquire-item",

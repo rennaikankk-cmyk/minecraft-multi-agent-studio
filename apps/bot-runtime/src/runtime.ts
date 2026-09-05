@@ -1,6 +1,8 @@
 import { probeBooleanKnob, startLoopMonitor, type LoopMonitorStop } from "./loop-monitor.js";
 import { PerfSpanTracker, startPerfTelemetry } from "./perf-spans.js";
 import { currentPerfAbMode } from "./perf-ab-gate.js";
+import { PhysicsCadence } from "./physics-cadence.js";
+import type { LoopDelaySample } from "./loop-monitor.js";
 import { rustShadowPlan } from "./rust-pathfinder.js";
 import { randomUUID } from "node:crypto";
 
@@ -19,6 +21,7 @@ import {
   parseBotTelemetryMessage,
   parseSkillCancellation,
   parseSkillInvocation,
+  resolveGameplayPolicy,
   skillJsonValueSchema,
   type BotDisconnectedV1,
   type BotHeartbeatV1,
@@ -415,6 +418,7 @@ export class SingleBotRuntime {
     taskId: string;
     controller: AbortController;
   } | null = null;
+  private nextProactiveCombatAtMs = 0;
   private readonly skillExecutions = new Map<
     string,
     { fingerprint: string; result: Promise<SkillExecutionResultV1> }
@@ -678,6 +682,9 @@ export class SingleBotRuntime {
   }
 
   private loopMonitorStop: LoopMonitorStop | null = null;
+  private loopDelaySample: LoopDelaySample | null = null;
+  private readonly physicsCadence = new PhysicsCadence();
+  private shadowTimer: NodeJS.Timeout | null = null;
   /** Phase 4 诊断门：skip_worldstate 模式下 L0 复用的最近快照。 */
   private lastAbSnapshot: BotClientSnapshot | null = null;
 
@@ -705,8 +712,8 @@ export class SingleBotRuntime {
     this.stopPromise = null;
     this.stopping = false;
     this.reconnectAttempts = 0;
-    this.loopMonitorStop ??= startLoopMonitor(this.dependencies.logger);
-    const shadowTimer = setInterval(() => {
+    this.loopMonitorStop ??= startLoopMonitor(this.dependencies.logger, 30_000, (sample) => { this.loopDelaySample = sample; });
+    this.shadowTimer = setInterval(() => {
       if (currentPerfAbMode() !== "shadow_rust") return;
       if (this.state !== "online" || !this.client) return;
       const client = this.client as unknown as { bot?: unknown };
@@ -714,7 +721,7 @@ export class SingleBotRuntime {
       if (!bot || !(bot as { entity?: unknown }).entity) return;
       void this.perfSpans.spanAsync("rust.shadow.plan", () => rustShadowPlan(bot as never));
     }, 1_000);
-    shadowTimer.unref?.();
+    this.shadowTimer.unref?.();
     this.perfTelemetryStop ??= startPerfTelemetry({
       logger: this.dependencies.logger,
       tracker: this.perfSpans,
@@ -1053,6 +1060,13 @@ export class SingleBotRuntime {
     operationTraceId: string,
   ): Promise<RuntimeStopOutcome> {
     this.stopping = true;
+    this.loopMonitorStop?.();
+    this.loopMonitorStop = null;
+    this.loopDelaySample = null;
+    this.perfTelemetryStop?.();
+    this.perfTelemetryStop = null;
+    if (this.shadowTimer) clearInterval(this.shadowTimer);
+    this.shadowTimer = null;
 
     this.cancelCombatReaction();
     this.client?.interruptNormalActions?.();
@@ -1229,7 +1243,8 @@ export class SingleBotRuntime {
       client.setPerfSpanWrap?.((category, fn) => this.perfSpans.spanSync(category, fn));
       client.setPerfRecorder?.((category, durationMs, detail) => this.perfSpans.record(category, durationMs, detail));
       client.setHandlers({
-        onSpawn: () => this.handleSpawn(activeGeneration),
+        onSpawn: () => { if (activeGeneration === this.generation) this.physicsCadence.reset(); this.handleSpawn(activeGeneration); },
+        onPhysicsTick: () => { if (activeGeneration === this.generation) this.physicsCadence.record(this.monotonicNow()); },
         onStateChanged: () => this.requestStatus(activeGeneration),
         onDamaged: (info) => this.handleDamaged(activeGeneration, info),
         onDeath: (info) => this.handleDeath(activeGeneration, info),
@@ -1528,8 +1543,9 @@ export class SingleBotRuntime {
           return;
         }
         const snapshot = this.perfSpans.spanSync("tick.requestStatus.snapshot", () => this.client!.snapshot());
-        this.perfSpans.spanSync("tick.requestStatus.worldState", () => this.updateWorldState(snapshot));
         this.perfSpans.spanSync("tick.requestStatus.safety", () => this.evaluateSafetySnapshot(generation, snapshot));
+        this.maybeStartProactiveCombat(generation, snapshot);
+        this.perfSpans.spanSync("tick.requestStatus.worldState", () => this.updateWorldState(snapshot));
         this.lastAbSnapshot = snapshot;
       }
     } catch (cause) {
@@ -1585,8 +1601,8 @@ export class SingleBotRuntime {
 
     try {
       const snapshot = this.perfSpans.spanSync("telemetry.snapshot", () => this.client!.snapshot());
-      this.updateWorldState(snapshot);
       if (evaluateSafety) this.evaluateSafetySnapshot(generation, snapshot);
+      this.updateWorldState(snapshot);
       const sequence = this.nextSequence();
       const observedAt = this.now().toISOString();
       const message: BotStatusV1 = this.perfSpans.spanSync("telemetry.serialize", () => botStatusV1Schema.parse({
@@ -1605,6 +1621,7 @@ export class SingleBotRuntime {
           ...(this.lastDeath ? { lastDeath: this.lastDeath } : {}),
           position: snapshot.position,
           latencyMs: snapshot.latencyMs,
+          performance: { physics: this.physicsCadence.snapshot(observedAt, this.monotonicNow()), eventLoop: this.loopDelaySample },
           currentTask: this.currentTaskTelemetry(),
           safety: this.safetyStatus,
           ...(this.combatDriver &&
@@ -2737,7 +2754,25 @@ export class SingleBotRuntime {
     this.emitStatus(this.generation, false);
   }
 
-  private handleDamaged(generation: number, info: BotDamageInfo): void {    if (
+  private maybeStartProactiveCombat(generation: number, snapshot: BotClientSnapshot): void {
+    const nowMs = this.now().getTime();
+    if (this.profile.purpose !== "anarchy" || !this.combatDriver || this.combatReaction ||
+      this.stopping || this.safetyStatus.normalTasksPaused || snapshot.food.level < 12 ||
+      nowMs < this.nextProactiveCombatAtMs || snapshot.safety.movementRequested ||
+      !resolveGameplayPolicy({ environment: process.env }).proactiveCombat) return;
+    this.nextProactiveCombatAtMs = nowMs + 200;
+    try {
+      const observation = this.client?.combatObservation?.(nowMs);
+      if (!observation || !this.combatDriver.shouldEngageProactively(observation, nowMs)) return;
+      this.nextProactiveCombatAtMs = nowMs + 3_000;
+      this.handleDamaged(generation, { previousHealth: snapshot.health.current, currentHealth: snapshot.health.current }, "proactive");
+    } catch {
+      this.combatDriver.recordUnavailable("COMBAT_OBSERVATION_UNAVAILABLE", nowMs);
+    }
+  }
+
+  private handleDamaged(generation: number, info: BotDamageInfo, trigger: "damage" | "proactive" = "damage"): void {
+    if (
       generation !== this.generation ||
       this.stopping ||
       this.state !== "online" ||
@@ -2806,7 +2841,7 @@ export class SingleBotRuntime {
     const taskId = `combat-reaction-${this.randomId()}`;
     const task: RuntimeCurrentTask = {
       taskId,
-      title: "战斗反应: 受到攻击",
+      title: trigger === "damage" ? "战斗反应: 受到攻击" : "主动交战: 发现敌对玩家",
       status: "running",
       startedAt: this.now().toISOString(),
     };
@@ -2824,6 +2859,7 @@ export class SingleBotRuntime {
       activeClient,
       taskId,
       controller,
+      trigger === "damage",
     ).catch((error): CombatReactionOutcome => {
       this.dependencies.logger.error(
         "bot_runtime_damage_reaction_failed",
@@ -2845,6 +2881,7 @@ export class SingleBotRuntime {
       this.logFields({
         previousHealth: info.previousHealth,
         currentHealth: info.currentHealth,
+        trigger,
         maxSteps: COMBAT_REACTION_MAX_STEPS,
         maxDurationMs: COMBAT_REACTION_MAX_DURATION_MS,
       }, this.traceId, taskId),
@@ -2856,6 +2893,7 @@ export class SingleBotRuntime {
     activeClient: BotClient,
     taskId: string,
     controller: AbortController,
+    retaliation = true,
   ): Promise<CombatReactionOutcome> {
     const startedAtMs = this.now().getTime();
     const anarchy = this.profile.purpose === "anarchy";
@@ -2889,7 +2927,7 @@ export class SingleBotRuntime {
         requestedAtMs,
         activeClient,
         controller.signal,
-        true,
+        retaliation,
       );
       this.combatReflexProbeSource?.recordStepDurationMs(
         this.monotonicNow() - stepStartedAtMonotonicMs,
@@ -3071,7 +3109,10 @@ export class SingleBotRuntime {
     outcome: CombatReactionOutcome,
   ): void {
     const isCurrent = this.combatReaction?.taskId === taskId;
-    if (isCurrent) this.combatReaction = null;
+    if (isCurrent) {
+      this.combatReaction = null;
+      this.nextProactiveCombatAtMs = this.now().getTime() + 3_000;
+    }
     if (
       !isCurrent ||
       generation !== this.generation ||

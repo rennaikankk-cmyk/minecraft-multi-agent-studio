@@ -508,7 +508,7 @@ describe("MineflayerBotClient utility-station guard", () => {
 });
 
 describe("MineflayerBotClient world-state block scan throttling", () => {
-  it("runs one important-block scan across repeated physics ticks", () => {
+  it("shares one cooperative important-block scan across repeated physics ticks", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     const fixture = makeFixture({ registeredBlockNames: importantBlockNames });
@@ -524,12 +524,15 @@ describe("MineflayerBotClient world-state block scan throttling", () => {
     fixture.emitter.emit("physicsTick");
     fixture.emitter.emit("physicsTick");
 
+    expect(fixture.findBlocks).not.toHaveBeenCalled();
+    await vi.runAllTimersAsync();
     expect(fixture.findBlocks).toHaveBeenCalledTimes(importantBlockNames.length);
     vi.advanceTimersByTime(fixture.client.worldStateBlockScanIntervalMs - 1);
     fixture.emitter.emit("physicsTick");
     expect(fixture.findBlocks).toHaveBeenCalledTimes(importantBlockNames.length);
     vi.advanceTimersByTime(1);
     fixture.emitter.emit("physicsTick");
+    await vi.runAllTimersAsync();
     expect(fixture.findBlocks).toHaveBeenCalledTimes(
       importantBlockNames.length * 2,
     );

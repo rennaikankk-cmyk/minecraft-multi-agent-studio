@@ -160,6 +160,7 @@ export function parseBlueprintFileGoal(
 }
 
 export type DeterministicGoal =
+  | Readonly<{ kind: "maintain-farm"; crop: "carrots" | "potatoes" | "wheat" | "beetroots"; min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number } }>
   | ParsedAcquisitionGoal
   | ParsedMovementGoal
   | ParsedScanGoal
@@ -179,6 +180,10 @@ export function parseDeterministicGoal(
   operatorGoal: string,
   plannedItemNames: readonly string[],
 ): DeterministicGoal | null {
+  const farm = /^维护农场 (carrots|potatoes|wheat|beetroots) min x=(-?\d+) y=(-?\d+) z=(-?\d+) max x=(-?\d+) y=(-?\d+) z=(-?\d+)$/u.exec(operatorGoal.trim());
+  if (farm) return { kind: "maintain-farm", crop: farm[1] as "carrots" | "potatoes" | "wheat" | "beetroots",
+    min: { x: Number(farm[2]), y: Number(farm[3]), z: Number(farm[4]) },
+    max: { x: Number(farm[5]), y: Number(farm[6]), z: Number(farm[7]) } };
   const acquisition = parseAcquisitionGoal(operatorGoal, plannedItemNames);
   if (acquisition !== null) return acquisition;
   const movement = parseMovementGoal(operatorGoal);

@@ -1,10 +1,59 @@
 import type { BotRegistryRecord } from "../src/bot-registry.js";
 import { AutonomousDirector } from "../src/autonomous-director.js";
 import { describe, expect, it, vi } from "vitest";
+import { BaseRegistry, FacilityRegistry, readFarmProduction } from "@minecraft-studio/skills";
+import { applyOperatorBaseAssignments } from "../src/operator-base-assignments.js";
 
 const NOW = new Date("2026-08-28T00:00:00.000Z");
 
 describe("AutonomousDirector", () => {
+  it("assigns one farmer per facility, persists receipts, and rechecks after growth", async () => {
+    const records = [readyRecord("farmer-1"), readyRecord("farmer-2")];
+    for (const record of records) {
+      record.currentStatus!.armorPoints = 20;
+      record.currentStatus!.inventory = satisfiedInventory().concat([{ itemName: "carrot", count: 8 }]);
+    }
+    const baseRegistry = new BaseRegistry();
+    const facilityRegistry = new FacilityRegistry();
+    applyOperatorBaseAssignments({ schemaVersion: "1.0", assignments: [{
+      name: "Test base", serverProfileId: records[0]!.serverProfileId, dimension: "minecraft:overworld",
+      anchor: { x: 0, y: 64, z: 0 }, bounds: { min: { x: -5, y: 63, z: -5 }, max: { x: 5, y: 70, z: 5 } },
+      memberBotIds: records.map((r) => r.botId), farms: [{ min: { x: -3, y: 63, z: -3 }, max: { x: 3, y: 64, z: 3 }, crop: "carrots" }],
+    }] }, baseRegistry, facilityRegistry);
+    const registry = { list: () => records, get: (botId: string) => records.find((r) => r.botId === botId) ?? null,
+      subscribe: vi.fn(() => () => undefined) };
+    let nowMs = NOW.getTime();
+    let finish: (() => void) | undefined;
+    const planAndDispatch = vi.fn(async ({ operatorGoal }: { operatorGoal: string }) => {
+      if (!operatorGoal.startsWith("维护农场")) return noopPlanResult();
+      await new Promise<void>((resolve) => { finish = resolve; });
+      return completedPlanResult("farm.maintain", { status: "PASS_COMPLETE", scannedCells: 98, unknownCells: 0,
+        harvested: 3, planted: 3, tilled: 0, bonemealUsed: 0, inventoryDelta: [{ itemName: "carrot", delta: 5 }], observedAt: new Date(nowMs).toISOString() });
+    });
+    const persistBaseState = vi.fn();
+    const director = new AutonomousDirector({ registry, planner: { planAndDispatch }, baseRegistry, facilityRegistry,
+      persistBaseState, intervalMs: 60_000, goalTimeoutMs: 60_000, failureCooldownMs: 5_000,
+      terminalRetentionMs: 10_000, now: () => new Date(nowMs), randomId: uuidSequence() });
+    director.start();
+    await flushDirector();
+    expect(planAndDispatch.mock.calls.filter(([r]) => r.operatorGoal.startsWith("维护农场"))).toHaveLength(1);
+    finish!();
+    await flushDirector();
+    const facility = facilityRegistry.findByBase(baseRegistry.forMember("farmer-1", records[0]!.serverProfileId, "minecraft:overworld")!.id)[0]!;
+    expect(readFarmProduction(facility)).toMatchObject({ status: "PRODUCING", samples: [{ netFood: 5 }], nextRunAtMs: nowMs + 30_000 });
+    const base = baseRegistry.forMember("farmer-1", records[0]!.serverProfileId, "minecraft:overworld")!;
+    expect(base.phaseFacts?.FOOD_FACILITY_ACTIVE?.availability).toBe("UNVERIFIED");
+    nowMs += 61_000;
+    for (const record of records) registrySubscribeKick(registry, record);
+    await flushDirector();
+    finish!();
+    await flushDirector();
+    expect(readFarmProduction(facility)?.samples).toHaveLength(2);
+    expect(base.phaseFacts?.FOOD_FACILITY_ACTIVE?.availability).toBe("AVAILABLE");
+    expect(persistBaseState).toHaveBeenCalled();
+    await director.stop();
+  });
+
   it("starts one independent safe goal per idle Bot and exposes only public task fields", async () => {
     const records = [readyRecord("studio-bot-01"), readyRecord("studio-bot-02")];
     const listeners = new Set<(record: BotRegistryRecord) => void>();

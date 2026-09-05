@@ -1,10 +1,49 @@
 import type { BotRegistryRecord } from "../src/bot-registry.js";
-import { assessSurvivalNeeds } from "../src/survival-needs.js";
+import { assessSurvivalNeeds, SurvivalRecoveryMemory } from "../src/survival-needs.js";
+import { emptyBasePhaseSnapshot } from "../src/base-phase-state.js";
 import { describe, expect, it } from "vitest";
 
 const NOW = new Date("2026-08-28T00:00:00.000Z");
 
 describe("assessSurvivalNeeds", () => {
+  it("counts worn diamond armor and opens base selection without recrafting it", () => {
+    const bot = record(satisfied().filter((i) => !/_(helmet|chestplate|leggings|boots)$/.test(i.itemName)), 20, 20);
+    bot.currentStatus = { ...bot.currentStatus!, armorSlots: {
+      head: "diamond_helmet", chest: "diamond_chestplate", legs: "diamond_leggings", feet: "diamond_boots",
+    } };
+    const needs = assessSurvivalNeeds({ record: bot, shelterBuilt: true,
+      basePhase: { ...emptyBasePhaseSnapshot(), SHELTER_MINIMAL_READY: true } });
+    expect(needs.some((n) => n.key === "DIAMOND_ARMOR" || n.key === "EQUIP_ARMOR")).toBe(false);
+    expect(needs[0]?.key).toBe("BASE_SITE_SELECTION");
+  });
+
+  it("equips an upgrade over partial iron armor, then fills the actual missing slot", () => {
+    const bot = record([{ itemName: "iron_pickaxe", count: 1 }, { itemName: "diamond_chestplate", count: 1 }], 20, 8);
+    bot.currentStatus = { ...bot.currentStatus!, armorSlots: { head: "iron_helmet", chest: "iron_chestplate", legs: null, feet: null } };
+    expect(assessSurvivalNeeds({ record: bot, shelterBuilt: true }).some((n) => n.key === "EQUIP_ARMOR")).toBe(true);
+    bot.currentStatus = { ...bot.currentStatus, inventory: [{ itemName: "iron_pickaxe", count: 1 }],
+      armorSlots: { head: "iron_helmet", chest: "diamond_chestplate", legs: null, feet: null } };
+    expect(assessSurvivalNeeds({ record: bot, shelterBuilt: true }).find((n) => n.key === "ARMOR")?.operatorGoal).toBe("获取 iron_leggings");
+  });
+
+  it("requests the total diamond reserve and recognizes colored beds", () => {
+    const needs = assess({ inventory: [{ itemName: "iron_pickaxe", count: 1 }, { itemName: "diamond", count: 2 }, { itemName: "red_bed", count: 1 }], shelterBuilt: true });
+    expect(needs.find((n) => n.key === "DIAMOND_PROGRESSION")?.operatorGoal).toBe("获取 3 个 diamond");
+    expect(needs.some((n) => n.key === "BED")).toBe(false);
+  });
+
+  it("isolates repeated deaths by bot and server and uses the supplied clock", () => {
+    const memory = new SurvivalRecoveryMemory();
+    const bot = record([], 20, 0);
+    for (let i = 1; i <= 3; i++) {
+      bot.currentStatus = { ...bot.currentStatus!, lastDeath: { x: 100, y: 64, z: 0, dimension: "minecraft:overworld", diedAt: new Date(NOW.getTime() - 10_000 + i).toISOString() } };
+      expect(memory.observe(bot, NOW.getTime(), false)).toBe(i);
+    }
+    expect(memory.observe({ ...bot, botId: "second" }, NOW.getTime(), false)).toBe(1);
+    expect(memory.observe({ ...bot, serverProfileId: "second-server" }, NOW.getTime(), false)).toBe(1);
+    expect(memory.observe(bot, NOW.getTime(), false)).toBe(3);
+    expect(memory.observe(bot, NOW.getTime() + 300_000, false)).toBe(0);
+  });
   it("bootstraps a fresh spawn onto the tool ladder before food topping-up", () => {
     const needs = assess({ inventory: [], foodLevel: 20 });
     expect(needs[0]).toMatchObject({

@@ -24,10 +24,12 @@ export function probeBooleanKnob(
 }
 
 export type LoopMonitorStop = () => void;
+export type LoopDelaySample = { observedAt: string; samples: number; p99DelayMs: number; maxDelayMs: number };
 
 export function startLoopMonitor(
   logger: { info?: (event: string, fields?: Record<string, unknown>) => void },
   intervalMs = 30_000,
+  onSample?: (sample: LoopDelaySample) => void,
 ): LoopMonitorStop {
   // 口径（Phase 3 校准）：resolution=1ms（采样分辨率；直方图输出值仍是纳秒，/1e6 换算在下方唯一换算点）（Windows
   // 定时器粒度仍影响下限，报告须连同平台说明）；warmup 一窗不计（启动
@@ -48,7 +50,11 @@ export function startLoopMonitor(
     const p99 = histogram.percentile(99) / 1e6;
     const max = histogram.max / 1e6;
     const mean = histogram.mean / 1e6;
+    const samples = histogram.count;
     histogram.reset();
+    if (samples > 0 && Number.isFinite(p99) && Number.isFinite(max)) {
+      onSample?.({ observedAt: new Date().toISOString(), samples, p99DelayMs: round(p99), maxDelayMs: round(max) });
+    }
     logger.info?.("runtime_event_loop_delay", {
       p50Ms: round(p50),
       p95Ms: round(p95),

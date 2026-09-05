@@ -29,6 +29,8 @@ export const automatedFacilityKinds = [
   "mob_drop_farm",
   "storage_system",
   "smelting_array",
+  "tree_farm",
+  "trading_hall",
 ] as const;
 export const automatedFacilityKindSchema = z.enum(automatedFacilityKinds);
 export type AutomatedFacilityKind = z.infer<typeof automatedFacilityKindSchema>;

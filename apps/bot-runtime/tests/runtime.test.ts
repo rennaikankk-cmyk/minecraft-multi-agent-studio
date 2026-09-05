@@ -1471,6 +1471,21 @@ describe("SingleBotRuntime", () => {
     await runtime.stop("test_cleanup");
   });
 
+  it("initiates a bounded anarchy encounter without waiting to be hit", async () => {
+    const client = new FakeBotClient();
+    client.combatEnabled = true;
+    const messages: BotTelemetryMessageV1[] = [];
+    const runtime = new SingleBotRuntime({ ...combatProfile, purpose: "anarchy" }, {
+      createClient: () => client, messageSink: (message) => messages.push(message), logger,
+      now: () => new Date(Date.now()), randomId: () => FIXED_UUID,
+    });
+    runtime.start(); client.spawn(); client.stateChanged();
+    await vi.advanceTimersByTimeAsync(250);
+    expect(client.combatActions.some((action) => action.kind === "MELEE_ATTACK")).toBe(true);
+    expect(messages.some((message) => message.type === "bot.status.v1" && message.payload.currentTask?.title.includes("主动交战"))).toBe(true);
+    await runtime.stop("test_cleanup");
+  });
+
   it("preempts a normal task and starts a deterministic reaction when damaged", async () => {
     const messages: BotTelemetryMessageV1[] = [];
     const client = new FakeBotClient();

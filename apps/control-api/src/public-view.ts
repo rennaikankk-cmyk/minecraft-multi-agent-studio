@@ -38,6 +38,8 @@ export function toPublicBotDetail(
     health: status?.health ?? null,
     food: status?.food ?? null,
     armorPoints: status?.armorPoints ?? null,
+    armorSlots: status?.armorSlots,
+    performance: status?.performance,
     latencyMs: status?.latencyMs ?? null,
     currentTask: status?.currentTask ?? null,
     safety: status?.safety ?? null,

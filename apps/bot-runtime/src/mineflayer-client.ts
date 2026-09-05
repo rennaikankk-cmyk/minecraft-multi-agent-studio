@@ -14,6 +14,8 @@ import pathfinderModule, {
 } from "mineflayer-pathfinder";
 import { plugin as collectBlockPlugin } from "mineflayer-collectblock";
 import { Vec3 } from "vec3";
+import { runSpawnEscape } from "./spawn-escape.js";
+import { NearbyBlockScanner } from "./nearby-block-scanner.js";
 import { MovementSyncShaper, type MovementWire } from "./movement-sync.js";
 import { PursuitController } from "./pursuit-controller.js";
 
@@ -124,7 +126,6 @@ import {
 } from "./no-hunger.js";
 import type { ServerProfile } from "./server-profile.js";
 import {
-  importantBlockNames,
   WorldStateStore,
   type EntityState,
   type InventoryItemState,
@@ -1182,8 +1183,8 @@ export class MineflayerBotClient implements BotClient {
   private pursuitTimer: ReturnType<typeof setInterval> | null = null;
   /** 活跃追击控制器（租约持有者；stopPursuit 必须调它的 stop() 释放租约）。 */
   private activePursuit: { stop: (reason: string) => void } | null = null;
-  /** G1 spawn-escape：本连接首个出生点（重触发判定的参照原点）。 */
-  private worldSpawnOrigin: { x: number; z: number } | null = null;
+  /** G1 spawn-escape：服务端最近同步的出生点（重触发判定的参照原点）。 */
+  private worldSpawnOrigin: { x: number; z: number; dimension: string } | null = null;
   /** 最近一次 Rust 路由的各阶段耗时（runtime 技能完成时上报；null=未启用）。 */
   rustPathStats: RustPathStats | null = null;
   /** P5-D2c WorldMirror 同步适配器（STUDIO_WORLD_MIRROR_SYNC=1 时创建）。 */
@@ -1191,7 +1192,7 @@ export class MineflayerBotClient implements BotClient {
   /** world 事件订阅清理（连接终止时解除）。 */
   private worldSyncDetach: (() => void) | null = null;
   /** spawn-escape 疾跑进行中（防同点重复派发；goto 落定后复位）。 */
-  private spawnEscapeActive = false;
+  private spawnEscape: AbortController | null = null;
   /** World effects share one scoped wrapper for the lifetime of the action lock. */
   private worldActionsWrapped = false;
   private worldActionController: AbortController | undefined;
@@ -1219,9 +1220,13 @@ export class MineflayerBotClient implements BotClient {
   private readonly sessionPlacedCraftingTables = new Set<string>();
   private lastFurnacePlacedAt = 0;
   private lastFurnacePosition: Vec3 | null = null;
-  private lastNearbyBlockScanAt = Number.NEGATIVE_INFINITY;
-  private lastNearbyBlockScanContext: string | null = null;
-  private nearbyBlockScanCache: readonly NearbyBlockState[] = Object.freeze([]);
+  readonly worldStateBlockScanIntervalMs = 1_000;
+  private readonly nearbyBlockScanner = new NearbyBlockScanner({
+    query: (name, origin) => this.scanNearbyBlockType(name, origin),
+    scopeMatches: (origin) => !this.requestedStop && origin.serverProfileId === this.serverProfileId &&
+      origin.dimension === normalizeDimension(String(this.bot.game?.dimension)),
+    now: () => Date.now(),
+  }, this.worldStateBlockScanIntervalMs);
   private pathResetCount = 0;
   private currentPathLength: number | null = null;
   private activePathInvocationId: string | null = null;
@@ -1246,9 +1251,6 @@ export class MineflayerBotClient implements BotClient {
   readonly furnacePlacementCooldownMs = 20_000;
   readonly maxOwnedFurnacesPerArea = FURNACE_POLICY.maxOwnedPerArea;
   readonly furnaceScanRadius = FURNACE_POLICY.scanRadius;
-  /** Expensive findBlocks passes are shared by all state-change events. */
-  readonly worldStateBlockScanIntervalMs = 1_000;
-
   constructor(
     private readonly bot: Bot,
     private readonly configuredVersion: ServerProfile["minecraftVersion"],
@@ -1330,7 +1332,16 @@ export class MineflayerBotClient implements BotClient {
     bot.on("login", () => {
       this.loginSeen = true;
     });
+    bot._client?.on("spawn_position", (packet: { location?: { x: number; z: number }; globalPos?: { location: { x: number; z: number }; dimensionName?: string } }) => {
+      const location = packet.globalPos?.location ?? packet.location;
+      if (!location || !Number.isFinite(location.x) || !Number.isFinite(location.z)) return;
+      this.worldSpawnOrigin = { x: location.x, z: location.z,
+        dimension: normalizeDimension(packet.globalPos?.dimensionName ?? String(bot.game?.dimension ?? "minecraft:overworld")) };
+      if (this.spawnSeen) this.trySpawnEscape();
+    });
     bot.on("spawn", () => {
+      this.spawnEscape?.abort();
+      this.spawnEscape = null;
       this.spawnSeen = true;
       this.lastObservedHealth = finiteNumber(bot.health)
         ? Number(bot.health)
@@ -1408,12 +1419,16 @@ export class MineflayerBotClient implements BotClient {
     });
     bot.on("breath", () => this.perfSink?.("event.breath.stateChanged"));
     bot.on("move", () => this.perfSink?.("event.move.stateChanged"));
-    bot.on("physicsTick", () => this.perfSink?.("tick.physics.stateChanged"));
+    bot.on("physicsTick", () => {
+      this.handlers?.onPhysicsTick?.();
+      this.perfSink?.("tick.physics.stateChanged");
+    });
     // 死亡不是断线：连接保持，但背包清空、位置漂移到重生点。先上报事实
     // （runtime 取消进行中的技能并失效世界状态），再自动写重生包——
     // mineflayer 不会自动 respawn，不写这条包 Bot 会停在死亡屏上直到
     // 服务器踢人。
     bot.on("death", () => {
+      this.spawnEscape?.abort();
       const entity = bot.entity as typeof bot.entity & { position?: Vec3 };
       // 门禁 3：当场抓背包快照（盔甲/副手槽都在 inventory.slots 里）+ XP——
       // respawn 后这些就被清空了，事后拿到的只会是空背包。
@@ -1523,6 +1538,8 @@ export class MineflayerBotClient implements BotClient {
       this.handlers?.onError(error);
     });
     bot.on("end", (reason) => {
+      this.spawnEscape?.abort();
+      this.nearbyBlockScanner.reset();
       this.workstationDisconnected.abort();
       // 整形器随 wire（连接）一起死，但显式恢复 write 防重连复用。
       if (this.movementShaperDetach) {
@@ -1717,65 +1734,7 @@ export class MineflayerBotClient implements BotClient {
       dimension: current.position.dimension,
       serverProfileId,
     } as const;
-    const scanContext = `${serverProfileId}|${current.position.dimension}`;
-    const blockScanCacheMiss =
-      scanContext !== this.lastNearbyBlockScanContext ||
-      nowMs < this.lastNearbyBlockScanAt ||
-      nowMs - this.lastNearbyBlockScanAt >= this.worldStateBlockScanIntervalMs;
-    if (blockScanCacheMiss) {
-      const scanBegan = performance.now();
-      const nearbyBlocks: NearbyBlockState[] = [];
-      const registry = this.bot.registry as unknown as {
-        blocksByName?: Record<string, { id: number } | undefined>;
-      };
-      for (const name of importantBlockNames) {
-        const id = registry.blocksByName?.[name]?.id;
-        if (!Number.isSafeInteger(id)) continue;
-        let positions: Vec3[] = [];
-        try {
-          positions = this.bot.findBlocks({
-            matching: id!,
-            maxDistance: 32,
-            count: 8,
-          });
-        } catch {
-          continue;
-        }
-        for (const position of positions) {
-          const block = this.bot.blockAt(position);
-          if (!block || block.name !== name) continue;
-          const distance = Math.hypot(
-            position.x - origin.x,
-            position.y - origin.y,
-            position.z - origin.z,
-          );
-          nearbyBlocks.push({
-            name,
-            position: {
-              ...origin,
-              x: position.x,
-              y: position.y,
-              z: position.z,
-            },
-            lastSeen: now,
-            reachable: distance <= 4.5,
-            source: "observation",
-            confidence: 1,
-          });
-        }
-      }
-      this.nearbyBlockScanCache = Object.freeze(nearbyBlocks);
-      this.lastNearbyBlockScanAt = nowMs;
-      this.lastNearbyBlockScanContext = scanContext;
-      this.perfRecord?.("world.snapshot.blocks.scan", performance.now() - scanBegan, {
-        cache: "miss",
-        names: importantBlockNames.length,
-        found: nearbyBlocks.length,
-        at: nowMs,
-      });
-    } else {
-      this.perfRecord?.("world.snapshot.blocks.scan", 0, { cache: "hit", at: nowMs });
-    }
+    const nearbyBlocks = this.nearbyBlockScanner.read(origin);
     const entities: EntityState[] = [];
     const entityInputCount = Object.keys(this.bot.entities ?? {}).length;
     const entitiesBegan = performance.now();
@@ -1805,7 +1764,7 @@ export class MineflayerBotClient implements BotClient {
       observedAt: new Date(now),
       position: origin,
       inventory,
-      nearbyBlocks: this.nearbyBlockScanCache,
+      nearbyBlocks,
       replaceNearbyBlocks: true,
       entities,
       navigation: {
@@ -1816,6 +1775,24 @@ export class MineflayerBotClient implements BotClient {
       },
     });
     return this.worldState.snapshot();
+  }
+
+  private scanNearbyBlockType(name: string, origin: WorldPosition): readonly NearbyBlockState[] {
+    const began = performance.now();
+    try {
+      const id = this.bot.registry.blocksByName[name]?.id;
+      if (!Number.isSafeInteger(id)) return [];
+      const positions = this.bot.findBlocks({ matching: id!, point: new Vec3(origin.x, origin.y, origin.z), maxDistance: 32, count: 8 });
+      const lastSeen = new Date().toISOString();
+      return positions.flatMap((position): NearbyBlockState[] => {
+        if (this.bot.blockAt(position)?.name !== name) return [];
+        return [{ name, position: { ...origin, x: position.x, y: position.y, z: position.z }, lastSeen,
+          reachable: Math.hypot(position.x - origin.x, position.y - origin.y, position.z - origin.z) <= 4.5,
+          source: "observation", confidence: 1 }];
+      });
+    } finally {
+      this.perfRecord?.("world.snapshot.blocks.scan.slice", performance.now() - began, { name });
+    }
   }
 
   private movementGoalPosition(goal: unknown): WorldPosition | null {
@@ -2091,9 +2068,17 @@ export class MineflayerBotClient implements BotClient {
         try {
           return farmMaintainOutputSchema.parse(await maintainFarm(createFarmPort(this.bot, input, {
             signal: this.activeProcessSignal!, assertActive: port.assertActive,
-            approach: async (position) => { await port.goto(new goals.GoalLookAtBlock(new Vec3(position.x, position.y, position.z), this.bot.world, { reach: 4 })); },
+            approach: async (position) => {
+              let target = new Vec3(position.x, position.y, position.z);
+              const block = this.bot.blockAt(target);
+              const substrate = block && block.name in cropRules ? cropRules[block.name as keyof typeof cropRules].substrate : null;
+              // Ground crops and empty cells have no raycast shape; use their soil face.
+              if (block && (["air", "cave_air", "void_air"].includes(block.name) ||
+                substrate === "farmland" || substrate === "soul_sand")) target = target.offset(0, -1, 0);
+              await port.goto(new goals.GoalLookAtBlock(target, this.bot.world, { reach: 4 }));
+            },
             approachPickup: async (position) => {
-              await port.goto(new goals.GoalNear(position.x, Math.floor(this.bot.entity.position.y), position.z, 1));
+              await port.goto(new goals.GoalNear(position.x, position.y, position.z, 0));
             },
             assertEffect: async (position, harvest) => {
               await assertEffect();
@@ -3065,11 +3050,14 @@ export class MineflayerBotClient implements BotClient {
     this.bot.pathfinder.thinkTimeout = 5_000;
     this.bot.pathfinder.tickTimeout = 20;
     this.activePathInvocationId = request.invocationId;
-    // GoalNear measures integer path nodes, while the public contract measures
-    // the entity position. Reserve half a block for the entity's offset inside
-    // its current node so a radius-1 goal cannot resolve one block away and
-    // then fail the postcondition at roughly 1.58 blocks.
-    const pathfinderRadius = Math.max(0, input.data.radius - 0.5);
+    // Pathfinder nodes use block corners; the Bot stands at the cell center.
+    // Keep valid adjacent cells available when an entity occupies the target.
+    const movementGoal = new goals.GoalNear(input.data.target.x, input.data.target.y, input.data.target.z, input.data.radius);
+    movementGoal.isEnd = (node) => Math.hypot(
+      node.x + 0.5 - input.data.target.x,
+      node.y - input.data.target.y,
+      node.z + 0.5 - input.data.target.z,
+    ) <= input.data.radius;
 
     const stopOnAbort = () => this.stopPathfinder();
     request.signal.addEventListener("abort", stopOnAbort, { once: true });
@@ -3110,14 +3098,7 @@ export class MineflayerBotClient implements BotClient {
           },
         });
       } else {
-        await this.bot.pathfinder.goto(
-          new goals.GoalNear(
-            input.data.target.x,
-            input.data.target.y,
-            input.data.target.z,
-            pathfinderRadius,
-          ),
-        );
+        await this.bot.pathfinder.goto(movementGoal);
       }
       if (!lease.isCurrent()) {
         throw new SkillFault("SKILL_CANCELLED");
@@ -3146,7 +3127,7 @@ export class MineflayerBotClient implements BotClient {
         distanceToTarget,
       });
     } catch (error) {
-      this.stopPathfinder();
+      if (lease.isCurrent()) this.stopPathfinder();
       // pathfinder 用 error.name 区分 NoPath / Timeout / GoalChanged /
       // PathStopped（lib/goto.js:26-40），全丢掉就只剩一个"走不过去"，
       // 运维侧再也分不出是没有路还是思考预算不够。屏蔽码保持不变，
@@ -3205,6 +3186,8 @@ export class MineflayerBotClient implements BotClient {
           : String(error),
       );
     } finally {
+      request.signal.removeEventListener("abort", stopOnAbort);
+      if (this.activePathInvocationId === request.invocationId) this.activePathInvocationId = null;
       lease.release(lease.signal.aborted ? "cancelled" : "completed");
     }
   }
@@ -6710,27 +6693,21 @@ export class MineflayerBotClient implements BotClient {
    * 结论为竖井坠落（4.5=7.5 格）+ 井底怪坑，认证后物理放开即坠落。此反射
    * 在 spawn 第一时刻沿预设方位疾跑（默认东南 135°、96 格），确定性执行
    * 不经 planner/LLM；L0 安全层仍在更上层（crit → 断线保号不变）。
-   * 重触发：spawn 落在首个出生点 64 格内即再逃（床毁重生/出生拉回循环
+   * 重触发：spawn 落在服务端已同步的出生点 64 格内即再逃（床毁重生/出生拉回循环
    * 都覆盖）；远点/跨维度 spawn 不触发（防下界门误逃）。
    */
   private trySpawnEscape(): void {
-    if (!this.anarchyNavigation || this.spawnEscapeActive) return;
+    if (!this.anarchyNavigation || this.spawnEscape || !this.worldSpawnOrigin) return;
     if (process.env.STUDIO_SPAWN_ESCAPE === "0") return;
     const pos = this.bot.entity?.position;
     if (!pos) return;
-    if (this.worldSpawnOrigin === null) {
-      this.worldSpawnOrigin = { x: pos.x, z: pos.z };
-    }
+    if (normalizeDimension(String(this.bot.game?.dimension)) !== this.worldSpawnOrigin.dimension) return;
     const dx = pos.x - this.worldSpawnOrigin.x;
     const dz = pos.z - this.worldSpawnOrigin.z;
     if (dx * dx + dz * dz > 64 * 64) return;
     const distance = Number(process.env.STUDIO_SPAWN_ESCAPE_DISTANCE ?? "96");
     const bearingDeg = Number(process.env.STUDIO_SPAWN_ESCAPE_BEARING_DEG ?? "135");
-    const rad = (bearingDeg * Math.PI) / 180;
-    if (!Number.isFinite(distance) || !Number.isFinite(bearingDeg)) return;
-    const targetX = Math.floor(pos.x + Math.cos(rad) * distance);
-    const targetZ = Math.floor(pos.z + Math.sin(rad) * distance);
-    this.spawnEscapeActive = true;
+    if (!Number.isFinite(distance) || distance < 65 || distance > 1024 || !Number.isFinite(bearingDeg)) return;
     // 观测日志：逃逸是反射行为，无 planner 链路——直接写进程日志
     // （bot-<id>.log，manager 捕获 stdout），字段结构与结构化事件对齐。
     const escapeLog = (event: string, extra: Record<string, unknown> = {}) => {
@@ -6746,72 +6723,31 @@ export class MineflayerBotClient implements BotClient {
       );
     };
     escapeLog("bot_runtime_spawn_escape_started", {
-      from: `${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)}`,
-      target: `${targetX},${targetZ}`,
       distance,
       bearingDeg,
     });
-    // v0.1 修复（2026-09-03 实测）：spawn 第一 tick bot 常在半空且 chunk
-    // 未加载完——goto 17ms 内即拒绝。拒绝 ≠ 放弃：2s 后重试（等 chunk 追上），
-    // 三试仍败才落原始疾跑兜底（此前兜底被 .catch 吞掉永远不跑）。
-    // v0.2 修复（2026-09-04 实测）：逃逸必须走 movement 租约仲裁（ESCAPE=20
-    // 优先级，天然高于 TASK_NAVIGATION=40）——此前裸调 pathfinder.goto 绕过
-    // arbiter，2s 重试循环把 autonomy 任务的运动逐个顶掉（SKILL_CANCELLED 连发，
-    // tasks=0 的表象）。租约被更高级持有（EMERGENCY/COMBAT）时让位跳过。
-    const escapeLease = this.movementController.acquire({
-      owner: "spawn-escape",
-      priority: MOVEMENT_PRIORITIES.ESCAPE,
-      goal: { x: targetX, y: Math.floor(pos.y), z: targetZ },
-    });
-    if (escapeLease === null) {
-      escapeLog("bot_runtime_spawn_escape_skipped", { reason: "MOVEMENT_BUSY" });
-      this.spawnEscapeActive = false;
-      return;
-    }
-    const settle = (via: string) => {
-      this.spawnEscapeActive = false;
-      this.bot.setControlState("sprint", false);
-      this.bot.setControlState("jump", false);
-      escapeLease.release("completed");
-      const at = this.bot.entity?.position;
-      escapeLog("bot_runtime_spawn_escape_settled", {
-        via,
-        at: at
-          ? `${Math.floor(at.x)},${Math.floor(at.y)},${Math.floor(at.z)}`
-          : "unknown",
-      });
-      this.handlers?.onStateChanged();
-    };
-    const rawSprint = () => {
-      try {
+    const controller = new AbortController();
+    this.spawnEscape = controller;
+    const configuredMs = Number(process.env.STUDIO_SPAWN_ESCAPE_SPRINT_MS ?? "20000");
+    const durationMs = Number.isFinite(configuredMs) && configuredMs >= 3_000 && configuredMs <= 60_000 ? configuredMs : 20_000;
+    void runSpawnEscape({
+      movement: this.movementController,
+      position: () => {
+        const at = this.bot.entity?.position;
+        return at ? { x: at.x, z: at.z, dimension: normalizeDimension(String(this.bot.game?.dimension)) } : null;
+      },
+      look: (yaw) => this.bot.look(yaw, 0, true),
+      sprint: () => {
         this.bot.setControlState("sprint", true);
         this.bot.setControlState("forward", true);
-        void this.bot
-          .look(Math.atan2(-Math.cos(rad), Math.sin(rad)), 0, true)
-          .catch(() => undefined);
-        // v0.3（用户旁观实测 2026-09-04）：pathfinder 重试耗 6-8s + 5s 疾跑
-        // 不够离开击杀区——裸装每条命 ~10s 内被围死。原始疾跑为初始逃逸的
-        // 唯一手段（shaper 已实证直推控制状态过闸 delta 10.98）；时长默认
-        // 20s（≈100+ 格），STUDIO_SPAWN_ESCAPE_SPRINT_MS 可调。下坠期空气
-        // 控制无效无妨——落地瞬间疾跑即接管。
-        const sprintMs = Number(
-          process.env.STUDIO_SPAWN_ESCAPE_SPRINT_MS ?? "20000",
-        );
-        const duration = Number.isFinite(sprintMs) && sprintMs >= 3_000 && sprintMs <= 60_000
-          ? sprintMs
-          : 20_000;
-        setTimeout(() => {
-          this.bot.setControlState("forward", false);
-          this.bot.setControlState("sprint", false);
-          settle("raw_sprint");
-        }, duration).unref?.();
-      } catch {
-        settle("raw_sprint_failed");
-      }
-    };
-    // v0.3：初始逃逸直走原始疾跑——pathfinder 在出生点击杀区从未来得及
-    // 产出路径（200ms 假结算 + 重试全是浪费的死亡时间）。
-    rawSprint();
+      },
+    }, { origin: this.worldSpawnOrigin, distance, bearingDeg, durationMs, signal: controller.signal })
+      .then((outcome) => escapeLog("bot_runtime_spawn_escape_settled", { outcome }))
+      .catch(() => escapeLog("bot_runtime_spawn_escape_failed", { reason: "ESCAPE_CONTROL_FAILED" }))
+      .finally(() => {
+        if (this.spawnEscape === controller) this.spawnEscape = null;
+        this.handlers?.onStateChanged();
+      });
   }
 
   private bindInventoryEvents(): void {

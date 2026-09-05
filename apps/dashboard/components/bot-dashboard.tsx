@@ -195,9 +195,12 @@ export function BotDashboard() {
                 value={detailBot.armorPoints === null ? "不可用" : `${detailBot.armorPoints} / 20`}
               />
               <DrawerFact
-                label="延迟"
+                label="网络 Ping"
                 value={detailBot.latencyMs === null ? "不可用" : `${detailBot.latencyMs} ms`}
               />
+              <DrawerFact label="钻石及以上护甲" value={detailBot.armorSlots ? `${Object.values(detailBot.armorSlots).filter((item) => item?.startsWith("diamond_") || item?.startsWith("netherite_")).length} / 4 槽` : "未上报"} />
+              <DrawerFact label="物理 Tick 间隔 P95" value={detailBot.performance?.physics ? `${detailBot.performance.physics.p95IntervalMs} ms · ${detailBot.performance.physics.samples} 样本` : "等待采样"} />
+              <DrawerFact label="事件循环延迟 P99" value={detailBot.performance?.eventLoop ? `${detailBot.performance.eventLoop.p99DelayMs} ms · 峰值 ${detailBot.performance.eventLoop.maxDelayMs} ms` : "等待采样"} />
               <DrawerFact label="位置" value={formatPosition(detailBot)} />
               <DrawerFact label="L0 安全" value={formatSafety(detailBot)} />
               <DrawerFact

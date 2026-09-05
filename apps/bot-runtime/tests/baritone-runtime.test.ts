@@ -10,13 +10,18 @@ vi.mock("mineflayer-pathfinder", async (original) => {
   return { ...actual, Movements: class { exclusionAreasBreak = []; exclusionAreasPlace = []; } };
 });
 const scope = { serverProfileId: "isolated-local", dimension: "minecraft:overworld" };
-function fixture(assets = new WorldAssetAuthority()) {
+function fixture(assets = new WorldAssetAuthority(), initialCrop = "wheat", initialAge: unknown = 7, pickupDelayMs = 0) {
   const bot = new EventEmitter() as unknown as Bot;
   const wire = new EventEmitter();
-  let crop = "wheat", age = 7, seeds = 3, wheat = 0;
+  let crop = initialCrop, age = initialAge, seeds = 3, wheat = 0;
   const block = (p: Vec3) => ({ position: p, name: p.y === 63 ? "farmland" : p.x === 0 && p.z === 0 && p.y === 64 ? crop : "air",
     boundingBox: p.y < 64 ? "block" : "empty", diggable: true, getProperties: () => ({ age }) });
-  const dig = vi.fn(async () => { crop = "air"; wheat++; wire.emit("block_change", { location: { x: 0, y: 64, z: 0 }, type: 0 }); });
+  const dig = vi.fn(async () => {
+    crop = "air";
+    if (pickupDelayMs > 0) setTimeout(() => { wheat++; }, pickupDelayMs);
+    else wheat++;
+    wire.emit("block_change", { location: { x: 0, y: 64, z: 0 }, type: 0 });
+  });
   const placeBlock = vi.fn(async () => { crop = "wheat"; age = 0; seeds--; });
   Object.assign(bot, { _client: wire, game: { dimension: "overworld" }, entity: { position: new Vec3(0.5, 64, 1.5) },
     registry: { blocksByName: {} }, blockAt: block, clearControlStates: vi.fn(), stopDigging: vi.fn(),
@@ -32,6 +37,33 @@ function fixture(assets = new WorldAssetAuthority()) {
 }
 const input = { area: { ...scope, min: { x: 0, y: 64, z: 0 }, max: { x: 0, y: 64, z: 0 } }, crops: ["wheat"] };
 describe("process Runtime wiring", () => {
+  it("waits for delayed inventory pickup before reporting farm production", async () => {
+    const f = fixture(new WorldAssetAuthority(), "wheat", "7", 650);
+    const result = await f.invoke("farm.maintain", input);
+    expect(result).toMatchObject({ harvested: 1, planted: 1,
+      inventoryDelta: expect.arrayContaining([{ itemName: "wheat", delta: 1 }]) });
+  });
+  it("reports unconfirmed drops when the server never adds harvested items", async () => {
+    const f = fixture();
+    const items = f.bot.inventory.items;
+    vi.spyOn(f.bot.inventory, "items").mockImplementation(() => items().filter((item) => item.name !== "wheat"));
+    await expect(f.invoke("farm.maintain", input)).rejects.toMatchObject({ code: "FARM_DROPS_UNCONFIRMED" });
+  });
+  it.each([7, "7"])("harvests mature crops with numeric or string block states (%s)", async (age) => {
+    const f = fixture(new WorldAssetAuthority(), "wheat", age);
+    expect(await f.invoke("farm.maintain", input)).toMatchObject({ harvested: 1, planted: 1, unknownCells: 0 });
+    expect(f.bot.pathfinder.goto).toHaveBeenCalledWith(expect.objectContaining({ pos: new Vec3(0, 63, 0) }));
+  });
+  it.each([{}, null, "", "seven", -1, 1.5])("keeps invalid crop ages unobserved (%s)", async (age) => {
+    const f = fixture(new WorldAssetAuthority(), "wheat", age);
+    expect(await f.invoke("farm.maintain", input)).toMatchObject({ status: "WAITING_OBSERVATION", harvested: 0, unknownCells: 1 });
+    expect(f.dig).not.toHaveBeenCalled();
+  });
+  it("approaches supporting soil when planting an empty crop cell", async () => {
+    const f = fixture(new WorldAssetAuthority(), "air");
+    expect(await f.invoke("farm.maintain", { ...input, plantEmpty: "wheat" })).toMatchObject({ harvested: 0, planted: 1 });
+    expect(f.bot.pathfinder.goto).toHaveBeenCalledWith(expect.objectContaining({ pos: new Vec3(0, 63, 0) }));
+  });
   it("executes farm maintenance through locks, shared lease, wire confirmation, and shared provenance", async () => {
     const f = fixture();
     expect(await f.invoke("farm.maintain", input)).toMatchObject({ harvested: 1, planted: 1 });

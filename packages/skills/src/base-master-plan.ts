@@ -40,7 +40,7 @@ export const baseZoneSchema = z
       minZ: z.number().int(), maxZ: z.number().int(),
     }).strict(),
     /** 该区允许的设施类型。 */
-    allowedFacilityKinds: z.array(automatedFacilityKindSchema).max(11),
+    allowedFacilityKinds: z.array(automatedFacilityKindSchema).max(13),
   })
   .strict();
 export type BaseZone = z.infer<typeof baseZoneSchema>;
@@ -88,7 +88,7 @@ export const DEFAULT_FACILITY_DEPENDENCIES: Readonly<
     { dependsOnKind: "cobblestone_generator", strength: "hard", reason: "施工材料需要可再生来源" },
   ],
   gunpowder_farm: [
-    { dependsOnKind: "iron_farm", strength: "hard", reason: "需要铁工具/装备才能安全运营火药塔" },
+    { dependsOnKind: "iron_farm", strength: "soft", reason: "铁可由采矿或交易供应，不要求先建刷铁机" },
     { dependsOnKind: "crop_farm", strength: "hard", reason: "运营期消耗食物" },
   ],
   mob_drop_farm: [
@@ -97,6 +97,13 @@ export const DEFAULT_FACILITY_DEPENDENCIES: Readonly<
   storage_system: [], // 基础设施，无前置
   smelting_array: [
     { dependsOnKind: "storage_system", strength: "soft", reason: "燃料/原料需要存放点" },
+  ],
+  tree_farm: [
+    { dependsOnKind: "storage_system", strength: "soft", reason: "初期由 Bot 砍树和补种，后期再增加收集与存储" },
+  ],
+  trading_hall: [
+    { dependsOnKind: "crop_farm", strength: "soft", reason: "农作物可作交易输入，也可用木材、纸张或其他供应链" },
+    { dependsOnKind: "storage_system", strength: "soft", reason: "保存绿宝石与备用装备" },
   ],
 });
 

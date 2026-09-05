@@ -26,6 +26,27 @@ function farmFixture() {
   return { port, inventory, cancel: () => { cancelled = true; }, setCell: (value: Partial<FarmCell>) => { cell = { ...cell, ...value }; } };
 }
 describe("bounded farming", () => {
+  it("tills and immediately plants only when the soil is within the leased area", async () => {
+    const f = farmFixture();
+    f.setCell({ blockName: "air", age: null, belowName: "dirt" });
+    f.port.till = vi.fn(async () => { f.setCell({ belowName: "farmland" }); });
+    const input = farmMaintainInputSchema.parse({ area: { ...area, min: { ...position, y: 63 } },
+      crops: ["wheat"], plantEmpty: "wheat", prepareSoil: true, maxActions: 2 });
+    expect(await maintainFarm(f.port, input)).toMatchObject({ tilled: 1, planted: 1, harvested: 0 });
+    const outside = farmFixture(); outside.setCell({ blockName: "air", belowName: "dirt" });
+    outside.port.till = vi.fn();
+    await maintainFarm(outside.port, { ...input, area });
+    expect(outside.port.till).not.toHaveBeenCalled();
+  });
+  it("keeps the planting budget and seed reserve before tilling", async () => {
+    const f = farmFixture(); f.setCell({ blockName: "air", age: null, belowName: "dirt" });
+    f.port.till = vi.fn();
+    const input = farmMaintainInputSchema.parse({ area: { ...area, min: { ...position, y: 63 } }, crops: ["wheat"], plantEmpty: "wheat", prepareSoil: true, maxActions: 1 });
+    expect(await maintainFarm(f.port, input)).toMatchObject({ status: "BATCH_LIMIT", tilled: 0 });
+    f.inventory.set("wheat_seeds", 1);
+    expect(await maintainFarm(f.port, { ...input, maxActions: 2 })).toMatchObject({ status: "WAITING_SEEDS", tilled: 0 });
+    expect(f.port.till).not.toHaveBeenCalled();
+  });
   it("harvests, verifies replanting, and reports measured inventory delta", async () => {
     const f = farmFixture();
     const result = await maintainFarm(f.port, farmMaintainInputSchema.parse({ area, crops: ["wheat"] }));

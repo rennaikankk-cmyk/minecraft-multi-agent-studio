@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   botConnectionStateSchema,
   botPositionSchema,
+  botStatusV1Schema,
   combatRuntimeStatusV1Schema,
   identifierSchema,
   l0SafetyStatusSchema,
@@ -313,6 +314,8 @@ export const publicBotDetailV1Schema = publicBotSummaryV1Schema
       .strict()
       .nullable(),
     armorPoints: z.number().int().min(0).max(20).nullable(),
+    armorSlots: botStatusV1Schema.shape.payload.shape.armorSlots,
+    performance: botStatusV1Schema.shape.payload.shape.performance,
     latencyMs: z.number().int().nonnegative().max(120_000).nullable(),
     currentTask: publicTaskSchema.nullable(),
     position: botPositionSchema.nullable(),

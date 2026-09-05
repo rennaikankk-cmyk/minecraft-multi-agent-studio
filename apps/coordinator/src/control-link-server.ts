@@ -2403,6 +2403,8 @@ function projectBotState(
     health: status?.health ?? null,
     food: status?.food ?? null,
     armorPoints: status?.armorPoints ?? null,
+    armorSlots: status?.armorSlots,
+    performance: status?.performance,
     latencyMs: status?.latencyMs ?? null,
     currentTask,
     position: status?.position ?? null,

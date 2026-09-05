@@ -159,6 +159,7 @@ export interface BaseRecord {
   readonly anchor: BlockPosition;
   readonly blueprintId: string;
   readonly blueprintVersion: number;
+  source?: "bot_built" | "operator_adopted";
   protectedBounds?: { min: BlockPosition; max: BlockPosition };
   memberBotIds?: string[];
   phaseFacts?: Record<string, BasePhaseFact>;
@@ -282,7 +283,18 @@ export class BaseRegistry {
     if (!base || base.serverProfileId !== serverProfileId || base.dimension !== dimension) return false;
     base.memberBotIds ??= base.createdByBotId ? [base.createdByBotId] : [];
     if (!base.memberBotIds.includes(botId)) base.memberBotIds.push(botId);
+    base.updatedAt = new Date(this.now()).toISOString();
     return true;
+  }
+
+  assignMember(baseId: string, serverProfileId: string, dimension: string, botId: string): boolean {
+    const target = this.bases.get(baseId);
+    if (!target || target.serverProfileId !== serverProfileId || target.dimension !== dimension || target.status === "abandoned") return false;
+    for (const base of this.bases.values()) {
+      if (base.id === baseId || base.serverProfileId !== serverProfileId || base.dimension !== dimension) continue;
+      base.memberBotIds = (base.memberBotIds ?? (base.createdByBotId ? [base.createdByBotId] : [])).filter((id) => id !== botId);
+    }
+    return this.addMember(baseId, serverProfileId, dimension, botId);
   }
 
   forMember(botId: string, serverProfileId: string, dimension: string): BaseRecord | null {

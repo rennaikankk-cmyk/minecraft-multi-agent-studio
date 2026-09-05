@@ -1,4 +1,5 @@
 // ---------------------------------------------------------------------------
+import { farmProductionSchema, type FarmProduction, type BasePhaseFact } from "@minecraft-studio/skills";
 // Shared State 客户端（服务端专用）
 //
 // 数据流：浏览器 → dashboard API route（本文件，token 只在 Node 侧）
@@ -30,6 +31,7 @@ export interface SharedStateFacilityView {
   lifecycle: "planned" | "observed_existing";
   slotCounts: Record<string, number>;
   slots: SharedStateSlotView[];
+  production?: FarmProduction | null;
 }
 
 export interface SharedStateWorkstationView {
@@ -55,6 +57,10 @@ export interface SharedStateBaseView {
   placedCells: number;
   facilityCount: number;
   updatedAt: string;
+  source?: "bot_built" | "operator_adopted";
+  memberBotIds?: string[];
+  phaseFacts?: Record<string, BasePhaseFact>;
+  protectedBounds?: { min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number } } | null;
 }
 
 export interface SharedStateView {
@@ -107,6 +113,7 @@ interface SnapshotFacility {
   anchor?: { x: number; y: number; z: number };
   discovery?: string;
   slots?: SnapshotFacilitySlot[];
+  metadata?: { production?: unknown };
 }
 
 interface SnapshotBase {
@@ -120,6 +127,10 @@ interface SnapshotBase {
   integrity01?: number;
   placedCells?: number;
   updatedAt?: string;
+  source?: "bot_built" | "operator_adopted";
+  memberBotIds?: string[];
+  phaseFacts?: Record<string, BasePhaseFact>;
+  protectedBounds?: SharedStateBaseView["protectedBounds"];
 }
 
 interface SnapshotWorkstation {
@@ -154,6 +165,7 @@ export function toSharedStateView(snapshot: Snapshot): SharedStateView {
     }));
     const slotCounts: Record<string, number> = {};
     for (const slot of slots) slotCounts[slot.status] = (slotCounts[slot.status] ?? 0) + 1;
+    const production = farmProductionSchema.safeParse(facility.metadata?.production);
     return {
       id: facility.id ?? "unknown-facility",
       facilityType: facility.facilityType ?? "unknown",
@@ -164,6 +176,8 @@ export function toSharedStateView(snapshot: Snapshot): SharedStateView {
       lifecycle: facility.discovery === "observed_existing" ? "observed_existing" : "planned",
       slotCounts,
       slots,
+      production: production.success && production.data.input.area.serverProfileId === facility.serverProfileId &&
+        production.data.input.area.dimension === facility.dimension ? production.data : null,
     };
   });
 
@@ -179,6 +193,13 @@ export function toSharedStateView(snapshot: Snapshot): SharedStateView {
     placedCells: base.placedCells ?? 0,
     facilityCount: facilities.filter((facility) => facility.baseId === (base.id ?? "unknown-base")).length,
     updatedAt: base.updatedAt ?? new Date(0).toISOString(),
+    source: base.source ?? "bot_built",
+    memberBotIds: base.memberBotIds ?? [],
+    protectedBounds: base.protectedBounds ?? null,
+    phaseFacts: Object.fromEntries(Object.entries(base.phaseFacts ?? {}).map(([key, fact]) => {
+      const age = Date.now() - Date.parse(fact.observedAt);
+      return [key, { ...fact, availability: key !== "BASE_SITE_RESERVED" && (!Number.isFinite(age) || age < -5_000 || age > 60_000) ? "UNVERIFIED" : fact.availability }];
+    })),
   }));
 
   const workstations = (snapshot.workstations?.entries ?? []).map((entry): SharedStateWorkstationView => ({

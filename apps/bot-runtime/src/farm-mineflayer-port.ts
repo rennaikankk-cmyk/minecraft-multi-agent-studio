@@ -14,6 +14,7 @@ export function createFarmPort(bot: Bot, input: FarmMaintainInput, dependencies:
   approach(position: WorkPosition): Promise<void>;
   approachPickup(position: WorkPosition): Promise<void>;
 }): FarmMaintenancePort {
+  let pendingHarvest: { position: WorkPosition; itemName: string; before: number } | null = null;
   const inventory = () => {
     const counts = new Map<string, number>();
     for (const item of bot.inventory.items()) counts.set(item.name, (counts.get(item.name) ?? 0) + item.count);
@@ -23,8 +24,12 @@ export function createFarmPort(bot: Bot, input: FarmMaintainInput, dependencies:
     const block = bot.blockAt(vector(position));
     const properties = block?.getProperties();
     const facing = properties?.facing;
+    // Prismarine exposes some integer block-state enums as decimal strings.
+    const rawAge = properties?.age;
+    const age = typeof rawAge === "number" ? rawAge
+      : typeof rawAge === "string" && /^\d+$/u.test(rawAge) ? Number(rawAge) : NaN;
     return { position, blockName: block?.name ?? null,
-      age: typeof properties?.age === "number" ? properties.age : null,
+      age: Number.isSafeInteger(age) && age >= 0 ? age : null,
       facing: facing === "north" || facing === "south" || facing === "east" || facing === "west" ? facing : null,
       belowName: bot.blockAt(vector(position).offset(0, -1, 0))?.name ?? null,
       aboveName: bot.blockAt(vector(position).offset(0, 1, 0))?.name ?? null };
@@ -45,10 +50,32 @@ export function createFarmPort(bot: Bot, input: FarmMaintainInput, dependencies:
   };
   return {
     inspect, inventory, assertActive: dependencies.assertActive, approach: dependencies.approach,
+    till: async (cell) => {
+      const soil = { ...cell.position, y: cell.position.y - 1 };
+      const hoe = bot.inventory.items().find((item) => item.name.endsWith("_hoe"));
+      if (!hoe) throw new SkillFault("FARM_HOE_REQUIRED");
+      await equip(hoe.name);
+      await assertEffect(soil);
+      const block = bot.blockAt(vector(soil));
+      const above = bot.blockAt(vector(cell.position));
+      if (!block || !["dirt", "grass_block"].includes(block.name) || !above || !["air", "cave_air"].includes(above.name)) {
+        throw new SkillFault("FARM_SUBSTRATE_MISMATCH");
+      }
+      await bot.activateBlock(block, new Vec3(0, 1, 0));
+      for (let attempt = 0; attempt < 20; attempt++) {
+        await delay(50, undefined, { signal: dependencies.signal });
+        dependencies.assertActive();
+        if (bot.blockAt(vector(soil))?.name === "farmland") return;
+      }
+      throw new SkillFault("FARM_TILLING_UNCONFIRMED");
+    },
     harvest: async (cell) => {
       await assertEffect(cell.position, true);
       const block = bot.blockAt(vector(cell.position));
       if (!block || block.name !== cell.blockName) throw new SkillFault("FARM_READBACK_MISMATCH");
+      const rule = cropRules[block.name as keyof typeof cropRules];
+      if (!rule) throw new SkillFault("FARM_READBACK_MISMATCH");
+      pendingHarvest = { position: cell.position, itemName: rule.itemName, before: inventory().get(rule.itemName) ?? 0 };
       await bot.dig(block);
     },
     plant: async (crop, cell) => {
@@ -78,9 +105,18 @@ export function createFarmPort(bot: Bot, input: FarmMaintainInput, dependencies:
     },
     collectDrops: async (position) => {
       dependencies.assertActive();
+      const receipt = pendingHarvest;
+      if (!receipt || vector(receipt.position).distanceTo(vector(position)) !== 0) throw new SkillFault("FARM_DROPS_UNCONFIRMED");
+      const received = () => (inventory().get(receipt.itemName) ?? 0) > receipt.before;
       // Walking stays in the selected farm. Never chase unrelated drops outside the selection.
-      if (withinWorkArea(input.area, position)) await dependencies.approachPickup(position);
-      await delay(300, undefined, { signal: dependencies.signal });
+      if (!received() && withinWorkArea(input.area, position)) await dependencies.approachPickup(position);
+      for (let attempt = 0; attempt < 40; attempt++) {
+        dependencies.assertActive();
+        if (received()) { pendingHarvest = null; return; }
+        await delay(50, undefined, { signal: dependencies.signal });
+      }
+      if (received()) { pendingHarvest = null; return; }
+      throw new SkillFault("FARM_DROPS_UNCONFIRMED");
     },
     yield: async () => { await delay(0, undefined, { signal: dependencies.signal }); },
   };

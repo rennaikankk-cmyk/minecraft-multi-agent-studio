@@ -9,6 +9,7 @@ import {
   type SkillJsonValue,
 } from "@minecraft-studio/protocol";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { farmMaintainOutputSchema } from "@minecraft-studio/skills";
 
 import { createMineflayerClient } from "../src/mineflayer-client.js";
 import { SingleBotRuntime } from "../src/runtime.js";
@@ -40,6 +41,7 @@ const REAL_ACCEPTANCE_SKILL_IDS = [
   "combat.engage",
   "combat.disengage",
   "trade.villager",
+  "farm.maintain",
   "shelter.dig",
 ] as const;
 
@@ -111,9 +113,24 @@ const ACCEPTANCE_ZONES: readonly AcceptanceZone[] = [
 ];
 
 const runtimeEvents: string[] = [];
+const runtimeFaults: unknown[] = [];
+const runtimeDiagnostics: unknown[] = [];
 const logger: RuntimeLogger = {
-  info: (event) => runtimeEvents.push(`info:${event}`),
-  warn: (event) => runtimeEvents.push(`warn:${event}`),
+  info: (event, fields) => {
+    runtimeEvents.push(`info:${event}`);
+    if (event === "runtime_event_loop_delay") {
+      runtimeDiagnostics.push({ event, fields });
+      if (runtimeDiagnostics.length > 8) runtimeDiagnostics.shift();
+    }
+  },
+  warn: (event, fields) => {
+    runtimeEvents.push(`warn:${event}`);
+    if (event === "bot_runtime_skill_fault") runtimeFaults.push(fields);
+    if (event === "bot_runtime_client_error" || event === "bot_runtime_disconnected") {
+      runtimeDiagnostics.push({ event, fields });
+      if (runtimeDiagnostics.length > 8) runtimeDiagnostics.shift();
+    }
+  },
   error: (event) => runtimeEvents.push(`error:${event}`),
 };
 
@@ -330,7 +347,9 @@ async function runSkill(
     const reason = error instanceof Error ? error.message : String(error);
     throw new Error(
       `${reason}; runtimeState=${bot.runtime.getState()}; position=${JSON.stringify(position)}; ` +
-        `completed=${bot.completedSkillIds.join(",")}`,
+        `completed=${bot.completedSkillIds.join(",")}; ` +
+        `safety=${JSON.stringify(latestStatus?.type === "bot.status.v1" ? latestStatus.payload.safety : null)}; ` +
+        `events=${runtimeEvents.slice(-30).join(",")}; faults=${JSON.stringify(runtimeFaults.slice(-2))}; diagnostics=${JSON.stringify(runtimeDiagnostics)}`,
       { cause: error },
     );
   }
@@ -451,7 +470,8 @@ async function runAllSkillsForBot(bot: AcceptanceBot, dimension: string): Promis
   expect(packOutput).toMatchObject({ totalItems: 2, nextIndex: 2, completed: true });
 
   const placeReference = { x: zone.origin.x + 4, y: 64, z: 4 };
-  await moveTo(bot, { x: zone.origin.x + 4, y: 65, z: 5 }, dimension);
+  // Keep the entire radius-one arrival area clear of the placement cell.
+  await moveTo(bot, { x: zone.origin.x + 4, y: 65, z: 6 }, dimension);
   const placeOutput = await runSkill(bot, "world.place-block", {
     itemName: "cobblestone",
     referenceBlock: placeReference,
@@ -638,6 +658,16 @@ async function runAllSkillsForBot(bot: AcceptanceBot, dimension: string): Promis
     spentCount: 1,
   });
 
+  await moveTo(bot, { ...zone.origin, z: -3 }, dimension);
+  const farmOutput = await runSkill(bot, "farm.maintain", {
+    area: { serverProfileId, dimension, min: { x: zone.origin.x, y: 64, z: -4 }, max: { x: zone.origin.x + 2, y: 65, z: -4 } },
+    crops: ["carrots"], plantEmpty: "carrots", prepareSoil: true, replant: true, maxActions: 8,
+  });
+  expect(farmOutput).toMatchObject({ status: "PASS_COMPLETE", harvested: 2, planted: 3, tilled: 1, unknownCells: 0 });
+  const farmReceipt = farmMaintainOutputSchema.parse(farmOutput);
+  expect(farmReceipt.inventoryDelta.find((item) => item.itemName === "carrot")?.delta ?? 0).toBeGreaterThan(0);
+  console.info("ISOLATED_FARM_RECEIPT", JSON.stringify({ botId: bot.profile.botId, ...farmReceipt }));
+
   // shelter.dig seals the original standing cell by design. Run it last so
   // the acceptance can exercise all other movement-dependent skills first.
   await moveTo(bot, zone.origin, dimension);
@@ -652,6 +682,14 @@ async function runAllSkillsForBot(bot: AcceptanceBot, dimension: string): Promis
   expect(outputNumber(shelterOutput, "dugBlocks")).toBeGreaterThanOrEqual(2);
 
   expect(bot.completedSkillIds).toEqual(REAL_ACCEPTANCE_SKILL_IDS);
+  const latest = [...bot.messages].reverse().find((message) => message.type === "bot.status.v1");
+  const evidence = { schemaVersion: "1.0", observedAt: new Date().toISOString(), botId: bot.profile.botId,
+    completedSkills: bot.completedSkillIds, farm: farmReceipt,
+    performance: latest?.type === "bot.status.v1" ? latest.payload.performance : null };
+  const setupReady = process.env.MC_SKILL_SETUP_READY_FILE;
+  if (!setupReady) throw new Error("Skill setup marker path is required for acceptance evidence.");
+  await writeFile(path.join(path.dirname(setupReady), `skills-receipt-${bot.profile.botId}.json`), JSON.stringify(evidence, null, 2) + "\n", "utf8");
+  console.info("ISOLATED_SKILLS_ACCEPTANCE", JSON.stringify(evidence));
 }
 
 integrationDescribe("real isolated Minecraft 1.21.8 server", () => {
@@ -675,6 +713,8 @@ integrationDescribe("real isolated Minecraft 1.21.8 server", () => {
   });
   beforeEach(() => {
     runtimeEvents.length = 0;
+    runtimeFaults.length = 0;
+    runtimeDiagnostics.length = 0;
   });
 
   it(
@@ -768,7 +808,7 @@ integrationDescribe("real isolated Minecraft 1.21.8 server", () => {
   );
 
   it(
-    "executes all 21 builtin skills for two bots against independent real fixtures without an LLM prompt",
+    "executes 22 skills for two bots against independent real fixtures without an LLM prompt",
     async () => {
       const setupRequest = process.env.MC_SKILL_SETUP_REQUEST_FILE;
       const setupReady = process.env.MC_SKILL_SETUP_READY_FILE;

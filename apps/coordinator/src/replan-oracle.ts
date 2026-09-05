@@ -92,6 +92,8 @@ const SUBSTITUTIONS: Readonly<Record<SurvivalNeedKey, readonly string[]>> = Obje
   BASE_MAIN_CONSTRUCTION: Object.freeze([]),
   BASE_FACILITY_COBBLE: Object.freeze([]),
   BASE_FACILITY_FARM: Object.freeze([]),
+  BASE_FARM_MAINTENANCE: Object.freeze([]),
+  BASE_RETURN: Object.freeze([]),
   TORCH: Object.freeze(["torch"]),
   CHEST: Object.freeze(["chest"]),
   RECON_PATROL: Object.freeze([]),

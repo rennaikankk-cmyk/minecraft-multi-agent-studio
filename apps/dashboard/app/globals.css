@@ -1177,6 +1177,38 @@ html:not([data-theme]) .botOverviewStrip h3 {
 .badge-info { color:var(--info, #58a6ff); border-color:currentColor; background:color-mix(in srgb, var(--info, #58a6ff) 12%, transparent); }
 
 .metricRow { display:flex; flex-wrap:wrap; gap:12px; }
+.baseOperations { display: grid; gap: 16px; letter-spacing: 0; }
+.baseSummary { display: flex; flex-wrap: wrap; align-items: center; gap: 20px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.baseSummary > span { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; }
+.baseSummary strong { font-size: 18px; }
+.baseSummary select { margin-left: auto; max-width: 100%; padding: 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface, #171717); }
+.baseIconButton { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; flex: 0 0 32px; border-radius: 4px; }
+.baseIconButton:hover { background: var(--hover, #333); }
+.baseRecord { border: 1px solid var(--border); border-radius: 6px; min-width: 0; overflow: hidden; }
+.baseRecordHeader { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 14px; }
+.baseIdentity { min-width: 0; flex: 1 1 180px; overflow-wrap: anywhere; }
+.baseIdentity h2 { font-size: 16px; font-weight: 600; margin: 0 0 4px; }
+.baseIdentity > span, .baseMemberCount { font-size: 12px; color: var(--muted, #999); }
+.basePhaseStrip { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 1px; background: var(--border, #444); }
+.basePhase { display: grid; gap: 5px; padding: 12px 10px; background: var(--surface, #171717); border-top: 2px solid #737373; font-size: 12px; }
+.basePhase strong { font-weight: 500; color: #a3a3a3; }
+.basePhase.available { border-top-color: #37b98b; }
+.basePhase.available strong { color: #37b98b; }
+.basePhase.damaged { border-top-color: #ee7272; }
+.basePhase.recovering { border-top-color: #e6be57; }
+.baseRecordDetail { padding: 18px; border-top: 1px solid var(--border); }
+.baseRecordDetail h3 { font-size: 14px; margin: 20px 0 10px; }
+.baseFacts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 0; font-size: 12px; }
+.baseFacts dt { color: var(--muted, #999); margin-bottom: 4px; }
+.baseFacts dd { margin: 0; overflow-wrap: anywhere; }
+.baseFacility { padding: 14px 0; border-top: 1px solid var(--border); }
+.baseFacilityHeading { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; font-size: 13px; }
+@media (max-width: 700px) {
+  .basePhaseStrip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .baseFacts { grid-template-columns: minmax(0, 1fr); }
+  .baseSummary { gap: 12px; }
+  .baseSummary select { margin-left: 0; }
+}
 .metricCard { display:flex; flex-direction:column; gap:2px; min-width:120px; padding:10px 14px;
   border:1px solid var(--border, #30363d); border-radius:8px; background:var(--panel, #0d1117); }
 .metricLabel { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted, #8b949e); }

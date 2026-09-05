@@ -10,6 +10,7 @@ export interface FarmMaintenancePort {
   approach(position: WorkPosition): Promise<void>;
   harvest(cell: FarmCell): Promise<void>;
   plant(crop: FarmCropName, cell: FarmCell): Promise<void>;
+  till?(cell: FarmCell): Promise<void>;
   bonemeal(cell: FarmCell): Promise<void>;
   collectDrops(position: WorkPosition): Promise<void>;
   yield(): Promise<void>;
@@ -19,7 +20,7 @@ export interface FarmMaintenancePort {
 export async function maintainFarm(port: FarmMaintenancePort, input: FarmMaintainInput): Promise<FarmMaintainOutput> {
   const before = new Map(port.inventory());
   const positions = workAreaPositions(input.area, true);
-  let scannedCells = 0, unknownCells = 0, harvested = 0, planted = 0, bonemealUsed = 0, actions = 0;
+  let scannedCells = 0, unknownCells = 0, harvested = 0, planted = 0, tilled = 0, bonemealUsed = 0, actions = 0;
   let waitingSeeds = false, growing = false, limited = false;
   for (const position of positions) {
     port.assertActive();
@@ -28,6 +29,25 @@ export async function maintainFarm(port: FarmMaintenancePort, input: FarmMaintai
     scannedCells++;
     if (scannedCells % 16 === 0) { await port.yield(); port.assertActive(); }
     if (cell.blockName === null) { unknownCells++; continue; }
+    if (["air", "cave_air"].includes(cell.blockName) && input.plantEmpty) {
+      const rule = cropRules[input.plantEmpty];
+      const hasSeeds = (port.inventory().get(rule.seedItem!) ?? 0) > input.seedReserve;
+      const soil = { ...position, y: position.y - 1 };
+      const tillable = input.prepareSoil && rule.substrate === "farmland" &&
+        ["dirt", "grass_block"].includes(cell.belowName ?? "") && withinWorkArea(input.area, soil);
+      if ((tillable || cell.belowName === rule.substrate) && !hasSeeds) waitingSeeds = true;
+      if (tillable && hasSeeds) {
+        if (actions + 2 > input.maxActions) { limited = true; break; }
+        if (!port.till) throw new SkillFault("FARM_TILLING_UNAVAILABLE");
+        await port.approach(soil);
+        port.assertActive();
+        await port.till(cell);
+        port.assertActive();
+        cell = port.inspect(position);
+        if (cell.belowName !== "farmland") throw new SkillFault("FARM_READBACK_MISMATCH");
+        tilled++; actions++;
+      }
+    }
     const selectedCrop = input.crops.includes(cell.blockName as FarmCropName) ? cell.blockName as FarmCropName : null;
     if (selectedCrop) {
       const rule = cropRules[selectedCrop];
@@ -85,7 +105,7 @@ export async function maintainFarm(port: FarmMaintenancePort, input: FarmMaintai
   return {
     status: limited ? "BATCH_LIMIT" : unknownCells > 0 ? "WAITING_OBSERVATION" : waitingSeeds ? "WAITING_SEEDS"
       : actions === 0 && growing ? "WAITING_GROWTH" : "PASS_COMPLETE",
-    scannedCells, unknownCells, harvested, planted, bonemealUsed,
+    scannedCells, unknownCells, harvested, planted, tilled, bonemealUsed,
     inventoryDelta: [...names].sort().map((itemName) => ({ itemName, delta: (after.get(itemName) ?? 0) - (before.get(itemName) ?? 0) })).filter((item) => item.delta !== 0),
     observedAt: new Date().toISOString(),
   };

@@ -397,6 +397,23 @@ export class CombatDriver {
     };
   }
 
+  shouldEngageProactively(observation: CombatDriverObservation, nowMs: number): boolean {
+    if (!this.observationAvailable(observation) || observation.observedAtMs > nowMs ||
+      nowMs - observation.observedAtMs > 250 || observation.self.health < 12 ||
+      observation.weapons.length === 0 || observation.hazards === null) return false;
+    const totalTotems = observation.self.inventoryTotemCount + Number(observation.self.offhandIsTotem);
+    const assessment = this.threatAnalyzer.assess({ observedAtMs: observation.observedAtMs,
+      serverProfileId: observation.serverProfileId, selfPosition: observation.self.position,
+      selfHealth: observation.self.health, totemCount: totalTotems, entities: observation.entities });
+    const players = new Set(observation.entities.filter(({ entity }) => entity.kind === "player").map(({ entity }) => entity.entityId));
+    if (!assessment.threats.some((threat) => players.has(threat.entityId) && threat.distance <= 16)) return false;
+    const gear = this.gearAssessment(observation, assessment.threats);
+    if (this.currentStance !== "aggressive" && (gear.shouldAvoid || assessment.hostileCount > 3)) return false;
+    const retreat = this.retreatController.evaluate(assessment, observation.self.health, observation.self.position,
+      new Map(observation.entities.map((entity) => [entity.entity.entityId, entity.position])), gear);
+    return !retreat.suppressOffense && this.targetSelector.select(assessment, observation.self.health, totalTotems, gear).target !== null;
+  }
+
   status(): CombatRuntimeStatusV1 {
     return {
       schemaVersion: "1.0",

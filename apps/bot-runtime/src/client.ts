@@ -107,6 +107,7 @@ export type BotRecoveryActionResult = Readonly<{
 export type BotClientHandlers = {
   onSpawn: () => void;
   onStateChanged: () => void;
+  onPhysicsTick?: () => void;
   onDamaged?: (info: BotDamageInfo) => void;
   onDeath?: (info: BotDeathInfo) => void;
   onChat?: (info: BotChatMessage) => void;

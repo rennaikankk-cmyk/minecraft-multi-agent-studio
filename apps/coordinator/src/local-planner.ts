@@ -4075,6 +4075,14 @@ function deterministicSkillDecision(
     );
     return entry?.skillVersion ?? null;
   };
+  if (parsed.kind === "maintain-farm") {
+    const skillVersion = advertisedVersion("farm.maintain");
+    if (skillVersion === null) return null;
+    return { action: "invoke_skill", botId: request.botId, taskId: request.taskId, skillId: "farm.maintain", skillVersion,
+      input: { area: { min: parsed.min, max: parsed.max, dimension, serverProfileId: TRUSTED_SERVER_PROFILE_PLACEHOLDER },
+        crops: [parsed.crop], plantEmpty: parsed.crop, prepareSoil: true, replant: true, seedReserve: 1, maxActions: 32, maxBonemeal: 0 },
+      reasonCode: "DETERMINISTIC_FARM_MAINTENANCE" };
+  }
   if (parsed.kind === "move-to") {
     const skillVersion = advertisedVersion("movement.goto");
     if (skillVersion === null) return null;

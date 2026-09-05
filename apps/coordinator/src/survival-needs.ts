@@ -1,4 +1,4 @@
-import { DeathStreakTracker, assessDropRecovery } from "@minecraft-studio/skills";
+import { armorScore, assessDropRecovery } from "@minecraft-studio/skills";
 // ---------------------------------------------------------------------------
 // SurvivalNeeds —— 自主生存的确定性需求评估器（Needs/Utility + Goal Graph）。
 //
@@ -47,6 +47,8 @@ export type SurvivalNeedKey =
   | "BASE_MAIN_CONSTRUCTION"
   | "BASE_FACILITY_COBBLE"
   | "BASE_FACILITY_FARM"
+  | "BASE_FARM_MAINTENANCE"
+  | "BASE_RETURN"
   | "COAL_RESERVE"
   | "TORCH"
   | "CHEST"
@@ -96,6 +98,7 @@ export type SurvivalAssessmentInput = Readonly<{
   basePhase?: BasePhaseSnapshot | null;
   /** 可注入时钟（P0-A8）：不传则用 Date。一次读取贯穿整个评估。 */
   now?: Date;
+  recoveryMemory?: SurvivalRecoveryMemory;
 }>;
 
 /**
@@ -124,6 +127,8 @@ const PRIORITY_ORDER: readonly SurvivalNeedKey[] = Object.freeze([
   "BASE_MAIN_CONSTRUCTION",
   "BASE_FACILITY_COBBLE",
   "BASE_FACILITY_FARM",
+  "BASE_FARM_MAINTENANCE",
+  "BASE_RETURN",
   "COAL_RESERVE",
   "TORCH",
   "CHEST",
@@ -132,15 +137,8 @@ const PRIORITY_ORDER: readonly SurvivalNeedKey[] = Object.freeze([
 ]);
 
 /** 任何档位的护甲件（用于"有甲未穿"的 EQUIP_ARMOR 判定）。 */
-const ARMOR_PIECE_NAMES = [
-  "iron_helmet",
-  "iron_chestplate",
-  "iron_leggings",
-  "iron_boots",
-  "diamond_helmet",
-  "diamond_chestplate",
-  "diamond_leggings",
-  "diamond_boots",
+const ARMOR_SLOT_PIECES = [
+  ["head", "helmet"], ["chest", "chestplate"], ["legs", "leggings"], ["feet", "boots"],
 ] as const;
 
 const FOOD_EMERGENCY = 3;
@@ -152,16 +150,26 @@ const COAL_MINIMUM = 8;
 const IRON_MINIMUM = 6;
 const TORCH_MINIMUM = 16;
 const DIAMOND_PICKAXE_RESERVE = 3;
-/** 死亡点回收窗口：掉落物 5 分钟后开始消失，留 15 分钟是保守上限。 */
-
 /** 连续死亡追踪——streak ≥ 3 时停止送装备去捡装备。 */
-const deathStreakTracker = new DeathStreakTracker({ resetWindowMs: 5 * 60_000 });
-/**
- * 门禁 3 修复：recordDeath 此前从未被调用（streak 恒 0，死亡循环保险丝
- * 失效）。assessSurvivalNeeds 是 coordinator 每 tick 的入口——在这里识别
- * 新死亡（diedAt 未见过）记 streak；到达死点视为捡回，reset。
- */
-const seenDeathAtByBot = new Map<string, string>();
+export class SurvivalRecoveryMemory {
+  private readonly entries = new Map<string, { seen: string; deaths: number[] }>();
+
+  observe(record: BotRegistryRecord, nowMs: number, arrived: boolean): number {
+    const diedAt = record.currentStatus?.lastDeath?.diedAt;
+    if (!diedAt) return 0;
+    const key = JSON.stringify([record.serverProfileId, record.botId]);
+    const entry = this.entries.get(key) ?? { seen: "", deaths: [] };
+    entry.deaths = entry.deaths.filter((at) => at > nowMs - 300_000 && at <= nowMs);
+    const at = Date.parse(diedAt);
+    if (entry.seen !== diedAt && Number.isFinite(at) && at <= nowMs && at > nowMs - 300_000) {
+      entry.deaths.push(at);
+    }
+    entry.seen = diedAt;
+    if (arrived) entry.deaths = [];
+    this.entries.set(key, entry);
+    return entry.deaths.length;
+  }
+}
 const DEATH_RECOVERY_WINDOW_MS = 15 * 60_000;
 /** 距死点多近算"已到达"（掉落物碰撞拾取半径外扩）。 */
 const DEATH_RECOVERY_ARRIVAL_BLOCKS = 6;
@@ -211,17 +219,12 @@ export function assessSurvivalNeeds(
       status.position.z - lastDeath.z,
     ) : Infinity;
     // streak 接线：新死亡记一次；到达死点（已捡回）则清零。
-    const seenDeathAt = seenDeathAtByBot.get(input.record.botId);
-    if (seenDeathAt !== lastDeath.diedAt) {
-      seenDeathAtByBot.set(input.record.botId, lastDeath.diedAt);
-      deathStreakTracker.recordDeath();
-    }
-    if (sameDimension && distance <= DEATH_RECOVERY_ARRIVAL_BLOCKS) {
-      deathStreakTracker.reset();
-    }
+    const deathStreak = input.recoveryMemory?.observe(input.record, now.getTime(),
+      sameDimension && distance <= DEATH_RECOVERY_ARRIVAL_BLOCKS) ?? 1;
     if (
       sameDimension &&
       Number.isFinite(deathAgeMs) &&
+      now.getTime() >= deathAgeMs &&
       now.getTime() - deathAgeMs <= DEATH_RECOVERY_WINDOW_MS &&
       distance > DEATH_RECOVERY_ARRIVAL_BLOCKS
     ) {
@@ -237,7 +240,7 @@ export function assessSurvivalNeeds(
         diedAtMs: deathAgeMs,
         nowMs: now.getTime(),
         distanceBlocks: Math.round(distance),
-        deathStreak: deathStreakTracker.streak,
+        deathStreak,
         sameDimension,
         despawnWindowMs: DEATH_RECOVERY_WINDOW_MS,
       });
@@ -258,6 +261,7 @@ export function assessSurvivalNeeds(
   // 由确定性 GoalPlanner 倒推，这里不重复描述依赖。
   // P0-A1: 从最高档往下找——同时有木镐和铁镐时，当前档位是铁，不是木。
   const pickaxeTier = (() => {
+    if ((inventory.get("netherite_pickaxe")?.count ?? 0) > 0) return 3;
     for (let i = PICKAXE_TIERS.length - 1; i >= 0; i -= 1) {
       if ((inventory.get(PICKAXE_TIERS[i]!)?.count ?? 0) > 0) return i;
     }
@@ -317,6 +321,7 @@ export function assessSurvivalNeeds(
   // ---- 武器：石器时代之后必须有；铁器时代升铁剑。
   // P0-A1: 剑也用最高可用档
   const bestSwordTier = (() => {
+    if ((inventory.get("netherite_sword")?.count ?? 0) > 0) return 3;
     if ((inventory.get("diamond_sword")?.count ?? 0) > 0) return 3;
     if ((inventory.get("iron_sword")?.count ?? 0) > 0) return 2;
     if ((inventory.get("stone_sword")?.count ?? 0) > 0) return 1;
@@ -332,27 +337,32 @@ export function assessSurvivalNeeds(
   // ---- 有甲未穿：armorPoints 只反映穿戴，合好的甲放在背包里等于没有。
   // 穿戴是零成本幂等技能（inventory.equip-armor），永远先于"再合一件"。
   const armorPoints = status?.armorPoints ?? 0;
-  const ownedArmorPieces = ARMOR_PIECE_NAMES.filter((name) => (inventory.get(name)?.count ?? 0) > 0);
-  if (armorPoints === 0 && ownedArmorPieces.length > 0) {
+  const armorSlots = status?.armorSlots;
+  const ownedArmorPieces = [...inventory.keys()].filter((name) => armorScore(name) > 0);
+  const needsEquip = armorSlots
+    ? ARMOR_SLOT_PIECES.some(([slot, suffix]) => ownedArmorPieces.some((name) =>
+      name.endsWith(`_${suffix}`) && armorScore(name) > armorScore(armorSlots[slot])))
+    : armorPoints === 0 && ownedArmorPieces.length > 0;
+  const missingArmor = (material: "iron" | "diamond") => ARMOR_SLOT_PIECES.find(([slot, suffix]) => {
+    const sufficient = (name: string | null) => name?.endsWith(`_${suffix}`) &&
+      armorScore(name) >= armorScore(`${material}_${suffix}`);
+    return !sufficient(armorSlots?.[slot] ?? null) && !ownedArmorPieces.some(sufficient);
+  });
+  if (needsEquip) {
     needs.push({
       key: "EQUIP_ARMOR",
       score: 60,
-      reason: `armor points 0 while carrying ${ownedArmorPieces.length} armor piece(s)`,
+      reason: `carried armor improves an equipped slot (${armorPoints} armor points)`,
       title: "穿上最好的护甲",
       operatorGoal: "穿上最好的护甲",
       sourceBlock: null,
     });
   }
 
-  // ---- 铁甲：armorPoints 只告诉"穿了没"，不告诉穿了什么；逐件补齐。
-  // 只有在一件甲都没有时才走合成链——有甲先穿，缺件再补。
-  // P0-A3: 只在背包中没有可穿护甲时才合成新的（有的话先 EQUIP_ARMOR）。
-  // armorPoints < 15 (full iron = 2+6+5+2) 表示没穿满。
-  if (pickaxeTier >= 2 && armorPoints < 15 && ownedArmorPieces.length === 0) {
-    // P0-A3: armorPoints < 15 (full iron = 2+6+5+2) 表示没穿满。
-    // 协议没有逐槽信息，用 armorPoints 推断下一个缺失件：
-    // <2=盔, <8=胸, <13=腿, <15=靴。
-    const nextPiece = armorPoints < 2 ? "iron_helmet"
+  // ---- 铁甲：先装备已有升级，再按实际槽位补件；兼容旧 Runtime 总护甲值。
+  if (pickaxeTier >= 2 && !needsEquip && (armorSlots ? missingArmor("iron") !== undefined : armorPoints < 15 && ownedArmorPieces.length === 0)) {
+    // 旧 Runtime 没有逐槽信息时保留原总护甲值推断。
+    const nextPiece = armorSlots ? `iron_${missingArmor("iron")![1]}` : armorPoints < 2 ? "iron_helmet"
       : armorPoints < 8 ? "iron_chestplate"
       : armorPoints < 13 ? "iron_leggings"
       : "iron_boots";
@@ -380,8 +390,7 @@ export function assessSurvivalNeeds(
   if (!input.shelterBuilt && (pickaxeTier >= 1 || takingDamage)) {
     needs.push({
       key: "SHELTER",
-      // 51（Implementation Prompt V1）：避难所压过整个钻石梯队（甲 50/工具
-      // 49/剑 48）——先有庇护再谈发育；受伤分支 72 仍是硬紧急。
+      // 避难所优先于钻石升级；受伤分支提高到 72。
       score: takingDamage ? 72 : 51,
       reason: takingDamage
         ? `health ${healthCurrent.toFixed(1)}/${healthMaximum} — dig in before the next hit`
@@ -397,47 +406,33 @@ export function assessSurvivalNeeds(
   // 最佳努力：采集链经 white_wool（可徒手挖的方块）；荒野无羊毛时失败→
   // 抑制→流水线继续。放置/睡下设重生点在基地阶段承接（starter base 落成
   // 后床入箱），此处只保证"有床"。
-  if (input.shelterBuilt && pickaxeTier >= 1 && (inventory.get("bed")?.count ?? 0) === 0) {
+  if (input.shelterBuilt && pickaxeTier >= 1 && ![...inventory.keys()].some((name) => name === "bed" || name.endsWith("_bed"))) {
     needs.push(itemNeed("BED", 50, "bed", "shelter ready but no bed for a respawn point", 1, "white_wool"));
   }
 
   // ---- 钻石推进：铁镐之后的下一个台阶，先攒镐+剑的本钱再谈甲。
   const diamonds = inventory.get("diamond")?.count ?? 0;
-  // 全套钻装（甲 4 件+镐+剑；钻石工具不在内——工具 49 分自然先于选址 47
-  // 完成，无需重复判定）。函数级声明：基地阶段门块在钻石块之外消费。
+  // 基地选址要求四件钻甲、镐和剑；生产用斧铲升级不阻塞选址。
   const hasFullDiamondSet =
     pickaxeTier >= 3 &&
     bestSwordTier >= 3 &&
-    firstMissing([
-      "diamond_helmet",
-      "diamond_chestplate",
-      "diamond_leggings",
-      "diamond_boots",
-    ], inventory) === null;
+    missingArmor("diamond") === undefined;
   if (pickaxeTier === 2 && diamonds < DIAMOND_PICKAXE_RESERVE) {
-    needs.push(itemNeed("DIAMOND_PROGRESSION", 48, "diamond", `diamond reserve ${diamonds} < ${DIAMOND_PICKAXE_RESERVE} for a diamond pickaxe`, DIAMOND_PICKAXE_RESERVE - diamonds, "diamond_ore"));
+    needs.push(itemNeed("DIAMOND_PROGRESSION", 48, "diamond", `diamond reserve ${diamonds} < ${DIAMOND_PICKAXE_RESERVE} for a diamond pickaxe`, DIAMOND_PICKAXE_RESERVE, "diamond_ore"));
   }
   if (pickaxeTier >= 3) {
-    const missingDiamondArmor = firstMissing([
-      "diamond_helmet",
-      "diamond_chestplate",
-      "diamond_leggings",
-      "diamond_boots",
-    ], inventory);
+    const missingDiamondSlot = missingArmor("diamond");
+    const missingDiamondArmor = missingDiamondSlot ? `diamond_${missingDiamondSlot[1]}` : null;
     if (missingDiamondArmor !== null) {
-      // 用户产品方向（2026-09-04）：发育到一套完整钻装【优先于一切副业】——
-      // 全身钻甲(50) → 钻石工具斧/铲/锄(49) → 钻石剑(48)，全部压过
-      // 盾牌(33)/铁储备(35)/武器(44)/避难所(28)/煤火箱等；只让位于生存
-      // 底线（食物曲线/死亡回收 85/工具耐久 68/木料临界 68）。
+      // 钻甲优先于常规生产升级，仍服从食物、避难所和装备恢复。
       needs.push(itemNeed("DIAMOND_ARMOR", 50, missingDiamondArmor, `diamond age reached but ${missingDiamondArmor} missing`, 1, "diamond_ore"));
     }
     const missingDiamondTool = firstMissing([
       "diamond_axe",
       "diamond_shovel",
-      "diamond_hoe",
     ], inventory);
     if (missingDiamondTool !== null) {
-      needs.push(itemNeed("DIAMOND_TOOLS", 49, missingDiamondTool, `diamond set incomplete: ${missingDiamondTool} missing`, 1, "diamond_ore"));
+      needs.push(itemNeed("DIAMOND_TOOLS", 39, missingDiamondTool, `optional production upgrade: ${missingDiamondTool} missing`, 1, "diamond_ore"));
     }
     if (bestSwordTier < 3) {
       needs.push(itemNeed("DIAMOND_WEAPON", 48, "diamond_sword", "diamond set incomplete: diamond_sword missing", 1, "diamond_ore"));

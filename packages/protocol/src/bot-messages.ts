@@ -967,6 +967,12 @@ export const botStatusV1Schema = z
           .optional(),
         position: botPositionSchema,
         latencyMs: z.number().int().nonnegative().max(120_000).nullable(),
+        performance: z.object({
+          physics: z.object({ observedAt: timestampSchema, samples: z.number().int().min(16).max(256),
+            p95IntervalMs: z.number().finite().nonnegative(), maxIntervalMs: z.number().finite().nonnegative() }).strict().nullable(),
+          eventLoop: z.object({ observedAt: timestampSchema, samples: z.number().int().positive(),
+            p99DelayMs: z.number().finite().nonnegative(), maxDelayMs: z.number().finite().nonnegative() }).strict().nullable(),
+        }).strict().optional(),
         currentTask: currentTaskSchema.nullable(),
         safety: l0SafetyStatusSchema.optional(),
         combat: combatRuntimeStatusV1Schema.optional(),

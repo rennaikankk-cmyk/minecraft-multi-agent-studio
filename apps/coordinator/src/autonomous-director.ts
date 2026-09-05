@@ -6,7 +6,8 @@ import {
   identifierSchema,
   type PublicBotDetailV1,
 } from "@minecraft-studio/protocol";
-import { scanBlocksOutputSchema, type BaseRegistry } from "@minecraft-studio/skills";
+import { scanBlocksOutputSchema, farmMaintainInputSchema, cropRules, readFarmProduction, registerCropProduction,
+  recordFarmProduction, type FacilityRegistry, type BaseRegistry } from "@minecraft-studio/skills";
 import type { PlanJournalStore } from "./plan-journal.js";
 
 import type {
@@ -34,6 +35,7 @@ import {
 } from "./strategy-review.js";
 import {
   assessSurvivalNeeds,
+  SurvivalRecoveryMemory,
   SAFE_FOOD_ITEM_NAMES,
   type SurvivalNeed,
   type SurvivalNeedKey,
@@ -99,6 +101,7 @@ export type AutonomousDirectorOptions = Readonly<{
    */
   onChatGoal?: (botId: string, speaker: string, message: string) => boolean;
   baseRegistry?: BaseRegistry;
+  facilityRegistry?: FacilityRegistry;
   planJournalStore?: PlanJournalStore;
   persistBaseState?: () => void;
 }>;
@@ -258,6 +261,8 @@ export class AutonomousDirector implements AutonomousTaskSource {
   private readonly chatQueue = new Map<string, Readonly<{ speaker: string; message: string; receivedAtMs: number }>>();
   /** 已完成回收的死亡时间戳（diedAt），防止反复回同一个死点。 */
   private readonly recoveredDeaths = new Map<string, Set<string>>();
+  private readonly recoveryMemory = new SurvivalRecoveryMemory();
+  private readonly productionRuns = new Map<string, string>();
   /** 神谕给出的一次性立场切换，下一次调度前消费（优先于普通需求）。 */
   private readonly pendingStanceSwitches = new Map<string, "preserve-life" | "expendable" | "aggressive">();
   /** 神谕给出的一次性替代资源（needKey → item），用一次即消费。 */
@@ -624,6 +629,8 @@ export class AutonomousDirector implements AutonomousTaskSource {
     const focus = this.currentFocus.get(record.botId);
     const needs = [...assessSurvivalNeeds({
       record,
+      now: new Date(nowMs),
+      recoveryMemory: this.recoveryMemory,
       shelterBuilt: this.options.baseRegistry ? this.basePhase.snapshotFor(record.botId).SHELTER_MINIMAL_READY : this.shelterBuilt.has(record.botId),
       // 基地阶段真值（Phase 1）：BASE_* 需求的顺序门。快照恒供给——
       // 门全 false 时 survival-needs 整段静默（语义同未传入）。
@@ -637,6 +644,46 @@ export class AutonomousDirector implements AutonomousTaskSource {
     })];
     const build = this.persistedBuild(record.botId, "BASE_MAIN_CONSTRUCTION");
     const base = this.options.baseRegistry?.forMember(record.botId, record.serverProfileId, record.currentStatus!.position.dimension);
+    const adopted = base?.source === "operator_adopted";
+    if (adopted && base.protectedBounds) {
+      const p = record.currentStatus!.position;
+      const { min, max } = base.protectedBounds;
+      if (p.x < min.x || p.x > max.x || p.y < min.y || p.y > max.y || p.z < min.z || p.z > max.z) {
+        needs.push({ key: "BASE_RETURN", score: 56, title: "返回已加入的基地", reason: "operator-assigned base is outside current position",
+          operatorGoal: `移动到坐标 x=${base.anchor.x} y=${base.anchor.y} z=${base.anchor.z} 附近，返回基地`, sourceBlock: null });
+        needs.sort((a, b) => b.score - a.score);
+      }
+    }
+    const farmBuild = this.persistedBuild(record.botId, "BASE_FACILITY_FARM");
+    if (base && this.options.facilityRegistry && farmBuild?.verification === "VERIFIED") {
+      registerCropProduction(this.options.facilityRegistry, base.id, farmMaintainInputSchema.parse({
+        area: { serverProfileId: record.serverProfileId, dimension: base.dimension,
+          min: { x: farmBuild.anchor.x - 3, y: farmBuild.anchor.y - 1, z: farmBuild.anchor.z - 3 },
+          max: { x: farmBuild.anchor.x + 3, y: farmBuild.anchor.y, z: farmBuild.anchor.z + 3 } },
+        crops: ["carrots"], plantEmpty: "carrots", prepareSoil: true, maxActions: 32,
+      }));
+    }
+    const farm = base ? this.options.facilityRegistry?.findByBase(base.id).find((facility) => {
+      const production = readFarmProduction(facility);
+      return production?.enabled && !this.productionRuns.has(facility.id) && production.nextRunAtMs <= nowMs &&
+        facility.serverProfileId === record.serverProfileId && facility.dimension === base.dimension;
+    }) : null;
+    if (farm) {
+      const production = readFarmProduction(farm)!;
+      const inventory = record.currentStatus?.inventory ?? [];
+      const crop = production.input.plantEmpty;
+      if (crop && ["carrots", "potatoes", "wheat", "beetroots"].includes(crop)) {
+        const seed = cropRules[crop].seedItem!;
+        const hasHoe = inventory.some((item) => item.itemName.endsWith("_hoe") && item.count > 0);
+        const hasSeeds = inventory.reduce((sum, item) => sum + (item.itemName === seed ? item.count : 0), 0) > production.input.seedReserve;
+        const { min, max } = production.input.area;
+        const goal = !hasHoe ? "获取 stone_hoe" : !hasSeeds ? `获取 8 个 ${seed}`
+          : `维护农场 ${crop} min x=${min.x} y=${min.y} z=${min.z} max x=${max.x} y=${max.y} z=${max.z}`;
+        needs.push({ key: "BASE_FARM_MAINTENANCE", score: 43, title: !hasHoe ? "准备农具" : !hasSeeds ? "补充种子" : "农场收获与补种",
+          reason: "registered crop production is due", operatorGoal: goal, sourceBlock: null });
+        needs.sort((a, b) => b.score - a.score);
+      }
+    }
     if (build && base && !this.basePhase.snapshotFor(record.botId).STARTER_BASE_ACTIVE &&
       !needs.some((n) => n.key === "BASE_MAIN_CONSTRUCTION")) {
       needs.push({ key: "BASE_MAIN_CONSTRUCTION", title: "核对并恢复基地", score: 46,
@@ -645,6 +692,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
     }
     const eligible = needs.filter(
       (need) =>
+        !(adopted && (BASE_BUILD_NEED_KEYS.has(need.key) || need.key === "BASE_SITE_SELECTION" || need.key === "SHELTER")) &&
         !(need.key === "SHELTER" && build) &&
         !((need.key === "BASE_FACILITY_COBBLE" || need.key === "BASE_FACILITY_FARM") &&
           this.persistedBuild(record.botId, need.key)?.verification === "VERIFIED") &&
@@ -656,6 +704,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
     this.recordNeedTrail(record.botId, chosen.key);
     const bound = this.bindGoal(record, chosen, nowMs);
     if (bound === null) return null;
+    if (chosen.key === "BASE_FARM_MAINTENANCE" && farm) return { ...bound, productionFacilityId: farm.id };
     const substitute = this.pendingSubstitutes.get(record.botId);
     if (substitute && substitute.needKey === chosen.key) {
       this.pendingSubstitutes.delete(record.botId);
@@ -915,6 +964,32 @@ export class AutonomousDirector implements AutonomousTaskSource {
       j.build?.dimension === dimension && j.build.baseId === base.id && j.build.blueprintId === names[needKey])?.build ?? null;
   }
 
+  private recordProductionResult(record: BotRegistryRecord, goal: AutonomousGoal, taskId: string, result: AutonomousPlanResult): void {
+    if (!goal.productionFacilityId) return;
+    const facility = this.options.facilityRegistry?.get(goal.productionFacilityId);
+    const latest = this.options.registry.get(record.botId);
+    if (!facility || latest?.serverProfileId !== record.serverProfileId || latest.runtimeInstanceId !== record.runtimeInstanceId ||
+      latest.currentStatus?.position.dimension !== facility.dimension) return;
+    const production = readFarmProduction(facility);
+    if (!production) return;
+    const nowMs = validDate(this.now()).getTime();
+    if (result.action === "skill_result" && result.invocation.payload.skillId === "farm.maintain") {
+      recordFarmProduction(facility, taskId, result.result.payload.outcome === "completed" ? result.result.payload.output : null, nowMs,
+        result.result.payload.outcome === "completed" ? undefined : autonomousFailureCode(result) ?? "FARM_MAINTENANCE_FAILED");
+      const observed = readFarmProduction(facility)!;
+      const samples = observed.samples;
+      const producing = observed.status === "PRODUCING" && samples.length >= 2 &&
+        samples[samples.length - 1]!.atMs - samples[0]!.atMs >= 60_000;
+      if (facility.baseId) this.options.baseRegistry?.recordPhaseEvidence(facility.baseId, "FOOD_FACILITY_ACTIVE",
+        producing ? "AVAILABLE" : "UNVERIFIED", producing ? "multiple positive harvest receipts" : observed.reason ?? observed.status, "farm-production-receipts");
+    } else {
+      const failure = autonomousFailureCode(result);
+      if (failure) recordFarmProduction(facility, taskId, null, nowMs, failure);
+      else facility.metadata.production = { ...production, nextRunAtMs: nowMs + 1_000 };
+    }
+    this.options.persistBaseState?.();
+  }
+
   private recordBaseFact(botId: string, phase: BasePhaseKey): void {
     const record = this.options.registry.get(botId);
     const position = record?.currentStatus?.position;
@@ -1107,6 +1182,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
         goal.needKey,
         goal.operatorGoal,
       );
+      if (goal.productionFacilityId) this.productionRuns.set(goal.productionFacilityId, taskId);
       let result = await this.options.planner.planAndDispatch({
         requestId: taskId,
         traceId: taskId,
@@ -1117,6 +1193,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
         signal: controller.signal,
       });
       let status = taskStatusFromPlanResult(result, controller.signal);
+      if (goal.needKey === "BASE_FARM_MAINTENANCE") this.recordProductionResult(record, goal, taskId, result);
       let keepGoal = false;
       const failureCode = autonomousFailureCode(result);
       if (status === "failed" && failureCode !== null && !controller.signal.aborted) {
@@ -1181,6 +1258,10 @@ export class AutonomousDirector implements AutonomousTaskSource {
           : {}),
         ...(keepGoal ? { recovery: "retry_same_goal" } : {}),
       });
+    } finally {
+      if (goal.productionFacilityId && this.productionRuns.get(goal.productionFacilityId) === taskId) {
+        this.productionRuns.delete(goal.productionFacilityId);
+      }
     }
   }
 
@@ -1622,6 +1703,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
 }
 
 type AutonomousGoal = Readonly<{
+  productionFacilityId?: string;
   needKey: SurvivalNeedKey;
   key: string;
   title: string;

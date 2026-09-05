@@ -2359,6 +2359,7 @@ describe("MineflayerBotClient travel.route capability", () => {
       "auto",
       "isolated-test-profile",
     );
+    const routeController = new AbortController();
     const request = {
       traceId: "trace-route-runtime",
       taskId: "task-route-runtime",
@@ -2367,7 +2368,7 @@ describe("MineflayerBotClient travel.route capability", () => {
       skillVersion: "1.0.0",
       capability: "bot.move" as const,
       operation: "travel.route-segment",
-      signal: new AbortController().signal,
+      signal: routeController.signal,
     };
 
     await expect(
@@ -2399,11 +2400,24 @@ describe("MineflayerBotClient travel.route capability", () => {
     });
     expect(pathfinder.goto).toHaveBeenCalledTimes(1);
     expect(pathfinder.setMovements).toHaveBeenCalledTimes(1);
+    const movementGoal = pathfinder.goto.mock.calls[0]![0] as { isEnd(node: { x: number; y: number; z: number }): boolean };
+    expect(movementGoal.isEnd({ x: 3, y: 64, z: 0 })).toBe(true);
+    expect(movementGoal.isEnd({ x: 5, y: 64, z: 0 })).toBe(false);
+    const replacement = client.movementController.acquire({ owner: "next-navigation", priority: 40 })!;
+    const stopCount = pathfinder.stop.mock.calls.length;
+    routeController.abort();
+    expect(pathfinder.stop).toHaveBeenCalledTimes(stopCount);
+    expect(replacement.isCurrent()).toBe(true);
+    replacement.release();
+    const mineClient = client as unknown as { moveMineToTarget(request: Parameters<MineflayerBotClient["invokeSkillCapability"]>[0], target: Vec3, lookAt: boolean): Promise<void> };
+    await expect(mineClient.moveMineToTarget({ ...request, invocationId: "next-mine", input: {},
+      signal: new AbortController().signal }, new Vec3(4, 64, 0), false)).resolves.toBeUndefined();
 
     await expect(
       client.invokeSkillCapability({
         ...request,
         invocationId: "invocation-route-runtime-invalid",
+        signal: new AbortController().signal,
         input: {
           target: {
             x: 4,

@@ -45,7 +45,7 @@ const durableSchema = z.object({
     lastSeenAt: z.number().finite(), confidence: z.number().min(0).max(1),
   }).passthrough()).max(4096) }),
   facilities: z.object({ facilities: z.array(scopeSchema.extend({
-    id: z.string().min(1), anchor: positionSchema, facilityType: z.enum(["smelting_zone", "crafting_zone", "storage_zone"]),
+    id: z.string().min(1), anchor: positionSchema, facilityType: z.enum(["smelting_zone", "crafting_zone", "storage_zone", "crop_farm"]),
     slots: z.array(z.object({ index: z.number().int().nonnegative(), worldPosition: positionSchema,
       status: z.enum(["planned", "placement_reserved", "occupied", "missing", "temporarily_blocked", "invalid", "unknown"]),
     }).passthrough()).max(4096),

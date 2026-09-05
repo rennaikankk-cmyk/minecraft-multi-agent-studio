@@ -16,7 +16,7 @@ const themeInitScript = `(function(){try{var t=localStorage.getItem("studio-them
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
   return (
     <html lang="zh-CN">
-      <body>
+      <body className="studio-shell-host">
         <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
         <StudioShell>{children}</StudioShell>
       </body>

@@ -15,7 +15,7 @@ import {
   type TaskExecutionRecord,
   type TaskExecutionStore,
 } from "@minecraft-studio/task-system";
-import { vanillaResourceRecipes, buildBlueprintInputSchema } from "@minecraft-studio/skills";
+import { vanillaResourceRecipes, buildBlueprintInputSchema, farmMaintainInputSchema } from "@minecraft-studio/skills";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
@@ -45,6 +45,27 @@ let registry: BotRegistry;
 describe("CoordinatorLocalPlanner", () => {
   beforeEach(() => {
     registry = readyRegistry();
+  });
+
+  it("dispatches a bounded farm goal with the current server identity and no model", async () => {
+    const current = registry.get(BOT_ID, NOW)!;
+    const record = { ...current, skillCatalog: { ...current.skillCatalog!, skills: [
+      { ...current.skillCatalog!.skills[0]!, skillId: "farm.maintain", idempotent: false,
+        inputSchema: z.toJSONSchema(farmMaintainInputSchema) as Record<string, unknown> },
+    ] } };
+    const sendSkillInvocation = vi.fn<SkillInvocationTransport["sendSkillInvocation"]>(async (invocation) =>
+      skillResult(invocation, "completed", undefined, 1, { status: "WAITING_GROWTH", scannedCells: 98, unknownCells: 0,
+        harvested: 0, planted: 0, tilled: 0, bonemealUsed: 0, inventoryDelta: [], observedAt: NOW.toISOString() }));
+    const planner = new CoordinatorLocalPlanner({ registry: { get: () => record }, transport: { sendSkillInvocation },
+      coordinatorInstanceId: "coordinator-01", now: () => NOW, randomId: uuidSequence() });
+    await planner.planAndDispatch({ ...planRequest(),
+      operatorGoal: "维护农场 carrots min x=1233 y=63 z=-4324 max x=1239 y=64 z=-4318" });
+    expect(sendSkillInvocation).toHaveBeenCalledOnce();
+    expect(sendSkillInvocation.mock.calls[0]![0].payload).toMatchObject({ skillId: "farm.maintain", input: {
+      area: { serverProfileId: "isolated-test", dimension: "minecraft:overworld",
+        min: { x: 1233, y: 63, z: -4324 }, max: { x: 1239, y: 64, z: -4318 } },
+      crops: ["carrots"], prepareSoil: true, replant: true, seedReserve: 1,
+    } });
   });
 
   it.each([false, true])("gates the blueprint selector on the actual dispatch chain (%s)", async (blueprintWorksetEnabled) => {

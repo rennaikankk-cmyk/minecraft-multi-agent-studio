@@ -25,7 +25,7 @@ import { normalizeBlockPos } from "./workstation-registry.js";
 // Types
 // ---------------------------------------------------------------------------
 
-export type FacilityType = "smelting_zone" | "crafting_zone" | "storage_zone";
+export type FacilityType = "smelting_zone" | "crafting_zone" | "storage_zone" | "crop_farm";
 
 export type Orientation = "north" | "south" | "east" | "west";
 

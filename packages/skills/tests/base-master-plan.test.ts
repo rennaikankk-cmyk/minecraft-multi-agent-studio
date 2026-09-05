@@ -39,9 +39,9 @@ describe("facilityBuildOrder", () => {
     expect(cobbleIdx).toBeLessThan(ironIdx);
   });
 
-  it("火药塔在铁机之后", () => {
-    const order = facilityBuildOrder(["gunpowder_farm", "iron_farm", "crop_farm", "storage_system", "cobblestone_generator"]);
-    expect(order.indexOf("iron_farm")).toBeLessThan(order.indexOf("gunpowder_farm"));
+  it("mined or traded iron does not force an iron farm before gunpowder", () => {
+    const deps = missingHardDependencies("gunpowder_farm", new Set(["crop_farm"]));
+    expect(deps).toEqual([]);
   });
 
   it("空列表返回空", () => {

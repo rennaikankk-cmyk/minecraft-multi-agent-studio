@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { RefreshCw, Search } from "lucide-react";
+import type { PublicBotDetailV1 } from "@minecraft-studio/protocol";
 
 import { Badge, Card, CardContent, CardHeader, CardTitle, DataTable, Input, Td, Th, UiEmptyState } from "@/components/ui/primitives";
 import { Button } from "@/components/ui/button";
@@ -18,6 +19,8 @@ interface BotRow {
   latencyMs?: number | null;
   currentTask?: { title: string | null } | null;
   lastMessageAt?: string;
+  armorSlots?: PublicBotDetailV1["armorSlots"];
+  performance?: PublicBotDetailV1["performance"];
 }
 
 export function BotFleetTable() {
@@ -32,9 +35,11 @@ export function BotFleetTable() {
     try {
       const response = await fetch("/api/bots", { cache: "no-store" });
       const body = await response.json();
+      if (!response.ok || !Array.isArray(body?.data?.bots)) throw new Error(body?.error?.message ?? "机器人状态不可用");
       setBots((body?.data?.bots ?? []) as BotRow[]);
       setFailed(null);
     } catch (error) {
+      setBots(null);
       setFailed(error instanceof Error ? error.message : "unknown");
     } finally {
       setPending(false);
@@ -105,6 +110,9 @@ export function BotFleetTable() {
                 <Th>位置</Th>
                 <Th>当前任务</Th>
                 <Th>Ping</Th>
+                <Th>物理 Tick P95</Th>
+                <Th>循环延迟 P99</Th>
+                <Th>钻甲槽位</Th>
                 <Th>最近消息</Th>
                 <Th>Incidents</Th>
               </tr>
@@ -131,6 +139,9 @@ export function BotFleetTable() {
                     {bot.currentTask?.title ?? "—"}
                   </Td>
                   <Td className="data-mono text-muted-foreground">{bot.latencyMs != null ? `${bot.latencyMs}ms` : "—"}</Td>
+                  <Td className="data-mono text-muted-foreground">{bot.performance?.physics && Date.now() - Date.parse(bot.performance.physics.observedAt) < 15_000 ? `${bot.performance.physics.p95IntervalMs} ms` : "未采样"}</Td>
+                  <Td className="data-mono text-muted-foreground">{bot.performance?.eventLoop && Date.now() - Date.parse(bot.performance.eventLoop.observedAt) < 90_000 ? `${bot.performance.eventLoop.p99DelayMs} ms` : "未采样"}</Td>
+                  <Td className="data-mono text-muted-foreground">{bot.armorSlots ? `${Object.values(bot.armorSlots).filter((item) => item?.startsWith("diamond_") || item?.startsWith("netherite_")).length} / 4` : "未上报"}</Td>
                   <Td className="text-subtle-foreground">{bot.lastMessageAt ? new Date(bot.lastMessageAt).toLocaleTimeString("zh-CN") : "—"}</Td>
                   <Td>
                     <Link href={`/incidents?bot=${encodeURIComponent(bot.botId)}`} className="text-primary hover:underline">查看</Link>

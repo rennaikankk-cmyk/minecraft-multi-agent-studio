@@ -8,6 +8,7 @@
    - 参考视觉语言：shadcn/ui new-york + shadcn-admin 布局模式
    ============================================================ */
 
+@layer theme, base, components, utilities;
 @import "tailwindcss/theme.css" layer(theme);
 @import "tailwindcss/utilities.css" layer(utilities);
 
@@ -53,6 +54,15 @@
   --shadow-pop: 0 8px 24px rgb(0 0 0 / 0.45);
 }
 
+html body.studio-shell-host { padding: 0; background: var(--color-background); }
+
+/* Scoped resets must sit below component styles and utility classes. */
+@layer base {
+  .studio-ui *, .studio-ui *::before, .studio-ui *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  .studio-ui button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; }
+  .studio-ui a { color: inherit; text-decoration: none; }
+}
+
 /* 新 shell 作用域最小 reset（不影响旧页面） */
 .studio-ui {
   font-family: var(--font-sans);
@@ -61,20 +71,8 @@
   -webkit-font-smoothing: antialiased;
   font-feature-settings: "tnum" 1; /* 指标数字 tabular-nums */
 }
-.studio-ui *,
-.studio-ui *::before,
-.studio-ui *::after {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-}
-.studio-ui button {
-  font: inherit;
-  color: inherit;
-  background: none;
-  border: none;
-  cursor: pointer;
-}
+.studio-ui h1, .studio-ui h2, .studio-ui h3, .studio-ui h4 { font-family: var(--font-sans); letter-spacing: 0; }
+.studio-ui { --border: var(--color-border-subtle); --surface: var(--color-card); --muted: var(--color-muted-foreground); }
 .studio-ui input,
 .studio-ui select,
 .studio-ui textarea {

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { loadOperatorBaseAssignments } from "./operator-base-assignments.js";
 import path from "node:path";
 
 import {
@@ -117,6 +118,12 @@ async function main(): Promise<void> {
     baseRegistry.markFactsUnverified();
   }
   const persistBaseState = () => baseStateStore.save(durableSnapshotFrom(workstationRegistry, facilityRegistry, baseRegistry));
+  const assignmentsPath = process.env.STUDIO_BASE_ASSIGNMENTS_PATH?.trim();
+  if (assignmentsPath) {
+    const count = loadOperatorBaseAssignments(assignmentsPath, baseRegistry, facilityRegistry);
+    persistBaseState();
+    logger.info("coordinator_operator_bases_assigned", { count });
+  }
   const registry = new BotRegistry({
     staleAfterMs: runtimeConfig.botStaleAfterMs,
   });
@@ -317,7 +324,7 @@ async function main(): Promise<void> {
   }
   if (autonomousConfig.enabled) {
     autonomousDirector = new AutonomousDirector({
-      baseRegistry, planJournalStore, persistBaseState,
+      baseRegistry, facilityRegistry, planJournalStore, persistBaseState,
       registry,
       planner: localPlanner,
       intervalMs: autonomousConfig.intervalMs,

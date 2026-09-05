@@ -142,8 +142,10 @@ for (const guard of requiredRunnerGuards) {
 const requiredRealSkillCoverage = [
   "const REAL_ACCEPTANCE_SKILL_IDS = [",
   '"connects two real bots, reports independent status snapshots, and stops gracefully"',
-  '"executes all 21 builtin skills for two bots against independent real fixtures without an LLM prompt"',
+  '"executes 22 skills for two bots against independent real fixtures without an LLM prompt"',
   "const bots = await createAcceptanceBots();",
+  'await runSkill(bot, "farm.maintain",',
+  'harvested: 2, planted: 3, tilled: 1, unknownCells: 0',
   "bots.map((bot) => runAllSkillsForBot(bot, dimension))",
   'outputArray(scanOutput, "matches")',
   'outputArray(branchOutput, "steps")',

@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "1.0",
+  "assignments": [
+    {
+      "name": "Isolated example base",
+      "serverProfileId": "local-isolated-test",
+      "dimension": "minecraft:overworld",
+      "anchor": { "x": 0, "y": 65, "z": 0 },
+      "bounds": {
+        "min": { "x": -8, "y": 63, "z": -8 },
+        "max": { "x": 8, "y": 75, "z": 8 }
+      },
+      "memberBotIds": ["studio-bot-01"],
+      "farms": [
+        {
+          "min": { "x": -3, "y": 64, "z": -4 },
+          "max": { "x": 3, "y": 65, "z": -2 },
+          "crop": "carrots"
+        }
+      ]
+    }
+  ]
+}

@@ -98,6 +98,21 @@ function driver(
   });
 }
 
+describe("proactive encounter admission", () => {
+  it("admits nearby non-whitelisted players and excludes allies", () => {
+    expect(driver().shouldEngageProactively(observation(), 1_000)).toBe(true);
+    expect(driver({ whitelist: { usernames: ["Enemy"], uuids: [] } }).shouldEngageProactively(observation(), 1_000)).toBe(false);
+  });
+  it("does not initiate from stale facts, hunger-independent low health, unknown hazards or missing weapons", () => {
+    const combat = driver();
+    expect(combat.shouldEngageProactively(observation(), 2_000)).toBe(false);
+    expect(combat.shouldEngageProactively(observation({ self: { ...observation().self, health: 8 } }), 1_000)).toBe(false);
+    expect(combat.shouldEngageProactively(observation({ hazards: null }), 1_000)).toBe(false);
+    expect(combat.shouldEngageProactively(observation({ weapons: [] }), 1_000)).toBe(false);
+    expect(combat.shouldEngageProactively(observation({ serverProfileId: "other" }), 1_000)).toBe(false);
+  });
+});
+
 async function ackExecutor(actions: CombatPrimitiveAction[]) {
   return async (action: CombatPrimitiveAction) => {
     actions.push(action);
