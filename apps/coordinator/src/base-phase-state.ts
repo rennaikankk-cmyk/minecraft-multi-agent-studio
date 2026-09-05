@@ -3,13 +3,9 @@
 // "钻套之后该干什么"；需求评估（survival-needs）只消费结构化布尔，
 // 不再读自然语言状态。
 //
-// 真值来源分两层，后者优先（世界真值 > 进程记忆）：
-//   1. 进程内 needKey 完成态（SHELTER→shelterBuilt 的既有先例）：
-//      重启后丢失 = 安全侧失败（重来一遍，不会跳阶段）。
-//   2. 外部快照提供者（可选注入）：未来由 BaseRegistry/FacilityRegistry/
-//      WorldMemory 持久化真值覆盖。当前构建流程尚未写入这些注册表
-//      （BaseRegistry 无调用方），注入空真值会制造反向幽灵（永远"没基地"），
-//      所以 Phase 1 只留接口、不在 main.ts 接线。
+// Production reads current evidence from the shared BaseRegistry. This class
+// keeps historical milestones separately and exposes a boolean compatibility
+// view. The in-memory fallback is for callers without an injected registry.
 
 import type { SurvivalNeedKey } from "./survival-needs.js";
 
@@ -51,11 +47,12 @@ export function emptyBasePhaseSnapshot(): Record<BasePhaseKey, boolean> {
   };
 }
 
-/** 外部世界真值提供者：返回的已置位门覆盖进程记忆，永不反向清除。 */
+/** Explicit external true/false evidence overrides the compatibility cache. */
 export type BasePhaseExternalSource = (botId: string) => Partial<BasePhaseSnapshot>;
 
 export class BasePhaseTracker {
   private readonly completed = new Map<string, Set<BasePhaseKey>>();
+  private readonly available = new Map<string, Set<BasePhaseKey>>();
 
   constructor(private readonly externalSource?: BasePhaseExternalSource) {}
 
@@ -66,25 +63,35 @@ export class BasePhaseTracker {
     const set = this.completed.get(botId) ?? new Set<BasePhaseKey>();
     set.add(phase);
     this.completed.set(botId, set);
+    // A completed construction task is a historical milestone. Production
+    // availability comes from the injected registry's domain evidence.
+    if (!this.externalSource && phase !== "FOOD_FACILITY_ACTIVE" && phase !== "COBBLE_FACILITY_ACTIVE") {
+      this.forcePhase(botId, phase, true);
+    }
     return phase;
   }
 
   /** 进程内直接置位（预置/回放测试用；幂等）。 */
   forcePhase(botId: string, phase: BasePhaseKey, value = true): void {
-    if (!value) return;
-    const set = this.completed.get(botId) ?? new Set<BasePhaseKey>();
-    set.add(phase);
-    this.completed.set(botId, set);
+    const set = this.available.get(botId) ?? new Set<BasePhaseKey>();
+    if (value) set.add(phase);
+    else set.delete(phase);
+    this.available.set(botId, set);
+    if (value) {
+      const history = this.completed.get(botId) ?? new Set<BasePhaseKey>();
+      history.add(phase);
+      this.completed.set(botId, history);
+    }
   }
 
-  /** 当前快照：进程记忆 ∪ 外部真值（外部只做并集，不清洗）。 */
+  /** Boolean compatibility view derived from current external evidence. */
   snapshotFor(botId: string): BasePhaseSnapshot {
     const snapshot: Record<BasePhaseKey, boolean> = emptyBasePhaseSnapshot();
-    for (const key of this.completed.get(botId) ?? []) snapshot[key] = true;
+    for (const key of this.available.get(botId) ?? []) snapshot[key] = true;
     if (this.externalSource) {
       const external = this.externalSource(botId);
       for (const key of BASE_PHASE_KEYS) {
-        if (external[key]) snapshot[key] = true;
+        if (external[key] !== undefined) snapshot[key] = external[key] === true;
       }
     }
     return snapshot;

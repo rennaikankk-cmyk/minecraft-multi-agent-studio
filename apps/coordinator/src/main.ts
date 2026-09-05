@@ -34,7 +34,8 @@ import {
 } from "./control-link-config.js";
 import { ControlLinkServer } from "./control-link-server.js";
 import { SharedStateServer, loadSharedStateConfig } from "./shared-state-server.js";
-import { InMemoryWorkstationRegistry } from "@minecraft-studio/skills";
+import { InMemoryWorkstationRegistry, BaseRegistry, FacilityRegistry, DurableStateStore,
+  durableSnapshotFrom, registriesFromDurableSnapshot } from "@minecraft-studio/skills";
 import {
   RuntimeLinkConfigError,
   loadRuntimeLinkConfig,
@@ -101,6 +102,21 @@ async function main(): Promise<void> {
   // Round 6.2 Facility 消费方：跨 bot 共享工作站目录——planner 的 smelt 租约
   // 解析与 SharedStateServer 的跨进程控制面共用同一实例。
   const workstationRegistry = new InMemoryWorkstationRegistry();
+  const baseRegistry = new BaseRegistry();
+  const facilityRegistry = new FacilityRegistry();
+  const journalDir = process.env.STUDIO_PLAN_JOURNAL_DIR?.trim() || path.join("runtime-data", "plan-journals");
+  const planJournalStore = new FilePlanJournalStore({ dir: journalDir });
+  const baseStateStore = new DurableStateStore(process.env.STUDIO_SHARED_STATE_PERSIST_PATH?.trim() ||
+    path.join("runtime-data", "shared-state.json"));
+  const baseSnapshot = baseStateStore.load();
+  if (baseSnapshot) {
+    const restored = registriesFromDurableSnapshot(baseSnapshot);
+    workstationRegistry.absorb(restored.workstations);
+    baseRegistry.absorb(restored.bases);
+    facilityRegistry.absorb(restored.facilities);
+    baseRegistry.markFactsUnverified();
+  }
+  const persistBaseState = () => baseStateStore.save(durableSnapshotFrom(workstationRegistry, facilityRegistry, baseRegistry));
   const registry = new BotRegistry({
     staleAfterMs: runtimeConfig.botStaleAfterMs,
   });
@@ -271,9 +287,7 @@ async function main(): Promise<void> {
       transport: runtimeServer,
       coordinatorInstanceId: instanceId,
       workstationRegistry,
-      planJournalStore: new FilePlanJournalStore({
-        dir: path.join(process.env.STUDIO_PLAN_JOURNAL_DIR?.trim() || path.join("runtime-data", "plan-journals"), instanceId),
-      }),
+      planJournalStore, baseRegistry, persistBaseState,
       logger,
     });
   } else {
@@ -294,9 +308,7 @@ async function main(): Promise<void> {
       transport: runtimeServer,
       coordinatorInstanceId: instanceId,
       workstationRegistry,
-      planJournalStore: new FilePlanJournalStore({
-        dir: path.join(process.env.STUDIO_PLAN_JOURNAL_DIR?.trim() || path.join("runtime-data", "plan-journals"), instanceId),
-      }),
+      planJournalStore, baseRegistry, persistBaseState,
       logger,
     });
     logger.warn("coordinator_planner_deterministic_only", {
@@ -305,6 +317,7 @@ async function main(): Promise<void> {
   }
   if (autonomousConfig.enabled) {
     autonomousDirector = new AutonomousDirector({
+      baseRegistry, planJournalStore, persistBaseState,
       registry,
       planner: localPlanner,
       intervalMs: autonomousConfig.intervalMs,
@@ -456,10 +469,12 @@ async function main(): Promise<void> {
     if (sharedStateConfig) {
       sharedStateServer = new SharedStateServer({
         workstations: workstationRegistry,
+        bases: baseRegistry,
+        facilities: facilityRegistry,
+        persistState: persistBaseState,
         host: sharedStateConfig.host,
         port: sharedStateConfig.port,
         ...(sharedStateConfig.token ? { token: sharedStateConfig.token } : {}),
-        ...(sharedStateConfig.persistPath ? { persistPath: sharedStateConfig.persistPath } : {}),
         logger,
       });
       const sharedStateAddress = await sharedStateServer.start();

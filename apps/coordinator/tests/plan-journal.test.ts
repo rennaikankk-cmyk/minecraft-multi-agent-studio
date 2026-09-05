@@ -103,7 +103,7 @@ describe("FilePlanJournalStore durability", () => {
     expect(loaded[0]!.steps[0]!.dispatchCount).toBe(j.steps[0]!.dispatchCount);
   });
 
-  it("corrupt journal file is quarantined, not silently dropped", async () => {
+  it("corrupt journal blocks recovery and preserves the original evidence", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "plan-journal-corrupt-"));
     dirs.push(dir);
     const store = new FilePlanJournalStore({ dir });
@@ -112,10 +112,8 @@ describe("FilePlanJournalStore durability", () => {
     const { writeFileSync } = await import("node:fs");
     writeFileSync(file, "{ not valid json", "utf8");
     const revived = new FilePlanJournalStore({ dir });
-    expect(revived.load().length).toBe(0);
-    // quarantine 副本保留
-    const leftovers = readdirSync(dir).filter((f) => f.includes(".corrupt-"));
-    expect(leftovers.length).toBe(1);
+    expect(() => revived.load()).toThrow("JOURNAL_INVALID_OR_UNREADABLE");
+    expect(await readFile(file, "utf8")).toBe("{ not valid json");
   });
 
   it("writes are atomic (tmp+rename): no .tmp residue on success", async () => {

@@ -40,22 +40,22 @@ describe("BasePhaseTracker", () => {
     expect(snapshot.SHELTER_MINIMAL_READY).toBe(true);
     expect(snapshot.BASE_SITE_RESERVED).toBe(true);
     expect(snapshot.STARTER_BASE_ACTIVE).toBe(true);
-    expect(snapshot.COBBLE_FACILITY_ACTIVE).toBe(true);
-    expect(snapshot.FOOD_FACILITY_ACTIVE).toBe(true);
+    expect(snapshot.COBBLE_FACILITY_ACTIVE).toBe(false);
+    expect(snapshot.FOOD_FACILITY_ACTIVE).toBe(false);
     expect(snapshot.VILLAGE_SOURCE_VERIFIED).toBe(false);
     expect(snapshot.TRADING_HALL_ACTIVE).toBe(false);
     // per-bot 隔离
     expect(tracker.snapshotFor("bot-2").SHELTER_MINIMAL_READY).toBe(false);
   });
 
-  it("ORs external world truth in without ever clearing process memory", () => {
+  it("requires external domain evidence when a registry source is configured", () => {
     const tracker = new BasePhaseTracker(() => ({
       FOOD_FACILITY_ACTIVE: true,
       VILLAGE_SOURCE_VERIFIED: true,
     }));
     tracker.recordNeedCompletion("bot-1", "SHELTER");
     const snapshot = tracker.snapshotFor("bot-1");
-    expect(snapshot.SHELTER_MINIMAL_READY).toBe(true);
+    expect(snapshot.SHELTER_MINIMAL_READY).toBe(false);
     expect(snapshot.FOOD_FACILITY_ACTIVE).toBe(true);
     expect(snapshot.VILLAGE_SOURCE_VERIFIED).toBe(true);
     expect(snapshot.BASE_SITE_RESERVED).toBe(false);
@@ -65,6 +65,19 @@ describe("BasePhaseTracker", () => {
     const snapshot = emptyBasePhaseSnapshot();
     expect(Object.keys(snapshot).sort()).toEqual([...BASE_PHASE_KEYS].sort());
     for (const value of Object.values(snapshot)) expect(value).toBe(false);
+  });
+
+  it("revokes availability on explicit false and on negative world evidence", () => {
+    const tracker = new BasePhaseTracker();
+    tracker.forcePhase("bot-1", "STARTER_BASE_ACTIVE");
+    tracker.forcePhase("bot-1", "STARTER_BASE_ACTIVE", false);
+    expect(tracker.snapshotFor("bot-1").STARTER_BASE_ACTIVE).toBe(false);
+    let available = true;
+    const sourced = new BasePhaseTracker(() => ({ STARTER_BASE_ACTIVE: available }));
+    sourced.forcePhase("bot-1", "STARTER_BASE_ACTIVE");
+    expect(sourced.snapshotFor("bot-1").STARTER_BASE_ACTIVE).toBe(true);
+    available = false;
+    expect(sourced.snapshotFor("bot-1").STARTER_BASE_ACTIVE).toBe(false);
   });
 });
 

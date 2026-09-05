@@ -2,7 +2,7 @@
 // SharedStateServer —— Coordinator-backed 共享状态 HTTP 服务（Phase 5）
 //
 // 把 InMemoryWorkstationRegistry + FacilityRegistry 暴露为跨进程共享控制面：
-//   POST /rpc       {op, args} → {ok:true, result} | {ok:false, error}
+//   POST /rpc       versioned operation identity + {op, args}; correlated response
 //   GET  /snapshot  完整快照（可观测性 / 持久化）
 //
 // 安全契约：
@@ -19,6 +19,7 @@ import {
   captureSharedStateSnapshot,
   createSharedStateDispatcher,
   dispatchSharedState,
+  sharedStateRequestSchema,
   DurableStateStore,
   durableSnapshotFrom,
   restoreSharedStateSnapshot,
@@ -46,6 +47,7 @@ export interface SharedStateServerOptions {
    * 设置后：启动时加载（durable 恢复，ephemeral 丢弃）、定时落盘、stop 时落盘。
    */
   readonly persistPath?: string;
+  readonly persistState?: () => void;
   /** 定时落盘间隔；默认 60s；<=0 表示只在 stop 时落盘。 */
   readonly persistIntervalMs?: number;
   readonly logger?: { info(message: string, meta?: unknown): void; warn(message: string, meta?: unknown): void };
@@ -155,7 +157,15 @@ export class SharedStateServer {
           return;
         }
         const body = await this.readBody(request);
-        const envelope: SharedStateResponse = dispatchSharedState(this.dispatcher, body as { op: string; args?: Record<string, unknown> });
+        const parsed = sharedStateRequestSchema.parse(body);
+        const envelope: SharedStateResponse = dispatchSharedState(this.dispatcher, parsed);
+        if (envelope.ok && (parsed.op === "ws.register" || parsed.op === "ws.invalidate" ||
+          parsed.op === "ws.clearServer" || (parsed.op.startsWith("fac.") &&
+          !["fac.get", "fac.findCandidates", "fac.findByBase", "fac.nextPlannableSlot",
+            "fac.reserveSlot", "fac.releaseReservation", "fac.renewSlotReservation", "fac.expireReservations"].includes(parsed.op)))) {
+          this.options.persistState?.();
+          this.persist("mutation");
+        }
         this.writeJson(response, 200, envelope);
         return;
       }
@@ -250,10 +260,9 @@ export interface SharedStateConfig {
   readonly persistPath: string | undefined;
 }
 
-/** 从环境变量读取；全部字段缺省 → undefined（不启动）。 */
+/** Default loopback lease authority; this does not start a Minecraft server. */
 export function loadSharedStateConfig(env: NodeJS.ProcessEnv = process.env): SharedStateConfig | undefined {
-  const port = env.STUDIO_SHARED_STATE_PORT;
-  if (!port) return undefined;
+  const port = env.STUDIO_SHARED_STATE_PORT ?? "8791";
   const parsedPort = Number.parseInt(port, 10);
   if (!Number.isInteger(parsedPort) || parsedPort <= 0 || parsedPort > 65_535) {
     throw new Error("STUDIO_SHARED_STATE_PORT must be an integer in 1..65535");

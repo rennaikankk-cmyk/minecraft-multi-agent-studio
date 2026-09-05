@@ -27,9 +27,9 @@ import {
 } from "@minecraft-studio/protocol";
 import {
   GoalPlanner,
+  BaseRegistry,
+  buildBlueprintInputSchema,
   PlanSupervisor,
-  acquireWorkstation,
-  type FacilityFailureSignal,
   type GoalRequest,
   type PlanStep,
   type PlannerInventory,
@@ -49,12 +49,10 @@ import { dirname } from "node:path";
 import type { BotRegistry, BotRegistryRecord } from "./bot-registry.js";
 import { InMemoryGoalLifecycleStore } from "./in-memory-goal-store.js";
 import {
-  applyStepResult,
-  newPlanJournal,
-  recordDispatch,
   type PlanExecutionJournal,
   type PlanJournalStore,
 } from "./plan-journal.js";
+import { beginBuildBatch, finishBuildBatch, blueprintDigest } from "./build-journal.js";
 import {
   BotAssignmentError,
   type BotAssignmentService,
@@ -550,8 +548,8 @@ export type CoordinatorLocalPlannerOptions = Readonly<{
   /**
    * Round 6.2 真实 Facility 消费方：跨 bot 共享的工作站目录（与
    * SharedStateServer 同一实例，main.ts 装配）。smelt.item 在模型直派
-   * （furnace=null）时经 acquireWorkstation 解析共享熔炉租约；
-   * world.scan 观测到的熔炉位置自动注册。正常 contention（busy）静默。
+   * 时只提供候选坐标；所有入口最终由 Runtime 获取和维持租约。
+   * world.scan 观测到的熔炉位置自动注册。
    */
   workstationRegistry?: WorkstationRegistryPort;
   /**
@@ -559,6 +557,8 @@ export type CoordinatorLocalPlannerOptions = Readonly<{
    * 仍可运行但 resume 语义退化为 skill 自身 nextIndex（诚实降级）。
    */
   planJournalStore?: PlanJournalStore;
+  baseRegistry?: BaseRegistry;
+  persistBaseState?: () => void;
   /**
    * 蓝图文件目录（默认 apps/coordinator/blueprints）。测试可注入临时目录；
    * 缺省在构造期加载，schema/几何不合法直接抛（协调器拒启，fail-closed）。
@@ -923,6 +923,8 @@ export class CoordinatorLocalPlanner {
     this.goalPlanner = new GoalPlanner();
     this.planSupervisor = new PlanSupervisor(this.goalPlanner);
     this.blueprintFiles = loadBlueprintFiles(options.blueprintDirectory);
+    try { options.planJournalStore?.load(); }
+    catch { options.logger?.warn("coordinator_build_recovery_blocked", { code: "PLAN_JOURNAL_RECOVERY_BLOCKED" }); }
   }
 
   async planAndDispatch(request: LocalPlanRequest): Promise<LocalPlanResult> {
@@ -1175,8 +1177,8 @@ export class CoordinatorLocalPlanner {
    */
   /**
    * Round 6.4 J3：build.blueprint 派发的 durable journal 打开/复用。
-   * 同一 build（按 anchor 识别）跨 goal 复用同一 planId——restart 后
-   * 已完成 batch 的 SUCCEEDED 步骤是 resume 边界，对应 cell 零重放。
+   * 工程身份绑定服务器、维度、基地、蓝图摘要和锚点，跨 goal 复用。
+   * 恢复前核对世界，已确认且未变化的单元不重复放置。
    */
   private openBuildJournal(
     request: LocalPlanRequest,
@@ -1186,40 +1188,21 @@ export class CoordinatorLocalPlanner {
   ): PlanExecutionJournal | null {
     const store = this.options.planJournalStore;
     if (store === undefined || skillId !== "build.blueprint") return null;
-    const input = trustedInput as {
-      blueprint?: { anchor?: { x: number; y: number; z: number }; dimension?: string; cells?: unknown[] };
-      startIndex?: number;
-      maxPlacements?: number;
-    } | null;
-    const anchor = input?.blueprint?.anchor;
-    if (!anchor || !input.blueprint?.dimension) return null;
-    const buildKey = `${record.serverProfileId}|${input.blueprint.dimension}|${Math.floor(anchor.x)},${Math.floor(anchor.y)},${Math.floor(anchor.z)}`;
-    const existing = store.load().find(
-      (j) => j.status === "ACTIVE" && j.correlationId === buildKey,
-    );
-    if (existing !== undefined) return existing;
-    const cells = Array.isArray(input.blueprint.cells) ? (input.blueprint.cells as Array<{ itemName?: unknown }>) : [];
-    return newPlanJournal({
-      goalId: request.taskId,
-      botId: request.botId,
-      serverProfileId: record.serverProfileId,
-      correlationId: buildKey,
-      plannerVersion: "local-planner",
-      steps: [
-        {
-          skillId: "build.blueprint",
-          actionFamily: "build",
-          sideEffectClass: "NON_IDEMPOTENT",
-          expectedPostcondition: {
-            kind: "build-cell",
-            buildId: buildKey,
-            cellIndex: (input.startIndex ?? 0) + Math.max(1, input.maxPlacements ?? cells.length) - 1,
-            position: { x: Math.floor(anchor.x), y: Math.floor(anchor.y), z: Math.floor(anchor.z) },
-            blockName: String(cells[0]?.itemName ?? "unknown"),
-          },
-        },
-      ],
+    const input = buildBlueprintInputSchema.parse(trustedInput);
+    const digest = blueprintDigest(input.blueprint);
+    const file = [...this.blueprintFiles.values()].find((bp) =>
+      blueprintDigest({ cells: blueprintCellsForDispatch(bp) }) === digest);
+    const bases = this.options.baseRegistry;
+    const base = bases?.forMember(request.botId, record.serverProfileId, input.blueprint.dimension) ?? bases?.create({
+      name: "autonomous-base", serverProfileId: record.serverProfileId,
+      dimension: input.blueprint.dimension, anchor: input.blueprint.anchor,
+      blueprintId: file?.name ?? digest, createdByBotId: request.botId,
     });
+    this.options.persistBaseState?.();
+    return beginBuildBatch(store, { goalId: request.taskId, botId: request.botId,
+      baseId: base?.id ?? JSON.stringify([record.serverProfileId, input.blueprint.dimension, input.blueprint.anchor]),
+      blueprintId: file?.name ?? digest, skillInput: input,
+      execution: { coordinatorInstanceId: this.coordinatorInstanceId, runtimeInstanceId: record.runtimeInstanceId, taskId: request.taskId } });
   }
 
   /**
@@ -1362,9 +1345,8 @@ export class CoordinatorLocalPlanner {
     );
     validateAdvertisedInput(currentSkill.inputSchema, trustedInput);
 
-    // Round 6.2 Facility 消费方：模型直派 smelt.item 且未指定熔炉时，
-    // 从共享工作站目录解析租约（busy/not_found 静默回退 null=Runtime 自放）。
-    const facilityLease = await this.resolveFacilityLeaseForDispatch(
+    // Runtime owns the lease for every entry path, including explicit coordinates.
+    const facilityLease = this.resolveFacilityCandidateForDispatch(
       request,
       decision.skillId,
       trustedInput,
@@ -1397,11 +1379,17 @@ export class CoordinatorLocalPlanner {
         worldStateVersion: execution.worldStateVersion,
       },
     );
-    // Round 6.4 J3：build.blueprint 派发进 durable journal（cell 级零重放判据）
-    const buildJournal = this.openBuildJournal(request, decision.skillId, trustedInput, currentRecord);
-    if (buildJournal !== null) {
-      this.options.planJournalStore?.save(recordDispatch(buildJournal, buildJournal.steps[0]!.stepId));
+    // Persist build identity before dispatch; resume boundaries require world evidence.
+    if (decision.skillId === "build.blueprint" && this.options.planJournalStore) {
+      trustedInput = { ...(trustedInput as Record<string, SkillJsonValue>), reconcile: true };
+      const blueprint = buildBlueprintInputSchema.parse(trustedInput).blueprint;
+      const previous = this.options.planJournalStore.load().find((j) => j.serverProfileId === currentRecord.serverProfileId &&
+        j.build?.dimension === blueprint.dimension && JSON.stringify(j.build.anchor) === JSON.stringify(blueprint.anchor) &&
+        j.build.blueprintVersion === blueprintDigest(blueprint));
+      if (previous?.build?.verification === "VERIFIED") trustedInput = { ...(trustedInput as Record<string, SkillJsonValue>), inspectOnly: true };
+      validateAdvertisedInput(currentSkill.inputSchema, trustedInput);
     }
+    let buildJournal = this.openBuildJournal(request, decision.skillId, trustedInput, currentRecord);
     let dispatchOutcome: Awaited<ReturnType<
       CoordinatorLocalPlanner["dispatchSkillWithRecovery"]
     >> | undefined;
@@ -1415,32 +1403,25 @@ export class CoordinatorLocalPlanner {
         deadlineMs,
         execution: activeExecution,
         claim: execution.claim,
+        beforeDispatch: (invocation) => {
+          if (!buildJournal?.build) return;
+          buildJournal = { ...buildJournal, revision: buildJournal.revision + 1,
+            build: { ...buildJournal.build, execution: { coordinatorInstanceId: this.coordinatorInstanceId,
+              runtimeInstanceId: currentRecord.runtimeInstanceId, taskId: request.taskId, invocationId: invocation.payload.invocationId } },
+            steps: buildJournal.steps.map((step, index) => index === buildJournal!.steps.length - 1
+              ? { ...step, attemptId: invocation.payload.invocationId, claimIdentity: execution.claim.owner } : step),
+            updatedAt: this.validNow().toISOString() };
+          this.options.planJournalStore!.save(buildJournal);
+        },
       });
     } finally {
       if (buildJournal !== null) {
-        const completed = dispatchOutcome !== undefined && dispatchOutcome.result.payload.outcome === "completed";
-        this.options.planJournalStore?.save(
-          applyStepResult(buildJournal, buildJournal.steps[0]!.stepId, {
-            status: completed ? "SUCCEEDED" : "FAILED",
-            failureCode: completed ? null : "BUILD_DISPATCH_FAILED",
-            verification: completed
-              ? { outcome: "confirmed", evidence: "skill result completed with placements output" }
-              : { outcome: "unverifiable", evidence: "dispatch did not complete" },
-          }),
-        );
-      }
-      // 租约与派发结果同生命周期：失败也要归还（corruption 除外——那是注册表问题）
-      if (facilityLease !== null) {
-        try {
-          this.options.workstationRegistry?.release(
-            facilityLease.serverProfileId,
-            facilityLease.dimension,
-            facilityLease.position,
-            request.botId,
-          );
-        } catch {
-          // 归还失败只记录：下一次 TTL 过期自愈
-          this.options.logger?.warn?.("coordinator_facility_release_failed", {});
+        const saved = finishBuildBatch(this.options.planJournalStore!, buildJournal, dispatchOutcome?.result.payload);
+        if (saved.build?.blueprintId === "starter-base-v1") {
+          this.options.baseRegistry?.recordPhaseEvidence(saved.build.baseId, "STARTER_BASE_ACTIVE",
+            saved.build.verification === "VERIFIED" ? "AVAILABLE" : saved.build.verification === "UNVERIFIED" ? "UNVERIFIED" : saved.build.verification === "DAMAGED" ? "DAMAGED" : "RECOVERING",
+            saved.planId, "blueprint-cell-readback");
+          this.options.persistBaseState?.();
         }
       }
     }
@@ -1533,7 +1514,7 @@ export class CoordinatorLocalPlanner {
     planItems: DeterministicPlanItemsDecision | null;
     skill: DeterministicSkillDecision | null;
   }> | null {
-    const parsed: DeterministicGoal | null =
+    let parsed: DeterministicGoal | null =
       parseDeterministicGoal(operatorGoal, plannedItemNames) ??
       parseBlueprintFileGoal(operatorGoal, new Set(this.blueprintFiles.keys()));
     if (parsed === null) {
@@ -1565,12 +1546,28 @@ export class CoordinatorLocalPlanner {
       };
     }
     if (parsed.kind === "build-blueprint-file") {
+      const dimension = record.currentStatus?.position.dimension;
+      const base = dimension ? this.options.baseRegistry?.forMember(request.botId, record.serverProfileId, dimension) : null;
+      const recovered = base && this.options.planJournalStore?.load().find((j) =>
+        j.serverProfileId === record.serverProfileId && j.build !== undefined && j.build.dimension === dimension &&
+        j.build.baseId === base.id && j.build.blueprintId === (parsed as { name: string }).name);
+      if (recovered?.build) {
+        const file = this.blueprintFiles.get(parsed.name)!;
+        if (recovered.build.blueprintVersion !== blueprintDigest({ cells: blueprintCellsForDispatch(file) })) {
+          throw new LocalPlannerError("PLANNER_GOAL_UNSUPPORTED", "BLUEPRINT_VERSION_RECONCILIATION_REQUIRED");
+        }
+        if (parsed.anchor && JSON.stringify(parsed.anchor) !== JSON.stringify(recovered.build.anchor)) {
+          throw new LocalPlannerError("PLANNER_GOAL_UNSUPPORTED", "BUILD_ANCHOR_CONFLICT");
+        }
+        parsed = { ...parsed, anchor: recovered.build.anchor,
+          startIndex: recovered.build.nextIndex >= recovered.build.blueprint.cells.length ? 0 : recovered.build.nextIndex };
+      }
       // 材料预采集（Implementation Prompt V1 · 端到端缺口修复）：本批用料
       // 与背包比对，缺料时不派 build（批中段缺货=结构性失败），改派确定性
       // 采集（资源图覆盖全部蓝图物料：圆石/木板/火把/熔炉/工作台/箱子）。
       // 采集完成→director 重选同一需求→重派蓝图（批间进度记忆保持
       // 锚点+startIndex 不漂移）。
-      const materialGoals = this.blueprintMaterialDeficit(parsed, record);
+      const materialGoals = recovered?.build?.verification === "VERIFIED" ? null : this.blueprintMaterialDeficit(parsed, record);
       // 空数组=材料齐备→落回 invoke_skill 正常派建（实测事故 2026-09-04：
       // 空缺口被当"有缺口"派了零目标 plan_items→PLANNER_GOAL_UNSUPPORTED
       // blockedOn="" 空串，施工首派即死循环）。
@@ -2216,21 +2213,17 @@ export class CoordinatorLocalPlanner {
     return null;
   }
 
-  /**
-   * Round 6.2 Facility 消费方：模型直派 smelt.item 且 furnace=null 时解析
-   * 共享熔炉租约。返回 null 表示无可用共享站（busy 或目录为空都回退
-   * furnace=null——Runtime 自放受守护的本地熔炉，行为与接入前一致）。
-   */
-  private async resolveFacilityLeaseForDispatch(
-    request: LocalPlanRequest,
+  /** A catalog candidate is a hint; only Runtime's exact block read can disprove it. */
+  private resolveFacilityCandidateForDispatch(
+    _request: LocalPlanRequest,
     skillId: string,
     trustedInput: SkillJsonValue,
     record: BotRegistryRecord,
-  ): Promise<{
+  ): {
     position: { x: number; y: number; z: number };
     serverProfileId: string;
     dimension: string;
-  } | null> {
+  } | null {
     const registry = this.options.workstationRegistry;
     if (registry === undefined || skillId !== "smelt.item") return null;
     const input = trustedInput as { furnace?: unknown } | null;
@@ -2240,71 +2233,13 @@ export class CoordinatorLocalPlanner {
     const position = record.currentStatus?.position;
     const dimension = position?.dimension;
     if (!dimension) return null;
-    // F3：租约接受前 server 真值验证——注册表条目可能已被世界变化证伪
-    // （熔炉被破坏/替换）。验证用一次真实的 world.scan 派发（只读、幂等），
-    // matches 里没有候选位置即证伪：发信号 + invalidate + 回退 null。
-    const verifyFurnaceStillExists = async (
-      entry: Readonly<{ position: { x: number; y: number; z: number } }>,
-    ): Promise<boolean> => {
-      try {
-        const scanOutput = await this.dispatchObservation(
-          request,
-          record,
-          record.skillCatalog!.skills,
-          "world.scan",
-          {
-            blockName: "furnace",
-            maxCount: 16,
-            maxDistance: 64,
-            dimension,
-            serverProfileId: record.serverProfileId,
-          },
-          this.validNow().getTime() + 15_000,
-        );
-        const matches = Array.isArray(
-          (scanOutput as { matches?: unknown } | null)?.matches,
-        )
-          ? ((scanOutput as { matches: Array<{ x: number; y: number; z: number }> }).matches)
-          : [];
-        return matches.some(
-          (m) =>
-            Math.floor(m.x) === entry.position.x &&
-            Math.floor(m.y) === entry.position.y &&
-            Math.floor(m.z) === entry.position.z,
-        );
-      } catch {
-        // 世界观测不可得：fail-closed 拒绝该租约（不猜存在）
-        return false;
-      }
-    };
-    const acquired = await acquireWorkstation(registry, {
-      serverProfileId: record.serverProfileId,
-      dimension,
-      type: "furnace",
-      from: {
-        x: Math.floor(position.x),
-        y: Math.floor(position.y),
-        z: Math.floor(position.z),
-      },
-      botId: request.botId,
-      verifyFn: verifyFurnaceStillExists,
-      onFailureSignal: (signal: FacilityFailureSignal) => {
-        this.options.logger?.warn?.("coordinator_facility_failure_signal", {
-          botId: request.botId,
-          failureCode: signal.failureCode,
-          facilityType: signal.facilityType,
-          position: signal.position,
-          expected: signal.expected,
-          actual: signal.actual,
-        });
-      },
-    });
-    if (acquired.status !== "acquired") return null;
+    const candidate = registry.findCandidates(record.serverProfileId, dimension, "furnace", position, 64)[0];
+    if (!candidate) return null;
     return {
       position: {
-        x: acquired.entry.position.x,
-        y: acquired.entry.position.y,
-        z: acquired.entry.position.z,
+        x: candidate.position.x,
+        y: candidate.position.y,
+        z: candidate.position.z,
       },
       serverProfileId: record.serverProfileId,
       dimension,
@@ -2500,6 +2435,7 @@ export class CoordinatorLocalPlanner {
     deadlineMs: number;
     execution: TaskExecutionRecord;
     claim: PlannerExecutionClaim;
+    beforeDispatch?: (invocation: SkillInvocationV1) => void;
   }>): Promise<Readonly<{
     invocation: SkillInvocationV1;
     result: SkillExecutionResultV1;
@@ -2538,6 +2474,7 @@ export class CoordinatorLocalPlanner {
         input.request.signal,
         skillTimeoutMs,
       );
+      input.beforeDispatch?.(invocation);
       const result = this.validatedSkillResult(
         await this.options.transport.sendSkillInvocation(
           invocation,

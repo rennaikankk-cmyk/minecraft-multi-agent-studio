@@ -6,7 +6,8 @@ import {
   identifierSchema,
   type PublicBotDetailV1,
 } from "@minecraft-studio/protocol";
-import { scanBlocksOutputSchema } from "@minecraft-studio/skills";
+import { scanBlocksOutputSchema, type BaseRegistry } from "@minecraft-studio/skills";
+import type { PlanJournalStore } from "./plan-journal.js";
 
 import type {
   BotRegistry,
@@ -37,7 +38,7 @@ import {
   type SurvivalNeed,
   type SurvivalNeedKey,
 } from "./survival-needs.js";
-import { BasePhaseTracker, type BasePhaseKey } from "./base-phase-state.js";
+import { BasePhaseTracker, BASE_PHASE_KEYS, emptyBasePhaseSnapshot, type BasePhaseKey } from "./base-phase-state.js";
 import {
   askSiteVerdict,
   buildSiteVerdictPrompt,
@@ -97,6 +98,9 @@ export type AutonomousDirectorOptions = Readonly<{
    * 这里。返回 true 表示被接单。未注入时聊天指挥不可用（生存不受影响）。
    */
   onChatGoal?: (botId: string, speaker: string, message: string) => boolean;
+  baseRegistry?: BaseRegistry;
+  planJournalStore?: PlanJournalStore;
+  persistBaseState?: () => void;
 }>;
 
 type InternalTask = PublicTask & {
@@ -223,12 +227,11 @@ export class AutonomousDirector implements AutonomousTaskSource {
   private readonly shelterBuilt = new Set<string>();
   /**
    * 基地阶段真值（Implementation Prompt V1 · Phase 1）：7 门快照驱动
-   * BASE_* 需求的顺序放行。进程内完成态，与 shelterBuilt 同语义——重启
-   * 后重来是安全侧失败（不会跳阶段）。
+   * BASE_* 需求的顺序放行；生产环境从共享注册表的当前证据推导。
    */
-  private readonly basePhase = new BasePhaseTracker();
+  private readonly basePhase: BasePhaseTracker;
   /**
-   * 每 bot 进行中的蓝图施工进度（批间链）：锚点钉死在首批解析结果上，
+   * 未注入 journal 的兼容调用方使用的进程内批间链：锚点钉死在首批解析结果上，
    * 续派 goal 显式携带锚点+startIndex，避免 auto-anchor 随 bot 移动漂移。
    * completed=true 时清除。
    */
@@ -266,8 +269,21 @@ export class AutonomousDirector implements AutonomousTaskSource {
   private strategyTimer: ReturnType<typeof setInterval> | null = null;
   private unsubscribeRegistry: (() => void) | null = null;
   private started = false;
+  private readonly baseSessions = new Map<string, string>();
 
   constructor(private readonly options: AutonomousDirectorOptions) {
+    this.basePhase = new BasePhaseTracker(options.baseRegistry ? (botId) => {
+      const snapshot = emptyBasePhaseSnapshot();
+      const record = options.registry.get(botId);
+      const dimension = record?.currentStatus?.position.dimension;
+      if (!record || !dimension || record.connectionState !== "online") return snapshot;
+      const base = options.baseRegistry!.forMember(botId, record.serverProfileId, dimension);
+      const session = `${record.serverProfileId}:${dimension}:${record.runtimeInstanceId}`;
+      if (base && this.baseSessions.get(botId) !== session) options.baseRegistry!.markFactsUnverified(base.id);
+      this.baseSessions.set(botId, session);
+      for (const phase of BASE_PHASE_KEYS) snapshot[phase] = !!base && options.baseRegistry!.currentPhaseFact(base.id, phase)?.availability === "AVAILABLE";
+      return snapshot;
+    } : undefined);
     this.now = options.now ?? (() => new Date());
     this.randomId = options.randomId ?? randomUUID;
     positiveInteger(options.intervalMs, "intervalMs");
@@ -606,9 +622,9 @@ export class AutonomousDirector implements AutonomousTaskSource {
     nowMs: number,
   ): AutonomousGoal | null {
     const focus = this.currentFocus.get(record.botId);
-    const needs = assessSurvivalNeeds({
+    const needs = [...assessSurvivalNeeds({
       record,
-      shelterBuilt: this.shelterBuilt.has(record.botId),
+      shelterBuilt: this.options.baseRegistry ? this.basePhase.snapshotFor(record.botId).SHELTER_MINIMAL_READY : this.shelterBuilt.has(record.botId),
       // 基地阶段真值（Phase 1）：BASE_* 需求的顺序门。快照恒供给——
       // 门全 false 时 survival-needs 整段静默（语义同未传入）。
       basePhase: this.basePhase.snapshotFor(record.botId),
@@ -618,9 +634,20 @@ export class AutonomousDirector implements AutonomousTaskSource {
       // 战略评审给出的重心只做加权（score 上限钳到 95，不越过饿肚子级的
       // 硬需求），确保模型最多改变"先做什么"，永远改不掉"必须活着"。
       focusBoosts: focus ? FOCUS_NEED_BOOSTS[focus] : undefined,
-    });
+    })];
+    const build = this.persistedBuild(record.botId, "BASE_MAIN_CONSTRUCTION");
+    const base = this.options.baseRegistry?.forMember(record.botId, record.serverProfileId, record.currentStatus!.position.dimension);
+    if (build && base && !this.basePhase.snapshotFor(record.botId).STARTER_BASE_ACTIVE &&
+      !needs.some((n) => n.key === "BASE_MAIN_CONSTRUCTION")) {
+      needs.push({ key: "BASE_MAIN_CONSTRUCTION", title: "核对并恢复基地", score: 46,
+        reason: "base-world-evidence-required", operatorGoal: "使用蓝图文件 starter-base-v1 施工", sourceBlock: null });
+      needs.sort((a, b) => b.score - a.score);
+    }
     const eligible = needs.filter(
       (need) =>
+        !(need.key === "SHELTER" && build) &&
+        !((need.key === "BASE_FACILITY_COBBLE" || need.key === "BASE_FACILITY_FARM") &&
+          this.persistedBuild(record.botId, need.key)?.verification === "VERIFIED") &&
         (this.needSuppressedUntil.get(`${record.botId}:${need.key}`) ?? 0) <=
         nowMs,
     );
@@ -768,6 +795,11 @@ export class AutonomousDirector implements AutonomousTaskSource {
     operatorGoal: string,
   ): string {
     if (!BASE_BUILD_NEED_KEYS.has(needKey)) return operatorGoal;
+    const recovered = this.persistedBuild(botId, needKey);
+    if (recovered) {
+      const startIndex = recovered.nextIndex >= recovered.blueprint.cells.length ? 0 : recovered.nextIndex;
+      return `使用蓝图文件 ${recovered.blueprintId} 施工：锚点 x=${recovered.anchor.x} y=${recovered.anchor.y} z=${recovered.anchor.z}，从第 ${startIndex} 格开始`;
+    }
     const nameMatch = BLUEPRINT_GOAL_NAME.exec(operatorGoal);
     if (nameMatch === null) return operatorGoal;
     const progress = this.baseBuilds.get(botId);
@@ -793,6 +825,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
     operatorGoal: string,
     result: AutonomousPlanResult,
   ): void {
+    if (this.options.planJournalStore) return;
     if (!BASE_BUILD_NEED_KEYS.has(needKey)) return;
     if (result.action !== "skill_result") return;
     if (result.invocation.payload.skillId !== "build.blueprint") return;
@@ -862,7 +895,40 @@ export class AutonomousDirector implements AutonomousTaskSource {
   /** 多批蓝图需求是否仍有进行中施工（完成语义门控）。 */
   private hasOngoingBaseBuild(botId: string, needKey: SurvivalNeedKey): boolean {
     if (!BASE_BUILD_NEED_KEYS.has(needKey)) return false;
+    if (this.options.planJournalStore) {
+      const build = this.persistedBuild(botId, needKey);
+      return !build || build.verification !== "VERIFIED";
+    }
     return this.baseBuilds.has(botId);
+  }
+
+  private persistedBuild(botId: string, needKey: SurvivalNeedKey) {
+    const names: Partial<Record<SurvivalNeedKey, string>> = {
+      BASE_MAIN_CONSTRUCTION: "starter-base-v1", BASE_FACILITY_COBBLE: "cobble-generator", BASE_FACILITY_FARM: "carrot-farm-9x9",
+    };
+    const record = this.options.registry.get(botId);
+    const dimension = record?.currentStatus?.position.dimension;
+    if (!record || !dimension || !names[needKey]) return null;
+    const base = this.options.baseRegistry?.forMember(botId, record.serverProfileId, dimension);
+    if (!base) return null;
+    return this.options.planJournalStore?.load().find((j) => j.serverProfileId === record.serverProfileId &&
+      j.build?.dimension === dimension && j.build.baseId === base.id && j.build.blueprintId === names[needKey])?.build ?? null;
+  }
+
+  private recordBaseFact(botId: string, phase: BasePhaseKey): void {
+    const record = this.options.registry.get(botId);
+    const position = record?.currentStatus?.position;
+    if (!record || !position || !this.options.baseRegistry) return;
+    const base = this.options.baseRegistry.forMember(botId, record.serverProfileId, position.dimension) ?? this.options.baseRegistry.create({
+      name: "autonomous-base", serverProfileId: record.serverProfileId, dimension: position.dimension,
+      anchor: { x: Math.floor(position.x) + 2, y: Math.floor(position.y), z: Math.floor(position.z) },
+      blueprintId: "starter-base-v1", createdByBotId: botId,
+    });
+    // Structure completion cannot establish food production or trade replenishment.
+    if (phase === "SHELTER_MINIMAL_READY" || phase === "BASE_SITE_RESERVED") {
+      this.options.baseRegistry.recordPhaseEvidence(base.id, phase, "AVAILABLE", "verified deterministic goal result", "director-goal-result");
+      this.options.persistBaseState?.();
+    }
   }
 
   /**
@@ -948,6 +1014,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
     const forcedByLimit = verdict !== null && verdict.verdict === "reject";
     this.siteRejects.set(botId, 0);
     this.basePhase.forcePhase(botId, "BASE_SITE_RESERVED");
+    this.recordBaseFact(botId, "BASE_SITE_RESERVED");
     this.log("info", "coordinator_autonomous_site_accepted", {
       botId,
       goal: goal.key,
@@ -1468,6 +1535,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
         } else {
           const gated = this.basePhase.recordNeedCompletion(botId, goal.needKey);
           if (gated !== null) {
+            this.recordBaseFact(botId, gated);
             this.log("info", "coordinator_autonomous_base_phase_gate", {
               botId,
               needKey: goal.needKey,

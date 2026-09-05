@@ -8,6 +8,8 @@
 //   - body 上限 / 坏 JSON / 未知路径
 // ---------------------------------------------------------------------------
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 import { SharedStateClient, SharedStateError } from "@minecraft-studio/skills";
 import { smeltingLinePattern } from "@minecraft-studio/skills";
@@ -38,6 +40,36 @@ describe("SharedStateServer real HTTP integration", () => {
     expect(baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
   });
 
+  it("uses the same lease authority from an independent Node process", async () => {
+    const position = { x: 80, y: 64, z: 80 };
+    const owner = { ownerRuntimeId: "parent", ownerTaskId: "task", ownerAttemptId: "attempt" };
+    await client.workstations.register(SERVER, DIM, "furnace", position);
+    await client.workstations.claim(SERVER, DIM, position, BOT_A, undefined, owner);
+    const { stdout } = await promisify(execFile)(process.execPath, ["--input-type=module", "--eval",
+      `import { SharedStateClient } from '@minecraft-studio/skills';
+       const c = new SharedStateClient({ baseUrl: process.argv[1] });
+       const value = await c.workstations.claim(${JSON.stringify(SERVER)}, ${JSON.stringify(DIM)}, ${JSON.stringify(position)}, 'child', undefined,
+         { ownerRuntimeId: 'child-runtime', ownerTaskId: 'task', ownerAttemptId: 'attempt' });
+       process.stdout.write(JSON.stringify(value));`, baseUrl]);
+    expect(JSON.parse(stdout)).toBe(false);
+  });
+
+  it("replays operation identities and rejects changed bodies and missing versions", async () => {
+    const position = { x: 90, y: 64, z: 90 };
+    await client.workstations.register(SERVER, DIM, "furnace", position);
+    const request = { schemaVersion: "1.0", operationId: crypto.randomUUID(), issuedAtMs: Date.now(), op: "ws.claim",
+      args: { serverProfileId: SERVER, dimension: DIM, position, botId: BOT_A,
+        owner: { ownerRuntimeId: "parent", ownerTaskId: "task", ownerAttemptId: "attempt" } } };
+    const rpc = async (body: unknown) => (await fetch(`${baseUrl}/rpc`, { method: "POST",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })).json();
+    expect(await rpc(request)).toMatchObject({ ok: true, result: true, operationId: request.operationId });
+    const lease = (await client.workstations.get(SERVER, DIM, position))!.lease!;
+    expect(await rpc(request)).toMatchObject({ ok: true, result: true });
+    expect((await client.workstations.get(SERVER, DIM, position))!.lease!.leaseId).toBe(lease.leaseId);
+    expect(await rpc({ ...request, args: { ...request.args, botId: BOT_B } })).toMatchObject({ ok: false, error: "operation_conflict" });
+    expect(await rpc({ op: "ws.claim", args: request.args })).toMatchObject({ ok: false, error: "bad_request" });
+  });
+
   it("workstation register → get → claim race over real HTTP", async () => {
     const pos = { x: 10, y: 64, z: -20 };
     const entry = await client.workstations.register(SERVER, DIM, "furnace", pos);
@@ -45,10 +77,12 @@ describe("SharedStateServer real HTTP integration", () => {
     const got = await client.workstations.get(SERVER, DIM, pos);
     expect(got?.position).toEqual(pos);
 
-    expect(await client.workstations.claim(SERVER, DIM, pos, BOT_A)).toBe(true);
-    expect(await client.workstations.claim(SERVER, DIM, pos, BOT_B)).toBe(false);
-    await client.workstations.release(SERVER, DIM, pos, BOT_A);
-    expect(await client.workstations.claim(SERVER, DIM, pos, BOT_B)).toBe(true);
+    const owner = { ownerRuntimeId: "runtime-a", ownerTaskId: "task", ownerAttemptId: "attempt" };
+    expect(await client.workstations.claim(SERVER, DIM, pos, BOT_A, undefined, owner)).toBe(true);
+    expect(await client.workstations.claim(SERVER, DIM, pos, BOT_B, undefined, owner)).toBe(false);
+    const lease = (await client.workstations.get(SERVER, DIM, pos))!.lease!;
+    await client.workstations.release(SERVER, DIM, pos, BOT_A, lease);
+    expect(await client.workstations.claim(SERVER, DIM, pos, BOT_B, undefined, owner)).toBe(true);
   });
 
   it("facility 7-state lifecycle over real HTTP", async () => {
@@ -95,7 +129,7 @@ describe("SharedStateServer real HTTP integration", () => {
     const response = await fetch(`${baseUrl}/rpc`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ op: "ws.nope" }),
+      body: JSON.stringify({ schemaVersion: "1.0", operationId: crypto.randomUUID(), issuedAtMs: Date.now(), op: "ws.nope" }),
     });
     const envelope = (await response.json()) as { ok: boolean; error: string };
     expect(envelope.ok).toBe(false);
@@ -164,8 +198,8 @@ describe("SharedStateServer token auth", () => {
 });
 
 describe("loadSharedStateConfig", () => {
-  it("returns undefined when no port is configured", () => {
-    expect(loadSharedStateConfig({})).toBeUndefined();
+  it("defaults to a loopback authority for local Runtime leases", () => {
+    expect(loadSharedStateConfig({})).toMatchObject({ host: "127.0.0.1", port: 8791 });
   });
 
   it("parses port/host/token", () => {
@@ -209,7 +243,8 @@ describe("SharedStateServer durable persistence across restart", () => {
   it("builds state, persists on stop, and a fresh server remembers durable knowledge", async () => {
     // Workstation + 观测 + lease（lease 是 ephemeral）
     await firstClient.workstations.register(SERVER, DIM, "furnace", { x: 9, y: 64, z: 9 });
-    await firstClient.workstations.claim(SERVER, DIM, { x: 9, y: 64, z: 9 }, "studio-bot-01");
+    await firstClient.workstations.claim(SERVER, DIM, { x: 9, y: 64, z: 9 }, "studio-bot-01", undefined,
+      { ownerRuntimeId: "runtime-a", ownerTaskId: "task", ownerAttemptId: "attempt" });
 
     // Facility + slot 生命周期
     const facility = await firstClient.facilities.create({

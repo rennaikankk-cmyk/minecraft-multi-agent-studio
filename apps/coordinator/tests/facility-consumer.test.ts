@@ -290,7 +290,7 @@ function scanThenResultTransport(
 }
 
 describe("Round 6.2 facility consumer (shared furnace lease)", () => {
-  it("fills furnace from a shared-registry lease and releases it after dispatch", async () => {
+  it("passes the shared candidate without preclaiming Runtime's lease", async () => {
     const workstationRegistry = new InMemoryWorkstationRegistry();
     workstationRegistry.register("isolated-test", "minecraft:overworld", "furnace", {
       x: 1235,
@@ -345,7 +345,7 @@ describe("Round 6.2 facility consumer (shared furnace lease)", () => {
     expect((invocation.payload.input as { furnace: unknown }).furnace).toBeNull();
   });
 
-  it("leaves furnace null when the shared furnace is busy (contention is not an error)", async () => {
+  it("preserves a busy candidate for Runtime arbitration without creating another furnace", async () => {
     const workstationRegistry = new InMemoryWorkstationRegistry();
     workstationRegistry.register("isolated-test", "minecraft:overworld", "furnace", {
       x: 1235,
@@ -376,10 +376,11 @@ describe("Round 6.2 facility consumer (shared furnace lease)", () => {
       .map(([call]) => call)
       .find((call) => call.payload.skillId === "smelt.item");
     expect(invocation).toBeDefined();
-    expect((invocation!.payload.input as { furnace: unknown }).furnace).toBeNull();
+    expect((invocation!.payload.input as { furnace: unknown }).furnace).toEqual({ x: 1235, y: 64, z: -4320 });
+    expect(workstationRegistry.get("isolated-test", "minecraft:overworld", { x: 1235, y: 64, z: -4320 })?.lease?.ownerBotId).toBe("bot-other");
   });
 
-  it("F3: verifies the leased furnace against server truth and invalidates a destroyed one", async () => {
+  it("does not infer destruction from absent capped scan results", async () => {
     const workstationRegistry = new InMemoryWorkstationRegistry();
     workstationRegistry.register("isolated-test", "minecraft:overworld", "furnace", {
       x: 1235,
@@ -412,16 +413,15 @@ describe("Round 6.2 facility consumer (shared furnace lease)", () => {
     const smeltInvocation = sendSkillInvocation.mock.calls
       .map(([call]) => call)
       .find((call) => call.payload.skillId === "smelt.item")!;
-    // 证伪后回退 furnace=null（Runtime 自放），不把幽灵熔炉写进输入
-    expect((smeltInvocation.payload.input as { furnace: unknown }).furnace).toBeNull();
-    // 注册表条目被 invalidate（下一轮不会再用它）
+    expect((smeltInvocation.payload.input as { furnace: unknown }).furnace).toEqual({ x: 1235, y: 64, z: -4320 });
+    // Runtime must inspect the exact loaded block before invalidating a candidate.
     expect(
       workstationRegistry.get("isolated-test", "minecraft:overworld", {
         x: 1235,
         y: 64,
         z: -4320,
       }),
-    ).toBeNull();
+    ).not.toBeNull();
   });
 
   it("registers furnace positions from a completed world.scan", async () => {
