@@ -124,7 +124,7 @@ describe("WorkstationRegistry v1", () => {
     const pos = normalizeBlockPos({ x: 10, y: 64, z: 10 });
     r.claim(SERVER, DIM, pos, BOT_A, 5_000);
     vi.advanceTimersByTime(3_000);
-    expect(r.renewClaim(SERVER, DIM, pos, BOT_A, 10_000)).toBe(true);
+    expect(r.renewClaim(SERVER, DIM, pos, BOT_A, 10_000, r.get(SERVER, DIM, pos)!.lease!)).toBe(true);
     // Original 5s would have expired, renewed 10s is still valid
     vi.advanceTimersByTime(3_000);
     expect(r.claim(SERVER, DIM, pos, BOT_B)).toBe(false); // still held by A
@@ -135,7 +135,7 @@ describe("WorkstationRegistry v1", () => {
     r.register(SERVER, DIM, "furnace", { x: 10, y: 64, z: 10 });
     const pos = normalizeBlockPos({ x: 10, y: 64, z: 10 });
     r.claim(SERVER, DIM, pos, BOT_A);
-    r.release(SERVER, DIM, pos, BOT_A);
+    r.release(SERVER, DIM, pos, BOT_A, r.get(SERVER, DIM, pos)!.lease!);
     expect(r.claim(SERVER, DIM, pos, BOT_B)).toBe(true);
   });
 
@@ -194,13 +194,16 @@ describe("WorkstationRegistry v1", () => {
   });
 
   // 20. releaseAllClaims
-  it("20: releaseAllClaims frees all bot claims", () => {
+  it("20: unfenced bulk release preserves live claims until expiry", () => {
     r.register(SERVER, DIM, "furnace", { x: 10, y: 64, z: 10 });
     r.register(SERVER, DIM, "furnace", { x: 20, y: 64, z: 20 });
     const p1 = normalizeBlockPos({ x: 10, y: 64, z: 10 });
     const p2 = normalizeBlockPos({ x: 20, y: 64, z: 20 });
     r.claim(SERVER, DIM, p1, BOT_A);
     r.claim(SERVER, DIM, p2, BOT_A);
+    r.releaseAllClaims(BOT_A);
+    expect(r.claim(SERVER, DIM, p1, BOT_B)).toBe(false);
+    vi.advanceTimersByTime(10_001);
     r.releaseAllClaims(BOT_A);
     expect(r.claim(SERVER, DIM, p1, BOT_B)).toBe(true);
     expect(r.claim(SERVER, DIM, p2, BOT_B)).toBe(true);

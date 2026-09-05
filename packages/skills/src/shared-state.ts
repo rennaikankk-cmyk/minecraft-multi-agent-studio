@@ -13,6 +13,8 @@
 //   3. 快照 {workstations:{entries}, facilities:{facilities}} 支持 GET/PUT 持久化
 // ---------------------------------------------------------------------------
 
+import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import {
   FacilityRegistry,
   type Facility,
@@ -28,6 +30,8 @@ import {
   type WorkstationEntry,
   type WorkstationRegistryPort,
   type WorkstationType,
+  type WorkstationLease,
+  type WorkstationLeaseOwner,
 } from "./workstation-registry.js";
 
 // ---------------------------------------------------------------------------
@@ -35,13 +39,25 @@ import {
 // ---------------------------------------------------------------------------
 
 export interface SharedStateRequest {
+  readonly schemaVersion?: "1.0";
+  readonly operationId?: string;
+  readonly issuedAtMs?: number;
   readonly op: string;
-  readonly args?: Record<string, unknown>;
+  readonly args?: Record<string, unknown> | undefined;
 }
 
 export type SharedStateResponse =
-  | Readonly<{ ok: true; result: unknown }>
-  | Readonly<{ ok: false; error: string }>;
+  | Readonly<{ ok: true; result: unknown; schemaVersion?: "1.0"; operationId?: string }>
+  | Readonly<{ ok: false; error: string; schemaVersion?: "1.0"; operationId?: string }>;
+
+export const sharedStateRequestSchema = z.object({
+  schemaVersion: z.literal("1.0"), operationId: z.uuid(), issuedAtMs: z.number().int().positive(),
+  op: z.string().min(1).max(80), args: z.record(z.string(), z.unknown()).optional(),
+}).strict();
+const leaseOwnerSchema = z.object({ ownerRuntimeId: z.string().min(1), ownerTaskId: z.string().min(1), ownerAttemptId: z.string().min(1) }).strict();
+const leaseSchema = leaseOwnerSchema.extend({ leaseId: z.uuid(), generation: z.number().int().positive(),
+  ownerBotId: z.string().min(1), expiresAtMs: z.number().finite() });
+const replays = new WeakMap<object, Map<string, { body: string; expires: number; response: SharedStateResponse }>>();
 
 export interface SharedStateSnapshot {
   workstations: { entries: WorkstationEntry[] };
@@ -100,11 +116,12 @@ export function createSharedStateDispatcher(
         pos(a, "from"), optNum(a, "maxDistance"),
       ),
     "ws.claim": (a) =>
-      workstations.claim(str(a, "serverProfileId"), str(a, "dimension"), pos(a), str(a, "botId"), optNum(a, "ttlMs")),
+      workstations.claim(str(a, "serverProfileId"), str(a, "dimension"), pos(a), str(a, "botId"), optNum(a, "ttlMs"), leaseOwnerSchema.parse(a.owner)),
     "ws.renewClaim": (a) =>
-      workstations.renewClaim(str(a, "serverProfileId"), str(a, "dimension"), pos(a), str(a, "botId"), optNum(a, "ttlMs")),
+      workstations.renewClaim(str(a, "serverProfileId"), str(a, "dimension"), pos(a), str(a, "botId"), optNum(a, "ttlMs"), leaseSchema.parse(a.lease)),
     "ws.release": (a) =>
-      workstations.release(str(a, "serverProfileId"), str(a, "dimension"), pos(a), str(a, "botId")),
+      workstations.release(str(a, "serverProfileId"), str(a, "dimension"), pos(a), str(a, "botId"), leaseSchema.parse(a.lease)),
+    "ws.commit": (a) => workstations.commit(str(a, "serverProfileId"), str(a, "dimension"), pos(a), str(a, "botId"), leaseSchema.parse(a.lease)),
     "ws.invalidate": (a) => workstations.invalidate(str(a, "serverProfileId"), str(a, "dimension"), pos(a)),
     "ws.releaseAllClaims": (a) => workstations.releaseAllClaims(str(a, "botId")),
     "ws.clearServer": (a) => workstations.clearServer(str(a, "serverProfileId")),
@@ -157,7 +174,7 @@ export function createSharedStateDispatcher(
       facilities.observeSlot(
         str(a, "facilityId"), int(a, "slotIndex"),
         {
-          blockPresent: a.blockPresent === true,
+          blockPresent: z.boolean().parse(a.blockPresent),
           blockName: a.blockName === undefined || a.blockName === null ? null : str(a, "blockName"),
         },
       ),
@@ -169,6 +186,23 @@ export function dispatchSharedState(
   dispatcher: Readonly<Record<string, SharedStateHandler>>,
   request: SharedStateRequest,
 ): SharedStateResponse {
+  if (request.schemaVersion !== undefined) {
+    const parsed = sharedStateRequestSchema.safeParse(request);
+    if (!parsed.success) return { ok: false, error: "invalid_envelope" };
+    const id = parsed.data.operationId;
+    const envelope = { schemaVersion: "1.0" as const, operationId: id };
+    if (Math.abs(Date.now() - parsed.data.issuedAtMs) > 30_000) return { ...envelope, ok: false, error: "operation_expired" };
+    const cache = replays.get(dispatcher) ?? new Map();
+    replays.set(dispatcher, cache);
+    for (const [key, value] of cache) if (value.expires < Date.now()) cache.delete(key);
+    const body = JSON.stringify([request.op, request.args]);
+    const previous = cache.get(id);
+    if (previous) return previous.body === body ? previous.response : { ...envelope, ok: false, error: "operation_conflict" };
+    if (cache.size >= 2048) return { ...envelope, ok: false, error: "operation_backpressure" };
+    const response = { ...dispatchSharedState(dispatcher, { op: request.op, ...(request.args ? { args: request.args } : {}) }), ...envelope };
+    cache.set(id, { body, expires: parsed.data.issuedAtMs + 30_000, response: structuredClone(response) });
+    return response;
+  }
   const handler = dispatcher[request.op];
   if (!handler) return { ok: false, error: `unknown_op:${request.op}` };
   try {
@@ -211,9 +245,10 @@ export interface MaybeAsyncWorkstationRegistryPort {
   register(serverProfileId: string, dimension: string, type: WorkstationType, position: { x: number; y: number; z: number }, confidence?: number): Maybe<WorkstationEntry>;
   get(serverProfileId: string, dimension: string, position: BlockPosition): Maybe<WorkstationEntry | null>;
   findCandidates(serverProfileId: string, dimension: string, type: WorkstationType, from: { x: number; y: number; z: number }, maxDistance?: number): Maybe<readonly WorkstationEntry[]>;
-  claim(serverProfileId: string, dimension: string, position: BlockPosition, botId: string, ttlMs?: number): Maybe<boolean>;
-  renewClaim(serverProfileId: string, dimension: string, position: BlockPosition, botId: string, ttlMs?: number): Maybe<boolean>;
-  release(serverProfileId: string, dimension: string, position: BlockPosition, botId: string): Maybe<void>;
+  claim(serverProfileId: string, dimension: string, position: BlockPosition, botId: string, ttlMs?: number, owner?: WorkstationLeaseOwner): Maybe<boolean>;
+  renewClaim(serverProfileId: string, dimension: string, position: BlockPosition, botId: string, ttlMs?: number, lease?: WorkstationLease): Maybe<boolean>;
+  release(serverProfileId: string, dimension: string, position: BlockPosition, botId: string, lease?: WorkstationLease): Maybe<void>;
+  commit(serverProfileId: string, dimension: string, position: BlockPosition, botId: string, lease: WorkstationLease): Maybe<boolean>;
   invalidate(serverProfileId: string, dimension: string, position: BlockPosition): Maybe<void>;
   releaseAllClaims(botId: string): Maybe<void>;
   clearServer(serverProfileId: string): Maybe<void>;
@@ -294,12 +329,14 @@ export class SharedStateClient {
         this.#rpc("ws.get", { serverProfileId, dimension, position }) as Promise<WorkstationEntry | null>,
       findCandidates: (serverProfileId, dimension, type, from, maxDistance) =>
         this.#rpc("ws.findCandidates", { serverProfileId, dimension, type, from, maxDistance }) as Promise<readonly WorkstationEntry[]>,
-      claim: (serverProfileId, dimension, position, botId, ttlMs) =>
-        this.#rpc("ws.claim", { serverProfileId, dimension, position, botId, ttlMs }) as Promise<boolean>,
-      renewClaim: (serverProfileId, dimension, position, botId, ttlMs) =>
-        this.#rpc("ws.renewClaim", { serverProfileId, dimension, position, botId, ttlMs }) as Promise<boolean>,
-      release: (serverProfileId, dimension, position, botId) =>
-        this.#rpc("ws.release", { serverProfileId, dimension, position, botId }) as Promise<void>,
+      claim: (serverProfileId, dimension, position, botId, ttlMs, owner) =>
+        this.#rpc("ws.claim", { serverProfileId, dimension, position, botId, ttlMs, owner }) as Promise<boolean>,
+      renewClaim: (serverProfileId, dimension, position, botId, ttlMs, lease) =>
+        this.#rpc("ws.renewClaim", { serverProfileId, dimension, position, botId, ttlMs, lease }) as Promise<boolean>,
+      release: (serverProfileId, dimension, position, botId, lease) =>
+        this.#rpc("ws.release", { serverProfileId, dimension, position, botId, lease }) as Promise<void>,
+      commit: (serverProfileId, dimension, position, botId, lease) =>
+        this.#rpc("ws.commit", { serverProfileId, dimension, position, botId, lease }) as Promise<boolean>,
       invalidate: (serverProfileId, dimension, position) =>
         this.#rpc("ws.invalidate", { serverProfileId, dimension, position }) as Promise<void>,
       releaseAllClaims: (botId) =>
@@ -342,6 +379,7 @@ export class SharedStateClient {
   }
 
   async #rpc(op: string, args?: Record<string, unknown>): Promise<unknown> {
+    const operationId = randomUUID();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
@@ -350,7 +388,7 @@ export class SharedStateClient {
       const response = await this.doFetch(`${this.baseUrl}/rpc`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ op, args }),
+        body: JSON.stringify({ schemaVersion: "1.0", operationId, issuedAtMs: Date.now(), op, args }),
         signal: controller.signal,
       });
       if (response.status === 401 || response.status === 403) {
@@ -360,6 +398,9 @@ export class SharedStateClient {
         throw new SharedStateError(`http_${response.status}`);
       }
       const envelope = (await response.json()) as SharedStateResponse;
+      if (envelope.schemaVersion !== "1.0" || envelope.operationId !== operationId || typeof envelope.ok !== "boolean") {
+        throw new SharedStateError("response_identity_mismatch");
+      }
       if (!envelope.ok) throw new SharedStateError(envelope.error);
       return envelope.result;
     } catch (error) {
@@ -395,14 +436,17 @@ export class SharedStateClient {
   findCandidates(serverProfileId: string, dimension: string, type: WorkstationType, from: { x: number; y: number; z: number }, maxDistance?: number) {
     return this.#rpc("ws.findCandidates", { serverProfileId, dimension, type, from, maxDistance });
   }
-  claim(serverProfileId: string, dimension: string, position: BlockPosition, botId: string, ttlMs?: number) {
-    return this.#rpc("ws.claim", { serverProfileId, dimension, position, botId, ttlMs }) as Promise<boolean>;
+  claim(serverProfileId: string, dimension: string, position: BlockPosition, botId: string, ttlMs?: number, owner?: WorkstationLeaseOwner) {
+    return this.workstations.claim(serverProfileId, dimension, position, botId, ttlMs, owner);
   }
-  renewClaim(serverProfileId: string, dimension: string, position: BlockPosition, botId: string, ttlMs?: number) {
-    return this.#rpc("ws.renewClaim", { serverProfileId, dimension, position, botId, ttlMs }) as Promise<boolean>;
+  renewClaim(serverProfileId: string, dimension: string, position: BlockPosition, botId: string, ttlMs?: number, lease?: WorkstationLease) {
+    return this.workstations.renewClaim(serverProfileId, dimension, position, botId, ttlMs, lease);
   }
-  release(serverProfileId: string, dimension: string, position: BlockPosition, botId: string) {
-    return this.#rpc("ws.release", { serverProfileId, dimension, position, botId });
+  release(serverProfileId: string, dimension: string, position: BlockPosition, botId: string, lease?: WorkstationLease) {
+    return this.workstations.release(serverProfileId, dimension, position, botId, lease);
+  }
+  commit(serverProfileId: string, dimension: string, position: BlockPosition, botId: string, lease: WorkstationLease) {
+    return this.workstations.commit(serverProfileId, dimension, position, botId, lease);
   }
   invalidate(serverProfileId: string, dimension: string, position: BlockPosition) {
     return this.#rpc("ws.invalidate", { serverProfileId, dimension, position });

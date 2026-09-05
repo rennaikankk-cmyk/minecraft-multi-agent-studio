@@ -30,7 +30,7 @@ const BOT_B = "studio-bot-02";
 function makeClient(dispatcher: ReturnType<typeof createSharedStateDispatcher>): SharedStateClient {
   const fetchImpl = (async (url: URL | string, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body)) as { op: string; args?: Record<string, unknown> };
-    const envelope = dispatchSharedState(dispatcher, { op: body.op, args: body.args });
+    const envelope = dispatchSharedState(dispatcher, body);
     return new Response(JSON.stringify(envelope), {
       status: envelope.ok ? 200 : 200, // 协议层错误也走 200 + ok:false 信封
       headers: { "Content-Type": "application/json" },
@@ -71,20 +71,23 @@ describe("SharedStateClient workstation semantics", () => {
     const client = makeClient(createSharedStateDispatcher(wsReg, new FacilityRegistry()));
     const p = { x: 1, y: 2, z: 3 };
     await client.register(SERVER, DIM, "furnace", p);
-    expect(await client.claim(SERVER, DIM, p, BOT_A)).toBe(true);
-    expect(await client.claim(SERVER, DIM, p, BOT_B)).toBe(false);
-    await client.release(SERVER, DIM, p, BOT_A);
-    expect(await client.claim(SERVER, DIM, p, BOT_B)).toBe(true);
+    const owner = { ownerRuntimeId: "runtime-a", ownerTaskId: "task", ownerAttemptId: "attempt" };
+    expect(await client.claim(SERVER, DIM, p, BOT_A, undefined, owner)).toBe(true);
+    expect(await client.claim(SERVER, DIM, p, BOT_B, undefined, owner)).toBe(false);
+    const lease = (await client.workstations.get(SERVER, DIM, p))!.lease!;
+    await client.release(SERVER, DIM, p, BOT_A, lease);
+    expect(await client.claim(SERVER, DIM, p, BOT_B, undefined, owner)).toBe(true);
   });
 
-  it("releaseAllClaims frees every lease of a bot (crash recovery)", async () => {
+  it("unfenced bulk release cannot clear a live runtime lease", async () => {
     const wsReg = new InMemoryWorkstationRegistry();
     const client = makeClient(createSharedStateDispatcher(wsReg, new FacilityRegistry()));
     for (const x of [1, 2, 3]) await client.register(SERVER, DIM, "furnace", { x, y: 64, z: 0 });
-    expect(await client.claim(SERVER, DIM, { x: 1, y: 64, z: 0 }, BOT_A)).toBe(true);
-    expect(await client.claim(SERVER, DIM, { x: 2, y: 64, z: 0 }, BOT_A)).toBe(true);
+    const owner = { ownerRuntimeId: "runtime-a", ownerTaskId: "task", ownerAttemptId: "attempt" };
+    expect(await client.claim(SERVER, DIM, { x: 1, y: 64, z: 0 }, BOT_A, undefined, owner)).toBe(true);
+    expect(await client.claim(SERVER, DIM, { x: 2, y: 64, z: 0 }, BOT_A, undefined, owner)).toBe(true);
     await client.releaseAllClaims(BOT_A);
-    expect(await client.claim(SERVER, DIM, { x: 1, y: 64, z: 0 }, BOT_B)).toBe(true);
+    expect(await client.claim(SERVER, DIM, { x: 1, y: 64, z: 0 }, BOT_B, undefined, owner)).toBe(false);
   });
 
   it("findCandidates returns distance-sorted entries", async () => {

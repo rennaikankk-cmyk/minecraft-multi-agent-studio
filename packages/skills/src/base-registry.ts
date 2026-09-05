@@ -142,6 +142,15 @@ export function resolveMaterials(
 
 export type BaseStatus = "planned" | "building" | "operational" | "damaged" | "abandoned";
 
+export type BaseAvailability = "UNVERIFIED" | "AVAILABLE" | "DAMAGED" | "RECOVERING";
+export interface BasePhaseFact {
+  availability: BaseAvailability;
+  everCompleted: boolean;
+  evidence: string;
+  observedAt: string;
+  validator: string;
+}
+
 export interface BaseRecord {
   readonly id: string;
   readonly name: string;
@@ -150,9 +159,13 @@ export interface BaseRecord {
   readonly anchor: BlockPosition;
   readonly blueprintId: string;
   readonly blueprintVersion: number;
+  memberBotIds?: string[];
+  phaseFacts?: Record<string, BasePhaseFact>;
   status: BaseStatus;
   /** 已确认放置的 cell 数（0..totalCells）。 */
   placedCells: number;
+  placedCellIndices?: number[];
+  totalCells?: number;
   /** 结构完整度 0..1（operational=1，damaged 时 <1）。 */
   integrity01: number;
   createdByBotId: string | null;
@@ -226,8 +239,11 @@ export class BaseRegistry {
       anchor: params.anchor,
       blueprintId: params.blueprintId,
       blueprintVersion: params.blueprintVersion ?? 1,
+      memberBotIds: params.createdByBotId ? [params.createdByBotId] : [],
+      phaseFacts: {},
       status: "planned",
       placedCells: 0,
+      placedCellIndices: [],
       integrity01: 0,
       createdByBotId: params.createdByBotId ?? null,
       lastStatusReason: null,
@@ -240,6 +256,53 @@ export class BaseRegistry {
 
   get(baseId: string): BaseRecord | null {
     return this.bases.get(baseId) ?? null;
+  }
+
+  addMember(baseId: string, serverProfileId: string, dimension: string, botId: string): boolean {
+    const base = this.bases.get(baseId);
+    if (!base || base.serverProfileId !== serverProfileId || base.dimension !== dimension) return false;
+    base.memberBotIds ??= base.createdByBotId ? [base.createdByBotId] : [];
+    if (!base.memberBotIds.includes(botId)) base.memberBotIds.push(botId);
+    return true;
+  }
+
+  forMember(botId: string, serverProfileId: string, dimension: string): BaseRecord | null {
+    const matches = [...this.bases.values()].filter((base) => base.serverProfileId === serverProfileId &&
+      base.dimension === dimension && base.status !== "abandoned" &&
+      (base.memberBotIds ?? [base.createdByBotId]).includes(botId));
+    if (matches.length > 1) throw new Error("BASE_MEMBERSHIP_AMBIGUOUS");
+    return matches[0] ?? null;
+  }
+
+  recordPhaseEvidence(baseId: string, phase: string, availability: BaseAvailability, evidence: string, validator: string): boolean {
+    const base = this.bases.get(baseId);
+    if (!base || !evidence || !validator) return false;
+    const prior = base.phaseFacts?.[phase];
+    base.phaseFacts ??= {};
+    base.phaseFacts[phase] = {
+      availability, everCompleted: prior?.everCompleted === true || availability === "AVAILABLE",
+      evidence, validator, observedAt: new Date(this.now()).toISOString(),
+    };
+    base.updatedAt = new Date(this.now()).toISOString();
+    return true;
+  }
+
+  currentPhaseFact(baseId: string, phase: string, maxAgeMs = 60_000): BasePhaseFact | null {
+    const fact = this.bases.get(baseId)?.phaseFacts?.[phase];
+    if (!fact) return null;
+    if (phase !== "BASE_SITE_RESERVED" && this.now() - Date.parse(fact.observedAt) > maxAgeMs) {
+      return { ...fact, availability: "UNVERIFIED" };
+    }
+    return { ...fact };
+  }
+
+  markFactsUnverified(baseId?: string): void {
+    for (const base of this.bases.values()) {
+      if (baseId && base.id !== baseId) continue;
+      for (const [phase, fact] of Object.entries(base.phaseFacts ?? {})) {
+        if (phase !== "BASE_SITE_RESERVED") fact.availability = "UNVERIFIED";
+      }
+    }
   }
 
   /** 同 server+dimension 全部基地，按与 reference 距离升序。 */
@@ -292,10 +355,13 @@ export class BaseRegistry {
     const base = this.bases.get(baseId);
     if (!base || base.status !== "building") return false;
     if (!Number.isInteger(cellIndex) || cellIndex < 0) return false;
-    base.placedCells = Math.max(base.placedCells, cellIndex + 1);
+    if (base.totalCells !== undefined && cellIndex >= base.totalCells) return false;
+    base.placedCellIndices ??= [];
+    if (!base.placedCellIndices.includes(cellIndex)) base.placedCellIndices.push(cellIndex);
+    base.placedCells = base.placedCellIndices.length;
     base.updatedAt = new Date(this.now()).toISOString();
     this.cellReservations.get(baseId)?.delete(cellIndex);
-    const total = this.totals.get(baseId);
+    const total = base.totalCells;
     if (total !== undefined) {
       base.integrity01 = Math.min(1, base.placedCells / Math.max(1, total));
       if (base.placedCells >= total) return this.#transition(baseId, "operational", "all_cells_placed");
@@ -307,11 +373,9 @@ export class BaseRegistry {
   setTotalCells(baseId: string, totalCells: number): boolean {
     const base = this.bases.get(baseId);
     if (!base || !Number.isInteger(totalCells) || totalCells <= 0) return false;
-    this.totals.set(baseId, totalCells);
+    base.totalCells = totalCells;
     return true;
   }
-
-  private readonly totals = new Map<string, number>();
 
   // -- 多 Bot cell 级施工预约 ------------------------------------------------
 

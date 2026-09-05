@@ -1,4 +1,4 @@
-import { identifierSchema } from "@minecraft-studio/protocol";
+import { identifierSchema, skillJsonValueSchema } from "@minecraft-studio/protocol";
 import { z } from "zod";
 
 import { SkillFault } from "../errors.js";
@@ -70,6 +70,7 @@ export const blueprintCellSchema = z
     /** Optional support face. Defaults to the block immediately below target. */
     referenceOffset: offsetSchema.optional(),
     face: faceSchema.optional(),
+    blockProperties: z.array(z.object({ name: z.string().min(1).max(64), value: z.union([z.string(), z.number(), z.boolean()]) }).strict()).max(32).optional(),
   })
   .strict();
 export type BlueprintCell = z.infer<typeof blueprintCellSchema>;
@@ -93,6 +94,8 @@ export const buildBlueprintInputSchema = z
     blueprint: blueprintSchema,
     startIndex: z.number().int().min(0).max(MAX_BLUEPRINT_CELLS).optional(),
     maxPlacements: z.number().int().min(1).max(MAX_BLUEPRINT_BATCH).optional(),
+    reconcile: z.boolean().optional(),
+    inspectOnly: z.boolean().optional(),
     /** Empty means inventory is unknown; the runtime remains authoritative. */
     availableMaterials: z.array(materialSchema).max(256).optional(),
   })
@@ -130,6 +133,10 @@ const placementSchema = z
     placed: z.literal(true),
   })
   .strict();
+export const blueprintObservationSchema = z.object({
+  states: z.array(z.enum(["match", "different", "unknown"])).min(1).max(MAX_BLUEPRINT_CELLS),
+  observedAt: z.iso.datetime(),
+}).strict();
 export const buildBlueprintOutputSchema = z
   .object({
     completed: z.boolean(),
@@ -138,6 +145,7 @@ export const buildBlueprintOutputSchema = z
     totalCells: z.number().int().min(1).max(MAX_BLUEPRINT_CELLS),
     placements: z.array(placementSchema).max(MAX_BLUEPRINT_BATCH),
     estimatedDurationMs: z.number().int().min(0),
+    verification: blueprintObservationSchema.optional(),
   })
   .strict()
   .superRefine((output, context) => {
@@ -266,9 +274,20 @@ async function executeBlueprint(
   state: z.infer<typeof buildBlueprintStateSchema>,
 ): Promise<z.infer<typeof buildBlueprintOutputSchema>> {
   const plan = planBlueprint(input);
-  const startIndex = Math.min(input.startIndex ?? 0, plan.totalCells);
+  const inspect = async () => {
+    const observation = blueprintObservationSchema.parse(await context.callCapability(
+      "world.interact", "blueprint.inspect", skillJsonValueSchema.parse(input.blueprint),
+    ));
+    if (observation.states.length !== plan.totalCells || observation.states.includes("unknown")) {
+      throw new SkillFault("BUILD_VERIFY_TIMEOUT");
+    }
+    return observation;
+  };
+  const before = input.reconcile || input.inspectOnly ? await inspect() : null;
+  const firstMissing = before?.states.indexOf("different") ?? -1;
+  const startIndex = before ? (firstMissing < 0 ? plan.totalCells : firstMissing) : Math.min(input.startIndex ?? 0, plan.totalCells);
   const maxPlacements = input.maxPlacements ?? MAX_BLUEPRINT_BATCH;
-  const cells = plan.orderedCells.slice(startIndex, startIndex + maxPlacements);
+  const cells = input.inspectOnly ? [] : plan.orderedCells.slice(startIndex, startIndex + maxPlacements);
   if (!isIntermediateBlueprintSafe(cells)) {
     // server false-success / 世界漂移证据：cell 索引与期望进入 reason（P1-1）
     throw new SkillFault(
@@ -282,13 +301,17 @@ async function executeBlueprint(
     const index = startIndex + offset;
     const cell = cells[offset]!;
     const target = absolutePosition(input.blueprint, cell);
+    if (before?.states[index] === "match") {
+      placements.push({ index, position: target, itemName: cell.itemName, blockClass: cell.blockClass, placed: true });
+      continue;
+    }
     const raw = await context.callCapability(
       "world.interact",
       "block.place-safe",
       cellCapabilityInput(input.blueprint, cell, index),
     );
     const receipt = buildBlueprintCapabilityOutputSchema.parse(raw);
-    if (receipt.position.x !== target.x || receipt.position.y !== target.y || receipt.position.z !== target.z) {
+    if (receipt.placedBlockName !== cell.itemName || receipt.position.x !== target.x || receipt.position.y !== target.y || receipt.position.z !== target.z) {
       throw new SkillFault(
         "BUILD_WRONG_BLOCK",
         `anchor=${input.blueprint.anchor.x},${input.blueprint.anchor.y},${input.blueprint.anchor.z}@${input.blueprint.dimension} cellIndex=${index} order=${cell.order} expected=${cell.itemName}@${target.x},${target.y},${target.z} actual=receipt@${receipt.position.x},${receipt.position.y},${receipt.position.z}`,
@@ -296,7 +319,10 @@ async function executeBlueprint(
     }
     placements.push({ index, position: target, itemName: cell.itemName, blockClass: cell.blockClass, placed: true });
   }
-  const nextIndex = startIndex + placements.length;
+  const after = input.inspectOnly ? before : input.reconcile ? await inspect() : null;
+  const nextMissing = after?.states.indexOf("different") ?? -1;
+  const nextIndex = after ? (nextMissing < 0 ? plan.totalCells : nextMissing) : startIndex + placements.length;
+  if (after && nextIndex < startIndex + placements.length) throw new SkillFault("BUILD_WRONG_BLOCK");
   return buildBlueprintOutputSchema.parse({
     completed: nextIndex >= plan.totalCells,
     startIndex,
@@ -304,6 +330,7 @@ async function executeBlueprint(
     totalCells: plan.totalCells,
     placements,
     estimatedDurationMs: placements.length * BLUEPRINT_DESIGN_PLACEMENT_MS,
+    ...(after ? { verification: after } : {}),
   });
 }
 
@@ -341,13 +368,14 @@ export const buildBlueprintSkill = defineSkill({
         const ordered = orderBlueprintCells(input.blueprint);
         const startIndex = input.startIndex ?? 0;
         const maxPlacements = input.maxPlacements ?? MAX_BLUEPRINT_BATCH;
-        return hasMaterials(input, ordered.slice(startIndex, startIndex + maxPlacements));
+        return input.reconcile === true || input.inspectOnly === true || hasMaterials(input, ordered.slice(startIndex, startIndex + maxPlacements));
       },
     },
     {
       id: "blueprint.any-cell-in-reach",
       failureCode: "BUILD_CELL_UNREACHABLE",
       check: (input, state, policy) => {
+        if (input.inspectOnly) return true;
         const position = state.position;
         if (position === null) return false;
         const startIndex = input.startIndex ?? 0;
@@ -359,4 +387,3 @@ export const buildBlueprintSkill = defineSkill({
   ],
   execute: (context, input, state) => executeBlueprint(context, input, state),
 });
-

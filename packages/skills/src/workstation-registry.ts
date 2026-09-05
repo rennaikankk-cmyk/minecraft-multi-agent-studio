@@ -9,6 +9,8 @@
 //   P0-5: busy ≠ not_found (WorkstationAcquireResult gains "busy")
 // ---------------------------------------------------------------------------
 
+import { randomUUID } from "node:crypto";
+
 export type WorkstationType =
   | "crafting_table"
   | "furnace"
@@ -28,9 +30,16 @@ export type WorkstationUsageMode = "shared" | "exclusive";
 export type BlockPosition = Readonly<{ x: number; y: number; z: number }>;
 
 export interface WorkstationLease {
+  readonly leaseId: string;
+  readonly generation: number;
   readonly ownerBotId: string;
+  readonly ownerRuntimeId: string;
+  readonly ownerTaskId: string;
+  readonly ownerAttemptId: string;
   readonly expiresAtMs: number;
 }
+
+export type WorkstationLeaseOwner = Pick<WorkstationLease, "ownerRuntimeId" | "ownerTaskId" | "ownerAttemptId">;
 
 export interface WorkstationEntry {
   readonly type: WorkstationType;
@@ -100,9 +109,10 @@ export interface WorkstationRegistryPort {
   register(serverProfileId: string, dimension: string, type: WorkstationType, position: { x: number; y: number; z: number }, confidence?: number): WorkstationEntry;
   get(serverProfileId: string, dimension: string, position: BlockPosition): WorkstationEntry | null;
   findCandidates(serverProfileId: string, dimension: string, type: WorkstationType, from: { x: number; y: number; z: number }, maxDistance?: number): readonly WorkstationEntry[];
-  claim(serverProfileId: string, dimension: string, position: BlockPosition, botId: string, ttlMs?: number): boolean;
-  renewClaim(serverProfileId: string, dimension: string, position: BlockPosition, botId: string, ttlMs?: number): boolean;
-  release(serverProfileId: string, dimension: string, position: BlockPosition, botId: string): void;
+  claim(serverProfileId: string, dimension: string, position: BlockPosition, botId: string, ttlMs?: number, owner?: WorkstationLeaseOwner): boolean;
+  renewClaim(serverProfileId: string, dimension: string, position: BlockPosition, botId: string, ttlMs?: number, lease?: WorkstationLease): boolean;
+  release(serverProfileId: string, dimension: string, position: BlockPosition, botId: string, lease?: WorkstationLease): void;
+  commit(serverProfileId: string, dimension: string, position: BlockPosition, botId: string, lease: WorkstationLease): boolean;
   invalidate(serverProfileId: string, dimension: string, position: BlockPosition): void;
   releaseAllClaims(botId: string): void;
   clearServer(serverProfileId: string): void;
@@ -113,6 +123,7 @@ export class InMemoryWorkstationRegistry implements WorkstationRegistryPort {
   private readonly entryTtlMs: number;
   private readonly leaseTtlMs: number;
   private readonly maxEntries: number;
+  private generation = 0;
 
   constructor(options: WorkstationRegistryOptions = {}) {
     this.entryTtlMs = options.entryTtlMs ?? 5 * 60_000;
@@ -165,31 +176,57 @@ export class InMemoryWorkstationRegistry implements WorkstationRegistryPort {
     return results.sort((a, b) => a.sortKey - b.sortKey).map((r) => r.entry);
   }
 
-  claim(serverProfileId: string, dimension: string, position: BlockPosition, botId: string, ttlMs?: number): boolean {
+  claim(serverProfileId: string, dimension: string, position: BlockPosition, botId: string, ttlMs?: number, owner?: WorkstationLeaseOwner): boolean {
     const key = posKey(serverProfileId, dimension, normalizeBlockPos(position));
     const entry = this.entries.get(key);
     if (!entry) return false;
+    if (entry.usageMode === "shared") return true;
     const now = Date.now();
-    if (entry.lease !== null && entry.lease.ownerBotId !== botId && now < entry.lease.expiresAtMs) return false;
-    entry.lease = { ownerBotId: botId, expiresAtMs: now + (ttlMs ?? this.leaseTtlMs) };
+    if (entry.lease !== null && now < entry.lease.expiresAtMs) {
+      return owner !== undefined && entry.lease.ownerBotId === botId &&
+        entry.lease.ownerRuntimeId === owner.ownerRuntimeId && entry.lease.ownerTaskId === owner.ownerTaskId &&
+        entry.lease.ownerAttemptId === owner.ownerAttemptId;
+    }
+    const leaseId = randomUUID();
+    entry.lease = { leaseId, generation: ++this.generation, ownerBotId: botId,
+      ownerRuntimeId: owner?.ownerRuntimeId ?? "legacy-unbound",
+      ownerTaskId: owner?.ownerTaskId ?? leaseId, ownerAttemptId: owner?.ownerAttemptId ?? leaseId,
+      expiresAtMs: now + this.boundedTtl(ttlMs) };
     // P0-3: claim 不刷新 lastSeenAt（claim 是控制面仲裁，不是服务端观测）
     entry.lastClaimedAt = now;
     return true;
   }
 
-  renewClaim(serverProfileId: string, dimension: string, position: BlockPosition, botId: string, ttlMs?: number): boolean {
+  renewClaim(serverProfileId: string, dimension: string, position: BlockPosition, botId: string, ttlMs?: number, lease?: WorkstationLease): boolean {
     const key = posKey(serverProfileId, dimension, normalizeBlockPos(position));
     const entry = this.entries.get(key);
-    if (!entry || entry.lease === null || entry.lease.ownerBotId !== botId) return false;
-    entry.lease = { ownerBotId: botId, expiresAtMs: Date.now() + (ttlMs ?? this.leaseTtlMs) };
+    if (!entry || !lease || !this.commit(serverProfileId, dimension, position, botId, lease)) return false;
+    entry.lease = { ...entry.lease!, expiresAtMs: Date.now() + this.boundedTtl(ttlMs) };
     entry.lastClaimedAt = Date.now();
     return true;
   }
 
-  release(serverProfileId: string, dimension: string, position: BlockPosition, botId: string): void {
+  release(serverProfileId: string, dimension: string, position: BlockPosition, botId: string, lease?: WorkstationLease): void {
     const key = posKey(serverProfileId, dimension, normalizeBlockPos(position));
     const entry = this.entries.get(key);
-    if (entry && entry.lease !== null && entry.lease.ownerBotId === botId) entry.lease = null;
+    if (entry && lease && this.sameLease(entry.lease, botId, lease)) entry.lease = null;
+  }
+
+  commit(serverProfileId: string, dimension: string, position: BlockPosition, botId: string, lease: WorkstationLease): boolean {
+    const current = this.get(serverProfileId, dimension, position)?.lease;
+    return !!current && current.expiresAtMs > Date.now() && this.sameLease(current, botId, lease);
+  }
+
+  private sameLease(current: WorkstationLease | null | undefined, botId: string, expected: WorkstationLease): boolean {
+    return !!current && current.ownerBotId === botId && current.leaseId === expected.leaseId &&
+      current.generation === expected.generation && current.ownerRuntimeId === expected.ownerRuntimeId &&
+      current.ownerTaskId === expected.ownerTaskId && current.ownerAttemptId === expected.ownerAttemptId;
+  }
+
+  private boundedTtl(ttlMs?: number): number {
+    const ttl = ttlMs ?? this.leaseTtlMs;
+    if (!Number.isFinite(ttl) || ttl < 1 || ttl > 120_000) throw new Error("WORKSTATION_TTL_INVALID");
+    return ttl;
   }
 
   invalidate(serverProfileId: string, dimension: string, position: BlockPosition): void {
@@ -198,7 +235,7 @@ export class InMemoryWorkstationRegistry implements WorkstationRegistryPort {
 
   releaseAllClaims(botId: string): void {
     for (const entry of this.entries.values()) {
-      if (entry.lease !== null && entry.lease.ownerBotId === botId) entry.lease = null;
+      if (entry.lease !== null && entry.lease.ownerBotId === botId && entry.lease.expiresAtMs <= Date.now()) entry.lease = null;
     }
   }
 
@@ -219,7 +256,7 @@ export class InMemoryWorkstationRegistry implements WorkstationRegistryPort {
     const reg = new InMemoryWorkstationRegistry(options);
     for (const entry of snapshot?.entries ?? []) {
       if (!entry || typeof entry !== "object" || typeof entry.serverProfileId !== "string") continue;
-      reg.entries.set(posKey(entry.serverProfileId, entry.dimension, entry.position), entry);
+      reg.entries.set(posKey(entry.serverProfileId, entry.dimension, entry.position), { ...entry, lease: null });
     }
     return reg;
   }
@@ -229,7 +266,10 @@ export class InMemoryWorkstationRegistry implements WorkstationRegistryPort {
     let merged = 0;
     for (const entry of other.serialize().entries) {
       if (!entry || typeof entry !== "object" || typeof entry.serverProfileId !== "string") continue;
-      this.entries.set(posKey(entry.serverProfileId, entry.dimension, entry.position), entry);
+      const key = posKey(entry.serverProfileId, entry.dimension, entry.position);
+      const existing = this.entries.get(key);
+      if (existing?.lease && existing.lease.expiresAtMs > Date.now()) continue;
+      this.entries.set(key, { ...entry, lease: null });
       merged += 1;
     }
     this.evictIfNeeded();
@@ -240,10 +280,11 @@ export class InMemoryWorkstationRegistry implements WorkstationRegistryPort {
     if (this.entries.size <= this.maxEntries) return;
     const now = Date.now();
     for (const [key, entry] of this.entries) {
-      if (now - entry.lastSeenAt > this.entryTtlMs) this.entries.delete(key);
+      if (now - entry.lastSeenAt > this.entryTtlMs && (!entry.lease || entry.lease.expiresAtMs <= now)) this.entries.delete(key);
     }
     if (this.entries.size <= this.maxEntries) return;
-    const sorted = [...this.entries.entries()].sort((a, b) => a[1].lastSeenAt - b[1].lastSeenAt);
+    const sorted = [...this.entries.entries()].filter(([, entry]) => !entry.lease || entry.lease.expiresAtMs <= now)
+      .sort((a, b) => a[1].lastSeenAt - b[1].lastSeenAt);
     const toRemove = this.entries.size - this.maxEntries;
     for (let i = 0; i < toRemove && i < sorted.length; i += 1) this.entries.delete(sorted[i]![0]);
   }
@@ -253,7 +294,7 @@ export class InMemoryWorkstationRegistry implements WorkstationRegistryPort {
 // acquireWorkstation — P0 fixes applied
 // ---------------------------------------------------------------------------
 
-export type WorkstationVerifyFn = (entry: WorkstationEntry) => Promise<boolean>;
+export type WorkstationVerifyFn = (entry: WorkstationEntry) => Promise<boolean | "unknown">;
 export type WorkstationScanFn = (type: WorkstationType) => Promise<ReadonlyArray<{ position: BlockPosition; type: WorkstationType }>>;
 
 /**
@@ -283,6 +324,7 @@ export async function acquireWorkstation(
     maxDistance?: number; exclusive?: boolean;
     scanFn?: WorkstationScanFn; verifyFn?: WorkstationVerifyFn;
     onFailureSignal?: (signal: FacilityFailureSignal) => void;
+    owner?: WorkstationLeaseOwner;
   }>,
 ): Promise<WorkstationAcquireResult> {
   const { serverProfileId, dimension, type, from, botId } = params;
@@ -301,6 +343,7 @@ export async function acquireWorkstation(
     const pos = normalizeBlockPos(candidate.position);
     if (params.verifyFn) {
       const stillExists = await params.verifyFn(candidate);
+      if (stillExists === "unknown") return { status: "unreachable" };
       if (!stillExists) {
         emitSignal({
           failureCode: "FACILITY_VERIFY_FAILED",
@@ -315,13 +358,12 @@ export async function acquireWorkstation(
         continue;
       }
     }
-    // Refresh observation (server confirmed it exists)
-    registry.register(serverProfileId, dimension, type, pos, 1.0);
+    if (params.verifyFn) registry.register(serverProfileId, dimension, type, pos, 1.0);
 
     if (needsClaim) {
       const before = registry.get(serverProfileId, dimension, pos);
       const leaseWasExpired = before?.lease ? before.lease.expiresAtMs <= Date.now() : true;
-      const claimed = registry.claim(serverProfileId, dimension, pos, botId);
+      const claimed = registry.claim(serverProfileId, dimension, pos, botId, undefined, params.owner);
       if (!claimed) {
         if (leaseWasExpired) {
           emitSignal({
@@ -353,12 +395,17 @@ export async function acquireWorkstation(
       const pos = normalizeBlockPos(station.position);
       if (params.verifyFn) {
         const ok = await params.verifyFn({ type: station.type, position: pos, dimension, serverProfileId, usageMode: usageModeFor(station.type), lastSeenAt: Date.now(), confidence: 1, lease: null } as WorkstationEntry);
+        if (ok === "unknown") return { status: "unreachable" };
         if (!ok) continue;
       }
       registry.register(serverProfileId, dimension, station.type, pos);
       if (needsClaim) {
-        const claimed = registry.claim(serverProfileId, dimension, pos, botId);
-        if (!claimed) continue; // P0-2: scan→claim race——claim 失败不返回 acquired
+        const claimed = registry.claim(serverProfileId, dimension, pos, botId, undefined, params.owner);
+        if (!claimed) {
+          const entry = registry.get(serverProfileId, dimension, pos);
+          if (entry) return { status: "busy", entry, retryAfterMs: Math.max(1, (entry.lease?.expiresAtMs ?? Date.now() + 1000) - Date.now()) };
+          continue;
+        }
       }
       // P0-1: 用 get() 返回 authoritative entry
       const entry = registry.get(serverProfileId, dimension, pos);

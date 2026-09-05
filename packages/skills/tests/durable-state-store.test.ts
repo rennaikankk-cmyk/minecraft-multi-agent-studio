@@ -104,7 +104,8 @@ describe("stripEphemeralState (durable vs ephemeral split)", () => {
     const snapshot = stripEphemeralState(durableSnapshotFrom(new InMemoryWorkstationRegistry(), new FacilityRegistry(), bases));
     expect(snapshot.bases.bases).toHaveLength(1);
     expect(snapshot.bases.bases[0]!.status).toBe("building");
-    expect(snapshot.bases.bases[0]!.placedCells).toBe(4);
+    expect(snapshot.bases.bases[0]!.placedCells).toBe(1);
+    expect(snapshot.bases.bases[0]!.placedCellIndices).toEqual([3]);
   });
 });
 
@@ -151,14 +152,13 @@ describe("DurableStateStore atomic persistence", () => {
     expect(existsSync(leftovers)).toBe(false);
   });
 
-  it("corrupt file → null + quarantine rename (never crash the boot)", () => {
+  it("corruption is observable and retains the original file", () => {
     const dir = tmpDir();
     const path = join(dir, "state.json");
     const store = new DurableStateStore(path);
     writeFileSync(path, "{corrupt!!", "utf8");
-    expect(store.load()).toBeNull();
-    // 损坏文件被隔离，不会反复挡启动
-    expect(existsSync(`${path}.corrupt`)).toBe(true);
+    expect(() => store.load()).toThrow("DURABLE_STATE_INVALID");
+    expect(existsSync(path)).toBe(true);
   });
 
   it("repeated saves are idempotent in content structure", () => {

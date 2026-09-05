@@ -11,12 +11,13 @@
 //     - facility placement reservation（placement_reserved → planned）
 //     - cell build reservation
 //
-// 原子性：writeFile(tmp) + rename —— 崩溃不留半截状态文件。
-// 损坏容错：load 失败 → 把坏文件改名 *.corrupt 隔离 → 返回 null（首启语义），
-//           绝不让损坏文件永久挡住启动。
+// Atomic rename supports process recovery. No fsync or host power-loss guarantee.
+// Read/corruption failures block recovery and preserve the original for inspection.
 // ---------------------------------------------------------------------------
 
-import { existsSync, renameSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdirSync, renameSync, writeFileSync, readFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { z } from "zod";
 
 import type { BaseRecord } from "./base-registry.js";
 import { BaseRegistry } from "./base-registry.js";
@@ -26,11 +27,38 @@ import type { WorkstationEntry } from "./workstation-registry.js";
 import { InMemoryWorkstationRegistry } from "./workstation-registry.js";
 
 export interface DurableStateSnapshot {
+  schemaVersion?: "1.0";
   workstations: { entries: WorkstationEntry[] };
   facilities: { facilities: Facility[] };
   bases: { bases: BaseRecord[] };
   savedAt: string;
 }
+
+const positionSchema = z.object({ x: z.number().int(), y: z.number().int(), z: z.number().int() });
+const scopeSchema = z.object({ serverProfileId: z.string().min(1), dimension: z.string().min(1) });
+const durableSchema = z.object({
+  schemaVersion: z.literal("1.0").optional(), savedAt: z.iso.datetime(),
+  workstations: z.object({ entries: z.array(scopeSchema.extend({
+    type: z.enum(["crafting_table", "furnace", "blast_furnace", "smoker", "anvil", "enchanting_table", "brewing_stand",
+      "stonecutter", "smithing_table", "grindstone", "chest", "barrel"]),
+    position: positionSchema, usageMode: z.enum(["shared", "exclusive"]),
+    lastSeenAt: z.number().finite(), confidence: z.number().min(0).max(1),
+  }).passthrough()).max(4096) }),
+  facilities: z.object({ facilities: z.array(scopeSchema.extend({
+    id: z.string().min(1), anchor: positionSchema, facilityType: z.enum(["smelting_zone", "crafting_zone", "storage_zone"]),
+    slots: z.array(z.object({ index: z.number().int().nonnegative(), worldPosition: positionSchema,
+      status: z.enum(["planned", "placement_reserved", "occupied", "missing", "temporarily_blocked", "invalid", "unknown"]),
+    }).passthrough()).max(4096),
+  }).passthrough()).max(4096) }),
+  bases: z.object({ bases: z.array(scopeSchema.extend({
+    id: z.string().min(1), anchor: positionSchema, blueprintId: z.string().min(1), blueprintVersion: z.number().int().positive(),
+    status: z.enum(["planned", "building", "operational", "damaged", "abandoned"]),
+    placedCells: z.number().int().nonnegative(), integrity01: z.number().min(0).max(1),
+    memberBotIds: z.array(z.string().min(1)).optional(),
+    phaseFacts: z.record(z.string(), z.object({ availability: z.enum(["UNVERIFIED", "AVAILABLE", "DAMAGED", "RECOVERING"]),
+      everCompleted: z.boolean(), evidence: z.string().min(1), observedAt: z.iso.datetime(), validator: z.string().min(1) })).optional(),
+  }).passthrough()).max(4096) }),
+});
 
 /** 从三个注册表收集快照（未剥离 ephemeral）。 */
 export function durableSnapshotFrom(
@@ -39,6 +67,7 @@ export function durableSnapshotFrom(
   bases: BaseRegistry,
 ): DurableStateSnapshot {
   return {
+    schemaVersion: "1.0",
     workstations: { entries: workstations.serialize().entries },
     facilities: { facilities: facilities.serialize().facilities },
     bases: { bases: bases.serialize().bases },
@@ -76,6 +105,7 @@ export function stripEphemeralState(snapshot: DurableStateSnapshot): DurableStat
   // Base 的 cell 级施工预约同样不持久化——BaseRecord 本身不含预约
   //（预约在 BaseRegistry 内部 Map，serialize 已不含它们）。
   return {
+    schemaVersion: "1.0",
     workstations: { entries: workstations },
     facilities: { facilities },
     bases: { bases: snapshot.bases.bases },
@@ -99,7 +129,9 @@ export class DurableStateStore {
 
   /** 原子保存（strip ephemeral → tmp → rename）。 */
   save(snapshot: DurableStateSnapshot): void {
+    durableSchema.parse(snapshot);
     const durable = stripEphemeralState(snapshot);
+    mkdirSync(dirname(this.filePath), { recursive: true });
     const tmp = `${this.filePath}.tmp`;
     writeFileSync(tmp, JSON.stringify(durable), "utf8");
     renameSync(tmp, this.filePath);
@@ -107,29 +139,22 @@ export class DurableStateStore {
 
   /**
    * 读取持久状态。文件不存在 → null（首启）。
-   * 损坏 → 隔离为 *.corrupt 并返回 null，不抛异常。
+   * Corrupt or inaccessible files throw; only ENOENT means first startup.
    */
   load(): DurableStateSnapshot | null {
-    if (!existsSync(this.filePath)) return null;
     let raw: string;
     try {
       raw = readFileSync(this.filePath, "utf8");
-    } catch {
-      return null;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw new Error("DURABLE_STATE_READ_FAILED", { cause: error });
     }
     try {
       const parsed = JSON.parse(raw) as DurableStateSnapshot;
-      if (!parsed || typeof parsed !== "object" || !parsed.workstations || !parsed.facilities) {
-        throw new Error("malformed");
-      }
+      durableSchema.parse(parsed);
       return parsed;
-    } catch {
-      try {
-        renameSync(this.filePath, `${this.filePath}.corrupt`);
-      } catch {
-        // 隔离失败不阻塞启动
-      }
-      return null;
+    } catch (error) {
+      throw new Error("DURABLE_STATE_INVALID", { cause: error });
     }
   }
 
