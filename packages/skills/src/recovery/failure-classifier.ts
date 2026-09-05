@@ -106,6 +106,8 @@ export function isTerminalRecoveryAction(action: RecoveryAction): boolean {
  * 不是猜的——每一条都对应一个真实存在的失败签名。
  */
 const EXPLICIT: Readonly<Record<string, FailureCategory>> = Object.freeze({
+  BLUEPRINT_WORKSET_INVALID: "CONTRACT_BUG",
+  SKILL_POLICY_UNAVAILABLE: "UNSUPPORTED",
   // —— 安全与取消：预期行为，最高优先级，不算故障 ——
   NORMAL_ACTIONS_PAUSED: "SAFETY_INTERRUPT",
   SKILL_CANCELLED: "SAFETY_INTERRUPT",

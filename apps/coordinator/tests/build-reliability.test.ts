@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { BaseRegistry, buildBlueprintSkill } from "@minecraft-studio/skills";
 import { InMemoryPlanJournalStore } from "../src/plan-journal.js";
-import { beginBuildBatch, finishBuildBatch } from "../src/build-journal.js";
+import { beginBuildBatch, finishBuildBatch, worksetMaterialDeficit } from "../src/build-journal.js";
 
 const blueprint = { serverProfileId: "a", dimension: "minecraft:overworld", anchor: { x: 0, y: 64, z: 0 },
   cells: [0, 1].map((x) => ({ offset: { x, y: 0, z: 0 }, itemName: "stone", blockClass: "structural" as const, order: x })) };
@@ -9,6 +9,36 @@ const scope = { goalId: "task", botId: "bot-a", baseId: "base-a", blueprintId: "
 const execution = { coordinatorInstanceId: "c", runtimeInstanceId: "runtime-a", taskId: "task" };
 
 describe("construction recovery authority", () => {
+  it("persists sparse partial evidence with unknown cells without declaring the build complete", () => {
+    const store = new InMemoryPlanJournalStore();
+    const journal = beginBuildBatch(store, { ...scope, execution });
+    const saved = finishBuildBatch(store, journal, { outcome: "completed", output: {
+      completed: false, startIndex: 0, nextIndex: 0, totalCells: 2, estimatedDurationMs: 250,
+      placements: [{ index: 1, position: { x: 1, y: 64, z: 0 }, itemName: "stone", blockClass: "structural", placed: true }],
+      verification: { states: ["unknown", "match"], observedAt: new Date().toISOString() },
+      workset: { snapshotId: crypto.randomUUID(), status: "WAITING_OBSERVATION", remainingCells: 1, missingMaterials: [] },
+    } });
+    expect(saved.build).toMatchObject({ verification: "UNVERIFIED", nextIndex: 0, observedRuntimeInstanceId: "runtime-a" });
+    expect(saved.build!.execution).toBeUndefined();
+    expect(saved.steps.at(-1)!.observedActual).toMatchObject({ verification: { states: ["unknown", "match"] } });
+    expect(beginBuildBatch(store, { ...scope, execution }).build!.buildId).toBe(saved.build!.buildId);
+  });
+
+  it("only requests supplies from a fresh, settled receipt of the current Runtime", () => {
+    const store = new InMemoryPlanJournalStore();
+    const journal = beginBuildBatch(store, { ...scope, execution });
+    const now = Date.now();
+    const saved = finishBuildBatch(store, journal, { outcome: "completed", output: {
+      completed: false, startIndex: 0, nextIndex: 1, totalCells: 2, estimatedDurationMs: 0, placements: [],
+      verification: { states: ["match", "different"], observedAt: new Date(now).toISOString() },
+      workset: { snapshotId: crypto.randomUUID(), status: "WAITING_MATERIAL", remainingCells: 1, missingMaterials: [{ itemName: "stone", count: 1 }] },
+    } });
+    expect(worksetMaterialDeficit(saved, "bot-a", "runtime-a", new Map(), now)).toEqual([{ itemName: "stone", count: 1 }]);
+    expect(worksetMaterialDeficit(saved, "bot-a", "runtime-a", new Map([["stone", 1]]), now)).toEqual([]);
+    expect(worksetMaterialDeficit(saved, "bot-a", "runtime-new", new Map(), now)).toBeNull();
+    expect(worksetMaterialDeficit(saved, "bot-b", "runtime-a", new Map(), now)).toBeNull();
+    expect(worksetMaterialDeficit(saved, "bot-a", "runtime-a", new Map(), now + 60_001)).toBeNull();
+  });
   it("blocks concurrent builders and uncertain same-runtime retries, permitting a replacement runtime", () => {
     const store = new InMemoryPlanJournalStore();
     const first = beginBuildBatch(store, { ...scope, execution });

@@ -15,7 +15,7 @@ import {
   type TaskExecutionRecord,
   type TaskExecutionStore,
 } from "@minecraft-studio/task-system";
-import { vanillaResourceRecipes } from "@minecraft-studio/skills";
+import { vanillaResourceRecipes, buildBlueprintInputSchema } from "@minecraft-studio/skills";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
@@ -45,6 +45,38 @@ let registry: BotRegistry;
 describe("CoordinatorLocalPlanner", () => {
   beforeEach(() => {
     registry = readyRegistry();
+  });
+
+  it.each([false, true])("gates the blueprint selector on the actual dispatch chain (%s)", async (blueprintWorksetEnabled) => {
+    const current = registry.get(BOT_ID, NOW)!;
+    const record = { ...current, skillCatalog: { ...current.skillCatalog!, skills: [
+      { ...current.skillCatalog!.skills[0]!, skillId: "build.blueprint", idempotent: false,
+        inputSchema: z.toJSONSchema(buildBlueprintInputSchema) as Record<string, unknown> },
+    ] } };
+    const sendSkillInvocation = vi.fn<SkillInvocationTransport["sendSkillInvocation"]>(async (invocation) =>
+      skillResult(invocation, "completed", undefined, 1, { completed: false, startIndex: 0, nextIndex: 0,
+        totalCells: 2, estimatedDurationMs: 0, placements: [] }));
+    const planner = new CoordinatorLocalPlanner({ registry: { get: () => record }, transport: { sendSkillInvocation },
+      blueprintWorksetEnabled, coordinatorInstanceId: "coordinator-01", now: () => NOW, randomId: uuidSequence() });
+    await planner.planAndDispatch({ ...planRequest(),
+      operatorGoal: "施工蓝图行：锚点 x=1236 y=64 z=-4321，沿 +x 放置 2 个 stone，每批最多 2 格" });
+    expect(sendSkillInvocation).toHaveBeenCalledOnce();
+    expect(sendSkillInvocation.mock.calls[0]![0].payload.input).toMatchObject({ strategy: blueprintWorksetEnabled ? "workset" : "linear" });
+  });
+
+  it("observes an experimental named blueprint before issuing speculative full-batch material goals", async () => {
+    const current = registry.get(BOT_ID, NOW)!;
+    const record = { ...current, skillCatalog: { ...current.skillCatalog!, skills: [
+      { ...current.skillCatalog!.skills[0]!, skillId: "build.blueprint", idempotent: false,
+        inputSchema: z.toJSONSchema(buildBlueprintInputSchema) as Record<string, unknown> },
+    ] } };
+    const sendSkillInvocation = vi.fn<SkillInvocationTransport["sendSkillInvocation"]>(async (invocation) =>
+      skillResult(invocation, "completed", undefined, 1, { completed: false, placements: [] }));
+    const planner = new CoordinatorLocalPlanner({ registry: { get: () => record }, transport: { sendSkillInvocation },
+      blueprintWorksetEnabled: true, coordinatorInstanceId: "coordinator-01", now: () => NOW, randomId: uuidSequence() });
+    await planner.planAndDispatch({ ...planRequest(), operatorGoal: "使用蓝图文件 starter-base-v1 施工" });
+    expect(sendSkillInvocation).toHaveBeenCalledOnce();
+    expect(sendSkillInvocation.mock.calls[0]![0].payload.skillId).toBe("build.blueprint");
   });
 
   it("dispatches only a catalog skill and omits exact position/server identity from the prompt", async () => {

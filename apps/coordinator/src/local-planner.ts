@@ -52,7 +52,7 @@ import {
   type PlanExecutionJournal,
   type PlanJournalStore,
 } from "./plan-journal.js";
-import { beginBuildBatch, finishBuildBatch, blueprintDigest } from "./build-journal.js";
+import { beginBuildBatch, finishBuildBatch, blueprintDigest, worksetMaterialDeficit } from "./build-journal.js";
 import {
   BotAssignmentError,
   type BotAssignmentService,
@@ -557,6 +557,8 @@ export type CoordinatorLocalPlannerOptions = Readonly<{
    * 仍可运行但 resume 语义退化为 skill 自身 nextIndex（诚实降级）。
    */
   planJournalStore?: PlanJournalStore;
+  /** Experimental workface selector; STUDIO_BLUEPRINT_WORKSET=1 opts in when omitted. */
+  blueprintWorksetEnabled?: boolean;
   baseRegistry?: BaseRegistry;
   persistBaseState?: () => void;
   /**
@@ -1379,6 +1381,11 @@ export class CoordinatorLocalPlanner {
         worldStateVersion: execution.worldStateVersion,
       },
     );
+    if (decision.skillId === "build.blueprint") {
+      trustedInput = { ...(trustedInput as Record<string, SkillJsonValue>),
+        strategy: this.blueprintWorksetEnabled() ? "workset" : "linear" };
+      validateAdvertisedInput(currentSkill.inputSchema, trustedInput);
+    }
     // Persist build identity before dispatch; resume boundaries require world evidence.
     if (decision.skillId === "build.blueprint" && this.options.planJournalStore) {
       trustedInput = { ...(trustedInput as Record<string, SkillJsonValue>), reconcile: true };
@@ -1567,7 +1574,10 @@ export class CoordinatorLocalPlanner {
       // 采集（资源图覆盖全部蓝图物料：圆石/木板/火把/熔炉/工作台/箱子）。
       // 采集完成→director 重选同一需求→重派蓝图（批间进度记忆保持
       // 锚点+startIndex 不漂移）。
-      const materialGoals = recovered?.build?.verification === "VERIFIED" ? null : this.blueprintMaterialDeficit(parsed, record);
+      const materialGoals = this.blueprintWorksetEnabled()
+        ? worksetMaterialDeficit(recovered, request.botId, record.runtimeInstanceId,
+          new Map((record.currentStatus?.inventory ?? []).map((m) => [m.itemName, m.count])), this.validNow().getTime())
+        : recovered?.build?.verification === "VERIFIED" ? null : this.blueprintMaterialDeficit(parsed, record);
       // 空数组=材料齐备→落回 invoke_skill 正常派建（实测事故 2026-09-04：
       // 空缺口被当"有缺口"派了零目标 plan_items→PLANNER_GOAL_UNSUPPORTED
       // blockedOn="" 空串，施工首派即死循环）。
@@ -1596,6 +1606,10 @@ export class CoordinatorLocalPlanner {
     );
     if (decision === null) return null;
     return { planItems: null, skill: decision };
+  }
+
+  private blueprintWorksetEnabled(): boolean {
+    return this.options.blueprintWorksetEnabled ?? process.env.STUDIO_BLUEPRINT_WORKSET === "1";
   }
 
   private async withAssignment<T>(

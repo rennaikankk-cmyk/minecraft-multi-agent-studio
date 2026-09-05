@@ -6,12 +6,13 @@ import { beginBuildBatch, finishBuildBatch } from "../dist/build-journal.js";
 import { BaseRegistry, FacilityRegistry, InMemoryWorkstationRegistry, DurableStateStore,
   durableSnapshotFrom, registriesFromDurableSnapshot, buildBlueprintSkill } from "@minecraft-studio/skills";
 
-const [mode, dir] = process.argv.slice(2);
+const [mode, dir, strategy] = process.argv.slice(2);
 const store = new FilePlanJournalStore({ dir: path.join(dir, "journals") });
 const state = new DurableStateStore(path.join(dir, "state.json"));
 const blueprint = { serverProfileId: "server-a", dimension: "minecraft:overworld", anchor: { x: 10, y: 64, z: 20 },
   cells: [0, 1, 2].map((x) => ({ offset: { x, y: 0, z: 0 }, itemName: "stone", blockClass: "structural", order: x })) };
-const skillInput = { blueprint, startIndex: 0, maxPlacements: 2, reconcile: true };
+const skillInput = { blueprint, startIndex: 0, maxPlacements: 2, reconcile: true, ...(strategy ? { strategy } : {}) };
+const confirmedIndex = strategy === "workset" ? 1 : 0;
 const open = (baseId) => beginBuildBatch(store, { baseId, goalId: "goal", botId: "bot-a", blueprintId: "fixture-v1", skillInput });
 
 if (mode === "write" || mode === "lost-result") {
@@ -22,11 +23,11 @@ if (mode === "write" || mode === "lost-result") {
   bases.recordPhaseEvidence(base.id, "SHELTER_MINIMAL_READY", "AVAILABLE", "fixture-observation", "fixture-validator");
   state.save(durableSnapshotFrom(new InMemoryWorkstationRegistry(), new FacilityRegistry(), bases));
   const journal = open(base.id);
-  writeFileSync(path.join(dir, "world.json"), JSON.stringify(["stone", "air", "air"]));
+  writeFileSync(path.join(dir, "world.json"), JSON.stringify([0, 1, 2].map((index) => index === confirmedIndex ? "stone" : "air")));
   if (mode === "write") finishBuildBatch(store, journal, { outcome: "completed", output: {
-    startIndex: 0, nextIndex: 1, totalCells: 3, completed: false, placements: [{ index: 0,
-      position: blueprint.anchor, itemName: "stone", blockClass: "structural", placed: true }], estimatedDurationMs: 250,
-    verification: { states: ["match", "different", "different"], observedAt: new Date().toISOString() },
+    startIndex: 0, nextIndex: confirmedIndex === 0 ? 1 : 0, totalCells: 3, completed: false, placements: [{ index: confirmedIndex,
+      position: { ...blueprint.anchor, x: blueprint.anchor.x + confirmedIndex }, itemName: "stone", blockClass: "structural", placed: true }], estimatedDurationMs: 250,
+    verification: { states: [0, 1, 2].map((index) => index === confirmedIndex ? "match" : "different"), observedAt: new Date().toISOString() },
   } });
   process.stdout.write(journal.build.buildId);
 } else {
@@ -48,17 +49,24 @@ if (mode === "write" || mode === "lost-result") {
   const world = JSON.parse(readFileSync(path.join(dir, "world.json")));
   const placed = [];
   const output = await buildBlueprintSkill.execute({ signal: new AbortController().signal,
+    policy: { serverProfileId: "server-a", checkBlockReach: () => ({ allowed: true }), checkAttackReach: () => ({ allowed: false }) },
     callCapability: async (_capability, operation, input) => {
+      if (operation === "blueprint.inspect-workset") return { snapshotId: crypto.randomUUID(), observedAt: new Date().toISOString(),
+        playerPosition: { x: 10, y: 64, z: 20 },
+        availableMaterials: [{ itemName: "stone", count: 3 }], cells: world.map((name, index) => ({
+          state: name === "stone" ? "match" : "different", observedItemName: name === "stone" ? name : null,
+          reachable: true, supportUnknown: false, workfaces: [{ referenceBlock: { x: 10 + index, y: 63, z: 20 }, face: { x: 0, y: 1, z: 0 } }],
+        })) };
       if (operation === "blueprint.inspect") return { states: world.map((name) => name === "stone" ? "match" : "different"), observedAt: new Date().toISOString() };
       assert.equal(operation, "block.place-safe");
-      assert.notEqual(input.blueprintIndex, 0, "confirmed cell must not be replayed");
+      assert.notEqual(input.blueprintIndex, confirmedIndex, "confirmed cell must not be replayed");
       placed.push(input.blueprintIndex);
       world[input.blueprintIndex] = "stone";
       return { placed: true, placedBlockName: "stone", position: input.target };
     },
   }, skillInput, {});
   const completed = finishBuildBatch(store, journal, { outcome: "completed", output });
-  assert.deepEqual(placed, [1, 2]);
+  assert.deepEqual(placed, [0, 1, 2].filter((index) => index !== confirmedIndex));
   assert.equal(completed.status, "COMPLETED");
   assert.equal(completed.build.nextIndex, 3);
   process.stdout.write(completed.build.buildId);

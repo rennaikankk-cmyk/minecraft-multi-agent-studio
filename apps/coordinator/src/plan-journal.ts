@@ -32,6 +32,7 @@ export interface BuildJournalIdentity {
   readonly anchor: Blueprint["anchor"];
   nextIndex: number;
   verification: "UNVERIFIED" | "RECOVERING" | "VERIFIED" | "DAMAGED";
+  observedRuntimeInstanceId?: string;
   execution?: { coordinatorInstanceId: string; runtimeInstanceId: string; taskId: string; invocationId?: string };
 }
 
@@ -138,6 +139,7 @@ const journalSchema = z.object({
     dimension: z.string().min(1), anchor: blueprintSchema.shape.anchor,
     nextIndex: z.number().int().min(0).max(512),
     verification: z.enum(["UNVERIFIED", "RECOVERING", "VERIFIED", "DAMAGED"]),
+    observedRuntimeInstanceId: z.string().min(1).optional(),
     execution: z.object({ coordinatorInstanceId: z.string(), runtimeInstanceId: z.string(), taskId: z.string(), invocationId: z.string().optional() }).optional(),
   }).optional(),
 }).superRefine((j, ctx) => {
@@ -225,8 +227,8 @@ export class FilePlanJournalStore implements PlanJournalStore {
             const previous = out.get(journal.planId);
             if (previous && (previous.serverProfileId !== journal.serverProfileId ||
               previous.correlationId !== journal.correlationId ||
-              JSON.stringify(previous.build && { ...previous.build, nextIndex: 0, verification: "", execution: undefined }) !==
-                JSON.stringify(journal.build && { ...journal.build, nextIndex: 0, verification: "", execution: undefined }) ||
+              JSON.stringify(previous.build && { ...previous.build, nextIndex: 0, verification: "", execution: undefined, observedRuntimeInstanceId: undefined }) !==
+                JSON.stringify(journal.build && { ...journal.build, nextIndex: 0, verification: "", execution: undefined, observedRuntimeInstanceId: undefined }) ||
               (previous.revision === journal.revision && JSON.stringify(previous) !== JSON.stringify(journal)))) {
               issues.push("JOURNAL_IDENTITY_OR_REVISION_CONFLICT"); continue;
             }

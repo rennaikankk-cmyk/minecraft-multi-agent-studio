@@ -70,6 +70,7 @@ import {
   buildBlueprintCapabilityInputSchema,
   buildBlueprintCapabilityOutputSchema,
   blueprintSchema,
+  blueprintWorksetObservationSchema,
   orderBlueprintCells,
   SharedStateClient,
   type MaybeAsyncWorkstationRegistryPort,
@@ -2003,6 +2004,48 @@ export class MineflayerBotClient implements BotClient {
     return { states, observedAt: new Date().toISOString() };
   }
 
+  private async inspectBlueprintWorkset(request: SkillCapabilityRequest): Promise<unknown> {
+    const blueprint = blueprintSchema.parse(request.input);
+    this.assertServerProfileMatch(blueprint.serverProfileId);
+    const normals = [new Vec3(0, 1, 0), new Vec3(1, 0, 0), new Vec3(-1, 0, 0),
+      new Vec3(0, 0, 1), new Vec3(0, 0, -1), new Vec3(0, -1, 0)];
+    const cells = [];
+    for (const cell of orderBlueprintCells(blueprint)) {
+      if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      this.assertDimensionMatch(blueprint.dimension);
+      const target = new Vec3(blueprint.anchor.x + cell.offset.x, blueprint.anchor.y + cell.offset.y, blueprint.anchor.z + cell.offset.z);
+      const block = this.bot.blockAt(target);
+      const properties = block?.getProperties() ?? {};
+      const matches = block?.name === cell.itemName && (cell.blockProperties ?? []).every(({ name, value }) => properties[name] === value);
+      const preferred = cell.face ?? { x: 0, y: 1, z: 0 };
+      const relative = cell.referenceOffset ?? { x: 0, y: -1, z: 0 };
+      const defaultSupport = preferred.x === 0 && preferred.y === 1 && preferred.z === 0 && relative.x === 0 && relative.y === -1 && relative.z === 0;
+      const canChangeFace = defaultSupport && !(cell.blockProperties?.length) && !["utility", "decoration"].includes(cell.blockClass);
+      const candidates = canChangeFace ? normals : [new Vec3(preferred.x, preferred.y, preferred.z)];
+      const workfaces = [];
+      let supportUnknown = false;
+      for (const normal of candidates) {
+        if (!canChangeFace && (relative.x + normal.x !== 0 || relative.y + normal.y !== 0 || relative.z + normal.z !== 0)) continue;
+        const reference = target.minus(normal);
+        const support = this.bot.blockAt(reference);
+        if (!support) { supportUnknown = true; continue; }
+        if (support.boundingBox !== "block" || !this.bot.entity?.position || !this.withinInteractionReach(reference)) continue;
+        workfaces.push({ referenceBlock: { x: reference.x, y: reference.y, z: reference.z }, face: { x: normal.x, y: normal.y, z: normal.z } });
+      }
+      cells.push({ state: !block ? "unknown" : matches ? "match" : "different",
+        observedItemName: !block || ["air", "cave_air", "void_air"].includes(block.name) ? null : block.name,
+        workfaces, supportUnknown, reachable: !!this.bot.entity?.position && this.withinInteractionReach(target) });
+      if (cells.length % 32 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+    const names = new Set(blueprint.cells.map((c) => c.itemName));
+    const inventory = new Map<string, number>();
+    for (const item of this.bot.inventory.items()) if (names.has(item.name)) inventory.set(item.name, (inventory.get(item.name) ?? 0) + item.count);
+    return blueprintWorksetObservationSchema.parse({ snapshotId: randomUUID(), observedAt: new Date().toISOString(), cells,
+      playerPosition: this.bot.entity?.position ? { x: this.bot.entity.position.x, y: this.bot.entity.position.y, z: this.bot.entity.position.z } : null,
+      availableMaterials: [...inventory].map(([itemName, count]) => ({ itemName, count })) });
+  }
+
   async invokeSkillCapability(
     request: SkillCapabilityRequest,
   ): Promise<unknown> {
@@ -2014,6 +2057,9 @@ export class MineflayerBotClient implements BotClient {
     }
     if (request.capability === "world.interact" && request.operation === "blueprint.inspect") {
       return this.inspectBlueprint(request);
+    }
+    if (request.capability === "world.interact" && request.operation === "blueprint.inspect-workset") {
+      return this.inspectBlueprintWorkset(request);
     }
     if (
       request.capability === "bot.move" &&
@@ -2091,7 +2137,7 @@ export class MineflayerBotClient implements BotClient {
         this.withActionLocks(
           placementRequest,
           ["blockInteraction", "inventory"],
-          () => this.invokePlaceBlock(placementRequest),
+          () => this.invokePlaceBlock(placementRequest, blueprintInput.success),
         );
       if (blueprintInput.success) {
         const { target, blueprintIndex: _blueprintIndex, ...placement } = blueprintInput.data;
@@ -5447,6 +5493,7 @@ export class MineflayerBotClient implements BotClient {
   /** 放置方块：原生 placeBlock，放置后读回目标位校验，不伪造成功。 */
   private async invokePlaceBlock(
     request: SkillCapabilityRequest,
+    fixedBlueprintTarget = false,
   ): Promise<unknown> {
     const input = placeBlockCapabilityInputSchema.safeParse(request.input);
     if (!input.success) {
@@ -5459,6 +5506,9 @@ export class MineflayerBotClient implements BotClient {
     let reference = this.bot.blockAt(
       new Vec3(referenceBlock.x, referenceBlock.y, referenceBlock.z),
     );
+    if (fixedBlueprintTarget && (!reference || reference.boundingBox !== "block")) {
+      throw new SkillFault("BLUEPRINT_STEP_BLOCKED");
+    }
     if (!reference || reference.name === "air") {
       // 变通：参考位悬空时从下方或邻近找替代参考——bot 改造环境
       // 而非被地形卡死。优先检查正下方（参考位 y-1）；
@@ -5497,6 +5547,12 @@ export class MineflayerBotClient implements BotClient {
       referenceBlock.z + face.z,
     );
     const occupant = this.bot.blockAt(targetPosition);
+    if (fixedBlueprintTarget) {
+      if (!occupant) throw new SkillFault("BUILD_VERIFY_TIMEOUT");
+      if (!this.bot.inventory.items().some((item) => item.name === input.data.itemName) && occupant.name !== input.data.itemName) {
+        throw new SkillFault("BUILD_MATERIAL_MISSING");
+      }
+    }
     if (occupant && occupant.boundingBox !== "empty") {
       if (occupant.name === input.data.itemName) {
         return placeBlockCapabilityOutputSchema.parse({

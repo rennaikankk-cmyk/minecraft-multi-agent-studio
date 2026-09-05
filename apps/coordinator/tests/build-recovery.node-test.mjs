@@ -18,6 +18,11 @@ for (const mode of ["write", "lost-result"]) test("built ESM crosses process bou
   const after = execFileSync(process.execPath, [worker, "recover", dir], { encoding: "utf8" });
   assert.equal(after, before);
 }));
+test("workset resumes noncontiguous progress across actual ESM processes", () => fixture((dir) => {
+  const before = execFileSync(process.execPath, [worker, "lost-result", dir, "workset"], { encoding: "utf8" });
+  const after = execFileSync(process.execPath, [worker, "recover", dir, "workset"], { encoding: "utf8" });
+  assert.equal(after, before);
+}));
 test("historical instance directories deduplicate without deleting originals", () => fixture((dir) => {
   execFileSync(process.execPath, [worker, "write", dir]);
   const root = path.join(dir, "journals");

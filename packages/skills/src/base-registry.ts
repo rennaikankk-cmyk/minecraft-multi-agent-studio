@@ -487,6 +487,7 @@ export interface ReconcileResult {
 export function reconcileBlueprint(
   blueprint: Blueprint,
   observations: ReadonlyMap<string, string | null>,
+  propertyDifferences: ReadonlySet<string> = new Set(),
 ): ReconcileResult {
   const placed: ReconciledCell[] = [];
   const missing: ReconciledCell[] = [];
@@ -507,7 +508,7 @@ export function reconcileBlueprint(
       blockClass: c.blockClass,
     };
     if (observed === null) missing.push(entry);
-    else if (observed === c.itemName) placed.push(entry);
+    else if (observed === c.itemName && !propertyDifferences.has(key)) placed.push(entry);
     else wrong.push(entry);
   }
 

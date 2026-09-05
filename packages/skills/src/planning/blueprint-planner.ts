@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { SkillFault } from "../errors.js";
 import { defineSkill, type SkillExecutionContext } from "../types.js";
+import { blueprintWorksetObservationSchema, blueprintWorksetSummarySchema, selectBlueprintWorkset } from "./blueprint-workset.js";
 
 /**
  * Blueprint execution is intentionally bounded and resumable.  It orders
@@ -96,6 +97,7 @@ export const buildBlueprintInputSchema = z
     maxPlacements: z.number().int().min(1).max(MAX_BLUEPRINT_BATCH).optional(),
     reconcile: z.boolean().optional(),
     inspectOnly: z.boolean().optional(),
+    strategy: z.enum(["linear", "workset"]).optional(),
     /** Empty means inventory is unknown; the runtime remains authoritative. */
     availableMaterials: z.array(materialSchema).max(256).optional(),
   })
@@ -146,6 +148,7 @@ export const buildBlueprintOutputSchema = z
     placements: z.array(placementSchema).max(MAX_BLUEPRINT_BATCH),
     estimatedDurationMs: z.number().int().min(0),
     verification: blueprintObservationSchema.optional(),
+    workset: blueprintWorksetSummarySchema.optional(),
   })
   .strict()
   .superRefine((output, context) => {
@@ -181,6 +184,8 @@ const CLASS_RANK: Readonly<Record<BlueprintBlockClass, number>> = Object.freeze(
   shell: 3,
   decoration: 4,
 });
+
+export function blueprintClassRank(cell: BlueprintCell): number { return CLASS_RANK[cell.blockClass]; }
 
 function absolutePosition(blueprint: Blueprint, cell: BlueprintCell): z.infer<typeof coordinateSchema> {
   return coordinateSchema.parse({
@@ -273,6 +278,7 @@ async function executeBlueprint(
   input: BuildBlueprintInput,
   state: z.infer<typeof buildBlueprintStateSchema>,
 ): Promise<z.infer<typeof buildBlueprintOutputSchema>> {
+  if (input.strategy === "workset") return executeBlueprintWorkset(context, input);
   const plan = planBlueprint(input);
   const inspect = async () => {
     const observation = blueprintObservationSchema.parse(await context.callCapability(
@@ -334,6 +340,59 @@ async function executeBlueprint(
   });
 }
 
+async function executeBlueprintWorkset(context: SkillExecutionContext, input: BuildBlueprintInput) {
+  const ordered = orderBlueprintCells(input.blueprint);
+  const placements: z.infer<typeof placementSchema>[] = [];
+  const budget = input.availableMaterials?.map((m) => ({ ...m }));
+  const maxPlacements = input.maxPlacements ?? MAX_BLUEPRINT_BATCH;
+  const inspect = async () => {
+    if (context.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+    const observed = blueprintWorksetObservationSchema.parse(await context.callCapability(
+      "world.interact", "blueprint.inspect-workset", skillJsonValueSchema.parse(input.blueprint)));
+    if (observed.cells.length !== ordered.length) throw new SkillFault("BLUEPRINT_WORKSET_INVALID");
+    if (context.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+    const policy = context.policy;
+    if (!policy || policy.serverProfileId !== input.blueprint.serverProfileId) throw new SkillFault("SKILL_POLICY_UNAVAILABLE");
+    const origin = observed.playerPosition;
+    const permitted = (p: { x: number; y: number; z: number }) => origin !== null && policy.checkBlockReach(
+      Math.hypot(p.x + 0.5 - origin.x, p.y + 0.5 - origin.y, p.z + 0.5 - origin.z)).allowed;
+    observed.cells = observed.cells.map((cell, index) => ({ ...cell,
+      reachable: cell.reachable && permitted(absolutePosition(input.blueprint, ordered[index]!)),
+      workfaces: cell.workfaces.filter((face) => permitted(face.referenceBlock)),
+    }));
+    return observed;
+  };
+  // Each effect is followed by a bounded fresh snapshot, including the final effect.
+  // Workfaces are never a persistent second world model.
+  let observation = await inspect();
+  let selected = selectBlueprintWorkset(input, observation);
+  while (!input.inspectOnly && selected.next && placements.length < maxPlacements) {
+    if (context.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+    const { index, referenceBlock, face } = selected.next;
+    const cell = ordered[index]!;
+    const target = absolutePosition(input.blueprint, cell);
+    const receipt = buildBlueprintCapabilityOutputSchema.parse(await context.callCapability("world.interact", "block.place-safe",
+      buildBlueprintCapabilityInputSchema.parse({ ...cellCapabilityInput(input.blueprint, cell, index), referenceBlock, face })));
+    if (receipt.placedBlockName !== cell.itemName || receipt.position.x !== target.x || receipt.position.y !== target.y || receipt.position.z !== target.z) {
+      throw new SkillFault("BUILD_WRONG_BLOCK");
+    }
+    placements.push({ index, position: target, itemName: cell.itemName, blockClass: cell.blockClass, placed: true });
+    const material = budget?.find((m) => m.itemName === cell.itemName);
+    if (material) material.count = Math.max(0, material.count - 1);
+    observation = await inspect();
+    if (observation.cells[index]?.state !== "match") throw new SkillFault("BUILD_WRONG_BLOCK");
+    selected = selectBlueprintWorkset({ ...input, ...(budget ? { availableMaterials: budget } : {}) }, observation);
+  }
+  const states = observation.cells.map((c) => c.state);
+  const firstUnverified = states.findIndex((value) => value !== "match");
+  return buildBlueprintOutputSchema.parse({
+    completed: firstUnverified < 0, startIndex: 0, nextIndex: firstUnverified < 0 ? ordered.length : firstUnverified,
+    totalCells: ordered.length, placements, estimatedDurationMs: placements.length * BLUEPRINT_DESIGN_PLACEMENT_MS,
+    verification: { states, observedAt: observation.observedAt },
+    workset: { ...selected.summary, status: selected.next && placements.length >= maxPlacements ? "BATCH_LIMIT" : selected.summary.status },
+  });
+}
+
 export const buildBlueprintSkill = defineSkill({
   id: "build.blueprint",
   version: "1.0.0",
@@ -368,14 +427,14 @@ export const buildBlueprintSkill = defineSkill({
         const ordered = orderBlueprintCells(input.blueprint);
         const startIndex = input.startIndex ?? 0;
         const maxPlacements = input.maxPlacements ?? MAX_BLUEPRINT_BATCH;
-        return input.reconcile === true || input.inspectOnly === true || hasMaterials(input, ordered.slice(startIndex, startIndex + maxPlacements));
+        return input.strategy === "workset" || input.reconcile === true || input.inspectOnly === true || hasMaterials(input, ordered.slice(startIndex, startIndex + maxPlacements));
       },
     },
     {
       id: "blueprint.any-cell-in-reach",
       failureCode: "BUILD_CELL_UNREACHABLE",
       check: (input, state, policy) => {
-        if (input.inspectOnly) return true;
+        if (input.inspectOnly || input.strategy === "workset") return true;
         const position = state.position;
         if (position === null) return false;
         const startIndex = input.startIndex ?? 0;

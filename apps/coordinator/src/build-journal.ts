@@ -63,25 +63,37 @@ export function finishBuildBatch(store: PlanJournalStore, journal: PlanExecution
   const step = journal.steps.at(-1)!;
   const output = result?.outcome === "completed" ? buildBlueprintOutputSchema.safeParse(result.output) : null;
   const build = journal.build!;
-  const verified = output?.success && output.data.verification &&
+  const observed = output?.success && output.data.verification &&
     output.data.totalCells === build.blueprint.cells.length &&
-    output.data.verification.states.length === build.blueprint.cells.length &&
-    !output.data.verification.states.includes("unknown");
+    output.data.verification.states.length === build.blueprint.cells.length;
+  const verified = observed && !output.data.verification!.states.includes("unknown");
+  if (observed) {
+    const ordered = orderBlueprintCells(build.blueprint);
+    for (const placement of output.data.placements) {
+      const cell = ordered[placement.index];
+      if (!cell || placement.itemName !== cell.itemName || placement.blockClass !== cell.blockClass ||
+        placement.position.x !== build.anchor.x + cell.offset.x || placement.position.y !== build.anchor.y + cell.offset.y ||
+        placement.position.z !== build.anchor.z + cell.offset.z || output.data.verification!.states[placement.index] !== "match") {
+        throw new Error("BUILD_VERIFICATION_RECEIPT_MISMATCH");
+      }
+    }
+  }
   let updated = applyStepResult(journal, step.stepId, {
     status: verified ? "SUCCEEDED" : "RECONCILING",
     failureCode: verified ? null : "BUILD_RESULT_UNCERTAIN",
-    observedActual: verified ? output.data : null,
+    observedActual: observed ? output.data : null,
     verification: { outcome: verified ? "confirmed" : "unverifiable",
       evidence: verified ? "Runtime read back the fixed blueprint cells" : "Dispatch outcome requires world reconciliation" },
   });
-  if (verified) {
-    const firstMissing = output.data.verification!.states.indexOf("different");
+  if (observed) {
+    const firstMissing = output.data.verification!.states.findIndex((state) => state !== "match");
     const nextIndex = firstMissing < 0 ? build.blueprint.cells.length : firstMissing;
     if (output.data.nextIndex !== nextIndex || output.data.completed !== (firstMissing < 0)) {
       throw new Error("BUILD_VERIFICATION_BOUNDARY_MISMATCH");
     }
     updated = { ...updated, status: firstMissing < 0 ? "COMPLETED" : "ACTIVE",
-      build: { ...build, nextIndex, verification: firstMissing < 0 ? "VERIFIED" :
+      build: { ...build, nextIndex, ...(build.execution ? { observedRuntimeInstanceId: build.execution.runtimeInstanceId } : {}),
+        verification: !verified ? "UNVERIFIED" : firstMissing < 0 ? "VERIFIED" :
         build.nextIndex === build.blueprint.cells.length && output.data.placements.length === 0 ? "DAMAGED" : "RECOVERING" } };
   } else updated = { ...updated, status: "ACTIVE", build: { ...build, verification: "UNVERIFIED" } };
   // Executor timeout/cancellation can win a race while the adapter still runs.
@@ -92,4 +104,17 @@ export function finishBuildBatch(store: PlanJournalStore, journal: PlanExecution
   }
   store.save(updated);
   return updated;
+}
+
+/** Only a fresh, settled receipt from this Runtime can drive automatic replenishment. */
+export function worksetMaterialDeficit(journal: PlanExecutionJournal | undefined | null,
+  botId: string, runtimeInstanceId: string, inventory: ReadonlyMap<string, number>, now = Date.now()) {
+  if (!journal?.build || journal.botId !== botId || journal.build.execution ||
+    journal.build.observedRuntimeInstanceId !== runtimeInstanceId) return null;
+  const output = buildBlueprintOutputSchema.safeParse(journal.steps.at(-1)?.observedActual);
+  if (!output.success || output.data.workset?.status !== "WAITING_MATERIAL" || !output.data.verification) return null;
+  const age = now - Date.parse(output.data.verification.observedAt);
+  if (age < 0 || age > 60_000) return null;
+  return output.data.workset.missingMaterials.map(({ itemName, count }) => ({ itemName,
+    count: Math.max(0, count - (inventory.get(itemName) ?? 0)) })).filter((entry) => entry.count > 0);
 }

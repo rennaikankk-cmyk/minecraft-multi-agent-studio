@@ -134,6 +134,8 @@ export type SkillExecutionContext = Readonly<{
   botId: string;
   signal: AbortSignal;
   deadlineMs: number;
+  /** Read-only policy projection for selectors that evaluate individual actions. */
+  policy?: SkillPolicyView;
   compatibility: SkillExecutionCompatibility;
   callCapability<TOutput extends SkillJsonValue = SkillJsonValue>(
     capability: SkillCapability,

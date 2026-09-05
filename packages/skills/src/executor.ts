@@ -213,6 +213,8 @@ export class SkillExecutor {
         botId: invocation.botId,
         signal: controller.signal,
         deadlineMs,
+        policy: Object.freeze({ serverProfileId: policy.serverProfileId,
+          checkBlockReach: policy.checkBlockReach.bind(policy), checkAttackReach: policy.checkAttackReach.bind(policy) }),
         compatibility: Object.freeze({
           minecraftVersion: compatibility.minecraftVersion,
           protocolVersion: compatibility.protocolVersion,

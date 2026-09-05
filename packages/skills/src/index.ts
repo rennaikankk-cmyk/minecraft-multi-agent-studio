@@ -562,6 +562,9 @@ export {
   type ReconciledCell,
   type StarterBaseParams,
 } from "./base-registry.js";
+
+export { blueprintWorksetObservationSchema, blueprintWorksetSummarySchema, selectBlueprintWorkset,
+  type BlueprintWorksetObservation } from "./planning/blueprint-workset.js";
 export {
   DurableStateStore,
   durableSnapshotFrom,
