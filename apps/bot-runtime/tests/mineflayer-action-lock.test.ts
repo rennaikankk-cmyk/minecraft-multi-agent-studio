@@ -10,6 +10,7 @@ import { Vec3 } from "vec3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { MineflayerBotClient } from "../src/mineflayer-client.js";
+import { InMemoryWorkstationRegistry } from "@minecraft-studio/skills";
 
 const SERVER_PROFILE_ID = "isolated-local";
 const DIMENSION = "minecraft:overworld";
@@ -64,7 +65,7 @@ function makeFixture() {
       return { name: "furnace", position: position.clone(), boundingBox: "block" };
     }
     if (position.x === 3 && position.y === 64 && position.z === 0) {
-      return { name: "chest", position: position.clone(), boundingBox: "block" };
+      return { name: "chest", position: position.clone(), boundingBox: "block", getProperties: () => ({ type: "single" }) };
     }
     if (position.x === 0 && position.y === 63 && position.z === 0) {
       return { name: "stone", position: position.clone(), boundingBox: "block" };
@@ -152,7 +153,7 @@ function makeFixture() {
 
   return {
     bot,
-    client: new MineflayerBotClient(bot, "auto", SERVER_PROFILE_ID),
+    client: new MineflayerBotClient(bot, "auto", SERVER_PROFILE_ID, false, undefined, "safe", null, undefined, new InMemoryWorkstationRegistry()),
     craft,
   };
 }

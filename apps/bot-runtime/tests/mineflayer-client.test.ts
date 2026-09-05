@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { InMemoryWorkstationRegistry } from "@minecraft-studio/skills";
 
 import type { Bot } from "mineflayer";
 import type { Movements } from "mineflayer-pathfinder";
@@ -2193,7 +2194,7 @@ describe("MineflayerBotClient lifecycle", () => {
             ? [{ name: "cobblestone", count: cobblestoneCount }]
             : [],
       },
-      blockAt: vi.fn(() => ({ name: "chest" })),
+      blockAt: vi.fn(() => ({ name: "chest", position: new Vec3(5, 65, -2), getProperties: () => ({ type: "single" }) })),
       openContainer: vi.fn(async () => {
         // Simulate the prior place-block slot update arriving with window sync.
         cobblestoneCount = 4;
@@ -2204,6 +2205,7 @@ describe("MineflayerBotClient lifecycle", () => {
       bot,
       "auto",
       "isolated-test-profile",
+      false, undefined, "safe", null, undefined, new InMemoryWorkstationRegistry(),
     );
 
     await expect(
@@ -2228,6 +2230,43 @@ describe("MineflayerBotClient lifecycle", () => {
       }),
     ).resolves.toMatchObject({ requestedCount: 4, movedCount: 4 });
     expect(deposit).toHaveBeenCalledWith(1, null, 4);
+  });
+
+  it.each(["north", "east", "south", "west", "legacy"] as const)("fences double chest halves across Runtime instances (%s)", async (facing) => {
+    const registry = new InMemoryWorkstationRegistry();
+    const offset = facing === "east" ? new Vec3(0, 0, 1) : facing === "south" ? new Vec3(-1, 0, 0)
+      : facing === "west" ? new Vec3(0, 0, -1) : new Vec3(1, 0, 0);
+    const positionAt = (index: number) => new Vec3(0, 64, 0).plus(offset.scaled(index));
+    let finishTransfer!: () => void;
+    const blocked = new Promise<void>((resolve) => { finishTransfer = resolve; });
+    const makeClient = () => {
+      const bot = new EventEmitter() as unknown as Bot;
+      let count = 2;
+      const deposit = vi.fn(async () => { await blocked; count = 1; });
+      Object.assign(bot, { game: { dimension: "overworld" }, registry: { itemsByName: { stone: { id: 1 } } },
+        inventory: { items: () => [{ name: "stone", count }] },
+        blockAt: (position: Vec3) => {
+          // Modern adjacent pairs can contain a complementary half on the wrong side.
+          const index = (facing === "legacy" ? [0, 1] : [-1, 0, 1, 2]).find((i) => position.equals(positionAt(i)));
+          return index === undefined ? { name: "air", position, getProperties: () => ({}) }
+            : { name: "chest", position, getProperties: () => facing === "legacy" ? { facing: "north" }
+              : { facing, type: index === 0 || index === 2 ? "left" : "right" } };
+        },
+        openContainer: vi.fn(async () => ({ deposit, withdraw: vi.fn(), close: vi.fn() })),
+      });
+      return { deposit, client: new MineflayerBotClient(bot, "auto", "fixture", false, undefined, "safe", null, undefined, registry) };
+    };
+    const request = (index: number, botId: string) => ({ invocationId: crypto.randomUUID(), traceId: "trace", taskId: "task", botId,
+      skillId: "container.transfer", skillVersion: "1.0.0", capability: "container.write" as const, operation: "container.transfer-safe",
+      input: { direction: "deposit", itemName: "stone", count: 1, container: positionAt(index), dimension: "minecraft:overworld", serverProfileId: "fixture" },
+      signal: new AbortController().signal });
+    const first = makeClient(); const second = makeClient();
+    const pending = first.client.invokeSkillCapability(request(0, "a"));
+    await vi.waitFor(() => expect(first.deposit).toHaveBeenCalledOnce());
+    await expect(second.client.invokeSkillCapability(request(1, "b"))).rejects.toMatchObject({ code: "WORKSTATION_BUSY" });
+    expect(second.deposit).not.toHaveBeenCalled();
+    finishTransfer();
+    await expect(pending).resolves.toMatchObject({ movedCount: 1 });
   });
 });
 

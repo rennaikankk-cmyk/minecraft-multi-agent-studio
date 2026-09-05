@@ -1,5 +1,7 @@
 import { createBot, type Bot } from "mineflayer";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { ActiveWorkstationLease } from "./workstation-lease.js";
 import pathfinderModule, {
   Movements,
   pathfinder,
@@ -67,6 +69,11 @@ import {
   mineVeinCapabilityOutputSchema,
   buildBlueprintCapabilityInputSchema,
   buildBlueprintCapabilityOutputSchema,
+  blueprintSchema,
+  orderBlueprintCells,
+  SharedStateClient,
+  type MaybeAsyncWorkstationRegistryPort,
+  type WorkstationType,
   type BehaviorSignalEvent,
   type FamilyWindowStats,
   type SkillCapabilityRequest,
@@ -1138,6 +1145,8 @@ function isTimeoutLikeReason(reason: unknown): boolean {
 }
 
 export class MineflayerBotClient implements BotClient {
+  private readonly workstationRuntimeId = randomUUID();
+  private readonly workstationDisconnected = new AbortController();
   private handlers: BotClientHandlers | null = null;
   private lastObservedHealth: number | null = null;
   private requestedStop = false;
@@ -1237,6 +1246,10 @@ export class MineflayerBotClient implements BotClient {
     navigationProfile: ServerProfile["navigation"] = "safe",
     serverAddress: Readonly<{ host: string; port: number }> | null = null,
     noHungerConfig: ServerProfile["noHunger"] = undefined,
+    private readonly workstationRegistry: MaybeAsyncWorkstationRegistryPort = new SharedStateClient({
+      baseUrl: process.env.STUDIO_SHARED_STATE_URL ?? `http://127.0.0.1:${process.env.STUDIO_SHARED_STATE_PORT ?? "8791"}`,
+      ...(process.env.STUDIO_SHARED_STATE_TOKEN ? { token: process.env.STUDIO_SHARED_STATE_TOKEN } : {}),
+    }).workstations,
   ) {
     /** 无规则服导航档：true = 沿途挖掘/疾跑/跑酷/搭高全部放开。 */
     this.anarchyNavigation = navigationProfile === "anarchy";
@@ -1500,6 +1513,7 @@ export class MineflayerBotClient implements BotClient {
       this.handlers?.onError(error);
     });
     bot.on("end", (reason) => {
+      this.workstationDisconnected.abort();
       // 整形器随 wire（连接）一起死，但显式恢复 write 防重连复用。
       if (this.movementShaperDetach) {
         this.movementShaperDetach();
@@ -1970,6 +1984,25 @@ export class MineflayerBotClient implements BotClient {
 
   }
 
+  private async inspectBlueprint(request: SkillCapabilityRequest): Promise<unknown> {
+    const blueprint = blueprintSchema.parse(request.input);
+    this.assertServerProfileMatch(blueprint.serverProfileId);
+    this.assertDimensionMatch(blueprint.dimension);
+    const states: Array<"match" | "different" | "unknown"> = [];
+    for (const cell of orderBlueprintCells(blueprint)) {
+      if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      this.assertDimensionMatch(blueprint.dimension);
+      const block = this.bot.blockAt(new Vec3(blueprint.anchor.x + cell.offset.x,
+        blueprint.anchor.y + cell.offset.y, blueprint.anchor.z + cell.offset.z));
+      const properties = block?.getProperties() ?? {};
+      states.push(block === null ? "unknown" : block.name === cell.itemName &&
+        (cell.blockProperties ?? []).every(({ name, value }) => properties[name] === value)
+        ? "match" : "different");
+      if (states.length % 32 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    return { states, observedAt: new Date().toISOString() };
+  }
+
   async invokeSkillCapability(
     request: SkillCapabilityRequest,
   ): Promise<unknown> {
@@ -1978,6 +2011,9 @@ export class MineflayerBotClient implements BotClient {
     }
     if (!this.serverProfileId) {
       throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE");
+    }
+    if (request.capability === "world.interact" && request.operation === "blueprint.inspect") {
+      return this.inspectBlueprint(request);
     }
     if (
       request.capability === "bot.move" &&
@@ -5175,6 +5211,7 @@ export class MineflayerBotClient implements BotClient {
   /** Deterministic furnace access for nullable smelt.item station inputs. */
   private async ensureFurnaceAccess(
     request: SkillCapabilityRequest,
+    claim: (block: MineflayerBlock) => Promise<AbortSignal>,
   ): Promise<MineflayerBlock> {
     return this.withActionLocks(
       request,
@@ -5182,6 +5219,7 @@ export class MineflayerBotClient implements BotClient {
       async () => {
         const furnace = this.findReusableUtilityStation(FURNACE_POLICY);
         if (furnace) {
+          request = { ...request, signal: await claim(furnace) };
           this.lastFurnacePosition = furnace.position.clone();
           return furnace;
         }
@@ -5192,6 +5230,7 @@ export class MineflayerBotClient implements BotClient {
             0,
             MAX_UTILITY_STATION_PATH_ATTEMPTS,
           )) {
+            request = { ...request, signal: await claim(observedFurnace) };
             const reached = await this.moveToUtilityStation(
               request,
               FURNACE_POLICY,
@@ -5207,6 +5246,7 @@ export class MineflayerBotClient implements BotClient {
 
         const rescanned = this.findReusableUtilityStation(FURNACE_POLICY);
         if (rescanned) {
+          request = { ...request, signal: await claim(rescanned) };
           this.lastFurnacePosition = rescanned.position.clone();
           return rescanned;
         }
@@ -5249,6 +5289,7 @@ export class MineflayerBotClient implements BotClient {
           },
         });
         this.lastFurnacePosition = placed.position.clone();
+        await claim(placed);
         return placed;
       },
     );
@@ -5262,6 +5303,8 @@ export class MineflayerBotClient implements BotClient {
     if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
     this.assertServerProfileMatch(input.data.serverProfileId);
     this.assertDimensionMatch(input.data.dimension);
+    request = { ...request, signal: AbortSignal.any([request.signal, this.workstationDisconnected.signal]) };
+    const taskSignal = request.signal;
 
     const registry = this.bot.registry as unknown as {
       itemsByName?: Record<string, { id: number } | undefined>;
@@ -5276,28 +5319,53 @@ export class MineflayerBotClient implements BotClient {
       throw new SkillFault("SMELT_FUEL_INSUFFICIENT");
     }
 
+    let lease: ActiveWorkstationLease | null = null;
+    let furnace: Awaited<ReturnType<Bot["openFurnace"]>> | null = null;
+    let outputItemName: string | null = null;
+    let smeltedCount = 0;
+    const closeFurnace = () => { try { furnace?.close(); } catch { /* no new effects after cancellation */ } };
+    const claim = async (station: MineflayerBlock): Promise<AbortSignal> => {
+      if (lease) { request.signal.removeEventListener("abort", closeFurnace); await lease.release(); }
+      try {
+        await this.workstationRegistry.register(input.data.serverProfileId, input.data.dimension,
+          station.name as WorkstationType, station.position);
+      } catch { throw new SkillFault("WORKSTATION_LEASE_UNAVAILABLE"); }
+      lease = await ActiveWorkstationLease.acquire(this.workstationRegistry, {
+        serverProfileId: input.data.serverProfileId, dimension: input.data.dimension,
+        position: station.position, botId: request.botId,
+      }, { ownerRuntimeId: this.workstationRuntimeId, ownerTaskId: request.taskId,
+        ownerAttemptId: request.invocationId }, taskSignal);
+      request = { ...request, signal: lease.signal };
+      request.signal.addEventListener("abort", closeFurnace, { once: true });
+      return request.signal;
+    };
+    try {
     let block: MineflayerBlock;
     if (input.data.furnace === null) {
-      block = await this.ensureFurnaceAccess(request);
+      block = await this.ensureFurnaceAccess(request, claim);
     } else {
       const { x, y, z } = input.data.furnace;
       const requestedBlock = this.bot.blockAt(new Vec3(x, y, z));
+      if (!requestedBlock) throw new SkillFault("WORKSTATION_OBSERVATION_UNKNOWN");
       if (
-        !requestedBlock ||
         !["furnace", "blast_furnace", "smoker"].includes(
           requestedBlock.name,
         )
       ) {
+        await this.workstationRegistry.invalidate(input.data.serverProfileId, input.data.dimension, { x, y, z });
         throw new SkillFault("FURNACE_NOT_FOUND");
       }
       block = requestedBlock;
+      await claim(block);
+      if (!this.withinInteractionReach(block.position)) {
+        const reached = await this.moveToUtilityStation(request, FURNACE_POLICY, block);
+        if (!reached) throw new SkillFault("FURNACE_UNAVAILABLE");
+        block = reached;
+      }
     }
-
-    let furnace: Awaited<ReturnType<Bot["openFurnace"]>> | null = null;
-    let outputItemName: string | null = null;
-    let smeltedCount = 0;
-    try {
+      await lease!.assertCurrent();
       furnace = await this.bot.openFurnace(block);
+      await lease!.assertCurrent();
       // 无规则立场：别人的炉子先**掠夺**再使用（拿走产物/在烧物/燃料），
       // 而不是拒绝使用。空出来的炉子就是我们的炉子。读回计数只认自己
       // 投入后取出的部分，炉内旧物在 loot 日志里单独留痕。
@@ -5310,6 +5378,7 @@ export class MineflayerBotClient implements BotClient {
         ];
         const lootedNames: string[] = [];
         for (const take of takeOrder) {
+          await lease!.assertCurrent();
           if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
           const taken = await take().catch(() => null);
           if (taken && typeof (taken as { name?: string }).name === "string") {
@@ -5319,8 +5388,10 @@ export class MineflayerBotClient implements BotClient {
         this.lastFurnaceLoot = lootedNames;
       }
       if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      await lease!.assertCurrent();
       await furnace.putInput(inputType.id, null, input.data.count);
       if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      await lease!.assertCurrent();
       await furnace.putFuel(fuelType.id, null, input.data.fuelCount);
       if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
 
@@ -5330,6 +5401,7 @@ export class MineflayerBotClient implements BotClient {
         if (output) {
           outputItemName ??= output.name;
           if (output.name !== outputItemName) throw new SkillFault("FURNACE_OUTPUT_MISMATCH");
+          await lease!.assertCurrent();
           const taken = await furnace.takeOutput();
           if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
           smeltedCount += taken.count;
@@ -5355,6 +5427,11 @@ export class MineflayerBotClient implements BotClient {
       throw new SkillFault("SMELT_FAILED");
     } finally {
       try { furnace?.close(); } catch { /* closing never fabricates success */ }
+      request.signal.removeEventListener("abort", closeFurnace);
+      if (lease) {
+        try { await (lease as ActiveWorkstationLease).release(); }
+        catch { console.warn("workstation_release_failed"); }
+      }
     }
     if (!outputItemName || smeltedCount < 1) throw new SkillFault("SMELT_OUTPUT_NOT_CONFIRMED");
     return smeltItemCapabilityOutputSchema.parse({
@@ -5546,7 +5623,45 @@ export class MineflayerBotClient implements BotClient {
     }
     let before: number | null = null;
     let window: Awaited<ReturnType<Bot["openContainer"]>> | null = null;
+    let lease: ActiveWorkstationLease | null = null;
+    // Both halves of a double chest must resolve to the same exclusive key.
+    let leasePosition = containerBlock.position;
+    if (containerBlock.name === "chest" || containerBlock.name === "trapped_chest") {
+      const properties = containerBlock.getProperties();
+      if (properties.type === "left" || properties.type === "right") {
+        const clockwise: Record<string, Vec3> = { north: new Vec3(1, 0, 0), east: new Vec3(0, 0, 1),
+          south: new Vec3(-1, 0, 0), west: new Vec3(0, 0, -1) };
+        const offset = clockwise[String(properties.facing)];
+        if (!offset) throw new SkillFault("WORKSTATION_OBSERVATION_UNKNOWN");
+        const adjacent = this.bot.blockAt(containerBlock.position.plus(offset.scaled(properties.type === "left" ? 1 : -1)));
+        if (!adjacent || adjacent.name !== containerBlock.name || adjacent.getProperties().facing !== properties.facing ||
+          adjacent.getProperties().type !== (properties.type === "left" ? "right" : "left")) {
+          throw new SkillFault("WORKSTATION_OBSERVATION_UNKNOWN");
+        }
+        leasePosition = [containerBlock.position, adjacent.position].sort((a, b) => a.x - b.x || a.y - b.y || a.z - b.z)[0]!;
+      } else if (properties.type !== "single") {
+        // Legacy versions encode double chests by adjacency instead of a type property.
+        const neighbors = [new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)]
+          .map((offset) => this.bot.blockAt(containerBlock.position.plus(offset)));
+        const partners = neighbors.filter((block) => block?.name === containerBlock.name);
+        if (neighbors.some((block) => !block) || partners.length > 1) throw new SkillFault("WORKSTATION_OBSERVATION_UNKNOWN");
+        if (partners[0]) leasePosition = [containerBlock.position, partners[0].position]
+          .sort((a, b) => a.x - b.x || a.y - b.y || a.z - b.z)[0]!;
+      }
+    }
+    request = { ...request, signal: AbortSignal.any([request.signal, this.workstationDisconnected.signal]) };
+    const closeWindow = () => { try { window?.close(); } catch { /* cancellation is not a receipt */ } };
     try {
+      try {
+        await this.workstationRegistry.register(input.data.serverProfileId, input.data.dimension,
+          containerBlock.name === "barrel" ? "barrel" : "chest", leasePosition);
+      } catch { throw new SkillFault("WORKSTATION_LEASE_UNAVAILABLE"); }
+      lease = await ActiveWorkstationLease.acquire(this.workstationRegistry, { serverProfileId: input.data.serverProfileId,
+        dimension: input.data.dimension, position: leasePosition, botId: request.botId },
+        { ownerRuntimeId: this.workstationRuntimeId, ownerTaskId: request.taskId, ownerAttemptId: request.invocationId }, request.signal);
+      request = { ...request, signal: lease.signal };
+      request.signal.addEventListener("abort", closeWindow, { once: true });
+      await lease.assertCurrent();
       window = await this.bot.openContainer(containerBlock);
       // Opening the window synchronizes pending inventory slot updates from
       // earlier actions. Use that acknowledged state as the transfer baseline.
@@ -5554,6 +5669,7 @@ export class MineflayerBotClient implements BotClient {
       if (request.signal.aborted) {
         throw new SkillFault("SKILL_CANCELLED");
       }
+      await lease.assertCurrent();
       if (input.data.direction === "deposit") {
         await window.deposit(itemType.id, null, input.data.count);
       } else {
@@ -5589,6 +5705,10 @@ export class MineflayerBotClient implements BotClient {
         window?.close();
       } catch {
         // 关窗失败不掩盖真实结果。
+      }
+      request.signal.removeEventListener("abort", closeWindow);
+      if (lease) {
+        try { await lease.release(); } catch { console.warn("workstation_release_failed"); }
       }
     }
 

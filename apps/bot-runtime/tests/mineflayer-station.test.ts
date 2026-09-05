@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 
 import type { Bot } from "mineflayer";
-import type { SkillCapabilityRequest } from "@minecraft-studio/skills";
+import { InMemoryWorkstationRegistry, type SkillCapabilityRequest } from "@minecraft-studio/skills";
 import { Vec3 } from "vec3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -40,6 +40,7 @@ type FixtureOptions = Readonly<{
   placementFails?: boolean;
   pathfinderFails?: boolean;
   registeredBlockNames?: readonly string[];
+  workstationRegistry?: InMemoryWorkstationRegistry;
 }>;
 
 function key(position: Vec3): string {
@@ -210,7 +211,8 @@ function makeFixture(options: FixtureOptions = {}) {
     clearControlStates: vi.fn(),
     getControlState: vi.fn(() => false),
   });
-  const client = new MineflayerBotClient(bot, "auto", SERVER_PROFILE_ID);
+  const client = new MineflayerBotClient(bot, "auto", SERVER_PROFILE_ID, false, undefined, "safe", null, undefined,
+    options.workstationRegistry ?? new InMemoryWorkstationRegistry());
   return {
     bot,
     client,
@@ -219,6 +221,7 @@ function makeFixture(options: FixtureOptions = {}) {
     equip,
     placeBlock,
     openFurnace,
+    furnaceWindow,
     pathfinderGoto,
     placedFurnaces,
     inventoryItems,
@@ -308,6 +311,35 @@ afterEach(() => {
 });
 
 describe("MineflayerBotClient utility-station guard", () => {
+  it.each([null, { x: 2, y: 64, z: 0 }])("fences busy furnaces on automatic and explicit paths (%j)", async (target) => {
+    const registry = new InMemoryWorkstationRegistry();
+    const position = new Vec3(2, 64, 0);
+    registry.register(SERVER_PROFILE_ID, "minecraft:overworld", "furnace", position);
+    registry.claim(SERVER_PROFILE_ID, "minecraft:overworld", position, "other", 30_000,
+      { ownerRuntimeId: "runtime-other", ownerTaskId: "task-other", ownerAttemptId: "attempt-other" });
+    const fixture = makeFixture({ furnacePositions: [position], furnaceInInventory: true, workstationRegistry: registry });
+    await expect(fixture.client.invokeSkillCapability(smeltRequest(target))).rejects.toMatchObject({ code: "WORKSTATION_BUSY" });
+    expect(fixture.openFurnace).not.toHaveBeenCalled();
+    expect(fixture.placeBlock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the furnace lease beyond 30 seconds and closes on renewal failure before taking output", async () => {
+    vi.useFakeTimers();
+    const registry = new InMemoryWorkstationRegistry();
+    const position = new Vec3(2, 64, 0);
+    const fixture = makeFixture({ furnacePositions: [position], workstationRegistry: registry });
+    fixture.furnaceWindow.putFuel.mockImplementation(async () => {});
+    const pending = fixture.client.invokeSkillCapability(smeltRequest()).catch((error) => error);
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(fixture.furnaceWindow.putFuel).toHaveBeenCalledOnce();
+    expect(registry.claim(SERVER_PROFILE_ID, "minecraft:overworld", position, "other")).toBe(false);
+    vi.spyOn(registry, "renewClaim").mockImplementation(() => { throw new Error("authority disconnected"); });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect((await pending).code).toBe("SKILL_CANCELLED");
+    expect(fixture.furnaceWindow.close).toHaveBeenCalled();
+    expect(fixture.furnaceWindow.takeOutput).not.toHaveBeenCalled();
+  });
+
   it("returns a bounded real inventory snapshot for the closed-loop goal", async () => {
     const fixture = makeFixture({ furnaceInInventory: true });
 
