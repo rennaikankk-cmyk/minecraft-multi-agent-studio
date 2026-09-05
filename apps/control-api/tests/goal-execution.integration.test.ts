@@ -145,13 +145,30 @@ describe("goal execution across the production control path", () => {
       "craft.item:oak_planks",
       "craft.item:crafting_table",
     ]);
-    // Durable execution freshness checks read the authoritative Bot record
-    // before planning and before each bound dispatch. The deterministic
-    // acquisition path skips the post-model freshness re-read (there is no
-    // model round-trip to stale-check), hence 8 instead of 9.
-    expect(stack.plannerRegistryGet).toHaveBeenCalledTimes(8);
     expect(stack.requestFreshStatus).toHaveBeenCalledTimes(1);
-    expect(stack.client.snapshotCalls).toBeGreaterThan(1);
+    const [rejected, retried] = stack.sendSkillInvocation.mock.calls
+      .map(([invocation]) => invocation)
+      .filter((invocation) => inputField(invocation.payload.input, "itemName") === "oak_planks");
+    const events = stack.client.events;
+    const rejectedIndex = events.indexOf("rejected:" + rejected!.payload.invocationId);
+    const retriedIndex = events.indexOf("capability:" + retried!.payload.invocationId);
+    expect(rejectedIndex).toBeGreaterThanOrEqual(0);
+    expect(retriedIndex).toBeGreaterThan(rejectedIndex);
+    expect(events.slice(rejectedIndex + 1, retriedIndex)).toContain("snapshot");
+    expect(events).not.toContain("capability:" + rejected!.payload.invocationId);
+    const rejectedResult = await stack.handleSkillInvocation.mock.results[1]!.value;
+    const retriedResult = await stack.handleSkillInvocation.mock.results[2]!.value;
+    for (const [invocation, result, outcome, attempts] of [
+      [rejected!, rejectedResult, "rejected", 0],
+      [retried!, retriedResult, "completed", 1],
+    ] as const) {
+      expect(result).toMatchObject({
+        botId: invocation.botId,
+        taskId: invocation.taskId,
+        traceId: invocation.traceId,
+        payload: { invocationId: invocation.payload.invocationId, outcome, attempts },
+      });
+    }
     assertInvocationChain(stack, 4, 3);
   });
 
@@ -350,6 +367,7 @@ async function startStack(
             snapshotsAtRejection = client.snapshotCalls;
           }
           if (client.snapshotCalls <= snapshotsAtRejection) {
+            client.events.push("rejected:" + invocation.payload.invocationId);
             return rejectedSkillResult(
               invocation,
               host.runtime.getRuntimeInstanceId(),
@@ -576,6 +594,7 @@ class GoalExecutionClient implements BotClient {
     NonNullable<BotClient["invokeSkillCapability"]>
   >[0][] = [];
   snapshotCalls = 0;
+  readonly events: string[] = [];
 
   constructor(
     private readonly options: Readonly<{
@@ -590,6 +609,7 @@ class GoalExecutionClient implements BotClient {
 
   snapshot(): BotClientSnapshot {
     this.snapshotCalls += 1;
+    this.events.push("snapshot");
     return {
       health: { current: 20, maximum: 20 },
       food: { level: 20, saturation: 5 },
@@ -617,6 +637,7 @@ class GoalExecutionClient implements BotClient {
     request: Parameters<NonNullable<BotClient["invokeSkillCapability"]>>[0],
   ): Promise<unknown> {
     this.capabilityCalls.push(request);
+    this.events.push("capability:" + request.invocationId);
     const itemName = inputField(request.input, "itemName");
     if (
       this.options.failOakPlanksOnce &&

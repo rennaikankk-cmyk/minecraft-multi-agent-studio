@@ -35,7 +35,11 @@ jobs:
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
       - name: Run complete offline quality gate
-        run: pnpm check
+        run: |
+          cargo fmt --manifest-path packages/pathfinder-rs/Cargo.toml --check
+          cargo test --manifest-path packages/pathfinder-rs/Cargo.toml --locked
+          pnpm --filter @minecraft-studio/pathfinder-rs build
+          pnpm check
       - name: Verify Minecraft acceptance workflow safety policy
         run: pnpm check:minecraft-workflow
       - name: Verify authenticated Runtime Link across processes

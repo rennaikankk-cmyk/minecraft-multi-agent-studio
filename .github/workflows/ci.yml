@@ -25,4 +25,8 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Typecheck + Test + Build
-        run: pnpm check
+        run: |
+          cargo fmt --manifest-path packages/pathfinder-rs/Cargo.toml --check
+          cargo test --manifest-path packages/pathfinder-rs/Cargo.toml --locked
+          pnpm --filter @minecraft-studio/pathfinder-rs build
+          pnpm check
