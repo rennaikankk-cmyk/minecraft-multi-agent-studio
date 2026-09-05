@@ -55,6 +55,8 @@ const durableSchema = z.object({
     status: z.enum(["planned", "building", "operational", "damaged", "abandoned"]),
     placedCells: z.number().int().nonnegative(), integrity01: z.number().min(0).max(1),
     memberBotIds: z.array(z.string().min(1)).optional(),
+    protectedBounds: z.object({ min: positionSchema, max: positionSchema }).strict().refine((b) =>
+      b.min.x <= b.max.x && b.min.y <= b.max.y && b.min.z <= b.max.z).optional(),
     phaseFacts: z.record(z.string(), z.object({ availability: z.enum(["UNVERIFIED", "AVAILABLE", "DAMAGED", "RECOVERING"]),
       everCompleted: z.boolean(), evidence: z.string().min(1), observedAt: z.iso.datetime(), validator: z.string().min(1) })).optional(),
   }).passthrough()).max(4096) }),

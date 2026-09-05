@@ -72,7 +72,7 @@ import {
   configureSafePathfinderMovements,
   hasReachableFace,
   MineflayerBotClient,
-} from "../src/mineflayer-client.js";
+} from "./fixtures/in-memory-client.js";
 
 describe("MineflayerBotClient lifecycle", () => {
   it("waits for spawn before subscribing to the deferred inventory", () => {

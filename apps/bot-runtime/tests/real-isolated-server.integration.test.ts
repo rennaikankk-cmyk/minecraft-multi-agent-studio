@@ -1,4 +1,6 @@
-import { access, mkdir, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 import {
@@ -6,12 +8,13 @@ import {
   type BotTelemetryMessageV1,
   type SkillJsonValue,
 } from "@minecraft-studio/protocol";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createMineflayerClient } from "../src/mineflayer-client.js";
 import { SingleBotRuntime } from "../src/runtime.js";
 import { loadServerProfile, type ServerProfile } from "../src/server-profile.js";
 import type { RuntimeLogger } from "../src/runtime-types.js";
+import { SharedStateServer } from "../../coordinator/src/shared-state-server.js";
 
 const enabled = process.env.RUN_REAL_MC_TEST === "1";
 const integrationDescribe = enabled ? describe : describe.skip;
@@ -652,6 +655,24 @@ async function runAllSkillsForBot(bot: AcceptanceBot, dimension: string): Promis
 }
 
 integrationDescribe("real isolated Minecraft 1.21.8 server", () => {
+  let sharedState: SharedStateServer | undefined;
+  let stateDirectory: string | undefined;
+  beforeAll(async () => {
+    stateDirectory = await mkdtemp(path.join(tmpdir(), "studio-mc-acceptance-"));
+    const token = randomUUID();
+    sharedState = new SharedStateServer({ host: "127.0.0.1", port: 0, token,
+      provenanceDir: path.join(stateDirectory, "provenance"), persistPath: path.join(stateDirectory, "state.json") });
+    const address = await sharedState.start();
+    vi.stubEnv("STUDIO_SHARED_STATE_URL", `http://127.0.0.1:${address.port}`);
+    vi.stubEnv("STUDIO_SHARED_STATE_TOKEN", token);
+  });
+  afterAll(async () => {
+    try { await sharedState?.stop(); }
+    finally {
+      vi.unstubAllEnvs();
+      if (stateDirectory) await rm(stateDirectory, { recursive: true, force: true });
+    }
+  });
   beforeEach(() => {
     runtimeEvents.length = 0;
   });

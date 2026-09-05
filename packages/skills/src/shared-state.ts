@@ -15,6 +15,9 @@
 
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import { worldAssetQuerySchema, worldAssetWriteSchema, worldAssetObservationSchema, type WorldAssetPort, type WorldAssetAuthorityPort } from "./world-assets.js";
+import { provenanceRecordSchema } from "./provenance.js";
+import { WorkAreaLeaseAuthority, workAreaClaimSchema, workAreaProofSchema, workAreaLeaseSchema, type WorkAreaLeasePort } from "./work-area-lease.js";
 import {
   FacilityRegistry,
   type Facility,
@@ -101,8 +104,21 @@ function int(args: Record<string, unknown>, key: string): number {
 export function createSharedStateDispatcher(
   workstations: WorkstationRegistryPort,
   facilities: FacilityRegistryPort,
+  assets?: WorldAssetAuthorityPort,
+  workAreas?: WorkAreaLeaseAuthority,
 ): Readonly<Record<string, SharedStateHandler>> {
   return {
+    ...(workAreas ? {
+      "area.claim": (a: Record<string, unknown>) => workAreas.claim(workAreaClaimSchema.parse(a)),
+      "area.renew": (a: Record<string, unknown>) => workAreas.renew(workAreaProofSchema.parse(a)),
+      "area.validate": (a: Record<string, unknown>) => workAreas.validate(workAreaProofSchema.parse(a)),
+      "area.release": (a: Record<string, unknown>) => workAreas.release(workAreaProofSchema.parse(a)),
+    } : {}),
+    ...(assets ? {
+      "asset.observe": (a: Record<string, unknown>) => assets.observe(worldAssetQuerySchema.parse(a)),
+      "asset.record": (a: Record<string, unknown>) => assets.record(worldAssetWriteSchema.parse(a)),
+      "asset.remove": (a: Record<string, unknown>) => assets.remove(worldAssetQuerySchema.parse(a)),
+    } : {}),
     // -- workstations --------------------------------------------------------
     "ws.register": (a) =>
       workstations.register(
@@ -315,6 +331,8 @@ export class SharedStateClient {
   readonly workstations: MaybeAsyncWorkstationRegistryPort;
   /** 满足 MaybeAsyncFacilityRegistryPort 的视图（依赖注入用）。 */
   readonly facilities: MaybeAsyncFacilityRegistryPort;
+  readonly assets: WorldAssetPort;
+  readonly workAreas: WorkAreaLeasePort;
 
   constructor(options: SharedStateClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
@@ -322,6 +340,17 @@ export class SharedStateClient {
     this.doFetch = options.fetchImpl ?? fetch;
     this.timeoutMs = options.timeoutMs ?? 5_000;
     this.logger = options.logger;
+    this.workAreas = {
+      claim: async (input) => workAreaLeaseSchema.parse(await this.#rpc("area.claim", workAreaClaimSchema.parse(input))),
+      renew: async (proof) => workAreaLeaseSchema.parse(await this.#rpc("area.renew", workAreaProofSchema.parse(proof))),
+      validate: async (proof) => z.boolean().parse(await this.#rpc("area.validate", workAreaProofSchema.parse(proof))),
+      release: async (proof) => z.boolean().parse(await this.#rpc("area.release", workAreaProofSchema.parse(proof))),
+    };
+    this.assets = {
+      observe: async (query) => worldAssetObservationSchema.parse(await this.#rpc("asset.observe", query)),
+      record: async (entry) => provenanceRecordSchema.parse(await this.#rpc("asset.record", entry)),
+      remove: async (query) => z.boolean().parse(await this.#rpc("asset.remove", query)),
+    };
     this.workstations = {
       register: (serverProfileId, dimension, type, position, confidence) =>
         this.#rpc("ws.register", { serverProfileId, dimension, type, position, confidence }) as Promise<WorkstationEntry>,

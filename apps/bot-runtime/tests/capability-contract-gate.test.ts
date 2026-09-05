@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import minecraftData from "minecraft-data";
 
 import {
   builtinSkills,
@@ -23,11 +24,13 @@ const RUNTIME_SOURCES = ["mineflayer-client.ts", "runtime.ts"]
   )
   .join("\n");
 
+const data = minecraftData("1.21.11");
+const resources = { item: data.itemsByName, block: data.blocksByName, entity: data.entitiesByName };
 const TEST_ENVIRONMENT: SkillCompatibilityEnvironment = {
   minecraftVersion: "1.21.11",
   protocolVersion: 774,
   supportsFeature: () => undefined,
-  hasResource: () => undefined,
+  hasResource: (kind, name) => Object.hasOwn(resources[kind], name),
   serverCapability: () => undefined,
 };
 
@@ -41,8 +44,14 @@ describe("contract gate G3 — skill capabilities have runtime dispatchers", () 
       resolutions.filter((r) => r.availability === "available").map((r) => r.skillId),
     );
     for (const skill of builtinSkills) {
-      expect(available.has(skill.id)).toBe(true);
+      expect(available.has(skill.id), skill.id).toBe(true);
     }
+  });
+
+  it.each([false, undefined])("keeps elytra unavailable when its resource is %s", (present) => {
+    const resolution = registry.listCompatibility({ ...TEST_ENVIRONMENT, hasResource: () => present })
+      .find((entry) => entry.skillId === "movement.elytra");
+    expect(resolution?.availability).toBe("unavailable");
   });
 
   for (const skill of builtinSkills) {

@@ -179,7 +179,7 @@ describe("SKILLS.md is a rendering of the catalog, not a second copy", () => {
 
   it("never claims a skill count that disagrees with the registry", () => {
     // 中文数量词仍可被文档使用，但测试表必须覆盖当前注册数量。
-    const counts = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十", "二十一", "二十二", "二十三"];
+    const counts = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十", "二十一", "二十二", "二十三", "二十四", "二十五", "二十六", "二十七", "二十八", "二十九", "三十"];
     const correct = counts[builtinSkills.length];
     expect(correct, "registry outgrew this test's numeral table").toBeDefined();
     // "两" 是 2 的另一种口语写法，两种都得认，否则改文档的人会被迫写得别扭。

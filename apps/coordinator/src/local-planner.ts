@@ -29,6 +29,7 @@ import {
   GoalPlanner,
   BaseRegistry,
   buildBlueprintInputSchema,
+  processContinuationCode,
   PlanSupervisor,
   type GoalRequest,
   type PlanStep,
@@ -1397,6 +1398,10 @@ export class CoordinatorLocalPlanner {
       validateAdvertisedInput(currentSkill.inputSchema, trustedInput);
     }
     let buildJournal = this.openBuildJournal(request, decision.skillId, trustedInput, currentRecord);
+    if (buildJournal?.build && this.options.baseRegistry) {
+      this.options.baseRegistry.protectBlueprint(buildJournal.build.baseId, buildJournal.build.blueprint);
+      this.options.persistBaseState?.();
+    }
     let dispatchOutcome: Awaited<ReturnType<
       CoordinatorLocalPlanner["dispatchSkillWithRecovery"]
     >> | undefined;
@@ -1459,11 +1464,12 @@ export class CoordinatorLocalPlanner {
         // 都是非采集形态。如实记录，让调用方基于"目标仍缺"自行重估。
         this.logEmptyDispatchReplanned(request, decision.skillId);
       }
-      await this.finishSuccessfulTaskExecution(
-        request,
-        skillResult,
-        completedExecution,
-      );
+      const continuation = processContinuationCode(decision.skillId, skillResult.payload.output);
+      if (continuation) {
+        await this.abortTaskExecution(request.taskId, continuation, execution.claim, { expectedRevision: completedExecution.revision });
+      } else {
+        await this.finishSuccessfulTaskExecution(request, skillResult, completedExecution);
+      }
       if (ai !== null) {
         this.options.metrics?.increment("bot_llm_useful_responses_total", {
           bot_id: request.botId,

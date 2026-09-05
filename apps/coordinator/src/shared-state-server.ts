@@ -16,6 +16,7 @@ import { AddressInfo } from "node:net";
 
 import {
   BaseRegistry,
+  WorldAssetAuthority,
   captureSharedStateSnapshot,
   createSharedStateDispatcher,
   dispatchSharedState,
@@ -42,6 +43,7 @@ export interface SharedStateServerOptions {
   readonly workstations?: InMemoryWorkstationRegistry;
   readonly facilities?: FacilityRegistry;
   readonly bases?: BaseRegistry;
+  readonly provenanceDir?: string;
   /**
    * 持久化文件路径（Phase 6 durable world-memory）。
    * 设置后：启动时加载（durable 恢复，ephemeral 丢弃）、定时落盘、stop 时落盘。
@@ -69,6 +71,7 @@ export class SharedStateServer {
   readonly workstations: InMemoryWorkstationRegistry;
   readonly facilities: FacilityRegistry;
   readonly bases: BaseRegistry;
+  readonly assets: WorldAssetAuthority;
   private started = false;
   private stopped = false;
 
@@ -76,7 +79,9 @@ export class SharedStateServer {
     this.workstations = options.workstations ?? new InMemoryWorkstationRegistry();
     this.facilities = options.facilities ?? new FacilityRegistry();
     this.bases = options.bases ?? new BaseRegistry();
-    this.dispatcher = createSharedStateDispatcher(this.workstations, this.facilities);
+    this.assets = new WorldAssetAuthority({ bases: this.bases,
+      ...(options.provenanceDir ? { persistDir: options.provenanceDir } : {}) });
+    this.dispatcher = createSharedStateDispatcher(this.workstations, this.facilities, this.assets, this.assets.workAreas);
     this.token = options.token;
     this.logger = options.logger;
     this.persistStore = options.persistPath ? new DurableStateStore(options.persistPath) : null;

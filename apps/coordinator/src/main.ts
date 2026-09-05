@@ -472,6 +472,7 @@ async function main(): Promise<void> {
         bases: baseRegistry,
         facilities: facilityRegistry,
         persistState: persistBaseState,
+        provenanceDir: path.join(process.cwd(), "runtime-data", "provenance"),
         host: sharedStateConfig.host,
         port: sharedStateConfig.port,
         ...(sharedStateConfig.token ? { token: sharedStateConfig.token } : {}),

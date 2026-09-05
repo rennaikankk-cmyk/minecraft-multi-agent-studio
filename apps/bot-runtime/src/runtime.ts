@@ -309,7 +309,11 @@ function skillCatalogEntry(
     skillVersion: resolution.skillVersion,
     availability: resolution.availability,
     verification: resolution.verification,
-    inputSchema: skillJsonValueSchema.parse(z.toJSONSchema(definition.inputSchema)),
+    inputSchema: skillJsonValueSchema.parse(z.toJSONSchema(definition.inputSchema, {
+      io: "input",
+      // Defaults are applied by the authoritative Zod parser, not by the wire schema validator.
+      override: ({ jsonSchema }) => { delete jsonSchema.default; },
+    })),
     timeoutMs: definition.timeoutMs,
     idempotent: definition.idempotent,
     selectedVariantId: resolution.selectedVariantId,

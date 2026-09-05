@@ -82,6 +82,8 @@ export type SkillSystemV1Manifest = Readonly<{
  * llm = 仅经 v13 planner prompt 的 advertised catalog。
  */
 const PLANNER_REACHABILITY: Readonly<Record<string, PlannerReachability>> = Object.freeze({
+  "farm.maintain": "llm", "movement.goal": "llm", "movement.follow": "llm", "movement.get-to-block": "llm",
+  "world.explore": "llm", "build.clear-area": "llm", "movement.elytra": "llm",
   "movement.goto": "both",
   "world.scan": "both",
   "food.secure": "both",
@@ -109,6 +111,8 @@ const PLANNER_REACHABILITY: Readonly<Record<string, PlannerReachability>> = Obje
 
 /** 技能家族（产品能力族视角，非代码目录）。 */
 const FAMILY: Readonly<Record<string, string>> = Object.freeze({
+  "farm.maintain": "production", "movement.goal": "movement", "movement.follow": "movement", "movement.get-to-block": "movement",
+  "world.explore": "observation", "build.clear-area": "build", "movement.elytra": "movement",
   "movement.goto": "movement",
   "travel.route": "movement",
   "movement.profile": "movement",
@@ -136,6 +140,8 @@ const FAMILY: Readonly<Record<string, string>> = Object.freeze({
 
 /** 源模块（ownerModule）。 */
 const OWNER_MODULE: Readonly<Record<string, string>> = Object.freeze({
+  "farm.maintain": "packages/skills/src/farm-maintenance.ts",
+  ...Object.fromEntries(["movement.goal", "movement.follow", "movement.get-to-block", "world.explore", "build.clear-area", "movement.elytra"].map((id) => [id, "packages/skills/src/baritone-processes.ts"])),
   "movement.goto": "packages/skills/src/builtin/movement-goto.ts",
   "travel.route": "packages/skills/src/builtin/travel-route.ts",
   "inventory.equip-armor": "packages/skills/src/builtin/equip-armor.ts",
@@ -165,6 +171,13 @@ const OWNER_MODULE: Readonly<Record<string, string>> = Object.freeze({
  * 已知产品级限制（limitations）——只写会影响使用决策的事实，不写愿望。
  */
 const LIMITATIONS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  "farm.maintain": ["Bounded crop maintenance; not a farm construction or long-term food throughput claim.", "Requires a shared area lease, loaded cells, and spare planting items."],
+  "movement.goal": ["Mineflayer goal composition with bounded search; no original Baritone Java runtime."],
+  "movement.follow": ["Bounded tracking interval; disappearing or replaced entities stop the process."],
+  "movement.get-to-block": ["Loaded candidate scan and approach; does not automatically activate containers or blocks."],
+  "world.explore": ["Current loaded chunk observations; no durable Baritone region cache or long-range exploration guarantee."],
+  "build.clear-area": ["Bounded allowlisted clearing; protects team assets and rejects fluids, falling blocks, and unknown neighbors."],
+  "movement.elytra": ["Airborne start with equipped elytra; loaded straight descent corridor and landing only.", "No rocket routing, obstacle detours, takeoff automation, or real-server validation."],
   "movement.goto": [
     "完成半径 ~4 格（模板锚点按停点动态折算）",
     "死亡掉落回收依赖 coordinator DEATH_RECOVERY goal（同维度、15 分钟窗口）",

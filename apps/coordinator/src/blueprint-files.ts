@@ -59,6 +59,7 @@ const blueprintCellFileSchema = z
     /** 放置支撑面；默认格正下方（face 朝上）。 */
     face: faceSchema.optional(),
     referenceOffset: offsetSchema.optional(),
+    blockProperties: z.array(z.object({ name: z.string().min(1).max(64), value: z.union([z.string(), z.number(), z.boolean()]) }).strict()).max(32).optional(),
   })
   .strict();
 
@@ -138,7 +139,7 @@ export function loadBlueprintFiles(
  * 3.8 的保守余量；3.0 在 25 格结构上会拒绝 (1,3) 对角这类完全可达的站位）。
  * 缺批声明的批直接拒绝（作者必须全覆盖）。
  */
-function validateStagingGeometry(blueprint: BlueprintFile): void {
+export function validateStagingGeometry(blueprint: BlueprintFile): void {
   const batchCount = Math.ceil(blueprint.cells.length / blueprint.batchSize);
   const stagingByBatch = new Map(blueprint.staging.map((entry) => [entry.batch, entry.offset]));
   for (let batch = 1; batch <= batchCount; batch += 1) {
@@ -172,6 +173,7 @@ export function blueprintCellsForDispatch(blueprint: BlueprintFile) {
     order: index * 8,
     referenceOffset: cell.referenceOffset ?? { x: 0, y: -1, z: 0 },
     face: cell.face ?? { x: 0, y: 1, z: 0 },
+    ...(cell.blockProperties ? { blockProperties: cell.blockProperties } : {}),
   }));
 }
 

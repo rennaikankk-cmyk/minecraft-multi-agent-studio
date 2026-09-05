@@ -1,4 +1,5 @@
 import { AISchedulerError } from "@minecraft-studio/ai-router";
+import { processContinuationCode } from "@minecraft-studio/skills";
 import {
   goalDispatchTerminalResultV1Schema,
   goalResultSummaryFromOutput,
@@ -50,6 +51,10 @@ export function projectGoalDispatchResult(
   const summary = payload.outcome === "completed"
     ? goalResultSummaryFromOutput(payload.output)
     : undefined;
+  if (payload.outcome === "completed") {
+    const continuation = processContinuationCode(payload.skillId, payload.output);
+    if (continuation) return goalDispatchTerminalResultV1Schema.parse({ ...base, outcome: "failed", errorCode: continuation });
+  }
   const candidate = payload.outcome !== "completed"
     ? { ...base, errorCode: payload.errorCode }
     : (summary === undefined ? { ...base } : { ...base, summary });

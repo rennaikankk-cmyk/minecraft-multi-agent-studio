@@ -18,6 +18,8 @@ import { siteAssessSkill, shelterDigSkill } from "../planning/site-assessor.js";
 import { buildBlueprintSkill } from "../planning/blueprint-planner.js";
 import { packShulkerSkill, stockLevelSkill, storeSortSkill } from "../planning/stock-levels.js";
 import { movementProfileSkill } from "../planning/movement-profile.js";
+import { farmMaintainSkill } from "../farm-maintenance.js";
+import { baritoneProcessSkills } from "../baritone-processes.js";
 
 /**
  * 内建技能的**唯一清单**。runtime 注册、验收场景清单、状态目录与文档都从这里读，
@@ -58,6 +60,8 @@ export const builtinSkills: readonly AnySkillDefinition[] = Object.freeze([
   storeSortSkill,
   packShulkerSkill,
   movementProfileSkill,
+  farmMaintainSkill,
+  ...baritoneProcessSkills,
 ] as readonly unknown[] as readonly AnySkillDefinition[]);
 
 /** 内建技能的 id 集合（去重后按字典序），用于跨清单一致性断言。 */

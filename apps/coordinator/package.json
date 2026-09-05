@@ -24,6 +24,8 @@
     "@minecraft-studio/protocol": "workspace:*",
     "@minecraft-studio/skills": "workspace:*",
     "@minecraft-studio/task-system": "workspace:*",
+    "prismarine-nbt": "2.8.0",
+    "prismarine-schematic": "1.3.0",
     "ws": "8.21.1",
     "zod": "4.4.3"
   },

@@ -26,7 +26,7 @@
 - 自相矛盾的证据组合**拒绝装载**，例如"真实服跑过但运行时没接线"。
 - 只有四道闸全绿才允许对外称"已验证"（`evidenceSupportsVerifiedClaim`）。
 
-当前注册表包含 23 个技能；已接入 Runtime 的条目保持 **Partial**，其余条目标为 **Experimental**（当前仅 `stock.levels`：纯确定性计算、无 capability，L0 暂停对它按设计不生效，`runtime-wiring` 在为只读计算技能定义豁免语义前保持缺失）。所有技能仍缺 `isolated-server-scenarios` 与 `cross-version-matrix` 两道真实环境闸。
+当前注册表包含 30 个技能；新增 Baritone 对应能力保持 **Partial**，仍缺 `isolated-server-scenarios` 与 `cross-version-matrix` 两道环境闸。`stock.levels` 保持 **Experimental**，证据以 `skill-status.ts` 与场景账本为准。
 真实隔离服六类场景与 1.21.8 跨版本矩阵一次没跑过。这与编译产物里的
 `verification=unverified` 是同一个事实的两种表述（AGENTS.md §8：无隔离测试服时不得声称联机测试通过）。
 
@@ -34,9 +34,59 @@
 
 - Skill ID 后的 SemVer 表示技能输入、输出和行为契约，不表示 Minecraft 服务器版本。
 - 每个 Skill 另有有序 `compatibility.variants`。Runtime 只使用连接后真实协商出的版本/协议，以及当前 registry 的 feature、物品、方块、实体和显式服务端能力探针解析变体；不以 `minVersion/maxVersion` 一刀切。
-- 当前目录中的 23 个 Skill 都声明无额外资源要求的 `portable` 变体；只有证据中的 `runtime-wiring=true` 条目可由 Runtime 执行，其余条目保持 `Experimental`。跨版本真实场景矩阵尚未执行，所以目录上报 `availability=available`、`verification=unverified`，不冒充实机已验证。
+- 当前目录中的 30 个 Skill 声明能力变体；只有证据中的 `runtime-wiring=true` 条目可由 Runtime 执行，其余条目保持 `Experimental`。实际装备、目标资源和世界观测仍须经适配器校验；`verification=unverified` 不代表实机已验证。
 - 新版本特色 Skill 必须声明它实际依赖的 feature/资源；如果还依赖服务器插件、数据包或规则，则必须等待显式探针。能力为 `unknown` 时 fail-closed，不从版本号猜测。
 - `collect.block`、`craft.item`、`world.place-block` 和 `container.transfer` 当前仍接收目标版本 registry 的原生资源名。兼容变体可以表达旧/新 ID 的替代顺序，但规划器使用的语义资源别名尚未接入。
+
+## `farm.maintain@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`world.interact`、`bot.move`；操作 `farm.maintain-safe`；超时 60 秒。
+- 最多扫描 4096 格、执行 64 个动作；成熟作物收割、保留茎基、补种、可用骨粉和库存差值。
+- Coordinator 区域租约、共享资产授权、取消与服务端方块确认。等待生长、缺种和批次上限不算目标完成。
+- 不包含开垦供水、基地科技树推进或长期食物净产出保证。
+
+## `movement.goal@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`bot.move`；操作 `movement.goal-safe`；超时 60 秒。
+- 方块、附近、XZ、Y、相邻、远离目标；最多 16 个条件，支持 any/all 与取反。
+- 复用 Mineflayer Pathfinder 和唯一移动租约；最终重新判定到达，不执行原版 Baritone。
+
+## `movement.follow@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`bot.move`；操作 `movement.follow-safe`；最多跟踪 30 秒。
+- 动态实体目标；实体消失、身份替换或超距时返回未完成。结果含跟踪时间及近距时间。
+- 不修改敌我名单，也不自动触发战斗。
+
+## `movement.get-to-block@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`bot.move`；操作 `movement.get-to-block-safe`；超时 60 秒。
+- 有界扫描指定方块、接近到可观察距离、重新核对目标；不可达候选被跳过。
+- 不自动右键目标，箱子与工作站操作仍走各自技能。
+
+## `world.explore@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`bot.move`；操作 `world.explore-safe`；每次最多推进 16 个区块。
+- 区块范围与排除清单、当前加载观测、可重入扫描；提交的 visited 不能代替当前世界证据。
+- 不包含原版 Baritone 的磁盘区域缓存或无限远探索。
+
+## `build.clear-area@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`world.interact`、`bot.move`；操作 `build.clear-area-safe`；超时 60 秒。
+- 区域最多 4096 格，每批最多挖掘 64 格；只清除 blockNames 明确选择的方块。
+- 共享区域租约、队友资产保护、液体/下落方块与脚下保护；完整复查后才可返回 AREA_CLEAR。
+
+## `movement.elytra@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`bot.move`；操作 `movement.elytra-safe`；最多飞行 30 秒。
+- 已装备且耐久足够的鞘翅、空中起步、已加载的直线下降航段和安全落地区域；落地后验证位置。
+- 不含自动起飞、烟花补给、复杂绕障或远距离飞行。取消时释放移动控制，交回 L0；不能声称取消等于立即落地。
 
 ## `movement.goto@1.0.0`
 

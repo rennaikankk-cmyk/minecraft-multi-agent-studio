@@ -1,7 +1,13 @@
 import { createBot, type Bot } from "mineflayer";
-import path from "node:path";
+import { setTimeout as processDelay } from "node:timers/promises";
 import { randomUUID } from "node:crypto";
 import { ActiveWorkstationLease } from "./workstation-lease.js";
+import { withWorkAreaLease } from "./work-area-lease.js";
+import { maintainFarm } from "./farm-maintenance-adapter.js";
+import { createFarmPort } from "./farm-mineflayer-port.js";
+import { clearWorkArea } from "./clear-area-adapter.js";
+import { glideToLanding } from "./elytra-process-adapter.js";
+import { runNavigationGoal, followEntity, getToBlock, exploreChunks, type NavigationProcessPort } from "./navigation-process-adapter.js";
 import pathfinderModule, {
   Movements,
   pathfinder,
@@ -38,8 +44,13 @@ import {
   MOVEMENT_PRIORITIES,
   MovementController,
   ServerBehaviorObserver,
-  ProvenanceStore,
   authorizeHarvest,
+  farmMaintainInputSchema, farmMaintainOutputSchema, cropRules,
+  navigationGoalInputSchema, navigationGoalOutputSchema, followEntityInputSchema, followEntityOutputSchema,
+  getToBlockInputSchema, getToBlockOutputSchema, exploreInputSchema, exploreOutputSchema,
+  clearAreaInputSchema, clearAreaOutputSchema, workScopeSchema,
+  elytraInputSchema, elytraOutputSchema,
+  type WorkPosition, type WorkArea,
   type MovementLease,
   SAFE_PATH_MAX_DISTANCE,
   SkillFault,
@@ -1181,12 +1192,12 @@ export class MineflayerBotClient implements BotClient {
   private worldSyncDetach: (() => void) | null = null;
   /** spawn-escape 疾跑进行中（防同点重复派发；goto 落定后复位）。 */
   private spawnEscapeActive = false;
-  /**
-   * Phase 3：Material Provenance——bot.dig 边界 HarvestAuthorization。
-   * 2026-09-03 深度审计：此前恒为 null（检查是死代码）。现在按 serverProfile
-   * 构造并持久化（runtime-data/provenance/<profile>.json），放置写入、挖掘清除。
-   */
-  private readonly provenanceStore: ProvenanceStore | null;
+  /** World effects share one scoped wrapper for the lifetime of the action lock. */
+  private worldActionsWrapped = false;
+  private worldActionController: AbortController | undefined;
+  private activeWorkAreaLeaseId: string | undefined;
+  private placementPurpose: "farm" | undefined;
+  private activeProcessSignal: AbortSignal | undefined;
   /** 显式拆除/回收授权的位置集合（salvage 通道，带死线）。 */
   private readonly salvageGrants = new Map<string, number>();
   /** 服务器地址（auth store 按 host:port 隔离凭据用）。 */
@@ -1251,16 +1262,14 @@ export class MineflayerBotClient implements BotClient {
       baseUrl: process.env.STUDIO_SHARED_STATE_URL ?? `http://127.0.0.1:${process.env.STUDIO_SHARED_STATE_PORT ?? "8791"}`,
       ...(process.env.STUDIO_SHARED_STATE_TOKEN ? { token: process.env.STUDIO_SHARED_STATE_TOKEN } : {}),
     }).workstations,
+    private readonly worldOperations: Pick<SharedStateClient, "assets" | "workAreas"> = new SharedStateClient({
+      baseUrl: process.env.STUDIO_SHARED_STATE_URL ?? `http://127.0.0.1:${process.env.STUDIO_SHARED_STATE_PORT ?? "8791"}`,
+      ...(process.env.STUDIO_SHARED_STATE_TOKEN ? { token: process.env.STUDIO_SHARED_STATE_TOKEN } : {}),
+    }),
   ) {
     /** 无规则服导航档：true = 沿途挖掘/疾跑/跑酷/搭高全部放开。 */
     this.anarchyNavigation = navigationProfile === "anarchy";
     this.serverAddress = serverAddress;
-    // Material Provenance：按 serverProfile 持久化（跨重启生效）。
-    this.provenanceStore = serverProfileId
-      ? new ProvenanceStore({
-          persistPath: provenancePersistPath(serverProfileId),
-        })
-      : null;
     // NoHunger 环境熔断（2026-09-04 用户诊断实证：luv 上 NoHunger maximum
     // 的"地面位移声明 onGround=false"= 自签空中行走签名 → 移动被静默拒绝，
     // 而旋转/潜行不受影响）。STUDIO_NO_HUNGER=0 一刀关闭；长期解=按服自适应。
@@ -1878,7 +1887,16 @@ export class MineflayerBotClient implements BotClient {
         return { outcome: "executed", errorCode: null };
       }
       if (action.kind === "FORAGE_SAFE_FOOD") {
-        return await this.forageSafeFood();
+        if (this.actionLocks.ownerOf("blockInteraction") || this.actionLocks.ownerOf("inventory")) {
+          return { outcome: "skipped", errorCode: "ACTION_LOCK_BUSY" };
+        }
+        const options = { owner: `safety:${action.kind}`, ttlMs: ACTION_LOCK_TTL_MS, signal: movementLease.signal };
+        return await this.actionLocks.withLock("blockInteraction", options, () =>
+          this.actionLocks.withLock("inventory", options, async () => {
+            const restore = this.installServerConfirmedDigging(movementLease.signal);
+            try { return await this.forageSafeFood(); }
+            finally { restore(); }
+          }));
       }
       if (action.kind === "RETREAT_STEP") {
         await this.applyBoundedControls(
@@ -2049,11 +2067,100 @@ export class MineflayerBotClient implements BotClient {
   async invokeSkillCapability(
     request: SkillCapabilityRequest,
   ): Promise<unknown> {
+    const mutatesWorld = ["world.interact", "bot.move", "craft.execute"].includes(request.capability) &&
+      !request.operation.startsWith("blueprint.inspect");
+    if (!mutatesWorld) return this.dispatchSkillCapability(request);
+    return this.withActionLocks(request, ["blockInteraction"], async () => {
+      const restore = this.installServerConfirmedDigging(request.signal);
+      try { return await this.dispatchSkillCapability(request); }
+      finally { restore(); }
+    });
+  }
+
+  private async dispatchSkillCapability(request: SkillCapabilityRequest): Promise<unknown> {
     if (this.requestedStop) {
       throw new SkillFault("RUNTIME_STOPPING");
     }
     if (!this.serverProfileId) {
       throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE");
+    }
+    if (request.capability === "world.interact" && request.operation === "farm.maintain-safe") {
+      const input = this.processInput(farmMaintainInputSchema, request.input);
+      return this.withActionLocks(request, ["inventory"], () => this.withAreaProcess(request, input.area, async (port, assertEffect) => {
+        this.placementPurpose = "farm";
+        try {
+          return farmMaintainOutputSchema.parse(await maintainFarm(createFarmPort(this.bot, input, {
+            signal: this.activeProcessSignal!, assertActive: port.assertActive,
+            approach: async (position) => { await port.goto(new goals.GoalLookAtBlock(new Vec3(position.x, position.y, position.z), this.bot.world, { reach: 4 })); },
+            approachPickup: async (position) => {
+              await port.goto(new goals.GoalNear(position.x, Math.floor(this.bot.entity.position.y), position.z, 1));
+            },
+            assertEffect: async (position, harvest) => {
+              await assertEffect();
+              const observation = await this.observeWorldAsset(position);
+              if (!observation.workAllowed) throw new SkillFault("WORK_AREA_BUSY");
+              if (observation.record && ["own_bot", "own_team"].includes(observation.record.owner) && observation.record.purpose !== "farm") {
+                throw new SkillFault("HARVEST_PROTECTED_ASSET");
+              }
+              if (harvest) {
+                const block = this.bot.blockAt(new Vec3(position.x, position.y, position.z));
+                if (!block || !(block.name in cropRules)) throw new SkillFault("FARM_READBACK_MISMATCH");
+                if (!observation.record) await this.worldOperations.assets.record({
+                  serverProfileId: input.area.serverProfileId, dimension: input.area.dimension, position,
+                  source: "natural", owner: "none", purpose: "farm", serverVerified: true, leaseId: this.activeWorkAreaLeaseId });
+                this.grantSalvage([{ position, dimension: input.area.dimension }], 5_000);
+              }
+            },
+          }), input));
+        } finally { this.placementPurpose = undefined; }
+      }));
+    }
+    if (request.capability === "world.interact" && request.operation === "build.clear-area-safe") {
+      const input = this.processInput(clearAreaInputSchema, request.input);
+      return this.withActionLocks(request, ["inventory"], () => this.withAreaProcess(request, input.area, async (port, assertEffect) => {
+        const dangerous = new Set(["water", "lava", "bubble_column", "fire", "soul_fire", "tnt", "sand", "red_sand", "gravel", "bedrock", "barrier"]);
+        return clearAreaOutputSchema.parse(await clearWorkArea(input, {
+          assertActive: port.assertActive,
+          inspect: (position) => {
+            const p = new Vec3(position.x, position.y, position.z);
+            const block = this.bot.blockAt(p);
+            const underFeet = Math.floor(this.bot.entity.position.x) === p.x && Math.floor(this.bot.entity.position.z) === p.z && p.y < this.bot.entity.position.y;
+            const neighbors = [p.offset(0, 1, 0), p.offset(0, -1, 0), p.offset(1, 0, 0), p.offset(-1, 0, 0), p.offset(0, 0, 1), p.offset(0, 0, -1)];
+            return { name: block?.name ?? null, safe: !!block && block.diggable && !underFeet && !dangerous.has(block.name) &&
+              neighbors.every((n) => { const b = this.bot.blockAt(n); return b !== null && !dangerous.has(b.name); }) };
+          },
+          approach: async (p) => { await port.goto(new goals.GoalLookAtBlock(new Vec3(p.x, p.y, p.z), this.bot.world, { reach: 4 })); },
+          dig: async (p) => {
+            await assertEffect(); port.assertActive();
+            const block = this.bot.blockAt(new Vec3(p.x, p.y, p.z));
+            if (!block) throw new SkillFault("CLEAR_OBSERVATION_UNAVAILABLE");
+            const tool = (this.bot as Bot & { tool?: { equipForBlock(block: unknown, options: { requireHarvest: boolean; getFromChest: boolean }): Promise<void> } }).tool;
+            if (!tool) throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE");
+            await tool.equipForBlock(block, { requireHarvest: false, getFromChest: false });
+            await assertEffect(); port.assertActive();
+            await this.bot.dig(block);
+          },
+          wait: () => port.wait(0),
+        }));
+      }));
+    }
+    if (request.capability === "bot.move" && request.operation === "movement.elytra-safe") {
+      const input = this.processInput(elytraInputSchema, request.input);
+      return this.withActionLocks(request, ["inventory"], () => this.withProcessNavigation(request, input,
+        async (port) => elytraOutputSchema.parse(await glideToLanding(port, input))));
+    }
+    if (request.capability === "bot.move" && ["movement.goal-safe", "movement.follow-safe", "movement.get-to-block-safe", "world.explore-safe"].includes(request.operation)) {
+      if (request.input === null || typeof request.input !== "object" || Array.isArray(request.input)) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+      const scope = this.processInput(workScopeSchema, { serverProfileId: (request.input as Record<string, unknown>).serverProfileId,
+        dimension: (request.input as Record<string, unknown>).dimension });
+      return this.withProcessNavigation(request, scope, async (port) => {
+        switch (request.operation) {
+          case "movement.goal-safe": return navigationGoalOutputSchema.parse(await runNavigationGoal(port, this.processInput(navigationGoalInputSchema, request.input)));
+          case "movement.follow-safe": return followEntityOutputSchema.parse(await followEntity(port, this.processInput(followEntityInputSchema, request.input)));
+          case "movement.get-to-block-safe": return getToBlockOutputSchema.parse(await getToBlock(port, this.processInput(getToBlockInputSchema, request.input)));
+          default: return exploreOutputSchema.parse(await exploreChunks(port, this.processInput(exploreInputSchema, request.input)));
+        }
+      });
     }
     if (request.capability === "world.interact" && request.operation === "blueprint.inspect") {
       return this.inspectBlueprint(request);
@@ -2248,6 +2355,56 @@ export class MineflayerBotClient implements BotClient {
         "The bot action resource lock failed.",
       );
     }
+  }
+
+  private processInput<T>(schema: { safeParse(raw: unknown): { success: true; data: T } | { success: false } }, input: unknown): T {
+    const parsed = schema.safeParse(input);
+    if (!parsed.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    return parsed.data;
+  }
+
+  private async withProcessNavigation<T>(request: SkillCapabilityRequest,
+    scope: { serverProfileId: string; dimension: string }, work: (port: NavigationProcessPort) => Promise<T>): Promise<T> {
+    this.assertServerProfileMatch(scope.serverProfileId);
+    this.assertDimensionMatch(scope.dimension);
+    const parent = AbortSignal.any([request.signal, this.workstationDisconnected.signal]);
+    const lease = this.movementController.acquire({ owner: `process:${request.invocationId}`, taskId: request.taskId,
+      priority: MOVEMENT_PRIORITIES.TASK_NAVIGATION, signal: parent });
+    if (!lease) throw new SkillFault("BOT_MOVEMENT_BUSY");
+    const signal = AbortSignal.any([parent, lease.signal]);
+    this.activeProcessSignal = signal;
+    const stop = () => { this.stopPathfinder(); this.bot.stopDigging?.(); };
+    signal.addEventListener("abort", stop, { once: true });
+    const assertActive = () => {
+      if (signal.aborted || !lease.isCurrent() || this.requestedStop) throw new SkillFault("SKILL_CANCELLED");
+      this.assertServerProfileMatch(scope.serverProfileId); this.assertDimensionMatch(scope.dimension);
+    };
+    try {
+      assertActive();
+      const movements = configureSafePathfinderMovements(new Movements(this.bot));
+      this.bot.pathfinder.setMovements(movements);
+      this.bot.pathfinder.tickTimeout = 20;
+      this.bot.pathfinder.thinkTimeout = 3_000;
+      return await work({ bot: this.bot, assertActive, now: Date.now, stop: () => { if (lease.isCurrent()) this.stopPathfinder(); },
+        wait: async (ms) => { await processDelay(ms, undefined, { signal }); assertActive(); },
+        goto: async (goal) => { assertActive(); await this.boundedCollectGoto(goal, signal, 8_000); assertActive(); },
+      });
+    } finally {
+      if (lease.isCurrent()) { this.stopPathfinder(); this.bot.clearControlStates(); }
+      signal.removeEventListener("abort", stop);
+      lease.release(); this.activeProcessSignal = undefined;
+    }
+  }
+
+  private async withAreaProcess<T>(request: SkillCapabilityRequest, area: WorkArea,
+    work: (port: NavigationProcessPort, assertEffect: () => Promise<void>) => Promise<T>): Promise<T> {
+    this.assertServerProfileMatch(area.serverProfileId); this.assertDimensionMatch(area.dimension);
+    return withWorkAreaLease(this.worldOperations.workAreas, area, `${this.workstationRuntimeId}:${request.taskId}:${request.invocationId}`,
+      request.signal, async (leaseId, signal, assertEffect) => {
+        this.activeWorkAreaLeaseId = leaseId;
+        try { return await this.withProcessNavigation({ ...request, signal }, area, (port) => work(port, assertEffect)); }
+        finally { this.activeWorkAreaLeaseId = undefined; }
+      });
   }
 
   private async invokeSiteObservation(request: SkillCapabilityRequest): Promise<unknown> {
@@ -2839,6 +2996,7 @@ export class MineflayerBotClient implements BotClient {
   }
 
   interruptNormalActions(): void {
+    this.worldActionController?.abort();
     this.releaseCollectBlockTask();
     this.activePathInvocationId = null;
     // 连接失败/半初始化的 bot 没有 clearControlStates（mineflayer 装好后才有）。
@@ -3338,33 +3496,30 @@ export class MineflayerBotClient implements BotClient {
    * that arrived just after the server tick boundary; timeout remains fail-closed.
    */
   private installServerConfirmedDigging(signal: AbortSignal): () => void {
+    if (this.worldActionsWrapped) return () => {};
+    const controller = new AbortController();
+    this.worldActionController = controller;
+    signal = AbortSignal.any([signal, controller.signal, this.workstationDisconnected.signal]);
     const botWithWire = this.bot as Bot & {
       _client?: MineflayerWireClient;
     };
     const wire = botWithWire._client;
-    if (
-      !wire ||
-      typeof wire.on !== "function" ||
-      (typeof wire.off !== "function" && typeof wire.removeListener !== "function")
-    ) {
-      // Unit doubles and pre-login clients do not expose the wire. The real
-      // Mineflayer client always does; preserving the original method here keeps
-      // lifecycle tests focused on their own contract.
-      return () => {};
-    }
+    const hasWire = wire && typeof wire.on === "function" &&
+      (typeof wire.off === "function" || typeof wire.removeListener === "function");
 
     const mutableBot = this.bot as Bot & { dig: Bot["dig"] };
     const originalDig = mutableBot.dig;
-    const callOriginalDig = originalDig.bind(this.bot);
+    const callOriginalDig: Bot["dig"] = typeof originalDig === "function" ? originalDig.bind(this.bot)
+      : async () => { throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE"); };
     const remove = (
       event: string,
       listener: (packet: unknown) => void,
     ): void => {
-      if (typeof wire.off === "function") wire.off(event, listener);
-      else wire.removeListener?.(event, listener);
+      if (typeof wire?.off === "function") wire.off(event, listener);
+      else wire?.removeListener?.(event, listener);
     };
 
-    const waitForServerConfirmation = (position: BlockPosition) => {
+    const waitForServerConfirmation = (position: BlockPosition, actionSignal: AbortSignal = signal, requireBlockUpdate = false) => {
       let settled = false;
       let timeout: ReturnType<typeof setTimeout> | null = null;
       let grace: ReturnType<typeof setTimeout> | null = null;
@@ -3378,7 +3533,7 @@ export class MineflayerBotClient implements BotClient {
         remove("block_change", onBlockChange);
         remove("multi_block_change", onMultiBlockChange);
         remove("acknowledge_player_digging", onDiggingAck);
-        signal.removeEventListener("abort", onAbort);
+        actionSignal.removeEventListener("abort", onAbort);
         resolvePromise(confirmed);
       };
       // An ack alone means the server processed the sequence. A refusal follows
@@ -3404,6 +3559,7 @@ export class MineflayerBotClient implements BotClient {
         }
       };
       const onDiggingAck = (packet: unknown) => {
+        if (requireBlockUpdate) return;
         const ack = parseDiggingAckPacket(packet);
         if (!ack) return;
         if (ack.kind === "sequence") {
@@ -3422,10 +3578,10 @@ export class MineflayerBotClient implements BotClient {
       const onAbort = () => finish(false);
       const promise = new Promise<boolean>((resolve) => {
         resolvePromise = resolve;
-        wire.on?.("block_change", onBlockChange);
-        wire.on?.("multi_block_change", onMultiBlockChange);
-        wire.on?.("acknowledge_player_digging", onDiggingAck);
-        signal.addEventListener("abort", onAbort, { once: true });
+        wire?.on?.("block_change", onBlockChange);
+        wire?.on?.("multi_block_change", onMultiBlockChange);
+        wire?.on?.("acknowledge_player_digging", onDiggingAck);
+        actionSignal.addEventListener("abort", onAbort, { once: true });
       });
       return {
         promise,
@@ -3443,18 +3599,20 @@ export class MineflayerBotClient implements BotClient {
 
     const wrappedDig = (async (...args: Parameters<Bot["dig"]>) => {
       const block = args[0];
+      const actionSignal = this.activeProcessSignal ? AbortSignal.any([signal, this.activeProcessSignal]) : signal;
+      const leaseId = this.activeWorkAreaLeaseId;
       // Phase 3：bot.dig 边界 HarvestAuthorization——own/team/facility 方块
       // 无显式 salvage 授权时拒绝采集。无 provenance 记录=自然方块=放行。
       // pathfinder 的沿途挖掘同样走 bot.dig——这一层就是全部挖掘的边界。
-      if (this.provenanceStore !== null) {
-        const dimension = this.bot.game?.dimension ?? "minecraft:overworld";
-        const record = this.provenanceStore.get(block.position, dimension);
+      if (this.serverProfileId !== null) {
+        if (actionSignal.aborted) throw new SkillFault("SKILL_CANCELLED");
+        const dimension = normalizeDimension(String(this.bot.game?.dimension ?? "minecraft:overworld"));
+        const observation = await this.observeWorldAsset(block.position, leaseId);
+        const { record, nearOwnBase } = observation;
+        if (!observation.workAllowed) throw new SkillFault("WORK_AREA_BUSY");
         const grantKey = `${dimension}:${block.position.x},${block.position.y},${block.position.z}`;
         const grantDeadline = this.salvageGrants.get(grantKey) ?? 0;
         const explicitSalvageAuthorized = grantDeadline > Date.now();
-        // 空间检查待接入 Base registry 后补（nearOwnBase fail-closed 分支
-        // 已有单测覆盖，运行时接入点在此——registry 落地前恒 false）。
-        const nearOwnBase = false;
         const decision = authorizeHarvest({
           record,
           explicitSalvageAuthorized,
@@ -3463,18 +3621,27 @@ export class MineflayerBotClient implements BotClient {
         if (!decision.allowed) {
           throw new SkillFault("HARVEST_PROTECTED_ASSET");
         }
+        if (actionSignal.aborted) throw new SkillFault("SKILL_CANCELLED");
+        this.assertDimensionMatch(dimension);
+        if (leaseId && !hasWire) throw new SkillFault("WORLD_CONFIRMATION_UNAVAILABLE");
+        if (!hasWire) return callOriginalDig(...args);
         try {
           return await (async () => {
             for (let attempt = 0; attempt <= COLLECT_SERVER_DIG_RETRIES; attempt += 1) {
-              if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
-              const confirmation = waitForServerConfirmation(block.position);
+              if (actionSignal.aborted) throw new SkillFault("SKILL_CANCELLED");
+              this.assertDimensionMatch(dimension);
+              const confirmation = waitForServerConfirmation(block.position, actionSignal, !!leaseId);
               try {
                 await callOriginalDig(...args);
                 confirmation.armTimeout();
                 if (await confirmation.promise) {
+                  if (actionSignal.aborted) throw new SkillFault("SKILL_CANCELLED");
+                  this.assertDimensionMatch(dimension);
                   // 服务器确认破坏：清除 provenance（含过期的 salvage grant）。
                   this.salvageGrants.delete(grantKey);
-                  this.provenanceStore?.remove(block.position, dimension);
+                  await this.worldOperations.assets.remove({ serverProfileId: this.serverProfileId!, dimension,
+                    position: { x: block.position.x, y: block.position.y, z: block.position.z },
+                    ...(leaseId ? { leaseId } : {}) });
                   return;
                 }
               } finally {
@@ -3490,11 +3657,13 @@ export class MineflayerBotClient implements BotClient {
           }
         }
       }
+      if (actionSignal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      if (!hasWire) return callOriginalDig(...args);
       for (let attempt = 0; attempt <= COLLECT_SERVER_DIG_RETRIES; attempt += 1) {
-        if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
-        const confirmation = waitForServerConfirmation(block.position);
+        if (actionSignal.aborted) throw new SkillFault("SKILL_CANCELLED");
+        const confirmation = waitForServerConfirmation(block.position, actionSignal, !!leaseId);
         try {
-          await originalDig(...args);
+          await callOriginalDig(...args);
           confirmation.armTimeout();
           if (await confirmation.promise) return;
         } finally {
@@ -3505,35 +3674,49 @@ export class MineflayerBotClient implements BotClient {
     }) as Bot["dig"];
 
     mutableBot.dig = wrappedDig;
+    this.worldActionsWrapped = true;
 
     // Phase 3 补全：placeBlock 包装——服务器确认放置成功后写 provenance
     // （owner=own_bot），下次 dig 该位置会被 HarvestAuthorization 拦截。
     const originalPlaceBlock = mutableBot.placeBlock;
-    if (this.provenanceStore !== null && typeof originalPlaceBlock === "function") {
+    let wrappedPlaceBlock: Bot["placeBlock"] | undefined;
+    if (this.serverProfileId !== null && typeof originalPlaceBlock === "function") {
       const callOriginalPlaceBlock = originalPlaceBlock.bind(this.bot);
-      const wrappedPlaceBlock = (async (
+      wrappedPlaceBlock = (async (
         ...args: Parameters<Bot["placeBlock"]>
       ) => {
         const [reference, face] = args;
-        const result = await callOriginalPlaceBlock(...args);
+        const actionSignal = this.activeProcessSignal ? AbortSignal.any([signal, this.activeProcessSignal]) : signal;
+        const leaseId = this.activeWorkAreaLeaseId;
+        const dimension = normalizeDimension(String(this.bot.game?.dimension ?? "minecraft:overworld"));
+        const purpose = this.placementPurpose ?? (this.movementController.currentLease() !== null ? "navigation" as const : "structural" as const);
         const target = {
           x: reference.position.x + face.x,
           y: reference.position.y + face.y,
           z: reference.position.z + face.z,
         };
+        if (actionSignal.aborted) throw new SkillFault("SKILL_CANCELLED");
+        const observation = await this.observeWorldAsset(target, leaseId);
+        if (actionSignal.aborted) throw new SkillFault("SKILL_CANCELLED");
+        this.assertDimensionMatch(dimension);
+        if (!observation.workAllowed) throw new SkillFault("WORK_AREA_BUSY");
+        const entry = {
+          serverProfileId: this.serverProfileId!,
+          dimension,
+          position: target, source: "bot_placed" as const, owner: "own_team" as const,
+          purpose: observation.record?.purpose ?? purpose,
+          ...(leaseId ? { leaseId } : {}),
+        };
+        // Protect uncertain placements too: a crash after sending must not leave an unowned block.
+        await this.worldOperations.assets.record({ ...entry, serverVerified: false });
+        if (actionSignal.aborted) throw new SkillFault("SKILL_CANCELLED");
+        this.assertDimensionMatch(dimension);
+        const result = await callOriginalPlaceBlock(...args);
+        if (actionSignal.aborted) throw new SkillFault("SKILL_CANCELLED");
+        this.assertDimensionMatch(dimension);
         const confirmed = this.bot.blockAt(new Vec3(target.x, target.y, target.z));
-        if (confirmed && confirmed.boundingBox !== "empty") {
-          this.provenanceStore!.record({
-            serverProfileId: this.serverProfileId ?? "unknown-server",
-            dimension: this.bot.game?.dimension ?? "minecraft:overworld",
-            position: target,
-            source: "bot_placed",
-            owner: "own_bot",
-            // 寻路租约期内的放置=垫脚/搭高（navigation，可自拆）；技能建造
-            // （build/blueprint 等）在无租约时发生 → structural（受保护）。
-            purpose: this.movementController.currentLease() !== null ? "navigation" : "structural",
-            serverVerified: true,
-          });
+        if (confirmed && !["air", "cave_air", "void_air"].includes(confirmed.name)) {
+          await this.worldOperations.assets.record({ ...entry, serverVerified: true });
         }
         return result;
       }) as Bot["placeBlock"];
@@ -3541,8 +3724,22 @@ export class MineflayerBotClient implements BotClient {
     }
 
     return () => {
+      controller.abort();
+      if (this.worldActionController === controller) this.worldActionController = undefined;
       if (mutableBot.dig === wrappedDig) mutableBot.dig = originalDig;
+      if (wrappedPlaceBlock && mutableBot.placeBlock === wrappedPlaceBlock) mutableBot.placeBlock = originalPlaceBlock;
+      this.worldActionsWrapped = false;
     };
+  }
+
+  private async observeWorldAsset(position: BlockPosition, leaseId = this.activeWorkAreaLeaseId) {
+    if (!this.serverProfileId) throw new SkillFault("TARGET_SERVER_PROFILE_MISMATCH");
+    try {
+      return await this.worldOperations.assets.observe({ serverProfileId: this.serverProfileId,
+        dimension: normalizeDimension(String(this.bot.game.dimension)),
+        position: { x: position.x, y: position.y, z: position.z },
+        ...(leaseId ? { leaseId } : {}) });
+    } catch { throw new SkillFault("WORLD_ASSET_AUTHORITY_UNAVAILABLE"); }
   }
 
   /**
@@ -5569,16 +5766,10 @@ export class MineflayerBotClient implements BotClient {
       // 目标位被非同种方块占用时，先挖掉障碍再放置——bot 是改造者不是
       // 站桩者。挖之前走 HarvestAuthorization（保护规则不变）。
       if (occupant.name !== "bedrock" && occupant.name !== "barrier") {
-        const digAuthorized = this.provenanceStore === null
-          ? true
-          : authorizeHarvest({
-              record: this.provenanceStore.get(
-                { x: targetPosition.x, y: targetPosition.y, z: targetPosition.z },
-                normalizeDimension(String(this.bot.game.dimension)),
-              ),
-              explicitSalvageAuthorized: false,
-              nearOwnBase: false,
-            }).allowed;
+        const observation = await this.observeWorldAsset(targetPosition);
+        const digAuthorized = observation.workAllowed && authorizeHarvest({
+          ...observation, explicitSalvageAuthorized: false,
+        }).allowed;
         if (digAuthorized) {
           try {
             if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
@@ -6867,12 +7058,6 @@ function resolveOnlinePassword(botId: string): string {
     );
   }
   return value;
-}
-
-/** Provenance 持久化路径：runtime-data/provenance/<serverProfileId>.json。 */
-function provenancePersistPath(serverProfileId: string): string {
-  const safe = serverProfileId.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 128);
-  return path.join(process.cwd(), "runtime-data", "provenance", `${safe}.json`);
 }
 
 /** 会话自置工作台的位置键（x,y,z 整数化）。 */

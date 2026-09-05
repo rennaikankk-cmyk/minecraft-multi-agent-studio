@@ -159,6 +159,7 @@ export interface BaseRecord {
   readonly anchor: BlockPosition;
   readonly blueprintId: string;
   readonly blueprintVersion: number;
+  protectedBounds?: { min: BlockPosition; max: BlockPosition };
   memberBotIds?: string[];
   phaseFacts?: Record<string, BasePhaseFact>;
   status: BaseStatus;
@@ -216,6 +217,24 @@ export class BaseRegistry {
   constructor(options: BaseRegistryOptions = {}) {
     this.defaultCellTtlMs = options.defaultCellTtlMs ?? 60_000;
     this.now = options.now ?? (() => Date.now());
+  }
+
+  protectBlueprint(id: string, raw: Blueprint): void {
+    const blueprint = blueprintSchema.parse(raw);
+    const base = this.bases.get(id);
+    if (!base || base.serverProfileId !== blueprint.serverProfileId || base.dimension !== blueprint.dimension) {
+      throw new Error("BASE_PROTECTION_SCOPE_MISMATCH");
+    }
+    const positions = blueprint.cells.map((cell) => ({ x: blueprint.anchor.x + cell.offset.x,
+      y: blueprint.anchor.y + cell.offset.y, z: blueprint.anchor.z + cell.offset.z }));
+    const previous = base.protectedBounds;
+    const bounds = { min: { ...blueprint.anchor }, max: { ...blueprint.anchor } };
+    for (const axis of ["x", "y", "z"] as const) {
+      bounds.min[axis] = Math.min(...positions.map((p) => p[axis] - 1), previous?.min[axis] ?? Infinity);
+      bounds.max[axis] = Math.max(...positions.map((p) => p[axis] + 1), previous?.max[axis] ?? -Infinity);
+    }
+    base.protectedBounds = bounds;
+    base.updatedAt = new Date(this.now()).toISOString();
   }
 
   create(params: Readonly<{

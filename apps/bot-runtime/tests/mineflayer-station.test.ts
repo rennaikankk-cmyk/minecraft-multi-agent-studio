@@ -26,7 +26,7 @@ vi.mock("mineflayer-pathfinder", async (importOriginal) => {
 });
 
 import type { BotClientHandlers } from "../src/client.js";
-import { MineflayerBotClient } from "../src/mineflayer-client.js";
+import { MineflayerBotClient } from "./fixtures/in-memory-client.js";
 import { importantBlockNames } from "../src/world-state.js";
 
 const SERVER_PROFILE_ID = "isolated-local";

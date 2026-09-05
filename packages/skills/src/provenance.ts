@@ -124,12 +124,16 @@ export function authorizeHarvest(input: {
 
 export interface ProvenanceStoreOptions {
   maxRecords?: number;
+  strictPersistence?: boolean;
+  serverProfileId?: string;
   /**
    * 2026-09-03 深度审计：持久化路径（可选）。提供时启动加载、每次变更
    * 原子落盘（tmp+rename）——runtime 重启后 own-placed 记录不丢，dig 边界
    * 才能跨会话生效。corrupt 文件隔离为 .corrupt-*，不杀进程（空库继续）。
    */
   persistPath?: string;
+  /** Read-only migration source, used only while the destination is absent. */
+  legacyPersistPath?: string;
 }
 
 const DEFAULT_MAX_RECORDS = 8192;
@@ -138,30 +142,49 @@ export class ProvenanceStore {
   private readonly records = new Map<string, ProvenanceRecord>();
   private readonly maxRecords: number;
   private readonly persistPath: string | null;
+  private readonly strictPersistence: boolean;
+  private readonly serverProfileId: string | undefined;
+  private degraded = false;
   /** chunk key → Set<recordKey> 空间索引。 */
   private readonly chunkIndex = new Map<string, Set<string>>();
 
   constructor(options: ProvenanceStoreOptions = {}) {
     this.maxRecords = options.maxRecords ?? DEFAULT_MAX_RECORDS;
     this.persistPath = options.persistPath ?? null;
-    this.loadFromDisk();
+    this.strictPersistence = options.strictPersistence ?? false;
+    this.serverProfileId = options.serverProfileId;
+    this.loadFromDisk(options.legacyPersistPath);
   }
 
-  private loadFromDisk(): void {
+  private loadFromDisk(legacyPersistPath?: string): void {
     if (this.persistPath === null) return;
     try {
-      if (!existsSync(this.persistPath)) return;
-      const parsed = JSON.parse(readFileSync(this.persistPath, "utf8")) as {
+      const readPath = existsSync(this.persistPath) ? this.persistPath : legacyPersistPath;
+      if (!readPath || !existsSync(readPath)) return;
+      const parsed = JSON.parse(readFileSync(readPath, "utf8")) as {
         schemaVersion: string;
         records: ProvenanceRecord[];
       };
       if (parsed.schemaVersion !== "1.0" || !Array.isArray(parsed.records)) {
         throw new Error("invalid provenance schema");
       }
+      if (this.strictPersistence && parsed.records.length > this.maxRecords) throw new Error("PROVENANCE_CAPACITY_EXCEEDED");
       for (const raw of parsed.records) {
         const record = provenanceRecordSchema.safeParse(raw);
-        if (!record.success) continue;
+        if (!record.success) {
+          if (this.strictPersistence) throw new Error("PROVENANCE_STORAGE_INVALID");
+          continue;
+        }
+        if (this.serverProfileId && record.data.serverProfileId !== this.serverProfileId) {
+          throw new Error("PROVENANCE_SCOPE_MISMATCH");
+        }
+        if (legacyPersistPath && readPath === legacyPersistPath) {
+          const dimension = record.data.dimension.toLowerCase();
+          record.data.dimension = dimension.includes(":") ? dimension : `minecraft:${dimension}`;
+          if (!/^[a-z0-9_.-]+:[a-z0-9_./-]+$/.test(record.data.dimension)) throw new Error("PROVENANCE_SCOPE_MISMATCH");
+        }
         const key = ProvenanceStore.key(record.data.position, record.data.dimension);
+        if (this.strictPersistence && this.records.has(key)) throw new Error("PROVENANCE_DUPLICATE_POSITION");
         this.records.set(key, record.data);
         const ck = ProvenanceStore.chunkKey(record.data.position, record.data.dimension);
         const set = this.chunkIndex.get(ck) ?? new Set<string>();
@@ -169,6 +192,7 @@ export class ProvenanceStore {
         this.chunkIndex.set(ck, set);
       }
     } catch {
+      if (this.strictPersistence) throw new Error("PROVENANCE_STORAGE_INVALID");
       // corrupt → 隔离（不清空别的文件），进程继续跑空库
       try {
         if (this.persistPath && existsSync(this.persistPath)) {
@@ -193,6 +217,10 @@ export class ProvenanceStore {
       writeFileSync(tmpPath, body, "utf8");
       renameSync(tmpPath, this.persistPath);
     } catch {
+      if (this.strictPersistence) {
+        this.degraded = true;
+        throw new Error("PROVENANCE_STORAGE_DEGRADED");
+      }
       // 磁盘失败不杀 runtime：内存记录仍生效（本会话），下次启动回退旧盘文件
     }
   }
@@ -207,14 +235,18 @@ export class ProvenanceStore {
 
   /** 记录一个方块的 provenance（build placement server verify 后调用）。 */
   record(entry: Omit<ProvenanceRecord, "recordId" | "recordedAtMs"> & { recordId?: string }): ProvenanceRecord {
+    this.assertHealthy();
+    if (this.serverProfileId && entry.serverProfileId !== this.serverProfileId) throw new Error("PROVENANCE_SCOPE_MISMATCH");
     const key = ProvenanceStore.key(entry.position, entry.dimension);
     const existing = this.records.get(key);
     if (existing !== undefined) {
       const updated: ProvenanceRecord = { ...existing, ...entry, recordId: existing.recordId, recordedAtMs: existing.recordedAtMs };
       this.records.set(key, updated);
+      this.persistToDisk();
       return updated;
     }
     if (this.records.size >= this.maxRecords) {
+      if (this.strictPersistence) throw new Error("PROVENANCE_CAPACITY_EXCEEDED");
       this.evictOldest();
     }
     const now = Date.now();
@@ -234,6 +266,7 @@ export class ProvenanceStore {
 
   /** 挖掘/破坏已确认后清除记录（server-confirmed dig 后调用）。 */
   remove(position: { x: number; y: number; z: number }, dimension: string): boolean {
+    this.assertHealthy();
     const key = ProvenanceStore.key(position, dimension);
     const existed = this.records.delete(key);
     if (existed) {
@@ -246,11 +279,13 @@ export class ProvenanceStore {
 
   /** 查询指定位置的 provenance（无则 null）。 */
   get(position: { x: number; y: number; z: number }, dimension: string): ProvenanceRecord | null {
+    this.assertHealthy();
     return this.records.get(ProvenanceStore.key(position, dimension)) ?? null;
   }
 
   /** 查询 chunk 内所有记录。 */
   getChunk(chunkX: number, chunkZ: number, dimension: string): readonly ProvenanceRecord[] {
+    this.assertHealthy();
     const ck = `${dimension}:${chunkX},${chunkZ}`;
     const keys = this.chunkIndex.get(ck);
     if (keys === undefined) return [];
@@ -259,6 +294,10 @@ export class ProvenanceStore {
 
   get size(): number {
     return this.records.size;
+  }
+
+  private assertHealthy(): void {
+    if (this.degraded) throw new Error("PROVENANCE_STORAGE_DEGRADED");
   }
 
   private evictOldest(): void {

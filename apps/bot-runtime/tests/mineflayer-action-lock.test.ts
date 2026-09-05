@@ -9,7 +9,7 @@ import {
 import { Vec3 } from "vec3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { MineflayerBotClient } from "../src/mineflayer-client.js";
+import { MineflayerBotClient } from "./fixtures/in-memory-client.js";
 import { InMemoryWorkstationRegistry } from "@minecraft-studio/skills";
 
 const SERVER_PROFILE_ID = "isolated-local";
@@ -283,6 +283,7 @@ describe("MineflayerBotClient action locks", () => {
 
     await fixture.client.invokeSkillCapability(craftRequest());
     expect(acquire.mock.calls.map(([kind]) => kind)).toEqual([
+      "blockInteraction",
       "crafting",
       "inventory",
     ]);
@@ -290,6 +291,7 @@ describe("MineflayerBotClient action locks", () => {
 
     await fixture.client.invokeSkillCapability(smeltRequest());
     expect(acquire.mock.calls.map(([kind]) => kind)).toEqual([
+      "blockInteraction",
       "crafting",
       "container",
       "inventory",
