@@ -1987,7 +1987,9 @@ function validateCreateBotRequest(input) {
   ) {
     throw managedError(
       "INVALID_REQUEST",
-      "Bot 字段无效；服务器必须是本机或私有局域网地址。",
+      input.purpose === "anarchy"
+        ? "Bot 字段无效；anarchy 真实服必须使用裸公网地址或 IP。"
+        : "Bot 字段无效；服务器必须是本机或私有局域网地址。",
       400,
     );
   }

@@ -37,6 +37,8 @@ describe("host/connectHost separation (Server Profile SSOT)", () => {
     const options = createMineflayerOptions(baseProfile);
     expect(options.host).toBe("play.example-gray.cn");
     expect("fakeHost" in options).toBe(false);
+    expect(options.auth).toBe("offline");
+    expect(options.username).toBe(baseProfile.username);
   });
 
   it("有 connectHost：TCP 目的=connectHost，握手域名=fakeHost=host", () => {

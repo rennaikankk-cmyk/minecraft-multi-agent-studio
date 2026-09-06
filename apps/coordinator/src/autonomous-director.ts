@@ -8,6 +8,7 @@ import {
 } from "@minecraft-studio/protocol";
 import { scanBlocksOutputSchema, siteAssessOutputSchema, plannedBlueprintAnchor, farmMaintainInputSchema, farmSustainInputSchema, cropRules, readFarmProduction, registerCropProduction, registerFoodProduction, farmProductionReady,
   recordFarmProduction, type FacilityRegistry, type BaseRegistry } from "@minecraft-studio/skills";
+import type { FacilityLease, FacilityLeaseAuthority } from "@minecraft-studio/skills";
 import type { PlanJournalStore } from "./plan-journal.js";
 import { ExplorationJournal } from "./exploration-journal.js";
 
@@ -106,6 +107,9 @@ export type AutonomousDirectorOptions = Readonly<{
   planJournalStore?: PlanJournalStore;
   persistBaseState?: () => void;
   explorationJournal?: ExplorationJournal;
+  /** Shared facility execution lease. Production deployments must back this
+   * interface with a shared store; the in-memory implementation is test-only. */
+  facilityLeaseAuthority?: FacilityLeaseAuthority;
 }>;
 
 type InternalTask = PublicTask & {
@@ -266,6 +270,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
   private readonly recoveredDeaths = new Map<string, Set<string>>();
   private readonly recoveryMemory = new SurvivalRecoveryMemory();
   private readonly productionRuns = new Map<string, string>();
+  private readonly facilityLeases = new Map<string, FacilityLease>();
   /** 神谕给出的一次性立场切换，下一次调度前消费（优先于普通需求）。 */
   private readonly pendingStanceSwitches = new Map<string, "preserve-life" | "expendable" | "aggressive">();
   /** 神谕给出的一次性替代资源（needKey → item），用一次即消费。 */
@@ -1258,6 +1263,12 @@ export class AutonomousDirector implements AutonomousTaskSource {
         goal.operatorGoal,
       );
       if (goal.productionFacilityId) {
+        const leaseAuthority = this.options.facilityLeaseAuthority;
+        if (leaseAuthority) {
+          const lease = leaseAuthority.acquire({ facilityId: goal.productionFacilityId, ownerId: taskId, ttlMs: Math.min(15 * 60_000, this.options.goalTimeoutMs + 60_000) }, validDate(this.now()).getTime());
+          if (!lease) throw new LocalPlannerError("FACILITY_RUN_LEASE_BUSY", "Facility is leased by another Coordinator task.");
+          this.facilityLeases.set(taskId, lease);
+        }
         this.productionRuns.set(goal.productionFacilityId, taskId);
         const facility = this.options.facilityRegistry?.get(goal.productionFacilityId);
         const production = facility && readFarmProduction(facility);
@@ -1353,6 +1364,11 @@ export class AutonomousDirector implements AutonomousTaskSource {
     } finally {
       if (goal.productionFacilityId && this.productionRuns.get(goal.productionFacilityId) === taskId) {
         this.productionRuns.delete(goal.productionFacilityId);
+      }
+      const lease = this.facilityLeases.get(taskId);
+      if (lease) {
+        this.options.facilityLeaseAuthority?.release(lease, validDate(this.now()).getTime());
+        this.facilityLeases.delete(taskId);
       }
     }
   }

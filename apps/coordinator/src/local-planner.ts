@@ -93,6 +93,7 @@ export const LOCAL_PLANNER_REASON_CODES = Object.freeze([
   "RAW_ACTION_FORBIDDEN",
   "UNGROUNDED_INPUT",
   "UNSUPPORTED_ACTION",
+  "FACILITY_RUN_LEASE_BUSY",
 ] as const);
 const reasonCodeSchema = z.enum(LOCAL_PLANNER_REASON_CODES);
 const TRUSTED_SERVER_PROFILE_PLACEHOLDER = "$CURRENT_SERVER_PROFILE";
@@ -524,7 +525,8 @@ export type LocalPlannerErrorCode =
   | "PLANNER_RESTART_RECOVERY_UNSAFE"
   | "PLANNER_RESTART_RECOVERY_EXHAUSTED"
   | "PLANNER_CANCELLED"
-  | "PLANNER_SKILL_RESULT_INVALID";
+  | "PLANNER_SKILL_RESULT_INVALID"
+  | "FACILITY_RUN_LEASE_BUSY";
 
 export class LocalPlannerError extends Error {
   /** Plan step the failure came from, when the failure had one. Log-only. */

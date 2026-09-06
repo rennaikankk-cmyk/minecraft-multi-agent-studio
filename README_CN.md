@@ -100,9 +100,11 @@ STUDIO_MAX_BOTS=16
 `studio-bot-16` 的独立槽位；状态页显示当前已创建数量、Runtime 进程状态和真实遥测连接状态。
 每个 Bot 使用独立的 Runtime Link 身份和 Profile，重启 Studio 后会恢复已保存的 Bot。
 
-当前真实服入口保持受控范围：只接受本机或私有局域网地址，并使用 Minecraft 离线认证；
-公网地址、在线账号登录和账号密码尚未接入。要连接在线认证服务器，不能把密码写入 Profile，
-需要后续单独接入安全的账号凭据流程。
+Manager 创建的真实服 Bot 使用 Minecraft 离线认证（`auth: "offline"`），公网地址只在
+`purpose: "anarchy"` 时开放。用户名只写入本地 Profile，离线服会按该用户名完成握手；
+不需要 Mojang/Microsoft 账号，也不会读取或持久化密码。Dashboard 创建的 Bot 和手工
+Profile 走同一条 Runtime 路径，支持 `connectHost` 覆盖 TCP 目的地址，同时保留 `host`
+作为握手域名。在线认证仍是独立能力，不能把离线 Profile 当作正版服凭据。
 
 ## 自主生存（Autonomous Survival）
 
@@ -186,8 +188,10 @@ pnpm bot:start
 
 安全限制：
 
-- 当前只允许离线认证的本机或私有局域网测试服。
-- 不支持公网地址、正式服务器或配置文件密码。
+- 真实服离线认证必须在服务器端启用离线模式（常见配置为 `online-mode=false`）；正版
+  在线模式服务器会拒绝离线会话，这是服务端认证策略，Runtime 不会绕过。
+- anarchy Profile 可以使用公网裸域名/IP；普通 managed Profile 仍限制在本机或私有局域网。
+- Profile 不接受密码字段。`auth: "offline"` 不会触发 Microsoft 登录，也不会静默切换到在线认证。
 - 没有设置 `BOT_SERVER_PROFILE_PATH` 时不会尝试连接。
 - Runtime ↔ Coordinator 与 Control API ↔ Coordinator 都已接入真实回环跨进程传输，并通过不连接 Minecraft 的服务级四进程验收。
 
@@ -276,7 +280,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-isolated-m
 - Control API 只有在收到 `snapshot-begin → snapshot-item* → snapshot-end` 完整快照后才原子替换可读状态；链路断开、协议/序列异常或 75 秒没有任何入站帧/ping 时会立即丢弃镜像、关闭状态流，并让列表、详情和停止返回 `503 CONTROL_UNAVAILABLE`。同一 Coordinator 实例短暂重连可重投原操作；Coordinator 实例变化时旧停止操作以身份变化失败，不会污染新链路。
 - 停止 RPC 只接受固定契约：同一 UUID 绑定 `commandId/traceId/decisionId`、`graceful`、`dashboard_operator_confirmed`、5 秒宽限、15 秒超时和仅 `bot.stop` 权限；结果身份不匹配或超时都不能报告成功。
 - Dashboard → Control API → Coordinator → Runtime 已通过真实回环四进程服务级验收；验收中的 Runtime 是测试专用 fixture，未连接 Minecraft，也不是浏览器 E2E。用户登录和持久化审计仍未接入。
-- Dashboard 已提供受控真实服入口，最多 16 个 Bot；公网地址、在线认证和账号凭据仍未接入。
+- Dashboard 已提供真实服离线登录入口，最多 16 个 Bot；公网地址仅对 anarchy Profile 开放。
 
 ## 验证 Runtime Link
 

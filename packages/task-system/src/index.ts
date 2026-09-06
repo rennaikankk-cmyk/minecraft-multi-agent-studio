@@ -41,6 +41,15 @@ export {
   type TaskTransitionCommand,
 } from "./model.js";
 export {
+  compositeKindSchema,
+  compositeStatusSchema,
+  compositeTaskSchema,
+  advanceCompositeTask,
+  type CompositeKind,
+  type CompositeStatus,
+  type CompositeTask,
+} from "./composite-task.js";
+export {
   MAX_EXPIRED_LEASE_BATCH_SIZE,
   MAX_TASK_HISTORY_BATCH_SIZE,
   MAX_TASK_LIFECYCLE_BATCH_SIZE,
