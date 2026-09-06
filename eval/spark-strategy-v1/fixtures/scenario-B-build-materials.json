@@ -1,0 +1,82 @@
+{
+  "sampleId": "B1-build-materials",
+  "scenario": "build-materials",
+  "mode": "offline",
+  "expectation": { "desiredBehavior": "act", "acceptableVerdicts": ["acceptable"] },
+  "facts": {
+    "scope": { "serverProfileId": "local-test-1.21.11", "dimension": "overworld", "observedAtMs": 1780010000000, "sessionEpoch": 7 },
+    "capturedAtMs": 1780010000000,
+    "bots": [
+      { "botId": "B01", "online": true, "currentTask": null, "survival": { "health": 20, "food": 16, "armorPoints": 4 }, "inventory": [{ "itemName": "iron_pickaxe", "count": 1 }], "deaths": 1 },
+      { "botId": "B02", "online": true, "currentTask": null, "survival": { "health": 20, "food": 15, "armorPoints": 4 }, "inventory": [{ "itemName": "stone_axe", "count": 1 }], "deaths": 0 },
+      { "botId": "B03", "online": true, "currentTask": null, "survival": { "health": 18, "food": 14, "armorPoints": 0 }, "inventory": [{ "itemName": "crafting_table", "count": 1 }], "deaths": "unknown" }
+    ],
+    "team": {
+      "sharedInventory": [{ "itemName": "oak_planks", "count": 6 }, { "itemName": "cobblestone", "count": 10 }],
+      "facilities": [{ "facilityId": "facility:build-site-shelter", "kind": "construction-site", "status": "available" }],
+      "shortages": ["oak_log: blueprint needs 24, visible 0", "cobblestone: blueprint needs 40, visible 10"],
+      "reservedResources": [{ "resource": "facility:build-site-shelter", "heldByBotId": "B03" }]
+    },
+    "events": [
+      { "kind": "failure", "atMs": 1780009900000, "source": "incident:bp-7f2a", "botId": "B03", "detail": "build.blueprint BUILD_MATERIAL_MISSING oak_log x18" },
+      { "kind": "failure", "atMs": 1780009850000, "source": "incident:bp-7f2a", "botId": "B03", "detail": "build.blueprint BUILD_MATERIAL_MISSING cobblestone x30" }
+    ],
+    "constraints": {
+      "capabilities": [
+        { "skillId": "collect.block", "supported": true, "maturity": "L4" },
+        { "skillId": "craft.item", "supported": true },
+        { "skillId": "container.transfer", "supported": true, "maturity": "L2" },
+        { "skillId": "build.blueprint", "supported": true, "maturity": "L4" },
+        { "skillId": "mine.branch", "supported": true },
+        { "skillId": "food.secure", "supported": true }
+      ],
+      "phaseGates": [{ "gate": "shelterEstablished", "satisfied": false }],
+      "nonPreemptibleBots": [],
+      "allowedChangeScope": "material gathering and construction assignments"
+    },
+    "sourceRefs": ["fixture://eval/spark-strategy-v1/fixtures/scenario-B.json"]
+  },
+  "injectedResponse": {
+    "proposalId": "prop-B1",
+    "factVersion": "{{factVersion}}",
+    "scope": { "serverProfileId": "local-test-1.21.11", "dimension": "overworld" },
+    "validUntilMs": 1780010600000,
+    "generatedBy": "fixture:scenario-B",
+    "objective": "close blueprint material gaps with parallel gathering then staged build; no duplicate construction of existing facilities",
+    "assignments": [
+      {
+        "assignmentId": "b-logs",
+        "botId": "B01",
+        "role": "wood-gatherer",
+        "action": { "kind": "deterministicGoal", "template": "acquisition", "goalText": "采集蓝图行：锚点 x=A y=B z=C，沿 +x 放置 8 个 item，每批最多 2 格，从第 1 格开始" },
+        "successSignals": ["sharedInventory oak_log >= 12"],
+        "maxAttempts": 2,
+        "onFailure": { "strategy": "escalate", "reason": "no reachable trees found twice" }
+      },
+      {
+        "assignmentId": "b-stone",
+        "botId": "B02",
+        "role": "stone-gatherer",
+        "action": { "kind": "skill", "skillId": "mine.branch", "params": {} },
+        "successSignals": ["sharedInventory cobblestone >= 30"],
+        "maxAttempts": 2
+      },
+      {
+        "assignmentId": "b-build",
+        "botId": "B03",
+        "role": "builder",
+        "action": { "kind": "deterministicGoal", "template": "blueprint", "goalText": "施工蓝图行：锚点 x=A y=B z=C，沿 +x 放置 8 个 item，每批最多 2 格，从第 1 格开始" },
+        "preconditions": ["b-logs and b-stone delivered to site storage"],
+        "requiredGates": [],
+        "resources": ["facility:build-site-shelter"],
+        "successSignals": ["blueprint cells placed increment reaches batch size", "receipt locations match blueprint"],
+        "maxAttempts": 1
+      }
+    ],
+    "dependencies": [
+      { "afterId": "b-build", "beforeId": "b-logs" },
+      { "afterId": "b-build", "beforeId": "b-stone" }
+    ],
+    "notes": "build site already reserved by B03; gatherers run in parallel, builder starts only after materials"
+  }
+}

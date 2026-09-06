@@ -1,0 +1,83 @@
+{
+  "sampleId": "A1-food-shortage",
+  "scenario": "food-shortage",
+  "mode": "offline",
+  "expectation": { "desiredBehavior": "act", "acceptableVerdicts": ["acceptable"] },
+  "facts": {
+    "scope": { "serverProfileId": "local-test-1.21.11", "dimension": "overworld", "observedAtMs": 1780000000000, "sessionEpoch": 7 },
+    "capturedAtMs": 1780000000000,
+    "bots": [
+      { "botId": "B01", "online": true, "currentTask": null, "survival": { "health": 20, "food": 9, "armorPoints": 0 }, "inventory": [{ "itemName": "stone_hoe", "count": 1 }, { "itemName": "bread", "count": 2 }], "deaths": "unknown" },
+      { "botId": "B02", "online": true, "currentTask": null, "survival": { "health": 20, "food": 11, "armorPoints": 0 }, "inventory": [{ "itemName": "wheat_seeds", "count": 6 }], "deaths": "unknown" },
+      { "botId": "B03", "online": true, "currentTask": null, "survival": { "health": 20, "food": 10, "armorPoints": 0 }, "inventory": [{ "itemName": "chest", "count": 1 }], "deaths": "unknown" }
+    ],
+    "team": {
+      "sharedInventory": [{ "itemName": "wheat", "count": 3 }, { "itemName": "bread", "count": 2 }],
+      "facilities": [
+        { "facilityId": "facility:wheat-farm-main", "kind": "farm", "status": "available" },
+        { "facilityId": "facility:storage-hub", "kind": "storage", "status": "available" }
+      ],
+      "shortages": ["food:team-wide below 4 days reserve"],
+      "reservedResources": []
+    },
+    "events": [
+      { "kind": "completion", "atMs": 1779999940000, "source": "skill_result", "botId": "B01", "detail": "world.scan registered facility:wheat-farm-main" },
+      { "kind": "other", "atMs": 1779999880000, "source": "survival-needs", "botId": "B02", "detail": "FOOD need score elevated" }
+    ],
+    "constraints": {
+      "capabilities": [
+        { "skillId": "food.secure", "supported": true, "maturity": "L4" },
+        { "skillId": "collect.block", "supported": true, "maturity": "L4" },
+        { "skillId": "container.transfer", "supported": true, "maturity": "L2" },
+        { "skillId": "build.blueprint", "supported": true, "maturity": "L4" },
+        { "skillId": "craft.item", "supported": true },
+        { "skillId": "world.scan", "supported": true }
+      ],
+      "phaseGates": [{ "gate": "shelterEstablished", "satisfied": true }],
+      "nonPreemptibleBots": [],
+      "allowedChangeScope": "resource collection / production / logistics assignments for idle bots"
+    },
+    "sourceRefs": ["fixture://eval/spark-strategy-v1/fixtures/scenario-A.json"]
+  },
+  "injectedResponse": {
+    "proposalId": "prop-A1",
+    "factVersion": "{{factVersion}}",
+    "scope": { "serverProfileId": "local-test-1.21.11", "dimension": "overworld" },
+    "validUntilMs": 1780000600000,
+    "generatedBy": "fixture:scenario-A",
+    "objective": "restore team food reserve via farm harvest, replant and transport split",
+    "assignments": [
+      {
+        "assignmentId": "a-harvest",
+        "botId": "B01",
+        "role": "harvester",
+        "action": { "kind": "skill", "skillId": "food.secure", "params": { "facilityId": "facility:wheat-farm-main", "replant": "true" } },
+        "preconditions": ["farm crop maturity observed before harvest"],
+        "resources": ["facility:wheat-farm-main"],
+        "successSignals": ["sharedInventory wheat +8 or more", "farm replanted (farmland holding seeds)"],
+        "maxAttempts": 2,
+        "onFailure": { "strategy": "alternative", "reason": "harvest blocked; fallback to foraging", "alternative": { "kind": "skill", "skillId": "collect.block", "params": {} } }
+      },
+      {
+        "assignmentId": "a-transport",
+        "botId": "B02",
+        "role": "logistics",
+        "action": { "kind": "skill", "skillId": "container.transfer", "params": { "facilityId": "facility:storage-hub" } },
+        "preconditions": ["a-harvest delivered at least 4 wheat"],
+        "resources": ["facility:storage-hub"],
+        "successSignals": ["storage-hub food items >= 8"],
+        "maxAttempts": 1
+      },
+      {
+        "assignmentId": "a-stockpile",
+        "botId": "B03",
+        "role": "forager",
+        "action": { "kind": "skill", "skillId": "collect.block", "params": {} },
+        "successSignals": ["bot inventory food items >= 4"],
+        "maxAttempts": 2
+      }
+    ],
+    "dependencies": [{ "afterId": "a-transport", "beforeId": "a-harvest" }],
+    "notes": "split roles to avoid all bots farming the same plot; transport waits for harvest"
+  }
+}

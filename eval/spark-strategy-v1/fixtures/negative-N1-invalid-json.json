@@ -1,0 +1,9 @@
+{
+  "sampleId": "N1-invalid-json",
+  "scenario": "repeated-failure",
+  "mode": "offline",
+  "factsRef": "scenario-C-repeated-failure.json",
+  "injectedResponse": "I thought about the plan carefully but forgot to emit JSON. The team should gather food and avoid the cliff.",
+  "expectation": { "desiredBehavior": "act", "acceptableVerdicts": ["acceptable"] },
+  "expectationNotes": "parse-failed accounting sample (reasoning-only); effective=false expected"
+}

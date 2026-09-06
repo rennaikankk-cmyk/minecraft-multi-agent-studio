@@ -1,0 +1,65 @@
+{
+  "sampleId": "C1-repeated-failure",
+  "scenario": "repeated-failure",
+  "mode": "offline",
+  "expectation": { "desiredBehavior": "wait-or-escalate", "acceptableVerdicts": ["acceptable"] },
+  "facts": {
+    "scope": { "serverProfileId": "local-test-1.21.11", "dimension": "overworld", "observedAtMs": 1780020000000, "sessionEpoch": 7 },
+    "capturedAtMs": 1780020000000,
+    "bots": [
+      { "botId": "B01", "online": true, "currentTask": null, "survival": { "health": 14, "food": 17, "armorPoints": 8 }, "inventory": [{ "itemName": "stone_pickaxe", "count": 1 }], "deaths": 2 },
+      { "botId": "B02", "online": true, "currentTask": null, "survival": { "health": 20, "food": 18, "armorPoints": 12 }, "inventory": [{ "itemName": "iron_pickaxe", "count": 1 }], "deaths": 0 }
+    ],
+    "team": {
+      "sharedInventory": "unknown",
+      "facilities": [{ "facilityId": "facility:storage-hub", "kind": "storage", "status": "available" }],
+      "shortages": ["iron_raw: tool progression stalled"],
+      "reservedResources": []
+    },
+    "events": [
+      { "kind": "failure", "atMs": 1780019700000, "source": "incident:mv-31ac", "botId": "B01", "detail": "collect.block PATH_FAILED target unreachable (cliff face)" },
+      { "kind": "failure", "atMs": 1780019640000, "source": "incident:mv-31ac", "botId": "B01", "detail": "collect.block PATH_FAILED target unreachable (cliff face)" },
+      { "kind": "failure", "atMs": 1780019580000, "source": "incident:mv-31ac", "botId": "B01", "detail": "collect.block PATH_FAILED target unreachable (cliff face)" }
+    ],
+    "constraints": {
+      "capabilities": [
+        { "skillId": "collect.block", "supported": true, "maturity": "L4" },
+        { "skillId": "mine.vein", "supported": true },
+        { "skillId": "movement.goto", "supported": true, "maturity": "L4" },
+        { "skillId": "craft.item", "supported": true }
+      ],
+      "phaseGates": [{ "gate": "shelterEstablished", "satisfied": true }],
+      "nonPreemptibleBots": [],
+      "allowedChangeScope": "recovery alternatives for repeated failures"
+    },
+    "sourceRefs": ["fixture://eval/spark-strategy-v1/fixtures/scenario-C.json"]
+  },
+  "injectedResponse": {
+    "proposalId": "prop-C1",
+    "factVersion": "{{factVersion}}",
+    "scope": { "serverProfileId": "local-test-1.21.11", "dimension": "overworld" },
+    "validUntilMs": 1780020600000,
+    "generatedBy": "fixture:scenario-C",
+    "objective": "stop repeating the failing cliff-face collect; switch approach and let the affected bot recover",
+    "assignments": [
+      {
+        "assignmentId": "c-hold",
+        "botId": "B01",
+        "role": "recovering",
+        "action": { "kind": "wait", "reason": "three consecutive PATH_FAILED on same target; retrying immediately would repeat the failure" }
+      },
+      {
+        "assignmentId": "c-alternate",
+        "botId": "B02",
+        "role": "alternate-miner",
+        "action": { "kind": "skill", "skillId": "mine.vein", "params": {} },
+        "preconditions": ["different iron exposure than the failed cliff target"],
+        "successSignals": ["sharedInventory raw_iron >= 3"],
+        "maxAttempts": 2,
+        "onFailure": { "strategy": "escalate", "reason": "operator review of mining area required" }
+      }
+    ],
+    "dependencies": [],
+    "notes": "failure evidence matches path-unreachable cause; alternative matches cause (different exposure), B01 waits instead of looping"
+  }
+}
