@@ -253,6 +253,7 @@ describe("MineflayerBotClient lifecycle", () => {
     const nearestEntity = vi.fn(() => null);
     const bot = emitter as unknown as Bot;
     Object.assign(bot, {
+      game: { dimension: "overworld" },
       health: 8,
       inventory,
       registry: {
@@ -271,7 +272,7 @@ describe("MineflayerBotClient lifecycle", () => {
       lookAt: vi.fn(async () => undefined),
       activateBlock,
     });
-    const client = new MineflayerBotClient(bot, "auto");
+    const client = new MineflayerBotClient(bot, "auto", "isolated-test-profile");
 
     await expect(
       client.executeSafetyAction({
@@ -312,6 +313,7 @@ describe("MineflayerBotClient lifecycle", () => {
     });
     const bot = emitter as unknown as Bot;
     Object.assign(bot, {
+      game: { dimension: "overworld" },
       health: 8,
       inventory,
       registry: {
@@ -329,7 +331,7 @@ describe("MineflayerBotClient lifecycle", () => {
       lookAt: vi.fn(async () => undefined),
       activateBlock,
     });
-    const client = new MineflayerBotClient(bot, "auto");
+    const client = new MineflayerBotClient(bot, "auto", "isolated-test-profile");
 
     await expect(
       client.executeSafetyAction({
@@ -2437,6 +2439,17 @@ describe("MineflayerBotClient travel.route capability", () => {
 });
 
 describe("MineflayerBotClient process ownership", () => {
+  it("normalizes real Prismarine World map-key coordinates before the native boundary", () => {
+    const bot = new EventEmitter() as unknown as Bot;
+    const column = {};
+    Object.assign(bot, { world: { getColumns: () => [{ chunkX: "-2", chunkZ: "3", column }] } });
+    const client = new MineflayerBotClient(bot, "auto", "isolated-test-profile");
+    const adapter = { onChunkColumnLoad: vi.fn() };
+    const internals = client as unknown as { worldSyncAdapter: unknown; importLoadedWorldSyncColumns(adapter: unknown): void };
+    internals.worldSyncAdapter = adapter;
+    internals.importLoadedWorldSyncColumns(adapter);
+    expect(adapter.onChunkColumnLoad).toHaveBeenCalledWith(column, -2, 3);
+  });
   it("clears inherited farm context and ignores late cleanup after another process takes ownership", async () => {
     const bot = new EventEmitter() as unknown as Bot;
     Object.assign(bot, { game: { dimension: "overworld" }, entity: { position: new Vec3(0, 64, 0) },

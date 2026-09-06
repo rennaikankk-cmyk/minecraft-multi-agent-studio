@@ -722,6 +722,7 @@ export const botWorldStateUtilityBlockV1Schema = z
     reachable: z.boolean().nullable(),
     source: z.enum(["observation", "memory", "placed", "unknown"]),
     confidence: z.number().finite().min(0).max(1),
+    lastSeen: timestampSchema.optional(),
   })
   .strict();
 
@@ -1123,6 +1124,24 @@ export const botSkillCatalogV1Schema = z
   })
   .strict();
 
+export const botWorldQueryV1Schema = z.object({
+  status: z.enum(["FRESH", "STALE_ALLOWED", "INCOMPLETE", "DESYNCED", "UNAVAILABLE"]),
+  source: z.literal("rust-spatial-index"),
+  generation: z.number().int().nonnegative().nullable(),
+  sourceRevision: z.number().int().nonnegative().nullable(),
+  capturedAtMs: z.number().finite().nonnegative().nullable(),
+  staleAgeMs: z.number().finite().nonnegative().nullable(),
+  dirtySinceMs: z.number().finite().nonnegative().nullable(),
+  complete: z.boolean(),
+  reason: z.enum(["pendingUpdates", "notReady", "scopeChanged", "cancelled", "timeout", "queueFull", "workerError",
+    "incomplete", "budgetExceeded", "invalidQuery", "stale"]).nullable(),
+}).strict().superRefine((value, context) => {
+  if (value.complete !== (value.status === "FRESH") || value.complete && (value.generation === null || value.capturedAtMs === null ||
+      value.sourceRevision === null || value.staleAgeMs === null || value.dirtySinceMs !== null || value.reason !== null)) {
+    context.addIssue({ code: "custom", message: "Complete world queries require a fresh identified observation." });
+  }
+});
+
 export const botWorldStateV1Schema = z
   .object({
     ...botMessageEnvelopeShape,
@@ -1134,6 +1153,7 @@ export const botWorldStateV1Schema = z
         sequence: sequenceSchema,
         observedAt: timestampSchema,
         worldStateVersion: sequenceSchema,
+        worldQuery: botWorldQueryV1Schema.optional(),
         inventory: z
           .array(botWorldStateInventoryItemV1Schema)
           .max(BOT_WORLD_STATE_MAX_INVENTORY_ITEMS)
@@ -1340,6 +1360,7 @@ export type BotWorldStateNavigationV1 = z.infer<
   typeof botWorldStateNavigationV1Schema
 >;
 export type BotWorldStateV1 = z.infer<typeof botWorldStateV1Schema>;
+export type BotWorldQueryV1 = z.infer<typeof botWorldQueryV1Schema>;
 export type SkillCompatibilityAvailability = z.infer<
   typeof skillCompatibilityAvailabilitySchema
 >;

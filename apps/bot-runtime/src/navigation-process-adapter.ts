@@ -14,6 +14,7 @@ export type NavigationProcessPort = {
   wait(ms: number): Promise<void>;
   now(): number;
   stop(): void;
+  findBlocks?(name: string, radius: number, count: number): Promise<Vec3[]>;
 };
 export function navigationGoal(input: z.infer<typeof navigationGoalInputSchema>): Goal {
   const targets = input.clauses.map(({ kind, position: p, radius, invert }) => {
@@ -77,7 +78,9 @@ export async function getToBlock(port: NavigationProcessPort, input: z.infer<typ
   const attempted = new Set<string>();
   for (let attempt = 0; attempt < input.maxCandidates; attempt++) {
     port.assertActive();
-    const positions = port.bot.findBlocks({ matching: type.id, maxDistance: input.maxDistance, count: input.maxCandidates });
+    const positions = port.findBlocks ? await port.findBlocks(input.blockName, input.maxDistance, input.maxCandidates) :
+      port.bot.findBlocks({ matching: type.id, maxDistance: input.maxDistance, count: input.maxCandidates });
+    port.assertActive();
     const target = positions.find((p) => !attempted.has(p.toString()) && port.bot.blockAt(p)?.name === input.blockName);
     if (!target) break;
     attempted.add(target.toString());

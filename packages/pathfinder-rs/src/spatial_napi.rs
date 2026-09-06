@@ -88,6 +88,7 @@ pub fn mirror_spatial_query(handle: u32, js: SpatialQueryJs) -> Result<SpatialRe
     let matching = match js.matching.as_str() {
         "union" => SelectorMatch::Union,
         "intersection" => SelectorMatch::Intersection,
+        "each" => SelectorMatch::Each,
         _ => {
             return Err(Error::new(
                 Status::InvalidArg,

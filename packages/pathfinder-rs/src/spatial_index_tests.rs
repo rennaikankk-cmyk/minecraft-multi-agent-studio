@@ -102,6 +102,50 @@ fn local(x: i32, y: i32, z: i32) -> usize {
 }
 
 #[test]
+fn per_selector_query_preserves_rare_interests_with_one_bounded_traversal() {
+    let mut d = Driver::new();
+    d.import((0, 0), 0, vec![0; 4096]);
+    for (position, state) in [
+        ((8, 8, 8), 1),
+        ((7, 8, 8), 1),
+        ((9, 8, 8), 1),
+        ((12, 8, 8), 2),
+    ] {
+        d.update(position, state, 1);
+    }
+    let snapshot = d.session.mirror().snapshot_handle();
+    let mut q = query((8, 8, 8), 5);
+    q.count = 1;
+    q.matching = SelectorMatch::Each;
+    let result = snapshot.spatial_query(&q);
+    assert_eq!(result.status, QueryStatus::Complete);
+    assert_eq!(result.visited_entries, 4);
+    assert_eq!(
+        result
+            .points
+            .iter()
+            .map(|p| (p.x, p.selectors))
+            .collect::<Vec<_>>(),
+        vec![(8, 1), (12, 2)]
+    );
+    d.update((8, 8, 8), 3, 2);
+    let result = d.session.mirror().snapshot_handle().spatial_query(&q);
+    assert_eq!(
+        result.points.len(),
+        1,
+        "overlapping selectors must not duplicate a point"
+    );
+    q.selectors = SELECTOR_BITS;
+    q.count = 11;
+    assert_eq!(snapshot.spatial_query(&q).status, QueryStatus::InvalidQuery);
+    q.count = 8;
+    q.max_visits = 1;
+    let exhausted = snapshot.spatial_query(&q);
+    assert_eq!(exhausted.status, QueryStatus::BudgetExceeded);
+    assert!(exhausted.points.is_empty());
+}
+
+#[test]
 fn empty_promotes_and_old_membership_is_removed() {
     let mut d = Driver::new();
     d.send(MirrorMessage::ChunkBegin { chunk: (0, 0) });
