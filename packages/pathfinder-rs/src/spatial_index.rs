@@ -90,6 +90,8 @@ impl SectionIndex {
 pub enum SelectorMatch {
     Union,
     Intersection,
+    /// One traversal, a separate bounded nearest-N for every selected interest.
+    Each,
 }
 
 #[derive(Clone, Debug)]
@@ -194,6 +196,11 @@ impl SnapshotHandle {
             || query.radius > MAX_QUERY_RADIUS
             || query.count == 0
             || query.count > MAX_QUERY_COUNT
+            || (query.matching == SelectorMatch::Each
+                && query
+                    .count
+                    .saturating_mul(query.selectors.count_ones() as usize)
+                    > MAX_QUERY_COUNT)
             || query.selectors == 0
             || query.selectors & !SELECTOR_BITS != 0
             || query.max_visits == 0
@@ -229,6 +236,12 @@ impl SnapshotHandle {
 
         // Bounded top-N heap; no dense world scan, no full result sort/allocation.
         let mut nearest: BinaryHeap<(u64, i32, i32, i32, u32)> = BinaryHeap::new();
+        let mut per_selector: Vec<BinaryHeap<(u64, i32, i32, i32, u32)>> =
+            if query.matching == SelectorMatch::Each {
+                (0..24).map(|_| BinaryHeap::new()).collect()
+            } else {
+                Vec::new()
+            };
         let (ox, oy, oz) = query.origin;
         let r = query.radius as i32;
         let r2 = u64::from(query.radius).pow(2);
@@ -300,7 +313,9 @@ impl SnapshotHandle {
                             continue;
                         }
                         let matched = match query.matching {
-                            SelectorMatch::Union => selectors & query.selectors != 0,
+                            SelectorMatch::Union | SelectorMatch::Each => {
+                                selectors & query.selectors != 0
+                            }
                             SelectorMatch::Intersection => {
                                 selectors & query.selectors == query.selectors
                             }
@@ -309,11 +324,23 @@ impl SnapshotHandle {
                             continue;
                         }
                         let entry = (distance, x, y, z, selectors);
-                        if nearest.len() < query.count {
-                            nearest.push(entry);
-                        } else if nearest.peek().is_some_and(|worst| entry < *worst) {
-                            nearest.pop();
-                            nearest.push(entry);
+                        let retain = |heap: &mut BinaryHeap<_>| {
+                            if heap.len() < query.count {
+                                heap.push(entry);
+                            } else if heap.peek().is_some_and(|worst| entry < *worst) {
+                                heap.pop();
+                                heap.push(entry);
+                            }
+                        };
+                        if query.matching == SelectorMatch::Each {
+                            let mut interests = selectors & query.selectors;
+                            while interests != 0 {
+                                let bit = interests.trailing_zeros() as usize;
+                                retain(&mut per_selector[bit]);
+                                interests &= interests - 1;
+                            }
+                        } else {
+                            retain(&mut nearest);
                         }
                     }
                     if began.elapsed().as_secs_f64() * 1000.0 >= query.max_ms {
@@ -327,8 +354,17 @@ impl SnapshotHandle {
             result.status = QueryStatus::BudgetExceeded;
         }
         if result.status != QueryStatus::BudgetExceeded {
-            result.points = nearest
-                .into_sorted_vec()
+            let mut ranked = if query.matching == SelectorMatch::Each {
+                per_selector
+                    .into_iter()
+                    .flat_map(BinaryHeap::into_iter)
+                    .collect::<Vec<_>>()
+            } else {
+                nearest.into_vec()
+            };
+            ranked.sort_unstable();
+            ranked.dedup();
+            result.points = ranked
                 .into_iter()
                 .map(|(distance_squared, x, y, z, selectors)| SpatialPoint {
                     x,

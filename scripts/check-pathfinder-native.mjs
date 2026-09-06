@@ -53,6 +53,7 @@ try {
   const found = await worker.mirrorSpatialQuery(handle, query);
   assert.equal(found.status, "complete");
   assert.deepEqual(found.points, [{ x: -15, y: -63, z: 1, selectors: 1, distanceSquared: 0 }]);
+  assert.deepEqual((await worker.mirrorSpatialQuery(handle, { ...query, matching: "each" })).points, found.points);
   const raw = new Uint32Array(4096).fill(2); raw[(1 << 8) | (1 << 4) | 1] = 1;
   await submit({ kind: "chunkBegin", chunkX: -1, chunkZ: 0 });
   assert.equal((await submit({ kind: "sectionData", chunkX: -1, chunkZ: 0, payloadKind: "stateDataV1", sectionY: -4, stateIds: Buffer.from(raw.buffer) })).status, "applied");

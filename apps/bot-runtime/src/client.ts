@@ -149,6 +149,8 @@ export interface BotClient {
   skillCompatibilityEnvironment(): SkillCompatibilityEnvironment;
   /** Optional richer event-driven snapshot. Legacy test clients may omit it. */
   worldStateSnapshot?(): WorldStateSnapshot;
+  /** Cheap identity/freshness key of the shared asynchronous source. */
+  worldStateSnapshotKey?(): string;
   close(gracePeriodMs: number): Promise<void>;
 }
 

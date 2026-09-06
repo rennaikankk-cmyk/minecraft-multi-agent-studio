@@ -113,6 +113,9 @@ import { MineflayerCombatAdapter } from "./combat-mineflayer-adapter.js";
 import { observeSite, digShelter } from "./site-shelter-adapter.js";
 import { mirrorTransport, rustGoto, type RustPathStats } from "./rust-pathfinder.js";
 import { buildRegistryTable, WorldSyncAdapter } from "./world-sync-adapter.js";
+import { WorldQueryProvider, type WorldQueryView, type WorldQueryReason } from "./world-query-provider.js";
+import { WorldQueryShadow } from "./world-query-shadow.js";
+import { selectorsForBlock } from "./world-semantic-registry.js";
 import { classifyMovementRejection, goalColumnLoaded } from "./movement-rejection.js";
 
 import type {
@@ -1207,6 +1210,40 @@ export class MineflayerBotClient implements BotClient {
   private worldSyncAdapter: WorldSyncAdapter | null = null;
   /** world 事件订阅清理（连接终止时解除）。 */
   private worldSyncDetach: (() => void) | null = null;
+  private worldSyncStopping: Promise<void> = Promise.resolve();
+  private readonly worldQueryEnabled = process.env.STUDIO_WORLD_QUERY_PROVIDER === "1";
+  private worldQueryRecoveryAttempts = 0;
+  private worldQueryRecoveryAtMs = -Infinity;
+  private worldQueryFallbackAtMs = -Infinity;
+  private worldQueryFallbacks = 0;
+  private readonly worldQueryShadow = new WorldQueryShadow({
+    mode: process.env.STUDIO_MODE, enabled: process.env.STUDIO_WORLD_QUERY_SHADOW === "1",
+    context: () => this.worldSyncAdapter?.queryContext() ?? null,
+    now: Date.now,
+    oracle: async (query, selector, limit) => {
+      await processYield();
+      const ids = this.bot.registry.blocksArray.filter((block) => query.matching === "intersection"
+        ? (selectorsForBlock(block.name) & selector) === selector : (selectorsForBlock(block.name) & selector) !== 0).map((block) => block.id);
+      if (ids.length === 0) return [];
+      const origin = new Vec3(query.origin.x, query.origin.y, query.origin.z);
+      return this.bot.findBlocks({ matching: ids, point: origin, maxDistance: query.radius, count: limit }).map((p) => ({
+        x: p.x, y: p.y, z: p.z, distanceSquared: (p.x - origin.x) ** 2 + (p.y - origin.y) ** 2 + (p.z - origin.z) ** 2,
+        selectors: selectorsForBlock(this.bot.blockAt(p)?.name ?? ""),
+      }));
+    },
+    completed: (outcome, ms) => this.perfRecord?.("world.query.shadow", ms, { outcome }),
+  });
+  private readonly worldQueryProvider = this.worldQueryEnabled ? new WorldQueryProvider({
+    context: () => this.worldSyncAdapter?.queryContext() ?? null,
+    query: (input, signal) => {
+      if (!this.worldSyncAdapter) return Promise.reject(new Error("world mirror unavailable"));
+      return this.worldSyncAdapter.querySpatial(input, { signal, timeoutMs: 2_000 });
+    },
+    now: Date.now,
+    span: (name, ms) => this.perfRecord?.(name, ms, {}),
+    onFailure: (reason) => this.handleWorldQueryFailure(reason),
+    onCompleted: (view) => { void this.worldQueryShadow.observe(view); },
+  }) : null;
   /** spawn-escape 疾跑进行中（防同点重复派发；goto 落定后复位）。 */
   private spawnEscape: AbortController | null = null;
   /** World effects share one scoped wrapper for the lifetime of the action lock. */
@@ -1343,7 +1380,7 @@ export class MineflayerBotClient implements BotClient {
     // flag 关闭=零行为——不创建 adapter、不订阅世界事件、不构建 registry 表。
     // 该通道 D2 只做同步（ACK/背压/恢复），不接 Snapshot Provider/SpatialIndex/
     // Pathfinder（P5-D3+）。
-    if (process.env.STUDIO_WORLD_MIRROR_SYNC === "1") {
+    if (process.env.STUDIO_WORLD_MIRROR_SYNC === "1" || this.worldQueryEnabled) {
       this.bootWorldSync();
       bot._client?.on("respawn", () => this.teardownWorldSync());
     }
@@ -1727,6 +1764,44 @@ export class MineflayerBotClient implements BotClient {
     }
   }
 
+  private worldQueryOrigin(): WorldPosition {
+    const p = this.bot.entity.position;
+    return { x: p.x, y: p.y, z: p.z, serverProfileId: this.serverProfileId ?? "unknown-server",
+      dimension: normalizeDimension(String(this.bot.game.dimension)) };
+  }
+
+  private worldQuerySnapshot(): WorldQueryView | null {
+    return this.worldQueryProvider?.read({ origin: this.worldQueryOrigin(), radius: 32, count: 8,
+      selectors: (1 << 24) - 1, matching: "each" }) ?? null;
+  }
+
+  worldStateSnapshotKey(): string {
+    if (!this.worldQueryProvider) return "legacy";
+    const view = this.worldQuerySnapshot();
+    const context = this.worldSyncAdapter?.queryContext();
+    return JSON.stringify([context?.scope.botSessionId, context?.sessionEpoch, context?.dimensionEpoch,
+      context?.sourceRevision, context?.state, view?.generation, view?.status]);
+  }
+
+  worldQueryDiagnostics() {
+    return { enabled: this.worldQueryEnabled, context: this.worldSyncAdapter?.queryContext() ?? null,
+      provider: this.worldQueryProvider?.getMetrics() ?? null, fallbackQueries: this.worldQueryFallbacks,
+      recoveryAttempts: this.worldQueryRecoveryAttempts, sync: this.worldSyncAdapter?.getMetrics() ?? null,
+      shadow: this.worldQueryShadow.diagnostics() };
+  }
+
+  worldQueryReplayEvidence() { return this.worldQueryShadow.replayEvidence(); }
+
+  private handleWorldQueryFailure(reason: WorldQueryReason): void {
+    this.logWorldSync("warn", "world_query_unavailable", { reason, provider: this.worldQueryProvider?.getMetrics() });
+    if (reason !== "workerError" || this.requestedStop || this.worldQueryRecoveryAttempts >= 2 ||
+        Date.now() - this.worldQueryRecoveryAtMs < 5_000) return;
+    this.worldQueryRecoveryAttempts++;
+    this.worldQueryRecoveryAtMs = Date.now();
+    this.teardownWorldSync();
+    this.bootWorldSync();
+  }
+
   private worldStateSnapshotInner(): WorldStateSnapshot {
     const current = this.snapshot();
     const serverProfileId = this.serverProfileId ?? "unknown-server";
@@ -1752,7 +1827,20 @@ export class MineflayerBotClient implements BotClient {
       dimension: current.position.dimension,
       serverProfileId,
     } as const;
-    const nearbyBlocks = this.nearbyBlockScanner.read(origin);
+    const queryView = this.worldQuerySnapshot();
+    const nearbyBlocks: readonly NearbyBlockState[] = queryView === null ? this.nearbyBlockScanner.read(origin) :
+      (queryView.result?.points ?? []).flatMap((point): NearbyBlockState[] => {
+        const block = this.bot.blockAt(new Vec3(point.x, point.y, point.z));
+        if (!block || (selectorsForBlock(block.name) & point.selectors) === 0) return [];
+        return [{ name: block.name, position: { ...origin, x: point.x, y: point.y, z: point.z },
+          lastSeen: new Date(queryView.capturedAtMs!).toISOString(), reachable: this.withinInteractionReach(new Vec3(point.x, point.y, point.z)),
+          source: "observation", confidence: 1 }];
+      });
+    const worldQuery = queryView === null ? null : {
+      status: queryView.status, reason: queryView.reason, source: queryView.source, generation: queryView.generation,
+      sourceRevision: queryView.sourceRevision, capturedAtMs: queryView.capturedAtMs, staleAgeMs: queryView.staleAgeMs,
+      dirtySinceMs: queryView.dirtySinceMs, complete: queryView.complete,
+    };
     const entities: EntityState[] = [];
     const entityInputCount = Object.keys(this.bot.entities ?? {}).length;
     const entitiesBegan = performance.now();
@@ -1784,6 +1872,7 @@ export class MineflayerBotClient implements BotClient {
       inventory,
       nearbyBlocks,
       replaceNearbyBlocks: true,
+      worldQuery,
       entities,
       navigation: {
         target: navigationTarget,
@@ -1811,6 +1900,57 @@ export class MineflayerBotClient implements BotClient {
     } finally {
       this.perfRecord?.("world.snapshot.blocks.scan.slice", performance.now() - began, { name });
     }
+  }
+
+  private async queryBlockCandidates(names: readonly string[], radius: number, count: number, signal?: AbortSignal,
+    filter?: (block: MineflayerBlock | null) => boolean): Promise<{ positions: Vec3[]; complete: boolean }> {
+    const origin = this.worldQueryOrigin();
+    const adapter = this.worldSyncAdapter;
+    const assertCurrent = () => {
+      if (signal?.aborted || this.requestedStop || adapter !== this.worldSyncAdapter) throw new SkillFault("SKILL_CANCELLED");
+      this.assertServerProfileMatch(origin.serverProfileId); this.assertDimensionMatch(origin.dimension);
+    };
+    assertCurrent();
+    const masks = names.map(selectorsForBlock);
+    if (!this.worldQueryProvider || masks.some((mask) => mask === 0)) {
+      const ids = names.map((name) => this.bot.registry.blocksByName[name]?.id).filter((id): id is number => Number.isSafeInteger(id));
+      if (!ids.length) return { positions: [], complete: true };
+      if (this.worldQueryProvider) {
+        if (Date.now() - this.worldQueryFallbackAtMs < 1_000) return { positions: [], complete: false };
+        this.worldQueryFallbackAtMs = Date.now();
+        this.worldQueryFallbacks++;
+        await processYield(); assertCurrent();
+      }
+      const began = performance.now();
+      const positions = this.bot.findBlocks({ matching: ids.length === 1 ? ids[0]! : ids,
+        point: new Vec3(origin.x, origin.y, origin.z), maxDistance: this.worldQueryProvider ? Math.min(radius, 16) : radius,
+        count: this.worldQueryProvider ? Math.min(count, 64) : count, ...(filter ? { useExtraInfo: filter } : {}) });
+      this.perfRecord?.(this.worldQueryProvider ? "world.query.compatibility_fallback" : "world.query.legacy", performance.now() - began, {});
+      assertCurrent();
+      // Unsupported selectors use a capped local probe. It never proves absence across the requested region.
+      return { positions, complete: this.worldQueryProvider === null && positions.every((p) => this.bot.blockAt(p) !== null) };
+    }
+    const selectors = masks.reduce((mask, next) => mask | next, 0);
+    const candidateLimit = 256;
+    const view = await this.worldQueryProvider.query({ origin, radius, count: candidateLimit, selectors, matching: "union" }, signal);
+    assertCurrent();
+    if (!view.result || !["FRESH", "INCOMPLETE"].includes(view.status)) return { positions: [], complete: false };
+    const positions: Vec3[] = [];
+    let complete = view.complete;
+    for (let index = 0; index < view.result.points.length; index++) {
+      if (index > 0 && index % 16 === 0) { await processYield(); assertCurrent(); }
+      const point = view.result.points[index]!;
+      const position = new Vec3(point.x, point.y, point.z);
+      const block = this.bot.blockAt(position);
+      if (!block || (selectorsForBlock(block.name) & selectors) === 0) { complete = false; continue; }
+      if (!names.includes(block.name)) continue;
+      if (!filter || filter(block)) positions.push(position);
+      if (positions.length >= count) break;
+    }
+    if (view.result.points.length === candidateLimit && positions.length < count) complete = false;
+    if (this.worldSyncAdapter?.queryContext()?.sourceRevision !== view.sourceRevision) complete = false;
+    assertCurrent();
+    return { positions, complete };
   }
 
   private movementGoalPosition(goal: unknown): WorldPosition | null {
@@ -2426,6 +2566,12 @@ export class MineflayerBotClient implements BotClient {
       this.bot.pathfinder.tickTimeout = 20;
       this.bot.pathfinder.thinkTimeout = 3_000;
       return await work({ bot: this.bot, assertActive, now: Date.now, stop: () => { if (lease.isCurrent()) this.stopPathfinder(); },
+        findBlocks: async (name, radius, count) => {
+          const result = await this.queryBlockCandidates([name], radius, count, signal);
+          assertActive();
+          if (!result.complete && result.positions.length === 0) throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE", "World query is incomplete.");
+          return result.positions;
+        },
         wait: async (ms) => { await processDelay(ms, undefined, { signal }); assertActive(); },
         goto: async (goal) => { assertActive(); await this.boundedCollectGoto(goal, signal, 8_000); assertActive(); },
       });
@@ -2489,12 +2635,9 @@ export class MineflayerBotClient implements BotClient {
     // 与 collect 用同一个可达谓词。若扫描把全埋的方块也报成 matches，
     // 上层就会照着这份坐标去派 collect.block，而 collect 已经筛掉了它们——
     // 两侧不一致的后果是规划器一直瞄准采集器根本不会接受的目标。
-    const positions = this.bot.findBlocks({
-      matching: blockType.id,
-      maxDistance: input.data.maxDistance,
-      count: input.data.maxCount,
-      useExtraInfo: reachableCandidateFilter(this.bot),
-    });
+    const candidates = await this.queryBlockCandidates([input.data.blockName], input.data.maxDistance, input.data.maxCount,
+      request.signal, reachableCandidateFilter(this.bot));
+    const positions = candidates.positions;
     const matches = positions
       .filter((position) => this.bot.blockAt(position) !== null)
       .map((position) => ({
@@ -2509,7 +2652,7 @@ export class MineflayerBotClient implements BotClient {
       dimension: input.data.dimension,
       matches,
       targetsFound: positions.length,
-      complete: matches.length === positions.length,
+      complete: candidates.complete && matches.length === positions.length,
     });
   }
 
@@ -2934,7 +3077,7 @@ export class MineflayerBotClient implements BotClient {
    * 失败=诚实降级（记录 + 不影响 bot 主流程——通道是观测面不是控制面）。
    */
   private bootWorldSync(): void {
-    if (process.env.STUDIO_WORLD_MIRROR_SYNC !== "1") return;
+    if (process.env.STUDIO_WORLD_MIRROR_SYNC !== "1" && !this.worldQueryEnabled) return;
     if (!this.spawnSeen || !this.bot.game?.dimension || !this.serverProfileId) return;
     if (this.worldSyncAdapter !== null) return;
     const registry = (this.bot as unknown as {
@@ -2967,13 +3110,16 @@ export class MineflayerBotClient implements BotClient {
         // 结构化事件（D2 范围=日志通道；IncidentStore 映射在接线方升级）。
         this.logWorldSync("error", "world_sync_incident", { incident: incident.kind, ...incident });
         if (incident.kind === "recovered") this.importLoadedWorldSyncColumns(adapter);
+        if (incident.kind === "recovery_failed") queueMicrotask(() => {
+          if (this.worldSyncAdapter === adapter) this.handleWorldQueryFailure("workerError");
+        });
       },
     });
     this.worldSyncAdapter = adapter;
-    void adapter
-      .start()
+    void this.worldSyncStopping
+      .then(() => this.worldSyncAdapter === adapter && !this.requestedStop ? adapter.start() : undefined)
       .then(() => {
-        if (this.worldSyncAdapter !== adapter) { void adapter.stop(); return; }
+        if (this.worldSyncAdapter !== adapter || this.requestedStop) { void adapter.stop(); return; }
         this.subscribeWorldSync(adapter);
         this.importLoadedWorldSyncColumns(adapter);
       })
@@ -2982,7 +3128,10 @@ export class MineflayerBotClient implements BotClient {
           error: error instanceof Error ? error.message : String(error),
         });
         void adapter.stop();
-        if (this.worldSyncAdapter === adapter) this.worldSyncAdapter = null;
+        if (this.worldSyncAdapter === adapter) {
+          this.worldSyncAdapter = null;
+          this.handleWorldQueryFailure("workerError");
+        }
       });
   }
 
@@ -3029,18 +3178,22 @@ export class MineflayerBotClient implements BotClient {
   private importLoadedWorldSyncColumns(adapter: WorldSyncAdapter): void {
     if (this.worldSyncAdapter !== adapter) return;
     for (const { chunkX, chunkZ, column } of this.bot.world.getColumns()) {
-      adapter.onChunkColumnLoad(column as unknown as Parameters<WorldSyncAdapter["onChunkColumnLoad"]>[0], chunkX, chunkZ);
+      // Prismarine World 3.7 getColumns() returns split map keys as strings.
+      const x = Number(chunkX), z = Number(chunkZ);
+      if (!Number.isSafeInteger(x) || !Number.isSafeInteger(z)) continue;
+      adapter.onChunkColumnLoad(column as unknown as Parameters<WorldSyncAdapter["onChunkColumnLoad"]>[0], x, z);
     }
   }
 
   private teardownWorldSync(): void {
+    this.worldQueryProvider?.reset(this.requestedStop);
     if (this.worldSyncDetach !== null) {
       this.worldSyncDetach();
       this.worldSyncDetach = null;
     }
     const adapter = this.worldSyncAdapter;
     this.worldSyncAdapter = null;
-    if (adapter !== null) void adapter.stop();
+    if (adapter !== null) this.worldSyncStopping = adapter.stop();
   }
 
   private logWorldSync(
@@ -4614,12 +4767,9 @@ export class MineflayerBotClient implements BotClient {
     // count == maxCount 时"最近的 maxCount 个暴露候选"就是全部候选，任何一个
     // 通不过可达性检查都没有替补。实测的死法就是这个——只找到 1 个暴露的
     // oak_log，它不可达，整个目标在 step 1 结束。
-    const targetPositions = this.bot.findBlocks({
-      matching: blockType.id,
-      maxDistance: input.data.maxDistance,
-      count: input.data.maxCount + COLLECT_CANDIDATE_POOL_SLACK,
-      useExtraInfo: reachableCandidateFilter(this.bot),
-    });
+    const candidates = await this.queryBlockCandidates([input.data.blockName], input.data.maxDistance,
+      input.data.maxCount + COLLECT_CANDIDATE_POOL_SLACK, request.signal, reachableCandidateFilter(this.bot));
+    const targetPositions = candidates.positions;
     const targets = targetPositions
       .map((position) => this.bot.blockAt(position))
       .filter((block): block is NonNullable<typeof block> => block !== null);
@@ -4634,11 +4784,8 @@ export class MineflayerBotClient implements BotClient {
         // Stone remains targetless because its staircase is itself the source.
         const buriedTargets = input.data.blockName === "stone"
           ? targets
-          : this.bot.findBlocks({
-              matching: blockType.id,
-              maxDistance: input.data.maxDistance,
-              count: input.data.maxCount + COLLECT_CANDIDATE_POOL_SLACK,
-            })
+          : (await this.queryBlockCandidates([input.data.blockName], input.data.maxDistance,
+              input.data.maxCount + COLLECT_CANDIDATE_POOL_SLACK, request.signal)).positions
               .map((position) => this.bot.blockAt(position))
               .filter((block): block is NonNullable<typeof block> =>
                 block !== null &&
@@ -4658,6 +4805,7 @@ export class MineflayerBotClient implements BotClient {
       // world, and collectBlock has not started. Report it as a refusal so a
       // multi-step planner can reobserve or explore instead of treating a
       // zero-count `completed` result as an uncertain non-idempotent action.
+      if (!candidates.complete) throw new SkillRefusal("SKILL_CAPABILITY_UNAVAILABLE", "World query is incomplete; reobserve before concluding that resources are absent.");
       throw new SkillRefusal(
         "COLLECT_TARGET_UNREACHABLE",
         `No exposed ${input.data.blockName} target was found within ${input.data.maxDistance} blocks.`,
@@ -5104,14 +5252,14 @@ export class MineflayerBotClient implements BotClient {
       ["crafting"],
       async () => {
         const now = Date.now();
-        const table = this.findReusableUtilityStation(CRAFTING_TABLE_POLICY);
+        const table = await this.findReusableUtilityStation(CRAFTING_TABLE_POLICY, request.signal);
         if (table) {
           this.lastCraftingTablePosition = table.position.clone();
           return table;
         }
 
-        const observedTables = this.findUtilityStations(
-          CRAFTING_TABLE_POLICY,
+        const observedTables = await this.findUtilityStations(
+          CRAFTING_TABLE_POLICY, request.signal,
         );
         if (observedTables.length > 0) {
           for (const observedTable of observedTables.slice(
@@ -5133,15 +5281,15 @@ export class MineflayerBotClient implements BotClient {
 
         // Re-scan after deciding to create/place. A different skill may have
         // changed the world while this invocation was queued for the lock.
-        const rescanned = this.findReusableUtilityStation(
-          CRAFTING_TABLE_POLICY,
+        const rescanned = await this.findReusableUtilityStation(
+          CRAFTING_TABLE_POLICY, request.signal,
         );
         if (rescanned) {
           this.lastCraftingTablePosition = rescanned.position.clone();
           return rescanned;
         }
 
-        const ownedNearby = this.countUtilityStations(CRAFTING_TABLE_POLICY);
+        const ownedNearby = await this.countUtilityStations(CRAFTING_TABLE_POLICY, request.signal);
         if (ownedNearby >= this.maxOwnedCraftingTablesPerArea) {
           throw new SkillFault("CRAFTING_TABLE_UNAVAILABLE");
         }
@@ -5311,9 +5459,9 @@ export class MineflayerBotClient implements BotClient {
   }
 
   /** Resolve all observed instances of one bounded utility-station policy. */
-  private findUtilityStations(
-    policy: UtilityStationPolicy,
-  ): readonly MineflayerBlock[] {
+  private async findUtilityStations(
+    policy: UtilityStationPolicy, signal: AbortSignal,
+  ): Promise<readonly MineflayerBlock[]> {
     const registry = this.bot.registry as unknown as {
       blocksByName?: Record<string, { id: number } | undefined>;
     };
@@ -5323,12 +5471,11 @@ export class MineflayerBotClient implements BotClient {
     if (ids.length === 0) return [];
     let positions: Vec3[] = [];
     try {
-      positions = this.bot.findBlocks({
-        matching: ids.length === 1 ? ids[0]! : ids,
-        maxDistance: policy.scanRadius,
-        count: policy.scanCount,
-      });
-    } catch {
+      const candidates = await this.queryBlockCandidates(policy.blockNames, policy.scanRadius, policy.scanCount, signal);
+      if (!candidates.complete) throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE", "Workstation discovery is incomplete; creating another station is not authorized by an empty cache.");
+      positions = candidates.positions;
+    } catch (error) {
+      if (this.worldQueryProvider || signal.aborted) throw error;
       return [];
     }
     const names = new Set(policy.blockNames);
@@ -5354,21 +5501,21 @@ export class MineflayerBotClient implements BotClient {
       );
   }
 
-  private findReusableUtilityStation(
-    policy: UtilityStationPolicy,
-  ): MineflayerBlock | null {
+  private async findReusableUtilityStation(
+    policy: UtilityStationPolicy, signal: AbortSignal,
+  ): Promise<MineflayerBlock | null> {
     // A farther station may still be the only one inside interaction reach;
     // filter after sorting rather than rejecting the nearest out-of-reach
     // candidate outright.
     return (
-      this.findUtilityStations(policy).find((station) =>
+      (await this.findUtilityStations(policy, signal)).find((station) =>
         this.withinInteractionReach(station.position),
       ) ?? null
     );
   }
 
-  private countUtilityStations(policy: UtilityStationPolicy): number {
-    return this.findUtilityStations(policy).length;
+  private async countUtilityStations(policy: UtilityStationPolicy, signal: AbortSignal): Promise<number> {
+    return (await this.findUtilityStations(policy, signal)).length;
   }
 
   private withinInteractionReach(position: Vec3): boolean {
@@ -5486,10 +5633,10 @@ export class MineflayerBotClient implements BotClient {
         throw new SkillFault("SKILL_CANCELLED");
       }
 
-      const reusable = this.findReusableUtilityStation(options.policy);
+      const reusable = await this.findReusableUtilityStation(options.policy, options.request.signal);
       if (reusable) return reusable;
       if (
-        this.countUtilityStations(options.policy) >=
+        await this.countUtilityStations(options.policy, options.request.signal) >=
         options.policy.maxOwnedPerArea
       ) {
         throw new SkillFault(options.faults.unavailable);
@@ -5523,14 +5670,14 @@ export class MineflayerBotClient implements BotClient {
       request,
       ["crafting"],
       async () => {
-        const furnace = this.findReusableUtilityStation(FURNACE_POLICY);
+        const furnace = await this.findReusableUtilityStation(FURNACE_POLICY, request.signal);
         if (furnace) {
           request = { ...request, signal: await claim(furnace) };
           this.lastFurnacePosition = furnace.position.clone();
           return furnace;
         }
 
-        const observedFurnaces = this.findUtilityStations(FURNACE_POLICY);
+        const observedFurnaces = await this.findUtilityStations(FURNACE_POLICY, request.signal);
         if (observedFurnaces.length > 0) {
           for (const observedFurnace of observedFurnaces.slice(
             0,
@@ -5550,14 +5697,14 @@ export class MineflayerBotClient implements BotClient {
           throw new SkillFault("FURNACE_UNAVAILABLE");
         }
 
-        const rescanned = this.findReusableUtilityStation(FURNACE_POLICY);
+        const rescanned = await this.findReusableUtilityStation(FURNACE_POLICY, request.signal);
         if (rescanned) {
           request = { ...request, signal: await claim(rescanned) };
           this.lastFurnacePosition = rescanned.position.clone();
           return rescanned;
         }
         if (
-          this.countUtilityStations(FURNACE_POLICY) >=
+          await this.countUtilityStations(FURNACE_POLICY, request.signal) >=
           this.maxOwnedFurnacesPerArea
         ) {
           throw new SkillFault("FURNACE_UNAVAILABLE");
@@ -6345,7 +6492,7 @@ export class MineflayerBotClient implements BotClient {
           return { outcome: "executed", errorCode: null };
         }
 
-        for (const blockTarget of this.safeForageBlocks()) {
+        for (const blockTarget of await this.safeForageBlocks(controller.signal)) {
           const result = await this.harvestSafeForageBlock(
             blockTarget,
             startedHealth,
@@ -6407,7 +6554,7 @@ export class MineflayerBotClient implements BotClient {
     ).slice(0, SAFE_FORAGE_MAX_CANDIDATES);
   }
 
-  private safeForageBlocks(): SafeForageBlockTarget[] {
+  private async safeForageBlocks(signal: AbortSignal): Promise<SafeForageBlockTarget[]> {
     if (typeof this.bot.findBlocks !== "function") return [];
     const registry = this.bot.registry as unknown as {
       blocksByName?: Record<string, { id?: unknown }>;
@@ -6419,12 +6566,9 @@ export class MineflayerBotClient implements BotClient {
 
     let positions: Vec3[];
     try {
-      positions = this.bot.findBlocks({
-        matching,
-        maxDistance: SAFE_FORAGE_MAX_DISTANCE,
-        count: 32,
-      });
-    } catch {
+      positions = (await this.queryBlockCandidates(SAFE_FORAGE_BLOCK_NAMES, SAFE_FORAGE_MAX_DISTANCE, 32, signal)).positions;
+    } catch (error) {
+      if (signal.aborted) throw error;
       return [];
     }
     return positions

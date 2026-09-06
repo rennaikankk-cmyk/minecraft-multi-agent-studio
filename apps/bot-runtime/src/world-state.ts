@@ -1,3 +1,5 @@
+import type { BotWorldQueryV1 } from "@minecraft-studio/protocol";
+
 export const importantBlockNames = [
   "crafting_table",
   "furnace",
@@ -79,6 +81,7 @@ export type WorldStateSnapshot = Readonly<{
   nearbyBlocks: readonly NearbyBlockState[];
   entities: readonly EntityState[];
   navigation: NavigationState;
+  worldQuery?: BotWorldQueryV1;
 }>;
 
 export type WorldStateObservation = Readonly<{
@@ -90,6 +93,7 @@ export type WorldStateObservation = Readonly<{
   replaceNearbyBlocks?: boolean;
   entities?: readonly EntityState[];
   navigation?: Partial<NavigationState>;
+  worldQuery?: BotWorldQueryV1 | null;
 }>;
 
 const emptyNavigation = (): NavigationState => Object.freeze({
@@ -132,12 +136,18 @@ export class WorldStateStore {
   private readonly entities = new Map<string, EntityState>();
   private reservedResources = new Map<string, number>();
   private navigation: NavigationState = emptyNavigation();
+  private worldQuery: BotWorldQueryV1 | null = null;
 
   observe(observation: WorldStateObservation): number {
     const time = observation.observedAt;
     if (!Number.isFinite(time.getTime())) throw new TypeError("World observation time is invalid.");
     const before = this.materialFingerprint();
     if (observation.position !== undefined) {
+      if (this.position && observation.position && (this.position.serverProfileId !== observation.position.serverProfileId ||
+          this.position.dimension !== observation.position.dimension)) {
+        this.blocks.clear(); this.entities.clear(); this.worldQuery = null;
+        this.navigation = emptyNavigation();
+      }
       this.position = clonePosition(observation.position);
     }
     if (observation.inventory !== undefined) {
@@ -176,6 +186,7 @@ export class WorldStateStore {
       this.navigation = Object.freeze({ ...this.navigation, ...observation.navigation, blacklist: Object.freeze([...(observation.navigation.blacklist ?? this.navigation.blacklist)]) });
     }
     this.observedAt = time.toISOString();
+    if (observation.worldQuery !== undefined) this.worldQuery = observation.worldQuery === null ? null : Object.freeze({ ...observation.worldQuery });
     if (before !== this.materialFingerprint()) this.version += 1;
     return this.version;
   }
@@ -253,6 +264,7 @@ export class WorldStateStore {
       nearbyBlocks: Object.freeze([...this.blocks.values()].map((block) => Object.freeze({ ...block, position: clonePosition(block.position)! }))),
       entities: Object.freeze([...this.entities.values()].map((entity) => Object.freeze({ ...entity, position: clonePosition(entity.position)! }))),
       navigation: Object.freeze({ ...this.navigation, target: clonePosition(this.navigation.target), blacklist: Object.freeze([...this.navigation.blacklist]) }),
+      ...(this.worldQuery ? { worldQuery: this.worldQuery } : {}),
     });
   }
 

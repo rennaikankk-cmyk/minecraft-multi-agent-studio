@@ -77,6 +77,16 @@ export type WorldSyncState =
   | "stopping"
   | "stopped";
 
+export type WorldSyncQueryContext = Readonly<{
+  scope: SemanticScope;
+  sessionEpoch: number;
+  dimensionEpoch: number;
+  state: WorldSyncState;
+  sourceRevision: number;
+  changedAtMs: number;
+  settled: boolean;
+}>;
+
 /** 结构化事件（接线方映射 Incident/FailureCode；本模块零 skills 依赖）。 */
 export type WorldSyncIncident =
   | { kind: "sequence_gap"; transportSequence: number; lastSequence: number }
@@ -87,6 +97,7 @@ export type WorldSyncIncident =
   | { kind: "ack_timeout"; transportSequence: number; waitedMs: number }
   | { kind: "worker_unavailable"; detail: string }
   | { kind: "desynced"; reason: string }
+  | { kind: "recovery_failed"; reason: string }
   | { kind: "recovered"; reason: string };
 
 export type WorldSyncMetrics = {
@@ -397,6 +408,8 @@ type CoalescedUpdate = {
 };
 
 export class WorldSyncAdapter {
+  private observationRevision = 0;
+  private observationChangedAtMs = 0;
   private spatialQueryInFlight = false;
   private extracting = false;
   private readonly extractionQueue = new Map<string, { column: Parameters<WorldSyncAdapter["onChunkColumnLoad"]>[0]; chunkX: number; chunkZ: number; session: ChunkExtractionSession }>();
@@ -425,6 +438,7 @@ export class WorldSyncAdapter {
   private ackCheckTimer: ReturnType<typeof setInterval> | null = null;
   private stopped = false;
   private recovering = false;
+  private recoveryAttempts = 0;
 
   private readonly metrics = {
     sent: 0,
@@ -460,6 +474,23 @@ export class WorldSyncAdapter {
 
   get currentState(): WorldSyncState {
     return this.state;
+  }
+
+  /** O(1) freshness fence; source events include imports/unloads as well as deltas. */
+  queryContext(): WorldSyncQueryContext | null {
+    const scope = this.table.semantic?.scope;
+    if (!scope) return null;
+    return {
+      scope: { ...scope }, sessionEpoch: this.sessionEpoch, dimensionEpoch: this.dimensionEpoch,
+      state: this.state, sourceRevision: this.observationRevision, changedAtMs: this.observationChangedAtMs,
+      settled: this.state === "ready" && this.queue.length === 0 && this.inFlight.size === 0 &&
+        this.coalesced.size === 0 && this.extractionSessions.size === 0 && !this.extracting && !this.spatialQueryInFlight,
+    };
+  }
+
+  private markObservationChanged(): void {
+    this.observationRevision++;
+    this.observationChangedAtMs = this.clock();
   }
 
   getMetrics(): WorldSyncMetrics {
@@ -499,6 +530,7 @@ export class WorldSyncAdapter {
     });
     this.handle = handle;
     try {
+      if (this.stopped) throw new Error("world-sync: stopped during create");
       this.setState("resetting");
       const resetAck = await this.transport.mirrorSubmitControl(handle, {
         kind: "worldReset",
@@ -507,12 +539,14 @@ export class WorldSyncAdapter {
         reason: "sessionRestart",
         resyncToken: this.sessionEpoch,
       });
+      if (this.stopped) throw new Error("world-sync: stopped during reset");
       if (resetAck.status !== "resetApplied") {
         throw new Error(`world-sync: initial reset -> ${resetAck.status}`);
       }
       this.metrics.resets += 1;
       this.setState("registry_handshake");
       await this.drainQueueForHandshake(handle, registryTableFingerprint(this.table));
+      if (this.stopped) throw new Error("world-sync: stopped during registry handshake");
       this.transportSequence = this.table.semantic ? 2 : 1;
       this.setState("importing");
       this.updateFlushTimer = setInterval(() => {
@@ -525,7 +559,7 @@ export class WorldSyncAdapter {
     } catch (error) {
       this.handle = null;
       await this.transport.mirrorDispose(handle).catch(() => false);
-      this.setState("degraded");
+      this.setState(this.stopped ? "stopped" : "degraded");
       throw error;
     }
   }
@@ -665,6 +699,7 @@ export class WorldSyncAdapter {
     chunkZ: number,
   ): void {
     if (this.stopped || this.handle === null) return;
+    this.markObservationChanged();
     if (this.state === "desynced" || this.state === "degraded") {
       // 显式重入（reImportColumn/新列事件）：触发一次有界恢复尝试。
       void this.desyncAndRecover("reimport_after_desync");
@@ -758,6 +793,7 @@ export class WorldSyncAdapter {
   /** chunk 列卸载：取消提取 + 淘汰该 chunk 的排队工作 + UNLOAD 入队。 */
   onChunkColumnUnload(chunkX: number, chunkZ: number): void {
     if (this.stopped || this.handle === null) return;
+    this.markObservationChanged();
     const key = `${chunkX},${chunkZ}`;
     this.extractionQueue.delete(key);
     const session = this.extractionSessions.get(key);
@@ -783,6 +819,7 @@ export class WorldSyncAdapter {
   /** block update：同坐标合并最终值（source 序号允许不连续）。 */
   onBlockUpdate(x: number, y: number, z: number, stateId: number): void {
     if (this.stopped || this.handle === null) return;
+    this.markObservationChanged();
     this.sourceSequence += 1;
     this.metrics.sourceEventsObserved += 1;
     const key = `${x},${y},${z}`;
@@ -919,10 +956,12 @@ export class WorldSyncAdapter {
       this.transport
         .mirrorSubmitEnvelope(handle, built.envelope, transferList)
         .then((ack) => {
+          if (this.inFlight.get(seq) !== inFlight) return;
           this.span("world_sync.ack_rtt", this.clock() - inFlight.sentAt, { transportSequence: seq });
           this.onAck(seq, ack);
         })
         .catch((error) => {
+          if (this.inFlight.get(seq) !== inFlight) return;
           this.onTransportFailure(seq, error instanceof Error ? error.message : String(error));
         });
       this.span("world_sync.post_message", this.clock() - postBegan, { bytes: built.bytes });
@@ -1005,6 +1044,7 @@ export class WorldSyncAdapter {
 
   private onTransportFailure(seq: number, detail: string): void {
     const entry = this.inFlight.get(seq);
+    if (entry === undefined || this.stopped) return;
     if (entry !== undefined) {
       if (entry.timer !== null) clearTimeout(entry.timer);
       this.inFlight.delete(seq);
@@ -1030,10 +1070,12 @@ export class WorldSyncAdapter {
 
   private async handleAckTimeout(seq: number, waitedMs: number): Promise<void> {
     if (this.stopped || this.handle === null) return;
+    const entry = this.inFlight.get(seq);
     this.onIncident({ kind: "ack_timeout", transportSequence: seq, waitedMs });
     const handle = this.handle;
     try {
       const health = await this.transport.mirrorHealth(handle);
+      if (this.stopped || this.handle !== handle || this.inFlight.get(seq) !== entry) return;
       if (health.stopped || health.desynced) {
         void this.desyncAndRecover(`ack_timeout_unhealthy:${health.desynced ? "desynced" : "stopped"}`);
         return;
@@ -1051,6 +1093,7 @@ export class WorldSyncAdapter {
 
   private async desyncAndRecover(reason: string): Promise<void> {
     if (this.stopped || this.recovering) return;
+    if (this.state === "degraded" && this.recoveryAttempts >= 2) return;
     this.recovering = true;
     this.metrics.desyncs += 1;
     this.setState("desynced");
@@ -1065,6 +1108,13 @@ export class WorldSyncAdapter {
     for (const session of this.extractionSessions.values()) session.cancel("reset");
     this.extractionSessions.clear();
     this.extractionQueue.clear();
+    if (this.recoveryAttempts >= 2) {
+      this.recovering = false;
+      this.setState("degraded");
+      this.onIncident({ kind: "recovery_failed", reason: "recovery_budget_exhausted" });
+      return;
+    }
+    this.recoveryAttempts++;
     const handle = this.handle;
     try {
       if (handle === null) throw new Error("no session");
@@ -1078,12 +1128,14 @@ export class WorldSyncAdapter {
         reason: "desyncRecovery",
         resyncToken: this.sessionEpoch,
       });
+      if (this.stopped || this.handle !== handle) return;
       this.span("world_sync.reset", this.clock() - began, {});
       if (resetAck.status !== "resetApplied") {
         throw new Error(`reset -> ${resetAck.status}`);
       }
       this.metrics.resets += 1;
       await this.drainQueueForHandshake(handle, registryTableFingerprint(this.table));
+      if (this.stopped || this.handle !== handle) return;
       this.transportSequence = this.table.semantic ? 2 : 1;
       this.setState("importing");
       this.onIncident({ kind: "recovered", reason });
@@ -1097,7 +1149,10 @@ export class WorldSyncAdapter {
         reason,
         error: error instanceof Error ? error.message : String(error),
       });
-      this.setState("degraded");
+      if (!this.stopped) {
+        this.setState("degraded");
+        this.onIncident({ kind: "recovery_failed", reason });
+      }
     }
   }
 

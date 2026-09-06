@@ -195,7 +195,8 @@ declare module "@minecraft-studio/pathfinder-rs" {
     x: number; y: number; z: number;
     radius: number; count: number;
     selectors: number;
-    matching: "union" | "intersection";
+    /** each keeps count nearest points per selector; count * selected bits <=256. */
+    matching: "union" | "intersection" | "each";
     maxVisits: number; maxMs: number;
   }
   export interface SpatialResult {

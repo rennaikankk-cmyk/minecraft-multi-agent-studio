@@ -698,7 +698,8 @@ export class SingleBotRuntime {
     snapshot: unknown;
     generation: number;
     capturedAtMs: number;
-  } = { snapshot: null, generation: 0, capturedAtMs: 0 };
+    scopeKey: string;
+  } = { snapshot: null, generation: 0, capturedAtMs: 0, scopeKey: "" };
   private static readonly WORLD_SNAPSHOT_TTL_MS = 600;
 
   /** Phase 3 测量面：分段计时（只观测不改行为；STUDIO_PERF_SPANS=0 关）。 */
@@ -1707,6 +1708,7 @@ export class SingleBotRuntime {
           reachable: block.reachable,
           source: block.source,
           confidence: block.confidence,
+          lastSeen: block.lastSeen,
         }));
       const target =
         snapshot.navigation.target?.serverProfileId === this.profile.id
@@ -1725,6 +1727,7 @@ export class SingleBotRuntime {
           sequence: this.nextSequence(),
           observedAt: snapshot.observedAt,
           worldStateVersion: snapshot.version,
+          ...(snapshot.worldQuery ? { worldQuery: snapshot.worldQuery } : {}),
           inventory,
           nearbyUtilityBlocks,
           navigation: {
@@ -1838,8 +1841,11 @@ export class SingleBotRuntime {
     let worldSnapshot: WorldStateSnapshot | null = null;
     try {
       const nowMsForProvider = this.now().getTime();
+      const scopeKey = JSON.stringify([this.generation, this.profile.id, position.dimension, this.client?.worldStateSnapshotKey?.() ?? null]);
       if (
         this.worldSnapshotProvider.snapshot !== null &&
+        this.worldSnapshotProvider.scopeKey === scopeKey &&
+        nowMsForProvider >= this.worldSnapshotProvider.capturedAtMs &&
         nowMsForProvider - this.worldSnapshotProvider.capturedAtMs < SingleBotRuntime.WORLD_SNAPSHOT_TTL_MS
       ) {
         worldSnapshot = this.worldSnapshotProvider.snapshot as NonNullable<typeof worldSnapshot>;
@@ -1850,6 +1856,7 @@ export class SingleBotRuntime {
             snapshot: worldSnapshot,
             generation: this.worldSnapshotProvider.generation + 1,
             capturedAtMs: nowMsForProvider,
+            scopeKey,
           };
         }
       }
@@ -1865,6 +1872,7 @@ export class SingleBotRuntime {
         replaceNearbyBlocks: true,
         entities: worldSnapshot.entities,
         navigation: worldSnapshot.navigation,
+        worldQuery: worldSnapshot.worldQuery ?? null,
       }));
       const inventoryFingerprint = worldSnapshot.inventory
         .map((item) => `${item.name}:${item.count}:${item.durability ?? ""}`)

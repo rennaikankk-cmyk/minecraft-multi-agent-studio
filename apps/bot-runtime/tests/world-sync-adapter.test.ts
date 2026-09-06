@@ -157,6 +157,44 @@ class FakeTransport implements MirrorTransport {
   }
 }
 
+describe("D4 startup cancellation", () => {
+  it("bounds repeated successful resets followed by bad data and ignores old batch failures", async () => {
+    const transport = new FakeTransport(); const submit = transport.mirrorSubmitEnvelope.bind(transport);
+    transport.registryFingerprint = registryTableFingerprint(smallTable());
+    transport.mirrorSubmitEnvelope = async (handle, envelope, transfers) => {
+      if (envelope.message.kind !== "registryTable") throw new Error("data rejected");
+      return submit(handle, envelope, transfers);
+    };
+    const incidents: string[] = [];
+    const column = { sections: Array.from({ length: 8 }, () => null), minY: 0, numSections: 8 };
+    const adapter = new WorldSyncAdapter({ transport, registryTable: smallTable(), sessionEpoch: 1, dimensionEpoch: 1,
+      onIncident: (incident) => {
+        incidents.push(incident.kind);
+        if (incident.kind === "recovered") adapter.onChunkColumnLoad(column, 0, 0);
+      } });
+    try {
+      await adapter.start(); adapter.onChunkColumnLoad(column, 0, 0);
+      await waitFor(() => adapter.currentState === "degraded");
+      expect(adapter.getMetrics().resets).toBe(3);
+      expect(incidents.filter((kind) => kind === "worker_unavailable")).toHaveLength(3);
+      for (let i = 0; i < 20; i++) adapter.onChunkColumnLoad(column, i, 0);
+      expect(adapter.getMetrics().resets).toBe(3);
+    } finally { await adapter.stop(); }
+  });
+  it("disposes a late-created mirror and cannot become ready after stop", async () => {
+    const transport = new FakeTransport();
+    let release!: (value: number) => void;
+    transport.mirrorCreate = () => new Promise((resolve) => { release = resolve; });
+    const adapter = new WorldSyncAdapter({ transport, registryTable: smallTable(), sessionEpoch: 1, dimensionEpoch: 1 });
+    const starting = adapter.start();
+    const failed = expect(starting).rejects.toThrow("stopped during create");
+    await adapter.stop(); release(777); await failed;
+    expect(adapter.currentState).toBe("stopped");
+    expect(transport.disposed).toBe(1);
+    expect(transport.controls).toEqual([]);
+  });
+});
+
 async function startWith(transport: FakeTransport, table = smallTable()): Promise<WorldSyncAdapter> {
   transport.registryFingerprint = registryTableFingerprint(table);
   const adapter = new WorldSyncAdapter({

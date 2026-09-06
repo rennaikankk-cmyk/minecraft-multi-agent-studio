@@ -5,6 +5,7 @@ import { semanticSelectorMask, buildSemanticSelectors, SEMANTIC_UNKNOWN, MOVEMEN
 import { mirrorTransport, terminatePathfinderWorker } from "../src/rust-pathfinder.js";
 import { ChunkExtractionSession, extractColumnBudgeted, replayUpdates } from "../src/world-section-extractor.js";
 import type { SpatialQuery } from "@minecraft-studio/pathfinder-rs";
+import { WorldQueryProvider } from "../src/world-query-provider.js";
 
 const require = createRequire(import.meta.url);
 const md = require("minecraft-data");
@@ -29,6 +30,27 @@ async function settled(adapter: WorldSyncAdapter, chunks: number): Promise<void>
 afterEach(async () => { for (const a of adapters.splice(0)) await a.stop(); await terminatePathfinderWorker(); vi.restoreAllMocks(); });
 
 describe("D3 real registry and Worker spatial contract", () => {
+  it("D4 batches each selector through the real Worker without losing a rare station", async () => {
+    const data = md("1.21.11");
+    const adapter = new WorldSyncAdapter({ transport: mirrorTransport(), registryTable: buildRegistryTable(data.blocksArray, options),
+      sessionEpoch: 101, dimensionEpoch: 1 });
+    adapters.push(adapter); await adapter.start();
+    const Column = pc(data, 774); const column = new Column();
+    for (let x = 0; x < 8; x++) column.setBlockStateId(new Vec3(x, -60, 5), data.blocksByName.chest.defaultState);
+    column.setBlockStateId(new Vec3(9, -60, 5), data.blocksByName.furnace.defaultState);
+    adapter.onChunkColumnLoad(column, -1, 0); await settled(adapter, 1);
+    const query = vi.fn((q, signal) => adapter.querySpatial(q, { signal }));
+    const provider = new WorldQueryProvider({ context: () => adapter.queryContext(), query, now: Date.now });
+    const request = { origin: { x: -13, y: -60, z: 5, serverProfileId: "spatial-test", dimension: "minecraft:overworld" },
+      radius: 8, count: 1, selectors: semanticSelectorMask("chest") | semanticSelectorMask("furnace"), matching: "each" as const };
+    const first = provider.query(request), second = provider.query(request);
+    expect(first).toBe(second);
+    const view = await first;
+    expect(view.result?.points.map((p) => p.x)).toEqual([-13, -7]);
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(provider.read(request).result).toBe(view.result);
+    provider.reset(true);
+  });
   it.each(["1.20.4", "1.21.11"])("classifies all real states and explicit families for %s", (version) => {
     const data = md(version);
     const table = buildRegistryTable(data.blocksArray, { ...options, minecraftVersion: version });
