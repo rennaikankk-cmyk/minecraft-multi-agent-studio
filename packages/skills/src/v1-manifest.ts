@@ -82,7 +82,7 @@ export type SkillSystemV1Manifest = Readonly<{
  * llm = 仅经 v13 planner prompt 的 advertised catalog。
  */
 const PLANNER_REACHABILITY: Readonly<Record<string, PlannerReachability>> = Object.freeze({
-  "farm.maintain": "llm", "movement.goal": "llm", "movement.follow": "llm", "movement.get-to-block": "llm",
+  "farm.maintain": "llm", "farm.sustain": "llm", "movement.goal": "llm", "movement.follow": "llm", "movement.get-to-block": "llm",
   "world.explore": "llm", "build.clear-area": "llm", "movement.elytra": "llm",
   "movement.goto": "both",
   "world.scan": "both",
@@ -111,7 +111,7 @@ const PLANNER_REACHABILITY: Readonly<Record<string, PlannerReachability>> = Obje
 
 /** 技能家族（产品能力族视角，非代码目录）。 */
 const FAMILY: Readonly<Record<string, string>> = Object.freeze({
-  "farm.maintain": "production", "movement.goal": "movement", "movement.follow": "movement", "movement.get-to-block": "movement",
+  "farm.maintain": "production", "farm.sustain": "production", "movement.goal": "movement", "movement.follow": "movement", "movement.get-to-block": "movement",
   "world.explore": "observation", "build.clear-area": "build", "movement.elytra": "movement",
   "movement.goto": "movement",
   "travel.route": "movement",
@@ -141,6 +141,7 @@ const FAMILY: Readonly<Record<string, string>> = Object.freeze({
 /** 源模块（ownerModule）。 */
 const OWNER_MODULE: Readonly<Record<string, string>> = Object.freeze({
   "farm.maintain": "packages/skills/src/farm-maintenance.ts",
+  "farm.sustain": "packages/skills/src/farm-sustain.ts",
   ...Object.fromEntries(["movement.goal", "movement.follow", "movement.get-to-block", "world.explore", "build.clear-area", "movement.elytra"].map((id) => [id, "packages/skills/src/baritone-processes.ts"])),
   "movement.goto": "packages/skills/src/builtin/movement-goto.ts",
   "travel.route": "packages/skills/src/builtin/travel-route.ts",
@@ -172,6 +173,7 @@ const OWNER_MODULE: Readonly<Record<string, string>> = Object.freeze({
  */
 const LIMITATIONS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   "farm.maintain": ["Bounded crop maintenance; not a farm construction or long-term food throughput claim.", "Requires a shared area lease, loaded cells, and spare planting items."],
+  "farm.sustain": ["Builds and audits a bounded irrigated, lit, fenced carrot garden, then harvests, replants and deposits surplus.", "Requires a loaded overworld, building materials, water access and a barrel; sustained production still needs repeated real-server evidence."],
   "movement.goal": ["Mineflayer goal composition with bounded search; no original Baritone Java runtime."],
   "movement.follow": ["Bounded tracking interval; disappearing or replaced entities stop the process."],
   "movement.get-to-block": ["Loaded candidate scan and approach; does not automatically activate containers or blocks."],

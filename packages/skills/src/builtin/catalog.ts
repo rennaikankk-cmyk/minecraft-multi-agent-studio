@@ -19,6 +19,7 @@ import { buildBlueprintSkill } from "../planning/blueprint-planner.js";
 import { packShulkerSkill, stockLevelSkill, storeSortSkill } from "../planning/stock-levels.js";
 import { movementProfileSkill } from "../planning/movement-profile.js";
 import { farmMaintainSkill } from "../farm-maintenance.js";
+import { farmSustainSkill } from "../farm-sustain.js";
 import { baritoneProcessSkills } from "../baritone-processes.js";
 
 /**
@@ -61,6 +62,7 @@ export const builtinSkills: readonly AnySkillDefinition[] = Object.freeze([
   packShulkerSkill,
   movementProfileSkill,
   farmMaintainSkill,
+  farmSustainSkill,
   ...baritoneProcessSkills,
 ] as readonly unknown[] as readonly AnySkillDefinition[]);
 

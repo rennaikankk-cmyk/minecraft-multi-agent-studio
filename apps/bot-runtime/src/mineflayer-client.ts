@@ -5,6 +5,9 @@ import { ActiveWorkstationLease } from "./workstation-lease.js";
 import { withWorkAreaLease } from "./work-area-lease.js";
 import { maintainFarm } from "./farm-maintenance-adapter.js";
 import { createFarmPort } from "./farm-mineflayer-port.js";
+import { sustainFarm } from "./farm-sustain-adapter.js";
+import { createFoodFarmPort } from "./farm-sustain-mineflayer.js";
+import { FoodReserves } from "./food-reserves.js";
 import { clearWorkArea } from "./clear-area-adapter.js";
 import { glideToLanding } from "./elytra-process-adapter.js";
 import { runNavigationGoal, followEntity, getToBlock, exploreChunks, type NavigationProcessPort } from "./navigation-process-adapter.js";
@@ -47,7 +50,7 @@ import {
   MovementController,
   ServerBehaviorObserver,
   authorizeHarvest,
-  farmMaintainInputSchema, farmMaintainOutputSchema, cropRules,
+  farmMaintainInputSchema, farmMaintainOutputSchema, farmSustainInputSchema, farmSustainOutputSchema, foodFarmLayout, foodFarmMaintenance, cropRules, withinWorkArea,
   navigationGoalInputSchema, navigationGoalOutputSchema, followEntityInputSchema, followEntityOutputSchema,
   getToBlockInputSchema, getToBlockOutputSchema, exploreInputSchema, exploreOutputSchema,
   clearAreaInputSchema, clearAreaOutputSchema, workScopeSchema,
@@ -1198,6 +1201,7 @@ export class MineflayerBotClient implements BotClient {
   private worldActionController: AbortController | undefined;
   private activeWorkAreaLeaseId: string | undefined;
   private placementPurpose: "farm" | undefined;
+  private readonly foodReserves = new FoodReserves();
   private activeProcessSignal: AbortSignal | undefined;
   /** 显式拆除/回收授权的位置集合（salvage 通道，带死线）。 */
   private readonly salvageGrants = new Map<string, number>();
@@ -2061,12 +2065,19 @@ export class MineflayerBotClient implements BotClient {
     if (!this.serverProfileId) {
       throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE");
     }
-    if (request.capability === "world.interact" && request.operation === "farm.maintain-safe") {
-      const input = this.processInput(farmMaintainInputSchema, request.input);
-      return this.withActionLocks(request, ["inventory"], () => this.withAreaProcess(request, input.area, async (port, assertEffect) => {
+    if (request.capability === "world.interact" && ["farm.maintain-safe", "farm.sustain-safe"].includes(request.operation)) {
+      const sustain = request.operation === "farm.sustain-safe" ? this.processInput(farmSustainInputSchema, request.input) : null;
+      const input = sustain ? foodFarmMaintenance(sustain) : this.processInput(farmMaintainInputSchema, request.input);
+      const layout = sustain ? foodFarmLayout(sustain.center) : null;
+      const area = layout ? { ...input.area, min: layout.min, max: layout.max } : input.area;
+      for (const crop of input.crops) {
+        const seed = cropRules[crop].seedItem;
+        if (seed) this.foodReserves.reserve(seed, input.seedReserve, sustain?.foodReserve ?? 0);
+      }
+      return this.withActionLocks(request, ["inventory", "container"], () => this.withAreaProcess(request, area, async (port, assertEffect) => {
         this.placementPurpose = "farm";
         try {
-          return farmMaintainOutputSchema.parse(await maintainFarm(createFarmPort(this.bot, input, {
+          const farm = createFarmPort(this.bot, input, {
             signal: this.activeProcessSignal!, assertActive: port.assertActive,
             approach: async (position) => {
               let target = new Vec3(position.x, position.y, position.z);
@@ -2096,7 +2107,27 @@ export class MineflayerBotClient implements BotClient {
                 this.grantSalvage([{ position, dimension: input.area.dimension }], 5_000);
               }
             },
-          }), input));
+          });
+          if (sustain) return farmSustainOutputSchema.parse(await sustainFarm(createFoodFarmPort(this.bot, sustain, farm, {
+            wait: port.wait,
+            goto: async (p) => port.goto(new goals.GoalNear(p.x, p.y, p.z, 0)),
+            approach: async (p) => port.goto(new goals.GoalLookAtBlock(new Vec3(p.x, p.y, p.z), this.bot.world, { reach: 4 })),
+            assertEffect: async (p) => {
+              await assertEffect(); port.assertActive();
+              if (!withinWorkArea(area, p)) throw new SkillFault("WORK_AREA_VIOLATION");
+              const observation = await this.observeWorldAsset(p);
+              if (!observation.workAllowed) throw new SkillFault("WORK_AREA_BUSY");
+              if (observation.record && ["own_bot", "own_team"].includes(observation.record.owner) && observation.record.purpose !== "farm") {
+                throw new SkillFault("HARVEST_PROTECTED_ASSET");
+              }
+            },
+            store: async (p, retain) => {
+              await port.goto(new goals.GoalLookAtBlock(new Vec3(p.x, p.y, p.z), this.bot.world, { reach: 4 }));
+              await assertEffect(); port.assertActive();
+              return this.invokeFarmStorage({ ...request, signal: this.activeProcessSignal! }, p, retain);
+            },
+          }), sustain));
+          return farmMaintainOutputSchema.parse(await maintainFarm(farm, input));
         } finally { this.placementPurpose = undefined; }
       }));
     }
@@ -5955,6 +5986,35 @@ export class MineflayerBotClient implements BotClient {
     });
   }
 
+  private async invokeFarmStorage(request: SkillCapabilityRequest, position: WorkPosition, retain: number): Promise<{
+    before: number; after: number; deposited: number; withdrawn: number; full: boolean;
+  }> {
+    const foodNames = [...SAFE_FOOD_NAMES].sort();
+    const count = () => foodNames.reduce((sum, name) => sum + this.countInventoryItem(name), 0);
+    const before = count();
+    let deposited = 0;
+    // Keep the seed and emergency ration floor in the bot inventory. Every
+    // transfer is acknowledged by the existing container capability.
+    for (const itemName of foodNames) {
+      const total = this.countInventoryItem(itemName);
+      const allowed = this.foodReserves.available(itemName, total);
+      if (allowed <= 0) continue;
+      const amount = Math.min(allowed, Math.max(0, before - retain));
+      if (amount <= 0) break;
+      try {
+        const receipt = await this.invokeContainerTransfer({ ...request, capability: "container.write", operation: "container.transfer-safe",
+          input: { direction: "deposit", itemName, count: amount, container: position,
+            dimension: normalizeDimension(String(this.bot.game?.dimension ?? "minecraft:overworld")), serverProfileId: this.serverProfileId! } });
+        if (receipt && typeof receipt === "object" && "movedCount" in receipt) deposited += Number(receipt.movedCount) || 0;
+      } catch (error) {
+        if (error instanceof SkillFault && ["CONTAINER_FULL", "CONTAINER_NOT_FOUND", "CONTAINER_TRANSFER_FAILED"].includes(error.code)) break;
+        throw error;
+      }
+    }
+    const after = count();
+    return { before, after, deposited, withdrawn: 0, full: deposited === 0 && before > retain };
+  }
+
   private transferredItemCount(
     direction: "deposit" | "withdraw",
     before: number,
@@ -6054,9 +6114,12 @@ export class MineflayerBotClient implements BotClient {
 
   private safeFoodItems() {
     const registry = this.bot.registry as unknown as FoodRegistry;
+    const totals = new Map<string, number>();
+    for (const item of this.bot.inventory.items()) totals.set(item.name, (totals.get(item.name) ?? 0) + item.count);
     return this.bot.inventory
       .items()
       .filter((item) => SAFE_FOOD_NAMES.has(item.name))
+      .filter((item) => this.foodReserves.available(item.name, totals.get(item.name) ?? item.count, true) > 0)
       .map((item) => ({ item, metadata: registry.foodsByName?.[item.name] }))
       .filter(
         (entry): entry is typeof entry & { metadata: FoodMetadata } =>

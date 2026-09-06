@@ -1,12 +1,12 @@
 {
   "schemaVersion": "1.0",
   "generatedFrom": "packages/skills/src/v1-manifest.ts",
-  "totalSkills": 30,
+  "totalSkills": 31,
   "maturitySummary": {
     "L0": 0,
     "L1": 0,
     "L2": 1,
-    "L3": 25,
+    "L3": 26,
     "L4": 4,
     "L5": 0
   },
@@ -1040,6 +1040,50 @@
         "Requires a shared area lease, loaded cells, and spare planting items."
       ],
       "ownerModule": "packages/skills/src/farm-maintenance.ts"
+    },
+    {
+      "skillId": "farm.sustain",
+      "schemaVersion": "1.0.0",
+      "family": "production",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "llm",
+      "runtimeCapabilities": [
+        "world.interact",
+        "bot.move",
+        "container.write"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "INVENTORY_CHANGE",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "NORMAL_ACTIONS_PAUSED",
+        "TARGET_DIMENSION_MISMATCH",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [
+        "Builds and audits a bounded irrigated, lit, fenced carrot garden, then harvests, replants and deposits surplus.",
+        "Requires a loaded overworld, building materials, water access and a barrel; sustained production still needs repeated real-server evidence."
+      ],
+      "ownerModule": "packages/skills/src/farm-sustain.ts"
     },
     {
       "skillId": "movement.goal",

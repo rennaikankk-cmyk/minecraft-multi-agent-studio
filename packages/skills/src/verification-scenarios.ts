@@ -151,6 +151,7 @@ const baseInputs: Readonly<Record<string, z.infer<typeof skillJsonValueSchema>>>
   "pack.shulker": { shulker: { x: 3, y: 64, z: 0 }, items: [{ itemName: "cobblestone", count: 1 }], dimension, serverProfileId: server, startIndex: 0, maxTransfers: 1 },
   "movement.profile": { profile: "SAFE", serverProfileId: server },
   "farm.maintain": { area: { serverProfileId: server, dimension, min: { x: 0, y: 64, z: 0 }, max: { x: 2, y: 64, z: 2 } }, crops: ["wheat"] },
+  "farm.sustain": { serverProfileId: server, dimension, center: { x: 0, y: 64, z: 0 }, seedReserve: 8, foodReserve: 8 },
   "movement.goal": { serverProfileId: server, dimension, clauses: [{ kind: "near", position: { x: 4, y: 64, z: 0 } }] },
   "movement.follow": { serverProfileId: server, dimension, entityId: 10, durationMs: 1000 },
   "movement.get-to-block": { serverProfileId: server, dimension, blockName: "crafting_table" },

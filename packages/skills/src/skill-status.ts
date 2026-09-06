@@ -147,7 +147,7 @@ export type SkillStatusEntry = Readonly<{
  * 这与技能编译产物里的 `verification: "unverified"` 是同一个事实的两种表述。
  */
 const EVIDENCE: Readonly<Record<string, SkillEvidence>> = Object.freeze({
-  ...Object.fromEntries(["farm.maintain", "movement.goal", "movement.follow", "movement.get-to-block", "world.explore", "build.clear-area", "movement.elytra"].map((id) => [id, {
+  ...Object.fromEntries(["farm.maintain", "farm.sustain", "movement.goal", "movement.follow", "movement.get-to-block", "world.explore", "build.clear-area", "movement.elytra"].map((id) => [id, {
     offlineTests: true, runtimeWiring: true, isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
   }])),
   "movement.goto": {
