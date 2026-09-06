@@ -112,6 +112,7 @@ declare module "@minecraft-studio/pathfinder-rs" {
   }
 
   export type MirrorMessageWire =
+    | ({ kind: "semanticRegistryV1"; selectors: Uint8Array } & SemanticScope)
     | {
         kind: "registryTable";
         revision: number;
@@ -126,7 +127,8 @@ declare module "@minecraft-studio/pathfinder-rs" {
         chunkX: number;
         chunkZ: number;
         /** payload 三态扁平化（Rust 侧 tagged object）：data|empty|notPresent。 */
-        payloadKind: "data" | "empty" | "notPresent";
+        payloadKind: "data" | "empty" | "notPresent" | "stateDataV1";
+        stateIds?: Uint8Array;
         sectionY: number;
         fillStateId?: number;
         /** 长 4096 的 palette 索引（LE u16 字节流）。 */
@@ -177,6 +179,47 @@ declare module "@minecraft-studio/pathfinder-rs" {
 
   /** 测试用：活镜像会话计数（idle 保活审计）。 */
   export function mirrorAliveSessions(): number;
+
+  export interface SemanticScope {
+    selectorRevision: 1;
+    botSessionId: string;
+    serverProfileId: string;
+    dimension: string;
+    minecraftVersion: string;
+  }
+  export interface SpatialQuery {
+    queryId: string;
+    sessionEpoch: number;
+    dimensionEpoch: number;
+    scope: SemanticScope;
+    x: number; y: number; z: number;
+    radius: number; count: number;
+    selectors: number;
+    matching: "union" | "intersection";
+    maxVisits: number; maxMs: number;
+  }
+  export interface SpatialResult {
+    queryId: string;
+    sessionEpoch: number;
+    dimensionEpoch: number;
+    scope?: SemanticScope | null;
+    generation: number;
+    status: "complete" | "incomplete" | "budgetExceeded" | "invalidQuery" | "scopeMismatch" | "notReady" | "desynced";
+    points: Array<{ x: number; y: number; z: number; selectors: number; distanceSquared: number }>;
+    consultedChunks: Array<{ x: number; z: number; revision?: number | null; importing: boolean }>;
+    visitedEntries: number;
+    elapsedMs: number;
+    snapshotBuildMs: number;
+    snapshotChunkEntries: number;
+  }
+  export interface SpatialMemory {
+    chunksLoaded: number; sectionsData: number; sectionsOther: number;
+    paletteEntries: number; indexEntries: number;
+    /** Estimate of current mirror payload/index allocation, not process RSS. */
+    approxBytes: number;
+  }
+  export function mirrorSpatialQuery(handle: number, query: SpatialQuery): Promise<SpatialResult>;
+  export function mirrorSpatialMemory(handle: number): Promise<SpatialMemory>;
 
   /** 显式回收 worker（测试 teardown；在途任务会 reject）。 */
   export function terminateWorker(): Promise<void>;

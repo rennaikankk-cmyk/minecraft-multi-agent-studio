@@ -156,7 +156,7 @@ describe("P5-D2d burst/背压/stop（真实 worker）", () => {
     }
     await adapter.flushUpdates();
     await waitFor(
-      () => adapter.getMetrics().queueDepth === 0 && adapter.getMetrics().inFlightMessages === 0,
+      () => adapter.getMetrics().queuedExtractions === 0 && adapter.getMetrics().queueDepth === 0 && adapter.getMetrics().inFlightMessages === 0,
       30_000,
     );
     histogram.disable();

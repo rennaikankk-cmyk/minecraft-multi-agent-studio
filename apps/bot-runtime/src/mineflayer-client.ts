@@ -1345,6 +1345,7 @@ export class MineflayerBotClient implements BotClient {
     // Pathfinder（P5-D3+）。
     if (process.env.STUDIO_WORLD_MIRROR_SYNC === "1") {
       this.bootWorldSync();
+      bot._client?.on("respawn", () => this.teardownWorldSync());
     }
     bot.on("login", () => {
       this.loginSeen = true;
@@ -2934,6 +2935,7 @@ export class MineflayerBotClient implements BotClient {
    */
   private bootWorldSync(): void {
     if (process.env.STUDIO_WORLD_MIRROR_SYNC !== "1") return;
+    if (!this.spawnSeen || !this.bot.game?.dimension || !this.serverProfileId) return;
     if (this.worldSyncAdapter !== null) return;
     const registry = (this.bot as unknown as {
       registry?: {
@@ -2952,6 +2954,7 @@ export class MineflayerBotClient implements BotClient {
         revision: 1,
         minecraftVersion: this.bot.version ?? String(this.configuredVersion ?? ""),
         serverProfileId: this.serverProfileId ?? undefined,
+        semanticScope: { botSessionId: randomUUID(), dimension: normalizeDimension(String(this.bot.game.dimension)) },
       }),
       sessionEpoch: Date.now(),
       dimensionEpoch: 1,
@@ -2963,12 +2966,17 @@ export class MineflayerBotClient implements BotClient {
       onIncident: (incident) => {
         // 结构化事件（D2 范围=日志通道；IncidentStore 映射在接线方升级）。
         this.logWorldSync("error", "world_sync_incident", { incident: incident.kind, ...incident });
+        if (incident.kind === "recovered") this.importLoadedWorldSyncColumns(adapter);
       },
     });
     this.worldSyncAdapter = adapter;
     void adapter
       .start()
-      .then(() => this.subscribeWorldSync(adapter))
+      .then(() => {
+        if (this.worldSyncAdapter !== adapter) { void adapter.stop(); return; }
+        this.subscribeWorldSync(adapter);
+        this.importLoadedWorldSyncColumns(adapter);
+      })
       .catch((error: unknown) => {
         this.logWorldSync("error", "world_sync_start_failed", {
           error: error instanceof Error ? error.message : String(error),
@@ -3005,7 +3013,7 @@ export class MineflayerBotClient implements BotClient {
         Math.floor(position.x),
         Math.floor(position.y),
         Math.floor(position.z),
-        Number(newBlock.stateId ?? 0),
+        Number.isSafeInteger(newBlock.stateId) && Number(newBlock.stateId) >= 0 && Number(newBlock.stateId) <= 0xffffffff ? Number(newBlock.stateId) : 0xffffffff,
       );
     };
     world.on("chunkColumnLoad", onColumnLoad);
@@ -3016,6 +3024,13 @@ export class MineflayerBotClient implements BotClient {
       world.off("chunkColumnUnload", onColumnUnload);
       this.bot.off("blockUpdate", onBlockUpdate);
     };
+  }
+
+  private importLoadedWorldSyncColumns(adapter: WorldSyncAdapter): void {
+    if (this.worldSyncAdapter !== adapter) return;
+    for (const { chunkX, chunkZ, column } of this.bot.world.getColumns()) {
+      adapter.onChunkColumnLoad(column as unknown as Parameters<WorldSyncAdapter["onChunkColumnLoad"]>[0], chunkX, chunkZ);
+    }
   }
 
   private teardownWorldSync(): void {

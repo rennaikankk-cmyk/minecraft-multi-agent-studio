@@ -32,12 +32,16 @@ import {
   type ExtractedSection,
 } from "./world-section-extractor.js";
 import { classifyBlock } from "./rust-pathfinder.js";
+import { buildSemanticSelectors, movementMetadata, registryStateCount } from "./world-semantic-registry.js";
 import type {
   MirrorAck,
   MirrorControlWire,
   MirrorEnvelopeWire,
   MirrorHealth,
   MirrorMessageWire,
+  SemanticScope,
+  SpatialQuery,
+  SpatialResult,
 } from "@minecraft-studio/pathfinder-rs";
 
 // ---------------------------------------------------------------------------
@@ -58,6 +62,7 @@ export type MirrorTransport = {
   mirrorSubmitControl(handle: number, control: MirrorControlWire): Promise<MirrorAck>;
   mirrorHealth(handle: number): Promise<MirrorHealth>;
   mirrorDispose(handle: number): Promise<boolean>;
+  mirrorSpatialQuery?(handle: number, query: SpatialQuery): Promise<SpatialResult>;
 };
 
 export type WorldSyncState =
@@ -109,6 +114,7 @@ export type WorldSyncMetrics = {
   sourceEventsObserved: number;
   sourceEventsCoalesced: number;
   extractSliceOverruns: number;
+  queuedExtractions: number;
 };
 
 export type WorldSyncAdapterOptions = {
@@ -162,6 +168,7 @@ export type RegistryTable = {
   masks: Uint32Array;
   minecraftVersion: string | undefined;
   serverProfileId: string | undefined;
+  semantic?: { scope: SemanticScope; selectors: Uint32Array };
 };
 
 /** class 位定义（镜像 bitmask；与寻路体素类 0..3 同源分类器，位不同）。 */
@@ -180,11 +187,9 @@ export function buildRegistryTable(
     maxStateId: number;
     boundingBox?: string;
   }>,
-  options: { revision: number; minecraftVersion: string | undefined; serverProfileId: string | undefined },
+  options: { revision: number; minecraftVersion: string | undefined; serverProfileId: string | undefined; semanticScope?: Pick<SemanticScope, "botSessionId" | "dimension"> },
 ): RegistryTable {
-  let maxStateId = 0;
-  for (const block of blocks) maxStateId = Math.max(maxStateId, block.maxStateId);
-  const masks = new Uint32Array(maxStateId + 1);
+  const masks = new Uint32Array(registryStateCount(blocks));
   // 缺省位=0（未分类）→ Rust 侧查表得到 0 ≠ UNKNOWN_BIT……表内 0 视为
   // "未分类"（Rust CLASS_UNKNOWN_BIT 语义=握手表项全 0 视为未分类）。
   const maskByClass = [
@@ -195,16 +200,21 @@ export function buildRegistryTable(
   ];
   for (const block of blocks) {
     const cls = classifyBlock(block.name, String(block.boundingBox ?? "empty"));
-    const mask = maskByClass[cls] ?? MIRROR_CLASS_BITS.DIGGABLE;
+    const mask = (maskByClass[cls] ?? MIRROR_CLASS_BITS.DIGGABLE) | (options.semanticScope ? movementMetadata(block.name) : 0);
     for (let stateId = block.minStateId; stateId <= block.maxStateId; stateId += 1) {
       masks[stateId] = mask;
     }
   }
+  if (options.semanticScope && (!options.minecraftVersion || !options.serverProfileId)) throw new Error("semantic registry requires version and server scope");
   return {
     revision: options.revision,
     masks,
     minecraftVersion: options.minecraftVersion,
     serverProfileId: options.serverProfileId,
+    ...(options.semanticScope ? { semantic: {
+      scope: { selectorRevision: 1, ...options.semanticScope, minecraftVersion: options.minecraftVersion!, serverProfileId: options.serverProfileId! },
+      selectors: buildSemanticSelectors(blocks),
+    } } : {}),
   };
 }
 
@@ -239,8 +249,9 @@ class Fnv1a64 {
     }
   }
   str(value: string): void {
-    this.u64(value.length);
-    for (const ch of Buffer.from(value, "utf8")) this.u8(ch);
+    const bytes = Buffer.from(value, "utf8");
+    this.u64(bytes.byteLength);
+    for (const ch of bytes) this.u8(ch);
   }
   optionStr(value: string | undefined): void {
     if (value === undefined) this.u8(0);
@@ -266,6 +277,19 @@ export function registryTableFingerprint(table: RegistryTable): string {
   return h.finish().toString();
 }
 
+export function semanticRegistryFingerprint(semantic: NonNullable<RegistryTable["semantic"]>): string {
+  const h = new Fnv1a64();
+  h.u8(7);
+  h.u32(semantic.scope.selectorRevision);
+  h.str(semantic.scope.botSessionId);
+  h.str(semantic.scope.serverProfileId);
+  h.str(semantic.scope.dimension);
+  h.str(semantic.scope.minecraftVersion);
+  h.u64(semantic.selectors.length);
+  for (const selectors of semantic.selectors) h.u32(selectors);
+  return h.finish().toString();
+}
+
 // ---------------------------------------------------------------------------
 // 提取结果 → 协议载荷（stateId→mask→去重 palette 索引）。
 // ---------------------------------------------------------------------------
@@ -275,7 +299,8 @@ export type SectionDataWire = {
   kind: "sectionData";
   chunkX: number;
   chunkZ: number;
-  payloadKind: "data" | "empty" | "notPresent";
+  payloadKind: "data" | "empty" | "notPresent" | "stateDataV1";
+  stateIds?: Uint8Array;
   sectionY: number;
   fillStateId?: number;
   paletteIndices?: Uint8Array;
@@ -313,6 +338,10 @@ export function buildSectionPayload(
       payloadKind: "notPresent",
       sectionY: section.sectionY,
     };
+  }
+  if (registryTable.semantic) {
+    return { kind: "sectionData", chunkX, chunkZ, payloadKind: "stateDataV1", sectionY: section.sectionY,
+      stateIds: new Uint8Array(section.stateIds.buffer, section.stateIds.byteOffset, section.stateIds.byteLength) };
   }
   const paletteEntries: number[] = [];
   const paletteIndexByMask = new Map<number, number>();
@@ -368,6 +397,9 @@ type CoalescedUpdate = {
 };
 
 export class WorldSyncAdapter {
+  private spatialQueryInFlight = false;
+  private extracting = false;
+  private readonly extractionQueue = new Map<string, { column: Parameters<WorldSyncAdapter["onChunkColumnLoad"]>[0]; chunkX: number; chunkZ: number; session: ChunkExtractionSession }>();
   private readonly transport: MirrorTransport;
   private readonly table: RegistryTable;
   private readonly logger: NonNullable<WorldSyncAdapterOptions["logger"]>;
@@ -439,6 +471,7 @@ export class WorldSyncAdapter {
     return {
       state: this.state,
       ...this.metrics,
+      queuedExtractions: this.extractionSessions.size,
       queueDepth: this.queue.length,
       inFlightMessages: this.inFlight.size,
       inFlightBytes,
@@ -480,7 +513,7 @@ export class WorldSyncAdapter {
       this.metrics.resets += 1;
       this.setState("registry_handshake");
       await this.drainQueueForHandshake(handle, registryTableFingerprint(this.table));
-      this.transportSequence = 1;
+      this.transportSequence = this.table.semantic ? 2 : 1;
       this.setState("importing");
       this.updateFlushTimer = setInterval(() => {
         void this.flushUpdates();
@@ -532,6 +565,56 @@ export class WorldSyncAdapter {
         `world-sync: registry fingerprint mismatch (ts ${expectedFingerprint}, rust ${String(ack.payloadFingerprint)})`,
       );
     }
+    if (this.table.semantic) {
+      const { scope, selectors } = this.table.semantic;
+      const semanticAck = await this.transport.mirrorSubmitEnvelope(handle, {
+        protocolVersion: 1, sessionEpoch: this.sessionEpoch, dimensionEpoch: this.dimensionEpoch, transportSequence: 2,
+        message: { kind: "semanticRegistryV1", ...scope, selectors: new Uint8Array(selectors.buffer, selectors.byteOffset, selectors.byteLength) },
+      });
+      if (semanticAck.status !== "registryReady" || semanticAck.registryRevision !== this.table.revision
+          || semanticAck.sessionEpoch !== this.sessionEpoch || semanticAck.dimensionEpoch !== this.dimensionEpoch
+          || semanticAck.transportSequence !== 2 || semanticAck.payloadFingerprint !== semanticRegistryFingerprint(this.table.semantic)) {
+        throw new Error("world-sync: semantic registry handshake mismatch");
+      }
+    }
+  }
+
+  /** D3 capability only. D4 owns cached provider reads and shared in-flight work. */
+  async querySpatial(input: Omit<SpatialQuery, "scope" | "sessionEpoch" | "dimensionEpoch">, options: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<SpatialResult> {
+    const timeoutMs = options.timeoutMs ?? 10_000;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 10_000) throw new Error("invalid spatial query timeout");
+    if (options.signal?.aborted) throw new Error("world-sync spatial query cancelled");
+    const handle = this.handle;
+    const semantic = this.table.semantic;
+    const query = this.transport.mirrorSpatialQuery;
+    if (handle === null || !semantic || !query || !["ready", "importing"].includes(this.state)) throw new Error("world-sync spatial query unavailable");
+    if (this.spatialQueryInFlight) throw new Error("world-sync spatial query already in flight");
+    const sessionEpoch = this.sessionEpoch;
+    const dimensionEpoch = this.dimensionEpoch;
+    this.spatialQueryInFlight = true;
+    // Cancellation abandons the result; it does not pretend to preempt native work.
+    const pending = Promise.resolve().then(() => query(handle, { ...input, scope: semantic.scope, sessionEpoch, dimensionEpoch }))
+      .finally(() => { this.spatialQueryInFlight = false; });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("world-sync spatial query timeout")), timeoutMs);
+      onAbort = () => reject(new Error("world-sync spatial query cancelled"));
+      options.signal?.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      const result = await Promise.race([pending, deadline]);
+      if (this.handle !== handle || this.sessionEpoch !== sessionEpoch || this.dimensionEpoch !== dimensionEpoch || this.stopped
+          || !["ready", "importing"].includes(this.state) || result.queryId !== input.queryId
+          || result.sessionEpoch !== sessionEpoch || result.dimensionEpoch !== dimensionEpoch
+          || !result.scope || Object.entries(semantic.scope).some(([key, value]) => result.scope?.[key as keyof SemanticScope] !== value)) {
+        throw new Error("world-sync stale spatial query result");
+      }
+      return result;
+    } finally {
+      clearTimeout(timer);
+      if (onAbort) options.signal?.removeEventListener("abort", onAbort);
+    }
   }
 
   // -------------------------------------------------------------------
@@ -550,6 +633,7 @@ export class WorldSyncAdapter {
     this.ackCheckTimer = null;
     for (const session of this.extractionSessions.values()) session.cancel("reset");
     this.extractionSessions.clear();
+    this.extractionQueue.clear();
     this.queue.length = 0;
     // 有界排空：in-flight 直接失败清理（worker 崩溃路径同构）。
     for (const entry of this.inFlight.values()) {
@@ -588,16 +672,36 @@ export class WorldSyncAdapter {
     }
     if (this.state !== "importing" && this.state !== "ready" && this.state !== "registry_handshake") return;
     const key = `${chunkX},${chunkZ}`;
+    if (!this.extractionSessions.has(key) && this.extractionSessions.size >= 512) {
+      this.onIncident({ kind: "queue_overflow", queueDepth: this.extractionSessions.size });
+      void this.desyncAndRecover("extraction_queue_overflow");
+      return;
+    }
+    this.extractionSessions.get(key)?.cancel("reset");
     const session = new ChunkExtractionSession();
     this.extractionSessions.set(key, session);
-    void this.extractAndEnqueue(column, chunkX, chunkZ, session).catch((error) => {
-      this.logger.warn?.("world_sync_extract_failed", {
-        chunkX,
-        chunkZ,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      this.extractionSessions.delete(key);
-    });
+    this.extractionQueue.set(key, { column, chunkX, chunkZ, session });
+    void this.drainExtractions();
+  }
+
+  private async drainExtractions(): Promise<void> {
+    if (this.extracting) return;
+    this.extracting = true;
+    try {
+      while (!this.stopped && this.extractionQueue.size > 0) {
+        await this.yieldFn();
+        const work = this.extractionQueue.entries().next().value;
+        if (!work) break;
+        const [key, { column, chunkX, chunkZ, session }] = work;
+        this.extractionQueue.delete(key);
+        try { await this.extractAndEnqueue(column, chunkX, chunkZ, session); }
+        catch (error) {
+          if (!session.isCancelled) this.logger.warn?.("world_sync_extract_failed", { chunkX, chunkZ, error: error instanceof Error ? error.message : String(error) });
+        } finally {
+          if (this.extractionSessions.get(key) === session) this.extractionSessions.delete(key);
+        }
+      }
+    } finally { this.extracting = false; }
   }
 
   private async extractAndEnqueue(
@@ -608,12 +712,15 @@ export class WorldSyncAdapter {
   ): Promise<void> {
     const key = `${chunkX},${chunkZ}`;
     const began = this.clock();
-    let extracted: ExtractedChunk;
-    try {
-      extracted = await extractColumnBudgeted(column, chunkX, chunkZ, session, this.limits.extractBudgetMs, this.yieldFn);
-    } finally {
-      this.extractionSessions.delete(key);
+    const extractionEpoch = this.sessionEpoch;
+    const extracted: ExtractedChunk = await extractColumnBudgeted(column, chunkX, chunkZ, session, this.limits.extractBudgetMs, this.yieldFn);
+    // Reserve one slot for updates released by this commit.
+    if (column.numSections + 3 > this.limits.queueCapacity) throw new Error("column exceeds sync queue capacity");
+    while (this.queue.length + column.numSections + 3 > this.limits.queueCapacity) {
+      if (session.isCancelled || this.stopped || this.sessionEpoch !== extractionEpoch) return;
+      await this.yieldFn();
     }
+    if (session.isCancelled || this.stopped || this.sessionEpoch !== extractionEpoch || this.extractionSessions.get(key) !== session) return;
     this.span("world_sync.extract_column", this.clock() - began, {
       sections: extracted.sections.length,
       overruns: extracted.sliceOverruns,
@@ -630,10 +737,11 @@ export class WorldSyncAdapter {
     for (const section of extracted.sections) {
       const payload = buildSectionPayload(section, this.table, chunkX, chunkZ);
       const isData = payload.payloadKind === "data";
+      const buffer = payload.stateIds ?? payload.paletteIndices;
       this.enqueue({ kind: "sectionData", chunk: { x: chunkX, z: chunkZ }, build: (seq) => ({
         envelope: this.envelope(seq, payload as MirrorMessageWire),
-        transferBuffer: isData ? ((payload.paletteIndices as Uint8Array).buffer as ArrayBuffer) : undefined,
-        bytes: isData ? 8192 + 64 : 32,
+        transferBuffer: buffer?.buffer as ArrayBuffer | undefined,
+        bytes: buffer ? buffer.byteLength + (isData ? (payload.paletteEntries?.length ?? 0) * 4 : 0) + 64 : 32,
       }) });
     }
     this.enqueue({ kind: "chunkCommit", chunk: { x: chunkX, z: chunkZ }, build: (seq) => ({
@@ -641,6 +749,7 @@ export class WorldSyncAdapter {
       transferBuffer: undefined,
       bytes: 16,
     }) });
+    this.extractionSessions.delete(key);
     // 该 chunk 的提取窗口关闭：持有中的 update 补冲（Rust 侧按 loaded 应用）。
     void this.flushUpdates();
     void this.pump();
@@ -650,6 +759,7 @@ export class WorldSyncAdapter {
   onChunkColumnUnload(chunkX: number, chunkZ: number): void {
     if (this.stopped || this.handle === null) return;
     const key = `${chunkX},${chunkZ}`;
+    this.extractionQueue.delete(key);
     const session = this.extractionSessions.get(key);
     if (session !== undefined) {
       session.cancel("unload");
@@ -683,6 +793,12 @@ export class WorldSyncAdapter {
       existing.sourceLast = this.sourceSequence;
       existing.eventCount += 1;
       this.metrics.sourceEventsCoalesced += 1;
+      return;
+    }
+    if (this.coalesced.size >= 65536) {
+      this.metrics.droppedUpdates += 1;
+      this.onIncident({ kind: "queue_overflow", queueDepth: this.coalesced.size });
+      void this.desyncAndRecover("coalesced_update_capacity");
       return;
     }
     this.coalesced.set(key, {
@@ -948,6 +1064,7 @@ export class WorldSyncAdapter {
     this.coalesced.clear();
     for (const session of this.extractionSessions.values()) session.cancel("reset");
     this.extractionSessions.clear();
+    this.extractionQueue.clear();
     const handle = this.handle;
     try {
       if (handle === null) throw new Error("no session");
@@ -967,7 +1084,7 @@ export class WorldSyncAdapter {
       }
       this.metrics.resets += 1;
       await this.drainQueueForHandshake(handle, registryTableFingerprint(this.table));
-      this.transportSequence = 1;
+      this.transportSequence = this.table.semantic ? 2 : 1;
       this.setState("importing");
       this.onIncident({ kind: "recovered", reason });
       // 注意：不自动重放历史 chunk（truth 重建由调用方重新触发 columnLoad

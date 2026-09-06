@@ -29,12 +29,16 @@
 //!  - 四态查询 Data/Empty/SectionNotPresent/ChunkNotLoaded + Desynced
 //!    覆盖态（调用方必须先检查覆盖态再解释四种状态）。
 //!  - SectionKey 用绝对 sectionY（1.18+ minY 可为负）。
-//!  - palette u16 索引/section + 每 chunk 去重（内存策略：4096×4B 稠密
-//!    stateId 的膨胀源→u16 索引 8KB/section + 全局去重表）。
+//!  - D3: immutable stateId registry + bounded per-section movement palettes;
+//!    semantic membership is sparse and shares each committed chunk's lifetime.
 //!  - epoch 权威在 TS session supervisor；Rust 只校验回显。
 //!  - SnapshotHandle Arc chunk 共享（generation 固定 COW 视图）。
 
-use std::collections::HashMap;
+use crate::spatial_index::{
+    SectionIndex, SemanticRegistry, MAX_INDEX_ENTRIES, MAX_LOADED_CHUNKS, MAX_PENDING_CHUNKS,
+    MAX_QUEUED_UPDATES, MAX_SECTIONS_PER_CHUNK,
+};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::world_mirror_protocol::{
@@ -62,13 +66,76 @@ pub enum SectionStatus {
     Desynced,
 }
 
-/// 单 section 存储：palette 索引（u16）而非 stateId——内存策略见模块头。
+/// Per-section u16 movement palette, separate from stateId registry/semantic IDs.
 #[derive(Clone)]
 pub struct Section {
     pub status: SectionStatus,
     /// Data 状态下长度 4096 的 palette 索引表；其余状态为空。
     pub palette_indices: Box<[u16]>,
+    pub palette_entries: Vec<BlockClassMask>,
+    pub index: SectionIndex,
     pub revision: u64,
+}
+
+fn known_mask(mask: u32) -> u32 {
+    if mask == 0 {
+        CLASS_UNKNOWN_BIT
+    } else {
+        mask
+    }
+}
+
+impl Section {
+    fn data(masks: impl Iterator<Item = u32>, index: SectionIndex, revision: u64) -> Self {
+        let mut entries = Vec::new();
+        let mut intern = HashMap::new();
+        let indices = masks
+            .map(|mask| {
+                let mask = known_mask(mask);
+                *intern.entry(mask).or_insert_with(|| {
+                    let id = entries.len() as u16;
+                    entries.push(mask);
+                    id
+                })
+            })
+            .collect::<Vec<_>>();
+        Self {
+            status: SectionStatus::Data,
+            palette_indices: indices.into_boxed_slice(),
+            palette_entries: entries,
+            index,
+            revision,
+        }
+    }
+
+    fn set_mask(&mut self, local: usize, mask: u32) {
+        if let SectionStatus::Empty { fill_mask } = self.status {
+            self.palette_indices = vec![0; 4096].into_boxed_slice();
+            self.palette_entries = vec![fill_mask];
+            self.status = SectionStatus::Data;
+        }
+        let id = self
+            .palette_entries
+            .iter()
+            .position(|m| *m == mask)
+            .unwrap_or_else(|| {
+                self.palette_entries.push(mask);
+                self.palette_entries.len() - 1
+            });
+        self.palette_indices[local] = id as u16;
+        // Reclaim unused palette members after churn; at most 4096 live values.
+        if self.palette_entries.len() > 4096 {
+            let compact = Self::data(
+                self.palette_indices
+                    .iter()
+                    .map(|i| self.palette_entries[*i as usize]),
+                SectionIndex::default(),
+                self.revision,
+            );
+            self.palette_indices = compact.palette_indices;
+            self.palette_entries = compact.palette_entries;
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -117,8 +184,11 @@ pub struct SnapshotHandle {
     pub generation: u64,
     pub session_epoch: u64,
     pub dimension_epoch: u64,
-    chunks: Arc<HashMap<ChunkKey, Arc<ChunkState>>>,
+    pub(crate) chunks: Arc<HashMap<ChunkKey, Arc<ChunkState>>>,
     registry: Arc<Vec<BlockClassMask>>,
+    pub(crate) semantic_registry: Option<Arc<SemanticRegistry>>,
+    pub(crate) pending_chunks: HashSet<ChunkKey>,
+    pub(crate) desynced: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -136,6 +206,9 @@ pub enum CellQuery {
 impl SnapshotHandle {
     /// 绝对坐标查询（y 为方块绝对坐标；内部按 section 高度换算）。
     pub fn query(&self, x: i32, y: i32, z: i32) -> CellQuery {
+        if self.desynced {
+            return CellQuery::Desynced;
+        }
         let chunk = (x >> 4, z >> 4);
         let state = match self.chunks.get(&chunk) {
             None => return CellQuery::ChunkNotLoaded,
@@ -152,8 +225,8 @@ impl SnapshotHandle {
                 SectionStatus::Data => {
                     let local = section_local_index(x, y, z);
                     let palette_index = section.palette_indices[local] as usize;
-                    let mask = self
-                        .registry
+                    let mask = section
+                        .palette_entries
                         .get(palette_index)
                         .copied()
                         .unwrap_or(CLASS_UNKNOWN_BIT);
@@ -166,8 +239,12 @@ impl SnapshotHandle {
     pub fn memory_stats(&self) -> MirrorMemoryStats {
         let mut sections_data = 0usize;
         let mut sections_other = 0usize;
+        let mut palette_entries = 0;
+        let mut index_entries = 0;
         for state in self.chunks.values() {
             for section in state.sections.values() {
+                palette_entries += section.palette_entries.len();
+                index_entries += section.index.cells.len();
                 if section.status == SectionStatus::Data {
                     sections_data += 1;
                 } else {
@@ -179,12 +256,18 @@ impl SnapshotHandle {
             chunks_loaded: self.chunks.len(),
             sections_data,
             sections_other,
-            palette_entries: self.registry.len(),
+            palette_entries,
+            index_entries,
             // u16×4096/section + HashMap/Box 元开销（保守 ~100B/项）
             approx_bytes: sections_data * 4096 * 2
                 + sections_other * 100
                 + self.chunks.len() * 200
-                + self.registry.len() * 4,
+                + (self.registry.len() + palette_entries) * 4
+                + self
+                    .semantic_registry
+                    .as_ref()
+                    .map_or(0, |r| r.selectors.len() * 4)
+                + index_entries * 32,
         }
     }
 }
@@ -195,6 +278,7 @@ pub struct MirrorMemoryStats {
     pub sections_data: usize,
     pub sections_other: usize,
     pub palette_entries: usize,
+    pub index_entries: usize,
     pub approx_bytes: usize,
 }
 
@@ -204,6 +288,9 @@ pub struct WorldMirror {
     registry: Arc<Vec<BlockClassMask>>,
     registry_revision: u64,
     registry_ready: bool,
+    registry_identity: (Option<String>, Option<String>),
+    semantic_registry: Option<Arc<SemanticRegistry>>,
+    index_entries: usize,
     /// 已提交 chunk（chunk 载荷 Arc：snapshot 克隆 map 时共享，不拷数据）。
     chunks: HashMap<ChunkKey, Arc<ChunkState>>,
     pending_imports: HashMap<ChunkKey, PendingImport>,
@@ -225,6 +312,9 @@ impl WorldMirror {
             registry: Arc::new(Vec::new()),
             registry_revision: 0,
             registry_ready: false,
+            registry_identity: (None, None),
+            semantic_registry: None,
+            index_entries: 0,
             chunks: HashMap::new(),
             pending_imports: HashMap::new(),
             queued_updates: Vec::new(),
@@ -291,6 +381,9 @@ impl WorldMirror {
             dimension_epoch: self.dimension_epoch,
             chunks: Arc::new(self.chunks.clone()),
             registry: Arc::clone(&self.registry),
+            semantic_registry: self.semantic_registry.clone(),
+            pending_chunks: self.pending_imports.keys().copied().collect(),
+            desynced: self.desynced,
         }
     }
 
@@ -317,6 +410,9 @@ impl WorldMirror {
         self.registry = Arc::new(Vec::new());
         self.registry_revision = 0;
         self.registry_ready = false;
+        self.registry_identity = (None, None);
+        self.semantic_registry = None;
+        self.index_entries = 0;
         self.chunks.clear();
         self.pending_imports.clear();
         self.queued_updates.clear();
@@ -332,19 +428,53 @@ impl WorldMirror {
         message: MirrorMessage,
         transport_sequence: u64,
     ) -> ApplyOutcome {
+        self.last_batch_skipped = 0;
         match message {
+            MirrorMessage::SemanticRegistryV1 { registry } => {
+                if let Some(outcome) = self.require_registry() {
+                    return outcome;
+                }
+                if let Some(current) = &self.semantic_registry {
+                    if **current == registry {
+                        return ApplyOutcome::RegistryReady;
+                    }
+                } else if self.chunks.is_empty()
+                    && self.pending_imports.is_empty()
+                    && registry.selectors.len() == self.registry.len()
+                    && self.registry_identity
+                        == (
+                            Some(registry.scope.minecraft_version.clone()),
+                            Some(registry.scope.server_profile_id.clone()),
+                        )
+                {
+                    self.semantic_registry = Some(Arc::new(registry));
+                    self.generation += 1;
+                    return ApplyOutcome::RegistryReady;
+                }
+                self.desynced = true;
+                ApplyOutcome::ResetRequired {
+                    reason: AckReason::RegistryMismatch,
+                }
+            }
             MirrorMessage::RegistryTable {
-                revision, masks, ..
+                revision,
+                masks,
+                minecraft_version,
+                server_profile_id,
             } => {
                 if !self.registry_ready {
                     self.registry = Arc::new(masks);
                     self.registry_revision = revision;
                     self.registry_ready = true;
+                    self.registry_identity = (minecraft_version, server_profile_id);
                     self.generation += 1;
                     return ApplyOutcome::RegistryReady;
                 }
                 // 已就绪：仅幂等接受同 revision 同表重发。
-                if revision == self.registry_revision && *self.registry == masks {
+                if revision == self.registry_revision
+                    && *self.registry == masks
+                    && self.registry_identity == (minecraft_version, server_profile_id)
+                {
                     return ApplyOutcome::RegistryReady;
                 }
                 // 换表（不同 revision / 同 revision 不同表）腐蚀既有 palette
@@ -357,6 +487,11 @@ impl WorldMirror {
             MirrorMessage::ChunkBegin { chunk } => {
                 if let Some(outcome) = self.require_registry() {
                     return outcome;
+                }
+                if !self.pending_imports.contains_key(&chunk)
+                    && self.pending_imports.len() >= MAX_PENDING_CHUNKS
+                {
+                    return self.capacity_exceeded();
                 }
                 // 重复 BEGIN（新传输序号的同 chunk）：TS 重启该 chunk 导入，
                 // 覆盖旧事务（旧 pending 丢弃，迟到 COMMIT 不复活旧内容）。
@@ -378,6 +513,20 @@ impl WorldMirror {
                         reason: AckReason::NoOpenImport,
                     };
                 };
+                if !(-128..=127).contains(&section_y)
+                    || (!import.sections.contains_key(&section_y)
+                        && import.sections.len() >= MAX_SECTIONS_PER_CHUNK)
+                {
+                    return self.capacity_exceeded();
+                }
+                if matches!(payload, SectionPayload::StateDataV1 { .. })
+                    && self.semantic_registry.is_none()
+                {
+                    self.desynced = true;
+                    return ApplyOutcome::ResetRequired {
+                        reason: AckReason::RegistryNotReady,
+                    };
+                }
                 import.sections.insert(section_y, payload);
                 ApplyOutcome::Applied
             }
@@ -390,36 +539,61 @@ impl WorldMirror {
                         reason: AckReason::NoOpenImport,
                     };
                 };
-                let mut registry: Vec<BlockClassMask> = (*self.registry).clone();
+                if !self.chunks.contains_key(&chunk) && self.chunks.len() >= MAX_LOADED_CHUNKS {
+                    return self.capacity_exceeded();
+                }
                 let mut sections = HashMap::new();
                 for (section_y, payload) in import.sections {
                     match payload {
+                        SectionPayload::StateDataV1 { state_ids, .. } => {
+                            let mut index = SectionIndex {
+                                available: true,
+                                ..SectionIndex::default()
+                            };
+                            let semantic = self
+                                .semantic_registry
+                                .as_ref()
+                                .expect("raw states require semantic handshake");
+                            for (local, &state_id) in state_ids.iter().enumerate() {
+                                let mask = self
+                                    .registry
+                                    .get(state_id as usize)
+                                    .copied()
+                                    .map(known_mask)
+                                    .unwrap_or(CLASS_UNKNOWN_BIT);
+                                index.set(local as u16, semantic.classify(state_id, mask));
+                            }
+                            sections.insert(
+                                section_y,
+                                Section::data(
+                                    state_ids.iter().map(|id| {
+                                        self.registry
+                                            .get(*id as usize)
+                                            .copied()
+                                            .unwrap_or(CLASS_UNKNOWN_BIT)
+                                    }),
+                                    index,
+                                    transport_sequence,
+                                ),
+                            );
+                        }
                         SectionPayload::Data {
                             palette_indices,
                             palette_entries,
                             ..
                         } => {
-                            let mut remapped = Vec::with_capacity(palette_indices.len());
-                            for &index in palette_indices.iter() {
-                                let mask = palette_entries
-                                    .get(index as usize)
-                                    .copied()
-                                    .unwrap_or(CLASS_UNKNOWN_BIT);
-                                // 去重插入全局表。
-                                if let Some(existing) = registry.iter().position(|&m| m == mask) {
-                                    remapped.push(existing as u16);
-                                } else {
-                                    registry.push(mask);
-                                    remapped.push((registry.len() - 1) as u16);
-                                }
-                            }
                             sections.insert(
                                 section_y,
-                                Section {
-                                    status: SectionStatus::Data,
-                                    palette_indices: remapped.into_boxed_slice(),
-                                    revision: transport_sequence,
-                                },
+                                Section::data(
+                                    palette_indices.iter().map(|i| {
+                                        palette_entries
+                                            .get(*i as usize)
+                                            .copied()
+                                            .unwrap_or(CLASS_UNKNOWN_BIT)
+                                    }),
+                                    SectionIndex::default(),
+                                    transport_sequence,
+                                ),
                             );
                         }
                         SectionPayload::Empty { fill_state_id, .. } => {
@@ -428,12 +602,25 @@ impl WorldMirror {
                                 .registry
                                 .get(fill_state_id as usize)
                                 .copied()
+                                .map(known_mask)
                                 .unwrap_or(CLASS_UNKNOWN_BIT);
+                            let mut index = SectionIndex::default();
+                            if let Some(semantic) = &self.semantic_registry {
+                                index.available = true;
+                                let selectors = semantic.classify(fill_state_id, fill_mask);
+                                if selectors != 0 {
+                                    for local in 0..4096 {
+                                        index.set(local, selectors);
+                                    }
+                                }
+                            }
                             sections.insert(
                                 section_y,
                                 Section {
                                     status: SectionStatus::Empty { fill_mask },
                                     palette_indices: Box::from([]),
+                                    palette_entries: Vec::new(),
+                                    index,
                                     revision: transport_sequence,
                                 },
                             );
@@ -443,7 +630,15 @@ impl WorldMirror {
                         }
                     }
                 }
-                self.registry = Arc::new(registry);
+                let old_entries = self.chunks.get(&chunk).map_or(0, |c| {
+                    c.sections.values().map(|s| s.index.cells.len()).sum()
+                });
+                let new_entries: usize = sections.values().map(|s| s.index.cells.len()).sum();
+                let total_entries = self.index_entries - old_entries + new_entries;
+                if total_entries > MAX_INDEX_ENTRIES {
+                    return self.capacity_exceeded();
+                }
+                self.index_entries = total_entries;
                 self.chunks.insert(
                     chunk,
                     Arc::new(ChunkState {
@@ -466,20 +661,36 @@ impl WorldMirror {
                 self.queued_updates = remaining;
                 replay.sort_by_key(|q| q.order_key);
                 for queued in replay {
-                    self.apply_block_update_internal(
+                    if !self.apply_block_update_internal(
                         queued.position,
                         queued.state_id,
-                        queued.order_key.0,
-                    );
+                        transport_sequence,
+                    ) {
+                        self.last_batch_skipped += 1;
+                        self.skipped_updates_total += 1;
+                    }
                 }
                 self.generation += 1;
+                if self.desynced {
+                    return ApplyOutcome::ResetRequired {
+                        reason: AckReason::CapacityExceeded,
+                    };
+                }
                 ApplyOutcome::Applied
             }
             MirrorMessage::ChunkUnload { chunk } => {
                 if let Some(outcome) = self.require_registry() {
                     return outcome;
                 }
-                let was_loaded = self.chunks.remove(&chunk).is_some();
+                let removed = self.chunks.remove(&chunk);
+                let was_loaded = removed.is_some();
+                if let Some(state) = removed {
+                    self.index_entries -= state
+                        .sections
+                        .values()
+                        .map(|s| s.index.cells.len())
+                        .sum::<usize>();
+                }
                 // 淘汰更旧的排队 delta + 丢弃未完成导入：迟到 COMMIT 不得
                 // 复活已卸载 chunk（P5-C 属性测试 seed=2 实锤语义）。
                 self.queued_updates
@@ -499,6 +710,9 @@ impl WorldMirror {
                 if let Some(outcome) = self.require_registry() {
                     return outcome;
                 }
+                if self.queued_updates.len() + updates.len() > MAX_QUEUED_UPDATES {
+                    return self.capacity_exceeded();
+                }
                 let mut queued_any = false;
                 let mut skipped = 0u64;
                 for (index, entry) in updates.into_iter().enumerate() {
@@ -512,11 +726,13 @@ impl WorldMirror {
                         });
                         queued_any = true;
                     } else if self.chunks.contains_key(&chunk) {
-                        self.apply_block_update_internal(
+                        if !self.apply_block_update_internal(
                             entry.position,
                             entry.state_id,
-                            source_last_sequence,
-                        );
+                            transport_sequence,
+                        ) {
+                            skipped += 1;
+                        }
                     } else {
                         // unload 后迟到更新：跳过（不得复活 chunk）——计数可观测。
                         skipped += 1;
@@ -524,6 +740,11 @@ impl WorldMirror {
                 }
                 self.last_batch_skipped = skipped;
                 self.skipped_updates_total += skipped;
+                if self.desynced {
+                    return ApplyOutcome::ResetRequired {
+                        reason: AckReason::CapacityExceeded,
+                    };
+                }
                 if queued_any {
                     ApplyOutcome::QueuedUntilCommit
                 } else {
@@ -549,43 +770,59 @@ impl WorldMirror {
         &mut self,
         position: (i32, i32, i32),
         state_id: u32,
-        source_sequence: u64,
-    ) {
+        transport_sequence: u64,
+    ) -> bool {
         let chunk = (position.0 >> 4, position.2 >> 4);
         let mask = self
             .registry
             .get(state_id as usize)
             .copied()
+            .map(known_mask)
             .unwrap_or(CLASS_UNKNOWN_BIT);
-        // 先做 palette 去重（借用结束后再动 chunks，避免交叉借用）。
-        let mut registry_vec: Vec<BlockClassMask> = (*self.registry).clone();
-        let index = match registry_vec.iter().position(|&m| m == mask) {
-            Some(existing) => existing,
-            None => {
-                registry_vec.push(mask);
-                registry_vec.len() - 1
-            }
-        };
+        let selectors = self
+            .semantic_registry
+            .as_ref()
+            .map_or(CLASS_UNKNOWN_BIT, |r| r.classify(state_id, mask));
         let Some(state) = self.chunks.get_mut(&chunk) else {
-            return;
+            return false;
         };
         let mutable = Arc::make_mut(state);
         let section_y = position.1 >> 4;
         let Some(section) = mutable.sections.get_mut(&section_y) else {
-            return;
+            return false;
         };
-        if !matches!(section.status, SectionStatus::Data) {
-            // 非 Data section 上的 update = 提取器漏导入：fail-closed 保持
-            // 原状（shadow oracle 会对出该差异）。
-            self.registry = Arc::new(registry_vec);
-            return;
+        if !matches!(
+            section.status,
+            SectionStatus::Data | SectionStatus::Empty { .. }
+        ) {
+            return false;
         }
         let local = section_local_index(position.0, position.1, position.2);
-        section.palette_indices[local] = index as u16;
-        section.revision = section.revision.max(source_sequence);
-        mutable.revision = mutable.revision.max(source_sequence);
-        self.registry = Arc::new(registry_vec);
+        let old_count = section.index.cells.len();
+        if section.index.available
+            && selectors != 0
+            && !section.index.cells.contains_key(&(local as u16))
+            && self.index_entries >= MAX_INDEX_ENTRIES
+        {
+            self.desynced = true;
+            return false;
+        }
+        section.set_mask(local, mask);
+        if section.index.available {
+            section.index.set(local as u16, selectors);
+        }
+        self.index_entries = self.index_entries - old_count + section.index.cells.len();
+        section.revision = section.revision.max(transport_sequence);
+        mutable.revision = mutable.revision.max(transport_sequence);
         self.generation += 1;
+        true
+    }
+
+    fn capacity_exceeded(&mut self) -> ApplyOutcome {
+        self.desynced = true;
+        ApplyOutcome::ResetRequired {
+            reason: AckReason::CapacityExceeded,
+        }
     }
 
     /// 会话级 Desynced（gap/conflict 与镜像覆盖态保持一致）。

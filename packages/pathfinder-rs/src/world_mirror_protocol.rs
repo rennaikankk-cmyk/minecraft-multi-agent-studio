@@ -30,6 +30,7 @@
 //! replay window：只存 (sequence, fingerprint) 定长对（capacity × 16B 有界），
 //! 绝不保存 section payload——重复检测不需要内容本身。
 
+use crate::spatial_index::{SemanticRegistry, MAX_REGISTRY_STATES};
 use std::collections::VecDeque;
 
 pub use crate::world_mirror::{BlockClassMask, ChunkKey, CLASS_UNKNOWN_BIT};
@@ -56,6 +57,10 @@ pub struct BlockUpdateEntry {
 /// AIR/UNKNOWN/Empty。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SectionPayload {
+    StateDataV1 {
+        section_y: i32,
+        state_ids: Box<[u32]>,
+    },
     Data {
         section_y: i32,
         /// 长 4096 的 palette 索引（TS 提取器负责 stateId→class mask→去重索引）。
@@ -76,7 +81,8 @@ pub enum SectionPayload {
 impl SectionPayload {
     pub fn section_y(&self) -> i32 {
         match self {
-            SectionPayload::Data { section_y, .. }
+            SectionPayload::StateDataV1 { section_y, .. }
+            | SectionPayload::Data { section_y, .. }
             | SectionPayload::Empty { section_y, .. }
             | SectionPayload::NotPresent { section_y } => *section_y,
         }
@@ -88,6 +94,9 @@ impl SectionPayload {
 /// 不得要求其连续——连续性只作用于 transportSequence）。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum MirrorMessage {
+    SemanticRegistryV1 {
+        registry: SemanticRegistry,
+    },
     RegistryTable {
         revision: u64,
         /// stateId → class mask 全表（索引即 stateId；表外 stateId → UNKNOWN 位）。
@@ -187,6 +196,7 @@ pub enum AckStatus {
 /// 固定 reason code（结构化，不携带自由文本）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AckReason {
+    CapacityExceeded,
     ChunkNotLoaded,
     NoOpenImport,
     RegistryNotReady,
@@ -292,6 +302,18 @@ const PAYLOAD_NOT_PRESENT: u8 = 3;
 pub fn payload_fingerprint(message: &MirrorMessage) -> u64 {
     let mut h = Fnv1a64::new();
     match message {
+        MirrorMessage::SemanticRegistryV1 { registry } => {
+            h.write_u8(7);
+            h.write_u32(registry.scope.selector_revision);
+            h.write_str(&registry.scope.bot_session_id);
+            h.write_str(&registry.scope.server_profile_id);
+            h.write_str(&registry.scope.dimension);
+            h.write_str(&registry.scope.minecraft_version);
+            h.write_u64(registry.selectors.len() as u64);
+            for &selectors in &registry.selectors {
+                h.write_u32(selectors);
+            }
+        }
         MirrorMessage::RegistryTable {
             revision,
             masks,
@@ -317,6 +339,17 @@ pub fn payload_fingerprint(message: &MirrorMessage) -> u64 {
             h.write_i32(chunk.0);
             h.write_i32(chunk.1);
             match payload {
+                SectionPayload::StateDataV1 {
+                    section_y,
+                    state_ids,
+                } => {
+                    h.write_u8(4);
+                    h.write_i32(*section_y);
+                    h.write_u64(state_ids.len() as u64);
+                    for &state_id in state_ids.iter() {
+                        h.write_u32(state_id);
+                    }
+                }
                 SectionPayload::Data {
                     section_y,
                     palette_indices,
@@ -395,6 +428,8 @@ pub fn payload_fingerprint(message: &MirrorMessage) -> u64 {
 // ---------------------------------------------------------------------------
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum StructureError {
+    InvalidSemanticRegistry,
+    CapacityExceeded,
     /// transportSequence 从 1 开始；0 是非法信封。
     ZeroTransportSequence,
     InvalidSectionLength {
@@ -419,8 +454,29 @@ pub fn validate_envelope_structure(envelope: &MirrorEnvelope) -> Result<(), Stru
 
 pub fn validate_message_structure(message: &MirrorMessage) -> Result<(), StructureError> {
     match message {
+        MirrorMessage::SemanticRegistryV1 { registry } => {
+            if !registry.valid() {
+                Err(StructureError::InvalidSemanticRegistry)
+            } else {
+                Ok(())
+            }
+        }
+        MirrorMessage::SectionData {
+            payload: SectionPayload::StateDataV1 { state_ids, .. },
+            ..
+        } => {
+            if state_ids.len() != SECTION_CELLS {
+                Err(StructureError::InvalidSectionLength {
+                    len: state_ids.len(),
+                })
+            } else {
+                Ok(())
+            }
+        }
         MirrorMessage::RegistryTable { masks, .. } => {
-            if masks.is_empty() {
+            if masks.len() > MAX_REGISTRY_STATES {
+                Err(StructureError::CapacityExceeded)
+            } else if masks.is_empty() {
                 Err(StructureError::EmptyRegistryTable)
             } else {
                 Ok(())
@@ -439,6 +495,9 @@ pub fn validate_message_structure(message: &MirrorMessage) -> Result<(), Structu
                 return Err(StructureError::InvalidSectionLength {
                     len: palette_indices.len(),
                 });
+            }
+            if palette_entries.len() > SECTION_CELLS {
+                return Err(StructureError::CapacityExceeded);
             }
             if palette_entries.is_empty() {
                 return Err(StructureError::PaletteEntriesEmpty);

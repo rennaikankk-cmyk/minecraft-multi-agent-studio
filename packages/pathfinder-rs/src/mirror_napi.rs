@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
+use crate::spatial_index::{SemanticRegistry, SemanticScope, MAX_REGISTRY_STATES};
 use crate::world_mirror::{MirrorHealth, MirrorSession};
 use crate::world_mirror_protocol::{
     AckReason, AckStatus, BlockUpdateEntry, MirrorControl, MirrorEnvelope, MirrorMessage,
@@ -32,7 +33,7 @@ thread_local! {
 
 static NEXT_HANDLE: AtomicU32 = AtomicU32::new(1);
 
-fn with_session<T>(handle: u32, f: impl FnOnce(&mut MirrorSession) -> T) -> Result<T> {
+pub(crate) fn with_session<T>(handle: u32, f: impl FnOnce(&mut MirrorSession) -> T) -> Result<T> {
     SESSIONS
         .try_with(|sessions| {
             sessions.try_borrow_mut().map(|mut map| {
@@ -106,6 +107,11 @@ pub struct MirrorMessageJs {
     pub masks: Option<Buffer>,
     pub minecraft_version: Option<String>,
     pub server_profile_id: Option<String>,
+    pub bot_session_id: Option<String>,
+    pub dimension: Option<String>,
+    pub selector_revision: Option<u32>,
+    pub selectors: Option<Buffer>,
+    pub state_ids: Option<Buffer>,
     /// sectionData："data"|"empty"|"notPresent"。
     pub payload_kind: Option<String>,
     pub section_y: Option<i32>,
@@ -162,6 +168,7 @@ fn status_string(status: AckStatus) -> String {
 
 fn reason_string(reason: AckReason) -> String {
     match reason {
+        AckReason::CapacityExceeded => "capacityExceeded",
         AckReason::ChunkNotLoaded => "chunkNotLoaded",
         AckReason::NoOpenImport => "noOpenImport",
         AckReason::RegistryNotReady => "registryNotReady",
@@ -230,10 +237,53 @@ fn parse_message(js: MirrorMessageJs) -> ParsedMessage {
         _ => None,
     };
     match js.kind.as_str() {
+        "semanticRegistryV1" => {
+            let (
+                Some(selector_revision),
+                Some(bot_session_id),
+                Some(server_profile_id),
+                Some(dimension),
+                Some(minecraft_version),
+                Some(bytes),
+            ) = (
+                js.selector_revision,
+                js.bot_session_id,
+                js.server_profile_id,
+                js.dimension,
+                js.minecraft_version,
+                js.selectors,
+            )
+            else {
+                return ParsedMessage::Malformed;
+            };
+            if bytes.len() > MAX_REGISTRY_STATES * 4 {
+                return ParsedMessage::Malformed;
+            }
+            let Ok(selectors) = decode_u32_le(&bytes) else {
+                return ParsedMessage::Malformed;
+            };
+            let registry = SemanticRegistry {
+                scope: SemanticScope {
+                    selector_revision,
+                    bot_session_id,
+                    server_profile_id,
+                    dimension,
+                    minecraft_version,
+                },
+                selectors,
+            };
+            if !registry.valid() {
+                return ParsedMessage::Malformed;
+            }
+            ParsedMessage::Data(MirrorMessage::SemanticRegistryV1 { registry })
+        }
         "registryTable" => {
             let (Some(revision), Some(masks)) = (js.revision, js.masks) else {
                 return ParsedMessage::Malformed;
             };
+            if masks.len() > MAX_REGISTRY_STATES * 4 {
+                return ParsedMessage::Malformed;
+            }
             let masks = match decode_u32_le(&masks) {
                 Ok(masks) if !masks.is_empty() => masks,
                 _ => return ParsedMessage::Malformed,
@@ -265,6 +315,21 @@ fn parse_message(js: MirrorMessageJs) -> ParsedMessage {
                 return ParsedMessage::Malformed;
             };
             let payload = match js.payload_kind.as_deref() {
+                Some("stateDataV1") => {
+                    let Some(bytes) = js.state_ids else {
+                        return ParsedMessage::Malformed;
+                    };
+                    if bytes.len() != SECTION_CELLS * 4 {
+                        return ParsedMessage::Malformed;
+                    }
+                    let Ok(states) = decode_u32_le(&bytes) else {
+                        return ParsedMessage::Malformed;
+                    };
+                    SectionPayload::StateDataV1 {
+                        section_y,
+                        state_ids: states.into_boxed_slice(),
+                    }
+                }
                 Some("data") => {
                     let (Some(indices), Some(entries)) = (js.palette_indices, js.palette_entries)
                     else {
