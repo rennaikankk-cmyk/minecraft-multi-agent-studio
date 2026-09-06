@@ -1,5 +1,7 @@
 # INTEGRATION_HANDOFF —— 交给 Codex（D3 集成审查后接线）
 
+2026-09-06 统一接管终局更新：Rust CI、五项补修、D3 和默认关闭的只读观察入口已分阶段合入。本文后续内容保留为历史设计交接；当前范围、实测、并发与未完成门见 [TAKEOVER_RESULTS_2026-09-06.md](TAKEOVER_RESULTS_2026-09-06.md)。自动下发仍关闭。
+
 GLM 原交接基线为 `75cab90`，原交付分支已推至 `bca26e1`。五项缺口由 Codex 在独立集成分支补修；生产接线仍须通过 D3 依赖门。当前证据见 [TAKEOVER_VALIDATION.md](TAKEOVER_VALIDATION.md)。
 
 ## 1. 输入/输出接口与来源

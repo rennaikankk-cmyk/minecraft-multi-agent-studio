@@ -13,13 +13,12 @@ export type LocalAIConfig = Readonly<{
 export type LocalAIProvider = "ollama" | "vllm";
 
 /**
- * P0-5：保守并发默认。12 从未有 capacity 证据；唯一实测安全值是 2
- * （Round 6 真实 6 路流测试在 maxConcurrency=2 下 3 bot 公平受服）。
- * 更高值必须显式配置 AI_MAX_CONCURRENCY 或经 benchmark-spark-capacity
- * 实测后写入 capacity profile。
+ * 保守默认不是运行值或混合业务 SLO。当前模型的 1/2/3/4 短测与聊天期限
+ * 失败见 docs/spark-strategy-v1/TAKEOVER_RESULTS_2026-09-06.md。
+ * 实际值仍由 AI_MAX_CONCURRENCY 和启动装配决定，不能从 Bot 数推导。
  */
 export const DEFAULT_MAX_CONCURRENCY = 2;
-export const CONSERVATIVE_DEFAULT_NOTE = "conservative-default: only concurrency=2 is measured-safe (Round 6 six-stream test); set AI_MAX_CONCURRENCY explicitly or benchmark first";
+export const CONSERVATIVE_DEFAULT_NOTE = "conservative-default: concurrency=2; actual configuration and shared-load latency require separate verification";
 
 export type LocalAIConfigErrorCode =
   | "LOCAL_AI_CONFIG_INCOMPLETE"

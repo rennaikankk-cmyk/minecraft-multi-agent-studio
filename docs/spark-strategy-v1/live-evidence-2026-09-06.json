@@ -1,0 +1,955 @@
+{
+  "generatedAt": "2026-09-06T09:58:24.806Z",
+  "rows": [
+    {
+      "id": "1788687153513-serial-1-b114a2a8",
+      "mode": "serial",
+      "level": 1,
+      "botCount": null,
+      "attempts": 1,
+      "completedResponses": 1,
+      "parsed": 1,
+      "accepted": 0,
+      "behaviorMatched": 0,
+      "wrongAccepted": 0,
+      "incorrectWait": 0,
+      "parseFailed": 0,
+      "lengthFinish": 0,
+      "errors": {},
+      "p50Ms": 21276,
+      "p95Ms": 21276,
+      "p99Ms": 21276,
+      "durationMs": 21341,
+      "completedPerMinute": 2.8114896209174827,
+      "promptTokens": 1615,
+      "completionTokens": 636,
+      "maxQueueMs": 1,
+      "maxServerRunning": 1,
+      "maxServerWaiting": 0,
+      "maxKvFraction": 0.05976095617529875,
+      "preemptionDelta": 0,
+      "servicePromptDelta": 1615,
+      "serviceCompletionDelta": 636,
+      "negativeControls": [
+        {
+          "name": "active-conflict",
+          "verdict": "rejected",
+          "reasonCodes": [
+            "CONFLICTS_ACTIVE_TASK"
+          ],
+          "wrongAccepted": false
+        },
+        {
+          "name": "unknown-task",
+          "verdict": "needs-reobservation",
+          "reasonCodes": [
+            "TASK_STATE_UNKNOWN"
+          ],
+          "wrongAccepted": false
+        },
+        {
+          "name": "stale-facts",
+          "verdict": "rejected",
+          "reasonCodes": [
+            "FACTS_TOO_OLD",
+            "PROPOSAL_TTL_EXCEEDED"
+          ],
+          "wrongAccepted": false
+        },
+        {
+          "name": "resource-conflict",
+          "verdict": "rejected",
+          "reasonCodes": [
+            "RESOURCE_CONFLICTS_RESERVATION",
+            "FACILITY_BUSY"
+          ],
+          "wrongAccepted": false
+        }
+      ],
+      "stopReasons": []
+    },
+    {
+      "id": "1788687283499-serial-1-d2b005c0",
+      "mode": "serial",
+      "level": 1,
+      "botCount": null,
+      "attempts": 1,
+      "completedResponses": 1,
+      "parsed": 1,
+      "accepted": 1,
+      "behaviorMatched": 1,
+      "wrongAccepted": 0,
+      "incorrectWait": 0,
+      "parseFailed": 0,
+      "lengthFinish": 0,
+      "errors": {},
+      "p50Ms": 10922,
+      "p95Ms": 10922,
+      "p99Ms": 10922,
+      "durationMs": 10995,
+      "completedPerMinute": 5.457025920873124,
+      "promptTokens": 2185,
+      "completionTokens": 345,
+      "maxQueueMs": 0,
+      "maxServerRunning": 1,
+      "maxServerWaiting": 0,
+      "maxKvFraction": 0.05976095617529875,
+      "preemptionDelta": 0,
+      "servicePromptDelta": 2185,
+      "serviceCompletionDelta": 345,
+      "negativeControls": [
+        {
+          "name": "active-conflict",
+          "verdict": "rejected",
+          "reasonCodes": [
+            "CONFLICTS_ACTIVE_TASK"
+          ],
+          "wrongAccepted": false
+        },
+        {
+          "name": "unknown-task",
+          "verdict": "needs-reobservation",
+          "reasonCodes": [
+            "TASK_STATE_UNKNOWN"
+          ],
+          "wrongAccepted": false
+        },
+        {
+          "name": "stale-facts",
+          "verdict": "rejected",
+          "reasonCodes": [
+            "FACTS_TOO_OLD",
+            "PROPOSAL_TTL_EXCEEDED"
+          ],
+          "wrongAccepted": false
+        },
+        {
+          "name": "resource-conflict",
+          "verdict": "rejected",
+          "reasonCodes": [
+            "RESOURCE_CONFLICTS_RESERVATION",
+            "FACILITY_BUSY"
+          ],
+          "wrongAccepted": false
+        }
+      ],
+      "stopReasons": []
+    },
+    {
+      "id": "1788687343180-capacity-1-9b6f50bc",
+      "mode": "capacity",
+      "level": 1,
+      "botCount": null,
+      "attempts": 8,
+      "completedResponses": 8,
+      "parsed": 8,
+      "accepted": 7,
+      "behaviorMatched": 8,
+      "wrongAccepted": 0,
+      "incorrectWait": 0,
+      "parseFailed": 0,
+      "lengthFinish": 0,
+      "errors": {},
+      "p50Ms": 14808,
+      "p95Ms": 21052,
+      "p99Ms": 21052,
+      "durationMs": 114325,
+      "completedPerMinute": 4.198556746118522,
+      "promptTokens": 17939,
+      "completionTokens": 3472,
+      "maxQueueMs": 1,
+      "maxServerRunning": 1,
+      "maxServerWaiting": 0,
+      "maxKvFraction": 0.05976095617529875,
+      "preemptionDelta": 0,
+      "servicePromptDelta": 17939,
+      "serviceCompletionDelta": 3472,
+      "negativeControls": [
+        {
+          "name": "active-conflict",
+          "verdict": "rejected",
+          "reasonCodes": [
+            "CONFLICTS_ACTIVE_TASK"
+          ],
+          "wrongAccepted": false
+        },
+        {
+          "name": "unknown-task",
+          "verdict": "needs-reobservation",
+          "reasonCodes": [
+            "TASK_STATE_UNKNOWN"
+          ],
+          "wrongAccepted": false
+        },
+        {
+          "name": "stale-facts",
+          "verdict": "rejected",
+          "reasonCodes": [
+            "FACTS_TOO_OLD",
+            "PROPOSAL_TTL_EXCEEDED"
+          ],
+          "wrongAccepted": false
+        },
+        {
+          "name": "resource-conflict",
+          "verdict": "rejected",
+          "reasonCodes": [
+            "RESOURCE_CONFLICTS_RESERVATION",
+            "FACILITY_BUSY"
+          ],
+          "wrongAccepted": false
+        }
+      ],
+      "stopReasons": []
+    },
+    {
+      "id": "1788687482638-capacity-2-49cc2fa4",
+      "mode": "capacity",
+      "level": 2,
+      "botCount": null,
+      "attempts": 8,
+      "completedResponses": 8,
+      "parsed": 8,
+      "accepted": 7,
+      "behaviorMatched": 8,
+      "wrongAccepted": 0,
+      "incorrectWait": 0,
+      "parseFailed": 0,
+      "lengthFinish": 0,
+      "errors": {},
+      "p50Ms": 16139,
+      "p95Ms": 21327,
+      "p99Ms": 21327,
+      "durationMs": 71015,
+      "completedPerMinute": 6.75913539393086,
+      "promptTokens": 17937,
+      "completionTokens": 3497,
+      "maxQueueMs": 0,
+      "maxServerRunning": 2,
+      "maxServerWaiting": 1,
+      "maxKvFraction": 0.11952191235059761,
+      "preemptionDelta": 0,
+      "servicePromptDelta": 17937,
+      "serviceCompletionDelta": 3497,
+      "negativeControls": [
+        {
+          "name": "active-conflict",
+          "verdict": "rejected",
+          "reasonCodes": [
+            "CONFLICTS_ACTIVE_TASK"
+          ],
+          "wrongAccepted": false
+        },
+        {
+          "name": "unknown-task",
+          "verdict": "needs-reobservation",
+          "reasonCodes": [
+            "TASK_STATE_UNKNOWN"
+          ],
+          "wrongAccepted": false
+        },
+        {
+          "name": "stale-facts",
+          "verdict": "rejected",
+          "reasonCodes": [
+            "FACTS_TOO_OLD",
+            "PROPOSAL_TTL_EXCEEDED"
+          ],
+          "wrongAccepted": false
+        },
+        {
+          "name": "resource-conflict",
+          "verdict": "rejected",
+          "reasonCodes": [
+            "RESOURCE_CONFLICTS_RESERVATION",
+            "FACILITY_BUSY"
+          ],
+          "wrongAccepted": false
+        }
+      ],
+      "stopReasons": []
+    },
+    {
+      "id": "1788687609572-capacity-3-96fe76bd",
+      "mode": "capacity",
+      "level": 3,
+      "botCount": null,
+      "attempts": 8,
+      "completedResponses": 8,
+      "parsed": 8,
+      "accepted": 7,
+      "behaviorMatched": 8,
+      "wrongAccepted": 0,
+      "incorrectWait": 0,
+      "parseFailed": 0,
+      "lengthFinish": 0,
+      "errors": {},
+      "p50Ms": 19902,
+      "p95Ms": 24022,
+      "p99Ms": 24022,
+      "durationMs": 67774,
+      "completedPerMinute": 7.082361967716233,
+      "promptTokens": 17939,
+      "completionTokens": 3663,
+      "maxQueueMs": 0,
+      "maxServerRunning": 3,
+      "maxServerWaiting": 1,
+      "maxKvFraction": 0.17928286852589637,
+      "preemptionDelta": 0,
+      "servicePromptDelta": 17939,
+      "serviceCompletionDelta": 3663,
+      "negativeControls": [
+        {
+          "name": "active-conflict",
+          "verdict": "rejected",
+          "reasonCodes": [
+            "CONFLICTS_ACTIVE_TASK"
+          ],
+          "wrongAccepted": false
+        },
+        {
+          "name": "unknown-task",
+          "verdict": "needs-reobservation",
+          "reasonCodes": [
+            "TASK_STATE_UNKNOWN"
+          ],
+          "wrongAccepted": false
+        },
+        {
+          "name": "stale-facts",
+          "verdict": "rejected",
+          "reasonCodes": [
+            "FACTS_TOO_OLD",
+            "PROPOSAL_TTL_EXCEEDED"
+          ],
+          "wrongAccepted": false
+        },
+        {
+          "name": "resource-conflict",
+          "verdict": "rejected",
+          "reasonCodes": [
+            "RESOURCE_CONFLICTS_RESERVATION",
+            "FACILITY_BUSY"
+          ],
+          "wrongAccepted": false
+        }
+      ],
+      "stopReasons": []
+    },
+    {
+      "id": "1788687698185-capacity-4-22349794",
+      "mode": "capacity",
+      "level": 4,
+      "botCount": null,
+      "attempts": 8,
+      "completedResponses": 8,
+      "parsed": 8,
+      "accepted": 7,
+      "behaviorMatched": 8,
+      "wrongAccepted": 0,
+      "incorrectWait": 0,
+      "parseFailed": 0,
+      "lengthFinish": 0,
+      "errors": {},
+      "p50Ms": 23015,
+      "p95Ms": 26351,
+      "p99Ms": 26351,
+      "durationMs": 49634,
+      "completedPerMinute": 9.670790184147963,
+      "promptTokens": 17937,
+      "completionTokens": 3345,
+      "maxQueueMs": 1,
+      "maxServerRunning": 4,
+      "maxServerWaiting": 3,
+      "maxKvFraction": 0.23904382470119523,
+      "preemptionDelta": 0,
+      "servicePromptDelta": 17937,
+      "serviceCompletionDelta": 3345,
+      "negativeControls": [
+        {
+          "name": "active-conflict",
+          "verdict": "rejected",
+          "reasonCodes": [
+            "CONFLICTS_ACTIVE_TASK"
+          ],
+          "wrongAccepted": false
+        },
+        {
+          "name": "unknown-task",
+          "verdict": "needs-reobservation",
+          "reasonCodes": [
+            "TASK_STATE_UNKNOWN"
+          ],
+          "wrongAccepted": false
+        },
+        {
+          "name": "stale-facts",
+          "verdict": "rejected",
+          "reasonCodes": [
+            "FACTS_TOO_OLD",
+            "PROPOSAL_TTL_EXCEEDED"
+          ],
+          "wrongAccepted": false
+        },
+        {
+          "name": "resource-conflict",
+          "verdict": "rejected",
+          "reasonCodes": [
+            "RESOURCE_CONFLICTS_RESERVATION",
+            "FACILITY_BUSY"
+          ],
+          "wrongAccepted": false
+        }
+      ],
+      "stopReasons": []
+    },
+    {
+      "id": "1788687783397-mixed-3-fd417c47",
+      "mode": "mixed",
+      "level": 3,
+      "botCount": 5,
+      "attempts": 9,
+      "completedResponses": 1,
+      "parsed": 1,
+      "accepted": 1,
+      "behaviorMatched": 1,
+      "wrongAccepted": 0,
+      "incorrectWait": 0,
+      "parseFailed": 0,
+      "lengthFinish": 0,
+      "errors": {
+        "AI_REQUEST_TIMEOUT": 3,
+        "AI_SCHEDULER_CLOSED": 5
+      },
+      "p50Ms": 11104,
+      "p95Ms": 11104,
+      "p99Ms": 11104,
+      "durationMs": 16080,
+      "completedPerMinute": 3.7313432835820897,
+      "promptTokens": 2187,
+      "completionTokens": 206,
+      "maxQueueMs": 0,
+      "maxServerRunning": 3,
+      "maxServerWaiting": 1,
+      "maxKvFraction": 0.17928286852589637,
+      "preemptionDelta": 0,
+      "servicePromptDelta": 8866,
+      "serviceCompletionDelta": 921,
+      "negativeControls": [
+        {
+          "name": "active-conflict",
+          "verdict": "rejected",
+          "reasonCodes": [
+            "CONFLICTS_ACTIVE_TASK"
+          ],
+          "wrongAccepted": false
+        },
+        {
+          "name": "unknown-task",
+          "verdict": "needs-reobservation",
+          "reasonCodes": [
+            "TASK_STATE_UNKNOWN"
+          ],
+          "wrongAccepted": false
+        },
+        {
+          "name": "stale-facts",
+          "verdict": "rejected",
+          "reasonCodes": [
+            "FACTS_TOO_OLD",
+            "PROPOSAL_TTL_EXCEEDED"
+          ],
+          "wrongAccepted": false
+        },
+        {
+          "name": "resource-conflict",
+          "verdict": "rejected",
+          "reasonCodes": [
+            "RESOURCE_CONFLICTS_RESERVATION",
+            "FACILITY_BUSY"
+          ],
+          "wrongAccepted": false
+        }
+      ],
+      "stopReasons": [
+        "CHAT_ERROR",
+        "REQUEST_ERROR"
+      ]
+    }
+  ],
+  "isolated": [
+    {
+      "id": "observer-1788688009806-c6dafd58",
+      "success": true,
+      "cleanup": true,
+      "defaultOff": {
+        "reads": 0,
+        "requests": 0
+      },
+      "telemetryCounts": {
+        "bot.heartbeat.v1": 6,
+        "bot.version.v1": 1,
+        "bot.skill-catalog.v1": 1,
+        "bot.status.v1": 24,
+        "bot.world-state.v1": 24,
+        "bot.disconnected.v1": 1
+      },
+      "assignmentEvents": [],
+      "retainedLeases": 0,
+      "taskAfter": "idle",
+      "inventoryAfter": [
+        {
+          "itemName": "bread",
+          "count": 1
+        }
+      ],
+      "skillEvents": [],
+      "logs": [
+        {
+          "mode": "read-only",
+          "automaticDispatch": false,
+          "factVersion": "74a42c488af68d87",
+          "scopeRef": "scope-665ac9e87151",
+          "requestId": "team-observer-b8d1f9b2-4702-44db-85ee-f8e5d070c43c",
+          "accounting": {
+            "requestId": "team-observer-b8d1f9b2-4702-44db-85ee-f8e5d070c43c",
+            "outcome": "valid-proposal",
+            "clientLatencyMs": 15242,
+            "finishReason": "stop",
+            "usage": {
+              "promptTokens": 2108,
+              "completionTokens": 489
+            },
+            "schedulerTimings": {
+              "queueTimeMs": 1,
+              "executionTimeMs": 15241,
+              "totalTimeMs": 15242,
+              "attempts": 1
+            }
+          },
+          "verdict": "acceptable",
+          "reasonCodes": [],
+          "validUntilMs": 1788688205715,
+          "suggestions": [
+            {
+              "botRef": "bot-802b3807d0c0",
+              "kind": "skill",
+              "skillId": "food.secure",
+              "params": {
+                "targetCount": 16
+              },
+              "resources": [],
+              "maxAttempts": 3,
+              "onFailure": "wait"
+            }
+          ],
+          "summaryChars": 1062,
+          "tokenEstimate": {
+            "value": 266,
+            "method": "estimated-chars-div-4"
+          },
+          "ttftMs": "unavailable",
+          "firstStructuredDecisionMs": "unavailable"
+        }
+      ]
+    }
+  ],
+  "totals": {
+    "submitted": 44,
+    "fullResponses": 36,
+    "promptTokensReported": 79847,
+    "completionTokensReported": 15653
+  },
+  "offlineFairness": [
+    {
+      "mode": "OFFLINE_REPLAY",
+      "bots": 10,
+      "arrival": "burst",
+      "maxConcurrency": 3,
+      "maxRunning": 3,
+      "maxPerBot": 1,
+      "assumptions": {
+        "planningMs": 20000,
+        "planningSource": "rounded measured concurrency-3 median 19902ms",
+        "chatMs": 4000,
+        "chatSource": "ASSUMED, not measured; live chat timed out",
+        "sparseBotIntervalMs": 30000,
+        "sparseChatAfterPlanMs": 21000
+      },
+      "rows": [
+        {
+          "botId": "bot-0",
+          "kind": "chat",
+          "outcome": "AI_REQUEST_TIMEOUT",
+          "totalMs": 15000
+        },
+        {
+          "botId": "bot-1",
+          "kind": "chat",
+          "outcome": "AI_REQUEST_TIMEOUT",
+          "totalMs": 15000
+        },
+        {
+          "botId": "bot-2",
+          "kind": "chat",
+          "outcome": "AI_REQUEST_TIMEOUT",
+          "totalMs": 15000
+        },
+        {
+          "botId": "bot-0",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 20000
+        },
+        {
+          "botId": "bot-1",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 20000
+        },
+        {
+          "botId": "bot-2",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 20000
+        },
+        {
+          "botId": "bot-3",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 20000,
+          "totalMs": 40000
+        },
+        {
+          "botId": "bot-4",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 20000,
+          "totalMs": 40000
+        },
+        {
+          "botId": "bot-5",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 20000,
+          "totalMs": 40000
+        },
+        {
+          "botId": "bot-6",
+          "kind": "planning",
+          "outcome": "AI_REQUEST_TIMEOUT",
+          "totalMs": 45000
+        },
+        {
+          "botId": "bot-7",
+          "kind": "planning",
+          "outcome": "AI_REQUEST_TIMEOUT",
+          "totalMs": 45000
+        },
+        {
+          "botId": "bot-8",
+          "kind": "planning",
+          "outcome": "AI_REQUEST_TIMEOUT",
+          "totalMs": 45000
+        },
+        {
+          "botId": "bot-9",
+          "kind": "planning",
+          "outcome": "AI_REQUEST_TIMEOUT",
+          "totalMs": 45000
+        },
+        {
+          "botId": "team-observer",
+          "kind": "background",
+          "outcome": "completed",
+          "queueMs": 44800,
+          "totalMs": 64800
+        }
+      ]
+    },
+    {
+      "mode": "OFFLINE_REPLAY",
+      "bots": 10,
+      "arrival": "sparse",
+      "maxConcurrency": 3,
+      "maxRunning": 2,
+      "maxPerBot": 1,
+      "assumptions": {
+        "planningMs": 20000,
+        "planningSource": "rounded measured concurrency-3 median 19902ms",
+        "chatMs": 4000,
+        "chatSource": "ASSUMED, not measured; live chat timed out",
+        "sparseBotIntervalMs": 30000,
+        "sparseChatAfterPlanMs": 21000
+      },
+      "rows": [
+        {
+          "botId": "bot-0",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 20000
+        },
+        {
+          "botId": "team-observer",
+          "kind": "background",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 20000
+        },
+        {
+          "botId": "bot-0",
+          "kind": "chat",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 4000
+        },
+        {
+          "botId": "bot-1",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 20000
+        },
+        {
+          "botId": "bot-1",
+          "kind": "chat",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 4000
+        },
+        {
+          "botId": "bot-2",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 20000
+        },
+        {
+          "botId": "bot-2",
+          "kind": "chat",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 4000
+        },
+        {
+          "botId": "bot-3",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 20000
+        },
+        {
+          "botId": "bot-4",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 20000
+        },
+        {
+          "botId": "bot-5",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 20000
+        },
+        {
+          "botId": "bot-6",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 20000
+        },
+        {
+          "botId": "bot-7",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 20000
+        },
+        {
+          "botId": "bot-8",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 20000
+        },
+        {
+          "botId": "bot-9",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 20000
+        }
+      ]
+    },
+    {
+      "mode": "OFFLINE_REPLAY",
+      "bots": 5,
+      "arrival": "burst",
+      "maxConcurrency": 3,
+      "maxRunning": 3,
+      "maxPerBot": 1,
+      "assumptions": {
+        "planningMs": 20000,
+        "planningSource": "rounded measured concurrency-3 median 19902ms",
+        "chatMs": 4000,
+        "chatSource": "ASSUMED, not measured; live chat timed out",
+        "sparseBotIntervalMs": 30000,
+        "sparseChatAfterPlanMs": 21000
+      },
+      "rows": [
+        {
+          "botId": "bot-0",
+          "kind": "chat",
+          "outcome": "AI_REQUEST_TIMEOUT",
+          "totalMs": 15000
+        },
+        {
+          "botId": "bot-1",
+          "kind": "chat",
+          "outcome": "AI_REQUEST_TIMEOUT",
+          "totalMs": 15000
+        },
+        {
+          "botId": "bot-2",
+          "kind": "chat",
+          "outcome": "AI_REQUEST_TIMEOUT",
+          "totalMs": 15000
+        },
+        {
+          "botId": "bot-0",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 20000
+        },
+        {
+          "botId": "bot-1",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 20000
+        },
+        {
+          "botId": "bot-2",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 20000
+        },
+        {
+          "botId": "bot-3",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 20000,
+          "totalMs": 40000
+        },
+        {
+          "botId": "bot-4",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 20000,
+          "totalMs": 40000
+        },
+        {
+          "botId": "team-observer",
+          "kind": "background",
+          "outcome": "completed",
+          "queueMs": 19800,
+          "totalMs": 39800
+        }
+      ]
+    },
+    {
+      "mode": "OFFLINE_REPLAY",
+      "bots": 5,
+      "arrival": "sparse",
+      "maxConcurrency": 3,
+      "maxRunning": 2,
+      "maxPerBot": 1,
+      "assumptions": {
+        "planningMs": 20000,
+        "planningSource": "rounded measured concurrency-3 median 19902ms",
+        "chatMs": 4000,
+        "chatSource": "ASSUMED, not measured; live chat timed out",
+        "sparseBotIntervalMs": 30000,
+        "sparseChatAfterPlanMs": 21000
+      },
+      "rows": [
+        {
+          "botId": "bot-0",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 20000
+        },
+        {
+          "botId": "team-observer",
+          "kind": "background",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 20000
+        },
+        {
+          "botId": "bot-0",
+          "kind": "chat",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 4000
+        },
+        {
+          "botId": "bot-1",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 20000
+        },
+        {
+          "botId": "bot-1",
+          "kind": "chat",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 4000
+        },
+        {
+          "botId": "bot-2",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 20000
+        },
+        {
+          "botId": "bot-2",
+          "kind": "chat",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 4000
+        },
+        {
+          "botId": "bot-3",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 20000
+        },
+        {
+          "botId": "bot-4",
+          "kind": "planning",
+          "outcome": "completed",
+          "queueMs": 0,
+          "totalMs": 20000
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "Aborted live requests do not expose per-request usage. Service counters include all callers and asynchronous metric updates.",
+    "Throughput counts complete responses, not cancellation settlements. Failed mixed-run historical summary counted settlements; this corrected aggregation preserves that original artifact.",
+    "Behavior match scores primary action/wait decisions, not free-text preconditions or proof that a Minecraft action succeeded.",
+    "Capacity inputs are synthetic; only the isolated observation uses a real Minecraft Bot. TTFT and first structured decision time unavailable."
+  ]
+}

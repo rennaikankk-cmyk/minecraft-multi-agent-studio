@@ -1,5 +1,7 @@
 # Spark 策略增强一期：工作边界与现有接线审计
 
+当前接管结果、分阶段合并 SHA、实际模型/并发和剩余门见 [TAKEOVER_RESULTS_2026-09-06.md](TAKEOVER_RESULTS_2026-09-06.md)。下文仓库和分支状态只对应 GLM 历史时点。
+
 日期：2026-09-06。执行：GLM-5.3-Flash（开发模型；运行时推理仍调用 Spark 现有模型，不做替换）。
 原 GLM 离线交付记录。2026-09-06 用户已授权 Codex 统一接管后续补修、D3、观察集成和 live 评测；下列冻结清单只描述 GLM 当时的范围，不再限制后续必要修改。当前验证见 [TAKEOVER_VALIDATION.md](TAKEOVER_VALIDATION.md)。
 
