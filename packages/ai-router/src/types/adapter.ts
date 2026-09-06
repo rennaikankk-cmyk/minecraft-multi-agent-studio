@@ -27,6 +27,7 @@ export interface GenerateOptions {
 
 export interface GenerateResult {
   content: string;
+  finishReason?: string | null;
   usage: {
     promptTokens: number;
     completionTokens: number;

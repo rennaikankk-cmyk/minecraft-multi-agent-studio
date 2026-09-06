@@ -5,11 +5,11 @@
 // 模块导入零副作用——只有显式调用 askTeamProposal 才产生请求。
 //
 // 分账口径（§6/§7）：客户端观测=入队前计时到完整响应；finishReason 与
-// 服务端排队指标在生产适配器拿不到（GenerateResult 只有 content+usage）
-// ——如实标 unknown/unavailable，不推导、不用总耗时冒充 TTFT。
+// vLLM finish_reason 可透传；服务端排队与 TTFT 仍不可从非流式总耗时推导。
 
 import {
   aiRequestPriorities,
+  AISchedulerError,
   type ScheduledAIRouter,
   type ScheduledGenerateOptions,
 } from "@minecraft-studio/ai-router";
@@ -38,8 +38,7 @@ export type ModelRequest = {
 export type ModelResponse = {
   text: string;
   /**
-   * 完成原因。ScheduledAIRouter 适配器只能给 "unknown"（GenerateResult
-   * 无此字段）——截断判定交由解析器（括号不平衡=truncated-json）。
+   * 完成原因。未提供该字段的适配器仍返回 unknown。
    */
   finishReason: "stop" | "length" | "aborted" | "error" | "unknown";
   /** 客户端观测耗时（ms）；口径=client-observed-total。 */
@@ -61,6 +60,7 @@ export type ModelResponse = {
 export type ProposalRequestAccounting = {
   requestId: string;
   outcome: "valid-proposal" | "parse-failed" | "request-failed" | "cancelled";
+  errorCode?: string;
   parseReason?: Extract<ParseOutcome, { ok: false }>["reason"];
   clientLatencyMs: number | null;
   finishReason: ModelResponse["finishReason"] | null;
@@ -86,17 +86,29 @@ export async function askTeamProposal(options: {
   try {
     response = await options.client.complete(options.request);
   } catch (error) {
-    const aborted = error instanceof Error && error.name === "AbortError";
+    const code = error instanceof AISchedulerError ? error.code : undefined;
+    const aborted = (error instanceof Error && error.name === "AbortError") ||
+      code === "AI_REQUEST_CANCELLED" || code === "AI_REQUEST_SUPERSEDED";
     return {
       accounting: {
         requestId: options.request.requestId,
         outcome: aborted ? "cancelled" : "request-failed",
+        ...(code ? { errorCode: code } : {}),
         clientLatencyMs: Date.now() - began,
         finishReason: aborted ? "aborted" : "error",
         detail: error instanceof Error ? error.message : String(error),
       },
       proposal: null,
     };
+  }
+  if (response.finishReason === "length" || response.finishReason === "aborted" || response.finishReason === "error") {
+    return { proposal: null, accounting: {
+      requestId: options.request.requestId,
+      outcome: response.finishReason === "length" ? "parse-failed" : response.finishReason === "aborted" ? "cancelled" : "request-failed",
+      ...(response.finishReason === "length" ? { parseReason: "truncated-json" as const } : {}),
+      finishReason: response.finishReason, clientLatencyMs: response.clientLatencyMs,
+      usage: response.usage, schedulerTimings: response.schedulerTimings,
+    } };
   }
   const parse = (options.parse ?? parseProposalResponse)(response.text);
   if (parse.ok) {
@@ -159,7 +171,8 @@ export function scheduledRouterModelClient(
       const result = await router.generate(scheduledOptions);
       return {
         text: result.value.content,
-        finishReason: "unknown",
+        finishReason: result.value.finishReason === "stop" || result.value.finishReason === "length"
+          ? result.value.finishReason : "unknown",
         clientLatencyMs: Date.now() - began,
         usage: {
           promptTokens: result.value.usage.promptTokens,

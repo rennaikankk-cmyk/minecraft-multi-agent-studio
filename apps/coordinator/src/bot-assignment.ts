@@ -333,6 +333,11 @@ export class BotAssignmentService {
       .map(cloneLease);
   }
 
+  /** Observe retained leases without expiry, reconciliation, or release side effects. */
+  inspect(): readonly BotAssignmentLease[] {
+    return [...this.leasesById.values()].map(cloneLease);
+  }
+
   reconcile(at = this.now()): BotAssignmentReconcileResult {
     const now = validDate(at);
     const expiredLeaseIds: string[] = [];

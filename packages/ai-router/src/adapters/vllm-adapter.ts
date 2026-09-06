@@ -18,6 +18,7 @@ const chatCompletionResponseSchema = z
         z
           .object({
             message: z.object({ content: z.string() }).loose(),
+            finish_reason: z.string().nullable().optional(),
           })
           .loose(),
       )
@@ -155,6 +156,7 @@ export class VLLMAdapter implements AIAdapter {
       if (!choice) throw new Error('vLLM response did not contain a completion choice.');
       return {
         content: choice.message.content,
+        ...(choice.finish_reason !== undefined ? { finishReason: choice.finish_reason } : {}),
         usage: {
           promptTokens: data.usage.prompt_tokens,
           completionTokens: data.usage.completion_tokens

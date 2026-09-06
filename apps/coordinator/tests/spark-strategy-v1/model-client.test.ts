@@ -26,6 +26,18 @@ const goodProposal: TeamProposal = {
 };
 
 describe("askTeamProposal 分账", () => {
+  it("valid JSON with a server length finish is not a usable proposal", async () => {
+    const result = await askTeamProposal({ client: { complete: async () => ({ text: JSON.stringify(goodProposal), finishReason: "length", clientLatencyMs: 5 }) },
+      request: { system: "s", prompt: "p", requestId: "length-json", botId: "B01" } });
+    expect(result.proposal).toBeNull();
+    expect(result.accounting).toMatchObject({ outcome: "parse-failed", finishReason: "length" });
+  });
+  it("scheduler timeout is distinct from caller cancellation", async () => {
+    const { AISchedulerError } = await import("@minecraft-studio/ai-router");
+    const result = await askTeamProposal({ client: { complete: async () => { throw new AISchedulerError("AI_REQUEST_TIMEOUT", "deadline", "timeout"); } },
+      request: { system: "s", prompt: "p", requestId: "timeout", botId: "B01" } });
+    expect(result.accounting).toMatchObject({ outcome: "request-failed", errorCode: "AI_REQUEST_TIMEOUT" });
+  });
   it("valid-proposal：解析成功带上时延与用量", async () => {
     const client: ModelClient = {
       complete: async () => ({
@@ -135,6 +147,7 @@ describe("scheduledRouterModelClient（真实 scheduler + fake adapter，零网�
       client,
       request: { system: "s", prompt: "p", requestId: "sched-2", botId: "B01", signal: controller.signal },
     });
-    expect(["cancelled", "request-failed"]).toContain(result.accounting.outcome);
+    expect(result.accounting.outcome).toBe("cancelled");
+    expect(result.accounting.errorCode).toBe("AI_REQUEST_CANCELLED");
   });
 });

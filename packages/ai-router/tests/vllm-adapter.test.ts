@@ -8,6 +8,16 @@ afterEach(() => {
 });
 
 describe('VLLMAdapter', () => {
+  it('preserves server length finish even when content is valid JSON', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: '{"action":"noop"}' }, finish_reason: 'length' }],
+      usage: { prompt_tokens: 12, completion_tokens: 64 },
+    }), { status: 200 })));
+    const result = await new VLLMAdapter('http://127.0.0.1:8000', 'test').generate({
+      prompt: 'plan', maxTokens: 64, temperature: 0, timeoutMs: 5000, traceId: 'finish-test',
+    });
+    expect(result.finishReason).toBe('length');
+  });
   it('falls back to OpenAI model discovery when the provider has no /health endpoint', async () => {
     const fetchMock = vi
       .fn()

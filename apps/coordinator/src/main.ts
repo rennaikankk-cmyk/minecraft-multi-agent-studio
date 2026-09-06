@@ -23,6 +23,9 @@ import {
 } from "@minecraft-studio/task-system";
 
 import { BotRegistry } from "./bot-registry.js";
+import { RegistryFactReader } from "./spark-strategy-v1/registry-facts.js";
+import { TeamProposalObserver, teamObserverEnabled } from "./spark-strategy-v1/observer.js";
+import { scheduledRouterModelClient } from "./spark-strategy-v1/model-client.js";
 import { BotAssignmentService } from "./bot-assignment.js";
 import {
   AutonomousConfigError,
@@ -82,6 +85,7 @@ async function main(): Promise<void> {
   const sharedStateConfig = loadSharedStateConfig();
   const localAIConfig = loadLocalAIConfig();
   const autonomousConfig = loadAutonomousConfig();
+  const proposalEnabled = teamObserverEnabled();
   const goalPersistenceConfig = loadGoalPersistenceConfig();
   const taskDeliveryConfig = loadTaskDeliveryConfig(
     process.env,
@@ -248,6 +252,14 @@ async function main(): Promise<void> {
   }
   // Scheduler+Router+Breaker 共享实例（planner 与健康遥测共用）
   const aiScheduledRouter = aiRouter && aiScheduler ? new ScheduledAIRouter(aiRouter, aiScheduler) : null;
+  const proposalReader = proposalEnabled ? new RegistryFactReader({ registry, assignment,
+    bases: baseRegistry, facilities: facilityRegistry, workstations: workstationRegistry }) : null;
+  const proposalObserver = proposalReader && aiScheduledRouter ? new TeamProposalObserver({
+    enabled: true, client: scheduledRouterModelClient(aiScheduledRouter), read: (now) => proposalReader.read(now),
+    log: (entry) => logger.info("coordinator_team_proposal", entry),
+  }) : null;
+  logger.info("coordinator_team_proposal_mode", { enabled: proposalEnabled,
+    available: proposalObserver !== null, automaticDispatch: false, cooldownMs: 180_000, maxInFlight: 1 });
   if (aiScheduledRouter) {
     const aiHealthTimer = setInterval(() => {
       const health = aiScheduledRouter.healthSnapshot();
@@ -338,14 +350,11 @@ async function main(): Promise<void> {
       terminalRetentionMs: autonomousConfig.terminalRetentionMs,
       logger,
       // 配置了 Local AI 时把调度路由交给重规划神谕；确定性模式不注入，
-      // 神谕路径完全不激活。12 路并发预算见 LOCAL_AI_MAX_CONCURRENCY。
+      // 神谕路径完全不激活。预算来自已装配的 localAIConfig。
       // 选址评审（site-verdict）与 replan 共用同一 router/scheduler——
       // 并发预算统一受管，模型缺位时两条路径都 fail-open。
-      ...(aiScheduler
-        ? (() => {
-            const ai = new ScheduledAIRouter(aiRouter!, aiScheduler);
-            return { replanAI: ai, siteAI: ai };
-          })()
+      ...(aiScheduledRouter
+        ? { replanAI: aiScheduledRouter, siteAI: aiScheduledRouter }
         : {}),
       onChatGoal: (botId, speaker, message) =>
         autonomousDirector?.handleChatMessage(botId, speaker, message) ?? false,
@@ -564,10 +573,12 @@ async function main(): Promise<void> {
   }
 
   let stopping = false;
+  proposalObserver?.start();
   const stop = async (signal: string) => {
     if (stopping) return;
     stopping = true;
     if (staleTimer) clearInterval(staleTimer);
+    await proposalObserver?.stop();
     if (autonomousDirector) await autonomousDirector.stop();
     aiScheduler?.close("coordinator shutdown");
     logger.info("coordinator_stopping", { signal });
