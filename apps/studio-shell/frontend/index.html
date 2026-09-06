@@ -1,3 +1,11 @@
 <!doctype html>
 <html lang="en"><head><meta charset="UTF-8"><title>Minecraft Multi-Agent Studio</title></head>
-<body style="background:#101418;color:#dfe7ef;font:16px system-ui;padding:32px">Starting Studio...</body></html>
+<body style="margin:0;background:#101418;color:#dfe7ef;font:14px system-ui;overflow:hidden">
+<header style="height:44px;display:flex;align-items:center;gap:12px;padding:0 14px;background:#182027;border-bottom:1px solid #2d3942">
+  <strong>Minecraft Multi-Agent Studio</strong><span id="state">Starting services...</span><button id="update" style="margin-left:auto;background:#2d8cff;color:white;border:0;border-radius:4px;padding:7px 12px;cursor:pointer">检查更新</button>
+</header><iframe id="dashboard" title="Studio Dashboard" style="display:block;width:100vw;height:calc(100vh - 45px);border:0" src="about:blank"></iframe>
+<script>
+const state=document.getElementById('state'), frame=document.getElementById('dashboard'), button=document.getElementById('update');
+window.__studioReady=(url)=>{frame.src=url;state.textContent='Dashboard online';};
+button.onclick=async()=>{button.disabled=true;state.textContent='Checking for updates...';try{const url=location.search.match(/manifest=([^&]+)/)?.[1]||'';if(!url){state.textContent='Update manifest not configured';return}const s=await window.__TAURI__.core.invoke('check_for_update',{manifestUrl:decodeURIComponent(url)});if(s.error)throw new Error(s.error);if(!s.available){state.textContent='Already up to date';return}state.textContent='Downloading '+s.version+'...';const p=await window.__TAURI__.core.invoke('download_update',{url:s.url,sha256:s.sha256});await window.__TAURI__.core.invoke('install_update',{downloaded:p});}catch(e){state.textContent='Update failed: '+e.message;}finally{button.disabled=false;}};
+</script></body></html>
