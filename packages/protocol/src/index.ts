@@ -18,6 +18,7 @@ export {
   studioManagedBotProcessStateSchema,
   studioManagedBotResponseV1Schema,
   studioManagedBotV1Schema,
+  studioMinecraftAuthSchema,
   studioManagerErrorCodeSchema,
   studioManagerErrorV1Schema,
   studioManagerStatusV1Schema,
@@ -25,6 +26,7 @@ export {
   type StudioCreateBotRequestV1,
   type StudioManagedBotResponseV1,
   type StudioManagedBotV1,
+  type StudioMinecraftAuth,
   type StudioManagerErrorCode,
   type StudioManagerStatusV1,
 } from "./studio-manager.js";

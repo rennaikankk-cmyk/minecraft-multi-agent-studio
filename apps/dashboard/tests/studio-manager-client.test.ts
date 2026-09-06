@@ -63,6 +63,23 @@ describe("Studio Manager client", () => {
       ),
     ).resolves.toMatchObject({ bot: { botId: "studio-bot-01" } });
   });
+
+  it("forwards an explicit online authentication choice", async () => {
+    const fetcher = vi.fn<typeof fetch>(async (_input, init) => {
+      expect(JSON.parse(String(init?.body))).toMatchObject({ auth: "online" });
+      return jsonResponse({ schemaVersion: "1.0", generatedAt: NOW, bot: { ...bot(), auth: "online" } });
+    });
+    await expect(
+      createStudioManagedBot(config(), {
+        schemaVersion: "1.0",
+        username: "StudioBot1",
+        serverHost: "127.0.0.1",
+        serverPort: 25565,
+        minecraftVersion: "auto",
+        auth: "online",
+      }, fetcher),
+    ).resolves.toMatchObject({ bot: { auth: "online" } });
+  });
 });
 
 function config() {

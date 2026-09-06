@@ -61,6 +61,13 @@ describe("host/connectHost separation (Server Profile SSOT)", () => {
     expect(withOverride.port).toBe(without.port);
   });
 
+  it("在线 Profile 不会被误映射成离线认证", () => {
+    const online = serverProfileSchema.parse({ ...baseProfile, auth: "online" });
+    const options = createMineflayerOptions(online);
+    expect("auth" in options).toBe(false);
+    expect(options.username).toBe(baseProfile.username);
+  });
+
   it("profile schema：connectHost 接受裸 IP/DNS 名，拒绝带协议前缀", () => {
     const valid = serverProfileSchema.safeParse({
       ...baseProfile,

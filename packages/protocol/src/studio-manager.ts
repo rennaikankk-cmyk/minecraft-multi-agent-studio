@@ -51,6 +51,8 @@ export const studioManagedBotProcessStateSchema = z.enum([
   "error",
 ]);
 
+export const studioMinecraftAuthSchema = z.enum(["offline", "online"]);
+
 export const studioManagedBotV1Schema = z
   .object({
     botId: identifierSchema,
@@ -62,6 +64,8 @@ export const studioManagedBotV1Schema = z
     serverHost: z.string().trim().min(1).max(253),
     serverPort: z.number().int().min(1).max(65_535),
     minecraftVersion: z.union([z.literal("auto"), minecraftVersionStringSchema]),
+    /** Authentication mode; omitted by legacy clients and defaults to offline. */
+    auth: studioMinecraftAuthSchema.optional(),
     /** TCP 目的地址覆盖（可选）；握手 hostname 恒为 serverHost。 */
     connectHost: z.string().trim().min(1).max(253).optional(),
     processState: studioManagedBotProcessStateSchema,
@@ -158,6 +162,8 @@ export const studioCreateBotRequestV1Schema = z
     serverHost: z.string().trim().min(1).max(253),
     serverPort: z.number().int().min(1).max(65_535),
     minecraftVersion: z.union([z.literal("auto"), minecraftVersionStringSchema]),
+    /** Omitted by legacy clients; Manager defaults to offline. */
+    auth: studioMinecraftAuthSchema.optional(),
     /** TCP 目的地址覆盖（可选）；握手 hostname 恒为 serverHost。 */
     connectHost: z.string().trim().min(1).max(253).optional(),
   })
@@ -201,6 +207,7 @@ export type StudioManagerStatusV1 = z.infer<typeof studioManagerStatusV1Schema>;
 export type StudioCreateBotRequestV1 = z.infer<
   typeof studioCreateBotRequestV1Schema
 >;
+export type StudioMinecraftAuth = z.infer<typeof studioMinecraftAuthSchema>;
 export type StudioManagedBotResponseV1 = z.infer<
   typeof studioManagedBotResponseV1Schema
 >;

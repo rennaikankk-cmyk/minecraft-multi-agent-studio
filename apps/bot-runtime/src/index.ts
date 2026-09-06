@@ -66,6 +66,7 @@ void main().catch((error: unknown) => {
 export {
   createMineflayerClient,
   createMineflayerOptions,
+  botEmailEnvVar,
 } from "./mineflayer-client.js";
 export {
   combatEntityFromMineflayer,

@@ -1117,6 +1117,7 @@ export class StudioLocalManager {
       serverHost: input.serverHost,
       serverPort: input.serverPort,
       minecraftVersion: input.minecraftVersion,
+      auth: input.auth,
       ...(input.purpose === "anarchy" ? { purpose: "anarchy" } : {}),
       ...(input.connectHost !== undefined ? { connectHost: input.connectHost } : {}),
       createdAt: now,
@@ -1571,6 +1572,7 @@ export class StudioLocalManager {
       serverPort: config.serverPort,
       ...(config.connectHost !== undefined ? { connectHost: config.connectHost } : {}),
       minecraftVersion: config.minecraftVersion,
+      auth: config.auth,
       processState: config.processState,
       pid: process?.child.exitCode === null ? process.child.pid ?? null : null,
       createdAt: config.createdAt,
@@ -1752,6 +1754,7 @@ export class StudioLocalManager {
         serverHost: config.serverHost,
         serverPort: config.serverPort,
         minecraftVersion: config.minecraftVersion,
+        auth: config.auth,
         ...(config.purpose === "anarchy" ? { purpose: "anarchy" } : {}),
         ...(config.connectHost !== undefined ? { connectHost: config.connectHost } : {}),
         createdAt: config.createdAt,
@@ -1784,7 +1787,7 @@ export class StudioLocalManager {
       ...(config.connectHost !== undefined ? { connectHost: config.connectHost } : {}),
       minecraftVersion: config.minecraftVersion,
       username: config.username,
-      auth: "offline",
+      auth: config.auth,
       combat: {
         enabled: true,
         stance: "preserve-life",
@@ -1965,8 +1968,15 @@ function validateCreateBotRequest(input) {
   const base = input.purpose === "anarchy"
     ? "minecraftVersion,purpose,schemaVersion,serverHost,serverPort,username"
     : "minecraftVersion,schemaVersion,serverHost,serverPort,username";
-  const allowed = input.connectHost !== undefined ? "connectHost," + base : base;
-  if (keys !== allowed) {
+  const allowed = new Set([
+    base,
+    ...(input.connectHost !== undefined ? [`connectHost,${base}`] : []),
+    ["auth", ...base.split(",")].sort().join(","),
+    ...(input.connectHost !== undefined
+      ? [["auth", "connectHost", ...base.split(",")].sort().join(",")]
+      : []),
+  ]);
+  if (!allowed.has(keys)) {
     throw managedError("INVALID_REQUEST", "Bot 创建请求包含未知或缺失字段。", 400);
   }
   const serverHost = String(input.serverHost ?? "").trim();
@@ -1974,6 +1984,7 @@ function validateCreateBotRequest(input) {
   const connectHost = input.connectHost !== undefined
     ? String(input.connectHost).trim()
     : undefined;
+  const auth = input.auth === undefined ? "offline" : input.auth;
   if (
     input.schemaVersion !== "1.0" ||
     typeof input.username !== "string" ||
@@ -1983,7 +1994,8 @@ function validateCreateBotRequest(input) {
     input.serverPort < 1 ||
     input.serverPort > 65_535 ||
     (minecraftVersion !== "auto" && !/^[0-9]+\.[0-9]+(?:\.[0-9]+)?$/u.test(minecraftVersion)) ||
-    (connectHost !== undefined && (connectHost === "" || connectHost.length > 253 || !/^[A-Za-z0-9.:\-]+$/u.test(connectHost)))
+    (connectHost !== undefined && (connectHost === "" || connectHost.length > 253 || !/^[A-Za-z0-9.:\-]+$/u.test(connectHost))) ||
+    (auth !== "offline" && auth !== "online")
   ) {
     throw managedError(
       "INVALID_REQUEST",
@@ -1998,6 +2010,7 @@ function validateCreateBotRequest(input) {
     serverHost,
     serverPort: input.serverPort,
     minecraftVersion,
+    auth,
     ...(input.purpose === "anarchy" ? { purpose: "anarchy" } : {}),
     ...(connectHost !== undefined ? { connectHost } : {}),
   };
@@ -2013,6 +2026,7 @@ function validatePersistedBot(input, slots) {
     serverHost: input?.serverHost,
     serverPort: input?.serverPort,
     minecraftVersion: input?.minecraftVersion,
+    ...(input?.auth !== undefined ? { auth: input.auth } : {}),
     ...(input?.purpose === "anarchy" ? { purpose: "anarchy" } : {}),
     ...(input?.connectHost !== undefined ? { connectHost: input?.connectHost } : {}),
   });

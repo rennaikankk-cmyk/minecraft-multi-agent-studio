@@ -100,11 +100,13 @@ STUDIO_MAX_BOTS=16
 `studio-bot-16` 的独立槽位；状态页显示当前已创建数量、Runtime 进程状态和真实遥测连接状态。
 每个 Bot 使用独立的 Runtime Link 身份和 Profile，重启 Studio 后会恢复已保存的 Bot。
 
-Manager 创建的真实服 Bot 使用 Minecraft 离线认证（`auth: "offline"`），公网地址只在
-`purpose: "anarchy"` 时开放。用户名只写入本地 Profile，离线服会按该用户名完成握手；
-不需要 Mojang/Microsoft 账号，也不会读取或持久化密码。Dashboard 创建的 Bot 和手工
-Profile 走同一条 Runtime 路径，支持 `connectHost` 覆盖 TCP 目的地址，同时保留 `host`
-作为握手域名。在线认证仍是独立能力，不能把离线 Profile 当作正版服凭据。
+Manager 创建的真实服 Bot 支持 Minecraft 离线认证（`auth: "offline"`）和正版在线认证
+（`auth: "online"`），公网地址只在 `purpose: "anarchy"` 时开放。离线模式不需要
+Mojang/Microsoft 账号，也不会读取或持久化密码。Dashboard 创建的 Bot 和手工 Profile
+走同一条 Runtime 路径，支持 `connectHost` 覆盖 TCP 目的地址，同时保留 `host`
+作为握手域名。选择在线认证时，Runtime 从 `STUDIO_BOT_EMAIL_<BOT_ID>` 和
+`STUDIO_BOT_PASSWORD_<BOT_ID>` 读取 Microsoft 账号邮箱/密码，只放在进程内存中；Profile
+中的 `username` 仍是 Bot 的游戏身份。缺少任一凭据会拒绝启动，不会静默切换为离线。
 
 ## 自主生存（Autonomous Survival）
 
@@ -191,7 +193,8 @@ pnpm bot:start
 - 真实服离线认证必须在服务器端启用离线模式（常见配置为 `online-mode=false`）；正版
   在线模式服务器会拒绝离线会话，这是服务端认证策略，Runtime 不会绕过。
 - anarchy Profile 可以使用公网裸域名/IP；普通 managed Profile 仍限制在本机或私有局域网。
-- Profile 不接受密码字段。`auth: "offline"` 不会触发 Microsoft 登录，也不会静默切换到在线认证。
+- Profile 不接受密码字段。`auth: "offline"` 不会触发 Microsoft 登录，`auth: "online"`
+  缺少凭据时也不会静默切换为离线。
 - 没有设置 `BOT_SERVER_PROFILE_PATH` 时不会尝试连接。
 - Runtime ↔ Coordinator 与 Control API ↔ Coordinator 都已接入真实回环跨进程传输，并通过不连接 Minecraft 的服务级四进程验收。
 

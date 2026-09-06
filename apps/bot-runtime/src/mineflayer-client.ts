@@ -7251,6 +7251,20 @@ export function botPasswordEnvVar(botId: string): string {
   return `STUDIO_BOT_PASSWORD_${botId.replace(/[^A-Za-z0-9]/gu, "_").toUpperCase()}`;
 }
 
+export function botEmailEnvVar(botId: string): string {
+  return `STUDIO_BOT_EMAIL_${botId.replace(/[^A-Za-z0-9]/gu, "_").toUpperCase()}`;
+}
+
+function resolveOnlineEmail(botId: string): string {
+  const value = process.env[botEmailEnvVar(botId)]?.trim() ?? "";
+  if (!value || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(value)) {
+    throw new Error(
+      `Online auth requires a valid Microsoft account email in ${botEmailEnvVar(botId)}.`,
+    );
+  }
+  return value;
+}
+
 function resolveOnlinePassword(botId: string): string {
   const value = process.env[botPasswordEnvVar(botId)]?.trim() ?? "";
   if (!value) {
@@ -7277,6 +7291,9 @@ export function createMineflayerClient(
           ...base,
           // 我们的 "online" 档映射到 mineflayer 的微软登录；密码只进进程内存。
           auth: "microsoft" as const,
+          // Mineflayer expects the Microsoft account email here. The Profile
+          // username remains the in-game identity used by the coordinator.
+          username: resolveOnlineEmail(profile.botId),
           password: resolveOnlinePassword(profile.botId),
         }
       : base,

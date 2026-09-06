@@ -39,6 +39,7 @@ export function StudioBotManager() {
   const [serverHost, setServerHost] = useState("127.0.0.1");
   const [serverPort, setServerPort] = useState("25565");
   const [minecraftVersion, setMinecraftVersion] = useState("auto");
+  const [auth, setAuth] = useState<"offline" | "online">("offline");
   const [submitting, setSubmitting] = useState(false);
   const [restartingBotId, setRestartingBotId] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState("");
@@ -90,6 +91,7 @@ export function StudioBotManager() {
           serverHost,
           serverPort: port,
           minecraftVersion,
+          auth,
         }),
       });
       const value = (await response.json()) as unknown;
@@ -186,6 +188,16 @@ export function StudioBotManager() {
             autoComplete="off"
           />
         </label>
+        <label>
+          <span>登录方式</span>
+          <select
+            value={auth}
+            onChange={(event) => setAuth(event.target.value as "offline" | "online")}
+          >
+            <option value="offline">离线登录</option>
+            <option value="online">正版在线登录</option>
+          </select>
+        </label>
         <button
           className="createBotButton"
           type="submit"
@@ -194,6 +206,12 @@ export function StudioBotManager() {
           {submitting ? "创建中…" : "创建并启动"}
         </button>
       </form>
+
+      {auth === "online" ? (
+        <p className="managerAuthHint">
+          在线登录需要在 Bot Runtime 环境中配置对应的 Microsoft 账号邮箱和密码。
+        </p>
+      ) : null}
 
       {error ? <div className="managerInlineError" role="alert">{error}</div> : null}
       {actionMessage ? <div className="managerActionResult" role="status">{actionMessage}</div> : null}
