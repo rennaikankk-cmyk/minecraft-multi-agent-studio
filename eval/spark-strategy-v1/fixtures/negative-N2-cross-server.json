@@ -1,0 +1,21 @@
+{
+  "sampleId": "N2-cross-server",
+  "scenario": "food-shortage",
+  "mode": "offline",
+  "expectation": { "desiredBehavior": "act", "acceptableVerdicts": ["rejected"] },
+  "factsRef": "scenario-A-food-shortage.json",
+  "scopeOverrideInProposal": { "serverProfileId": "some-other-server", "dimension": "overworld" },
+  "injectedResponse": {
+    "proposalId": "prop-N2",
+    "factVersion": "{{factVersion}}",
+    "scope": { "serverProfileId": "some-other-server", "dimension": "overworld" },
+    "validUntilMs": 1780000600000,
+    "generatedBy": "fixture:negative-N2",
+    "objective": "stale snapshot from another server",
+    "assignments": [
+      { "assignmentId": "n2-a1", "botId": "B01", "role": "harvester", "action": { "kind": "skill", "skillId": "food.secure", "params": {} }, "successSignals": ["x"], "maxAttempts": 1 }
+    ],
+    "dependencies": []
+  },
+  "expectedReasons": ["SCOPE_MISMATCH"]
+}
