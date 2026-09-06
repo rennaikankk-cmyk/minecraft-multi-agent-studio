@@ -457,6 +457,16 @@ export class BotRegistry {
       .sort((left, right) => left.botId.localeCompare(right.botId));
   }
 
+  /** Read-only projection: staleness is computed without notifying execution subscribers. */
+  inspect(at = this.now()): BotRegistryRecord[] {
+    const atMs = validTime(at);
+    return [...this.records.values()].map((record) => ({
+      ...snapshot(record),
+      connectionState: record.connectionState !== "offline" && atMs - record.lastLivenessMs > this.staleAfterMs
+        ? "stale" as const : record.connectionState,
+    })).sort((a, b) => a.botId.localeCompare(b.botId));
+  }
+
   sweepStale(at = this.now()): number {
     const atMs = validTime(at);
     let changed = 0;
