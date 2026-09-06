@@ -13,6 +13,14 @@
 //    最终绝对 stateId，即使提取时已读到新值，重放相同最终值无副作用。
 //  - chunk burst 按 wall-time 预算（默认 3ms）分片，setImmediate 让出。
 
+import { createRequire } from "node:module";
+
+const nodeRequire = createRequire(import.meta.url);
+const mineflayerRequire = createRequire(nodeRequire.resolve("mineflayer"));
+const { SingleValueContainer } = mineflayerRequire("prismarine-chunk/src/pc/common/PaletteContainer.js") as {
+  SingleValueContainer: new (...args: never[]) => { value: number; capacity: number; get(index: number): number };
+};
+
 /** 单 section 提取结果（buffer 所有权随导出移交，调用方 ACK 前不复用）。 */
 export type ExtractedSection = {
   // replay 可能 empty→data 升级（状态字段可变是设计的一部分）
@@ -196,6 +204,14 @@ export async function extractColumnBudgeted(
       continue;
     }
     try {
+      // Only the installed Prismarine single-value representation proves all cells are zero.
+      // A server's solidBlockCount=0 does not distinguish air variants or malformed palettes.
+      if (raw.data instanceof SingleValueContainer && raw.data.capacity === 4096 && raw.data.value === 0) {
+        sections.push({ sectionY, status: "empty", stateIds: null });
+        const { overran } = checkBudget();
+        if (overran) { await yieldFn(); sliceBegan = performance.now(); }
+        continue;
+      }
       const stateIds = new Uint32Array(4096);
       let allZero = true;
       // section 内部小批次推进：每 256 格一次预算/abort 检查，超支即让出。

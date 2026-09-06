@@ -51,6 +51,8 @@ At 289 columns, main-thread postMessage P99 was 0.0106ms, native query P99 0.002
 
 ## Remaining Gates and Rollback
 
+The first Ubuntu candidate (`99bb91386c4e8f4a4e0202f54db5123192e873bb`) passed all 61 Rust tests and native export smoke, but both workflows failed the existing empty-column zero-overrun assertion. With cumulative accounting restored, scanning 98,304 known-zero cells exceeded the 3ms slice on the runner. The follow-up uses the installed Prismarine `SingleValueContainer` identity, capacity and zero value to skip that redundant work. It does not infer air from `solidBlockCount`. The synchronous scan remains the oracle; the original stress assertion and time budget are unchanged. A real-column regression checks zero voxel reads and correctness after a single-value section promotes to a palette.
+
 Do not claim `physicsTick.stateChanged` P99 <=15ms, production main-thread snapshot P99 <=10ms, zero NORMAL legacy scans, D4 shadow oracle, or the 1/5/10 Bot live matrix from this evidence. No facility production/harvest permission follows from finding a block. The observer must retain unknown fields where downstream consumption is absent.
 
 Rollback: leave `STUDIO_WORLD_MIRROR_SYNC` unset/0 to disable this optional mirror path; reverting this stage's merge commit restores the prior D2 implementation. Use a new revert commit, never a force push/reset. Native addon and TS source must be rebuilt together after a rollback. Stage commit/merge SHAs, CI links and final status belong to the takeover report.

@@ -113,6 +113,22 @@ describe("P5-D1 world-section-extractor", () => {
     expect(yields).toBeGreaterThanOrEqual(23); // 24 section - 首个
   });
 
+  it("real single-value air skips voxel reads, while promoted data matches the scan oracle", async () => {
+    const { column, raw } = makeRealColumn();
+    const sections = (raw as unknown as { sections: Array<{ data: { get(index: number): number } }> }).sections;
+    let reads = 0;
+    for (const section of sections) {
+      const original = section.data.get.bind(section.data);
+      section.data.get = (index) => { reads += 1; return original(index); };
+    }
+    const empty = await extractColumnBudgeted(column, 0, 0, new ChunkExtractionSession());
+    expect(reads).toBe(0);
+    expect(empty.sections.every((section) => section.status === "empty")).toBe(true);
+    raw.setBlockStateId({ x: 3, y: -1, z: 5 }, 999);
+    const changed = await extractColumnBudgeted(column, 0, 0, new ChunkExtractionSession());
+    expect(changed.sections).toEqual(extractColumnSync(column, 0, 0, new ChunkExtractionSession()).sections);
+  });
+
   it("session: update during extraction is captured and replayed idempotently after commit", () => {
     const { column, raw } = makeRealColumn();
     raw.setBlockStateId({ x: 5, y: 10, z: 5 }, 100);
