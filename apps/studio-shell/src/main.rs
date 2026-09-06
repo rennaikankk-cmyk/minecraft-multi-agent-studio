@@ -17,6 +17,27 @@ const CURRENT_VERSION: &str = "0.1.0";
 
 struct Backend(Mutex<Option<Child>>);
 
+fn source_root() -> Result<PathBuf, String> {
+    if let Ok(value) = env::var("STUDIO_SOURCE_ROOT") {
+        let path = PathBuf::from(value);
+        if path.join("package.json").exists() && path.join("scripts/build-studio-exe.mjs").exists()
+        {
+            return Ok(path);
+        }
+    }
+    let mut path = env::current_dir().map_err(|e| e.to_string())?;
+    loop {
+        if path.join("package.json").exists() && path.join("scripts/build-studio-exe.mjs").exists()
+        {
+            return Ok(path);
+        }
+        if !path.pop() {
+            break;
+        }
+    }
+    Err("local source root not found; set STUDIO_SOURCE_ROOT for developer mode".into())
+}
+
 #[derive(Debug, Deserialize)]
 struct UpdateManifest {
     version: String,
@@ -138,15 +159,57 @@ fn install_update(app: tauri::AppHandle, downloaded: String) -> Result<(), Strin
     Ok(())
 }
 
+#[tauri::command]
+fn build_local_backend(app: tauri::AppHandle) -> Result<String, String> {
+    let root = source_root()?;
+    let command = if cfg!(windows) { "pnpm.cmd" } else { "pnpm" };
+    let status = Command::new(command)
+        .current_dir(&root)
+        .args(["build:exe:skip-build"])
+        .status()
+        .map_err(|e| format!("failed to start local build: {e}"))?;
+    if !status.success() {
+        return Err(format!("local build failed with status {status}"));
+    }
+    let backend_path = root.join("dist/MinecraftMultiAgentStudio.exe");
+    if !backend_path.exists() {
+        return Err("local build did not produce dist/MinecraftMultiAgentStudio.exe".into());
+    }
+    let mut slot = app
+        .state::<Backend>()
+        .0
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
+    if let Some(mut old) = slot.take() {
+        let _ = old.kill();
+        let _ = old.wait();
+    }
+    let child = Command::new(&backend_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("failed to restart rebuilt backend: {e}"))?;
+    *slot = Some(child);
+    Ok(backend_path.to_string_lossy().into_owned())
+}
+
 fn backend_path() -> PathBuf {
     if let Ok(path) = env::var("STUDIO_BACKEND_EXE") {
         return PathBuf::from(path);
     }
     let exe =
         env::current_exe().unwrap_or_else(|_| PathBuf::from("MinecraftMultiAgentStudioShell.exe"));
-    exe.parent()
+    let packaged = exe
+        .parent()
         .unwrap_or(Path::new("."))
-        .join("MinecraftMultiAgentStudioBackend.exe")
+        .join("MinecraftMultiAgentStudioBackend.exe");
+    if packaged.exists() {
+        return packaged;
+    }
+    source_root()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("dist/MinecraftMultiAgentStudio.exe")
 }
 
 fn launch_backend() -> Result<Child, String> {
@@ -191,7 +254,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             check_for_update,
             download_update,
-            install_update
+            install_update,
+            build_local_backend
         ])
         .manage(Backend(Mutex::new(None)))
         .setup(|app| {
