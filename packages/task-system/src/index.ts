@@ -128,6 +128,14 @@ export {
   type TaskExecutionSqlPool,
 } from "./postgres-task-execution-store.js";
 export {
+  CompositeTaskOrchestrator,
+  compositePhases,
+  compositeSkillId,
+  type CompositeOrchestratorOptions,
+  type CompositeSkillDispatcher,
+  type CompositeSkillStep,
+} from "./composite-orchestrator.js";
+export {
   BotWorkingMemory,
   InMemoryWorkingMemoryStore,
   PersistentBotWorkingMemory,

@@ -1,5 +1,14 @@
 export { baseLayoutSchema, planBaseLayout, plannedBlueprintAnchor, type BaseLayout } from "./base-layout.js";
 export {
+  FacilityExecutor,
+  FACILITY_EXECUTION_PROFILES,
+  facilitySkillId,
+  type FacilityExecutionAdapter,
+  type FacilityExecutionPhase,
+  type FacilityExecutionResult,
+  type FacilityExecutionProfile,
+} from "./facility-executor.js";
+export {
   SkillAbortError,
   SkillFault,
   SkillFrameworkError,
