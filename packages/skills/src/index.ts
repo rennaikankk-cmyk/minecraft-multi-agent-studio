@@ -518,6 +518,13 @@ export {
   type FacilitySlot,
   type FacilitySlotStatus,
   type FacilityType,
+  type FacilityOperationalState,
+  type FacilityProductionLedger,
+  FACILITY_OPERATIONAL_TRANSITIONS,
+  canTransitionFacilityOperationalState,
+  readFacilityProductionLedger,
+  transitionFacilityOperationalState,
+  recordFacilityProduction,
   type Orientation,
   type PatternSlot,
 } from "./facility-registry.js";

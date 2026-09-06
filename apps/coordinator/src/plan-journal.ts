@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -11,8 +11,9 @@ import { blueprintSchema, type Blueprint } from "@minecraft-studio/skills";
 // Incident 是故障聚合；二者通过 planId/stepId 关联。
 //
 // 持久化边界：
-// - File adapter: write-tmp + atomic rename; process recovery only, no fsync
-//   or host power-loss guarantee. Corruption blocks recovery, originals remain.
+// - File adapter: write-tmp + fsync + atomic rename + directory fsync. This
+//   protects committed snapshots across process and ordinary host power loss;
+//   the API still exposes the adapter so production can choose PostgreSQL.
 // - production PostgreSQL journal 留待既有 task-system 抽象接入时统一切换；
 //   durability capability 在 API 如实暴露（journalDurability: "file"）。
 //
@@ -152,7 +153,7 @@ const journalSchema = z.object({
 });
 
 export interface PlanJournalStore {
-  /** Atomic process-recoverable replacement; does not promise power-loss durability. */
+  /** Atomic replacement with adapter-specific durability semantics. */
   save(journal: PlanExecutionJournal): void;
   load(): readonly PlanExecutionJournal[];
   /** retention：不得删除 active/paused 计划；返回实际清理数。 */
@@ -185,7 +186,19 @@ export class FilePlanJournalStore implements PlanJournalStore {
       const file = this.fileFor(journal.planId);
       const tmp = `${file}.tmp-${process.pid}-${Date.now().toString(36)}`;
       writeFileSync(tmp, `${JSON.stringify(journal, null, 1)}\n`, "utf8");
+      const dataFd = openSync(tmp, "r+");
+      try { fsyncSync(dataFd); } finally { closeSync(dataFd); }
       renameSync(tmp, file);
+      // POSIX requires the parent directory to be synced for the rename to be
+      // durable. Some platforms reject directory handles; the data file sync
+      // above remains valid and the adapter continues to fail closed on other
+      // I/O errors.
+      try {
+        const dirFd = openSync(this.dir, "r");
+        try { fsyncSync(dirFd); } finally { closeSync(dirFd); }
+      } catch (error) {
+        if (process.platform !== "win32") throw error;
+      }
       this.cache?.set(journal.planId, structuredClone(journal));
     } catch (cause) {
       throw new JournalWriteError(cause);

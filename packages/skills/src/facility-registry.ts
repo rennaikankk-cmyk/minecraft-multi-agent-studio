@@ -25,7 +25,23 @@ import { normalizeBlockPos } from "./workstation-registry.js";
 // Types
 // ---------------------------------------------------------------------------
 
-export type FacilityType = "smelting_zone" | "crafting_zone" | "storage_zone" | "crop_farm";
+/**
+ * Stable facility identities shared by planning, persistence and production
+ * telemetry. A type only describes the facility class; commissioning and
+ * output must still be proven through metadata and server readback.
+ */
+export type FacilityType =
+  | "smelting_zone"
+  | "crafting_zone"
+  | "storage_zone"
+  | "crop_farm"
+  | "iron_farm"
+  | "mob_farm"
+  | "gunpowder_farm"
+  | "tree_farm"
+  | "cobblestone_generator"
+  | "trading_hall"
+  | "storage_system";
 
 export type Orientation = "north" | "south" | "east" | "west";
 
@@ -47,6 +63,94 @@ export type FacilitySlotStatus =
   | "temporarily_blocked"
   | "invalid"
   | "unknown";
+
+/** Facility-level lifecycle. Slot occupancy alone never implies production. */
+export type FacilityOperationalState =
+  | "PLANNED"
+  | "BUILDING"
+  | "COMMISSIONING"
+  | "ACTIVE"
+  | "DEGRADED"
+  | "STOPPED";
+
+export const FACILITY_OPERATIONAL_TRANSITIONS: Readonly<Record<FacilityOperationalState, readonly FacilityOperationalState[]>> = {
+  PLANNED: ["BUILDING", "STOPPED"],
+  BUILDING: ["COMMISSIONING", "DEGRADED", "STOPPED"],
+  COMMISSIONING: ["ACTIVE", "DEGRADED", "STOPPED"],
+  ACTIVE: ["DEGRADED", "STOPPED"],
+  DEGRADED: ["COMMISSIONING", "ACTIVE", "STOPPED"],
+  STOPPED: ["BUILDING", "COMMISSIONING"],
+};
+
+export function canTransitionFacilityOperationalState(
+  from: FacilityOperationalState,
+  to: FacilityOperationalState,
+): boolean {
+  return FACILITY_OPERATIONAL_TRANSITIONS[from].includes(to);
+}
+
+export type FacilityProductionLedger = Readonly<{
+  state: FacilityOperationalState;
+  lastTransitionAtMs: number;
+  lastTransitionReason: string | null;
+  produced: Readonly<Record<string, number>>;
+  consumed: Readonly<Record<string, number>>;
+  blockedReason: string | null;
+}>;
+
+export function readFacilityProductionLedger(facility: Facility): FacilityProductionLedger {
+  const raw = facility.metadata.productionLedger;
+  if (!raw || typeof raw !== "object") {
+    return { state: "PLANNED", lastTransitionAtMs: 0, lastTransitionReason: null, produced: {}, consumed: {}, blockedReason: null };
+  }
+  const value = raw as Record<string, unknown>;
+  const state = typeof value.state === "string" && value.state in FACILITY_OPERATIONAL_TRANSITIONS
+    ? value.state as FacilityOperationalState
+    : "PLANNED";
+  const counts = (input: unknown): Record<string, number> => {
+    if (!input || typeof input !== "object") return {};
+    return Object.fromEntries(Object.entries(input as Record<string, unknown>).filter(([, count]) => Number.isSafeInteger(count) && Number(count) >= 0).map(([name, count]) => [name, Number(count)]));
+  };
+  return {
+    state,
+    lastTransitionAtMs: Number.isSafeInteger(value.lastTransitionAtMs) ? Number(value.lastTransitionAtMs) : 0,
+    lastTransitionReason: typeof value.lastTransitionReason === "string" ? value.lastTransitionReason : null,
+    produced: counts(value.produced), consumed: counts(value.consumed),
+    blockedReason: typeof value.blockedReason === "string" ? value.blockedReason : null,
+  };
+}
+
+export function transitionFacilityOperationalState(
+  facility: Facility,
+  next: FacilityOperationalState,
+  atMs: number,
+  reason: string | null = null,
+): FacilityProductionLedger {
+  if (!Number.isSafeInteger(atMs) || atMs < 0) throw new RangeError("facility transition time must be a non-negative safe integer");
+  const current = readFacilityProductionLedger(facility);
+  if (current.state !== next && !canTransitionFacilityOperationalState(current.state, next)) throw new Error(`FACILITY_INVALID_OPERATIONAL_TRANSITION:${current.state}->${next}`);
+  const updated: FacilityProductionLedger = { ...current, state: next, lastTransitionAtMs: atMs, lastTransitionReason: reason, blockedReason: next === "DEGRADED" ? reason : null };
+  facility.metadata.productionLedger = updated;
+  facility.lastObservedAt = new Date(atMs).toISOString();
+  return updated;
+}
+
+export function recordFacilityProduction(
+  facility: Facility,
+  itemName: string,
+  count: number,
+  atMs: number,
+  direction: "produced" | "consumed",
+): FacilityProductionLedger {
+  if (!/^[a-z0-9_.-]{1,96}$/u.test(itemName) || !Number.isSafeInteger(count) || count <= 0) throw new TypeError("facility production entry is malformed");
+  const current = readFacilityProductionLedger(facility);
+  const bucket = { ...(current[direction] as Record<string, number>) };
+  bucket[itemName] = (bucket[itemName] ?? 0) + count;
+  const updated: FacilityProductionLedger = { ...current, [direction]: bucket };
+  facility.metadata.productionLedger = updated;
+  facility.lastObservedAt = new Date(atMs).toISOString();
+  return updated;
+}
 
 /** 非法跳变表。key=from, value=允许的 to 集合。 */
 export const TRANSITIONS: Readonly<Record<FacilitySlotStatus, readonly FacilitySlotStatus[]>> = {
