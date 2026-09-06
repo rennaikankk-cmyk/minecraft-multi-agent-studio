@@ -1,0 +1,84 @@
+{
+  "sampleId": "A1-food-shortage",
+  "scenario": "food-shortage",
+  "mode": "offline",
+  "evaluationNowMs": 1780000001000,
+  "expectation": { "desiredBehavior": "act", "acceptableVerdicts": ["acceptable"] },
+  "facts": {
+    "scope": { "serverProfileId": "local-test-1.21.11", "dimension": "minecraft:overworld", "observedAtMs": 1780000000000, "sessionEpoch": 7 },
+    "capturedAtMs": 1780000000000,
+    "bots": [
+      { "botId": "B01", "online": true, "currentTask": null, "survival": { "health": 20, "food": 9, "armorPoints": 0 }, "inventory": [{ "itemName": "stone_hoe", "count": 1 }, { "itemName": "bread", "count": 2 }], "deaths": "unknown" },
+      { "botId": "B02", "online": true, "currentTask": null, "survival": { "health": 20, "food": 11, "armorPoints": 0 }, "inventory": [{ "itemName": "wheat_seeds", "count": 6 }], "deaths": "unknown" },
+      { "botId": "B03", "online": true, "currentTask": null, "survival": { "health": 20, "food": 10, "armorPoints": 0 }, "inventory": [{ "itemName": "chest", "count": 1 }], "deaths": "unknown" }
+    ],
+    "team": {
+      "sharedInventory": [{ "itemName": "wheat", "count": 3 }, { "itemName": "bread", "count": 2 }],
+      "facilities": [
+        { "facilityId": "facility:wheat-farm-main", "kind": "farm", "status": "available" },
+        { "facilityId": "facility:storage-hub", "kind": "storage", "status": "available" }
+      ],
+      "shortages": ["food:team-wide below 4 days reserve"],
+      "reservedResources": []
+    },
+    "events": [
+      { "kind": "completion", "atMs": 1779999940000, "source": "isolated-fixture-receipt", "botId": "B01", "detail": "facility:wheat-farm-main production verification succeeded" },
+      { "kind": "other", "atMs": 1779999880000, "source": "survival-needs", "botId": "B02", "detail": "FOOD need score elevated" }
+    ],
+    "constraints": {
+      "capabilities": [
+        { "skillId": "food.secure", "supported": true, "maturity": "L4" },
+        { "skillId": "collect.block", "supported": true, "maturity": "L4" },
+        { "skillId": "container.transfer", "supported": true, "maturity": "L2" },
+        { "skillId": "build.blueprint", "supported": true, "maturity": "L4" },
+        { "skillId": "craft.item", "supported": true },
+        { "skillId": "world.scan", "supported": true }
+      ],
+      "phaseGates": [{ "gate": "shelterEstablished", "satisfied": true }],
+      "nonPreemptibleBots": [],
+      "allowedChangeScope": "resource collection / production / logistics assignments for idle bots"
+    },
+    "sourceRefs": ["fixture://eval/spark-strategy-v1/fixtures/scenario-A.json"]
+  },
+  "injectedResponse": {
+    "proposalId": "prop-A1",
+    "factVersion": "{{factVersion}}",
+    "scope": { "serverProfileId": "local-test-1.21.11", "dimension": "minecraft:overworld" },
+    "validUntilMs": 1780000120000,
+    "generatedBy": "fixture:scenario-A",
+    "objective": "replenish individual food reserves and deposit available wheat",
+    "assignments": [
+      {
+        "assignmentId": "a-harvest",
+        "botId": "B01",
+        "role": "harvester",
+        "action": { "kind": "skill", "skillId": "food.secure", "params": { "targetCount": 8 } },
+        "preconditions": ["farm crop maturity observed before harvest"],
+        "resources": ["facility:wheat-farm-main"],
+        "successSignals": ["B01 safeFoodCount reaches 8"],
+        "maxAttempts": 2,
+        "onFailure": { "strategy": "alternative", "reason": "refresh crop observations", "alternative": { "kind": "deterministicGoal", "template": "scan", "goalText": "读取当前区域的 wheat 方块分布并给出扫描结果，只读" } }
+      },
+      {
+        "assignmentId": "a-transport",
+        "botId": "B02",
+        "role": "logistics",
+        "action": { "kind": "skill", "skillId": "container.transfer", "targetRef": "facility:storage-hub", "params": { "direction": "deposit", "itemName": "wheat_seeds", "count": 2 } },
+        "preconditions": ["B02 inventory still contains at least 2 wheat_seeds"],
+        "resources": ["facility:storage-hub"],
+        "successSignals": ["container transfer receipt moved 2 wheat_seeds"],
+        "maxAttempts": 1
+      },
+      {
+        "assignmentId": "a-stockpile",
+        "botId": "B03",
+        "role": "forager",
+        "action": { "kind": "deterministicGoal", "template": "food", "goalText": "获取 8 份安全食物" },
+        "successSignals": ["bot inventory food items >= 4"],
+        "maxAttempts": 2
+      }
+    ],
+    "dependencies": [{ "afterId": "a-transport", "beforeId": "a-harvest" }],
+    "notes": "split roles to avoid all bots farming the same plot; transport waits for harvest"
+  }
+}
