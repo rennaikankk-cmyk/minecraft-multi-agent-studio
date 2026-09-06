@@ -1,3 +1,4 @@
+export { baseLayoutSchema, planBaseLayout, plannedBlueprintAnchor, type BaseLayout } from "./base-layout.js";
 export {
   SkillAbortError,
   SkillFault,

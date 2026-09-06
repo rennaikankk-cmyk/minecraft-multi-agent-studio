@@ -215,7 +215,7 @@ export function startPerfTelemetry(options: {
 
   const timer = setInterval(() => {
     const nowWall = Date.now();
-    const driftMs = nowWall - expectedFire - windowMs;
+    const driftMs = nowWall - expectedFire;
     expectedFire = nowWall + windowMs;
     const elapsed = monotonic() - windowStart;
     windowStart = monotonic();

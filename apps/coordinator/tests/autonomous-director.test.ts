@@ -24,11 +24,12 @@ describe("AutonomousDirector", () => {
       subscribe: vi.fn(() => () => undefined) };
     let nowMs = NOW.getTime();
     let finish: (() => void) | undefined;
-    const planAndDispatch = vi.fn(async ({ operatorGoal }: { operatorGoal: string }) => {
+    const planAndDispatch = vi.fn(async ({ operatorGoal, taskId }: { operatorGoal: string; taskId: string }) => {
       if (!operatorGoal.startsWith("维护农场")) return noopPlanResult();
       await new Promise<void>((resolve) => { finish = resolve; });
       return completedPlanResult("farm.maintain", { status: "PASS_COMPLETE", scannedCells: 98, unknownCells: 0,
-        harvested: 3, planted: 3, tilled: 0, bonemealUsed: 0, inventoryDelta: [{ itemName: "carrot", delta: 5 }], observedAt: new Date(nowMs).toISOString() });
+        harvested: 3, planted: 3, tilled: 0, bonemealUsed: 0, inventoryDelta: [{ itemName: "carrot", delta: 5 }], observedAt: new Date(nowMs).toISOString() },
+        { record: records[0]!, taskId, input: readFarmProduction(facilityRegistry.serialize().facilities[0]!)!.input });
     });
     const persistBaseState = vi.fn();
     const director = new AutonomousDirector({ registry, planner: { planAndDispatch }, baseRegistry, facilityRegistry,
@@ -49,7 +50,7 @@ describe("AutonomousDirector", () => {
     finish!();
     await flushDirector();
     expect(readFarmProduction(facility)?.samples).toHaveLength(2);
-    expect(base.phaseFacts?.FOOD_FACILITY_ACTIVE?.availability).toBe("AVAILABLE");
+    expect(base.phaseFacts?.FOOD_FACILITY_ACTIVE?.availability).toBe("UNVERIFIED");
     expect(persistBaseState).toHaveBeenCalled();
     await director.stop();
   });
@@ -685,7 +686,7 @@ describe("AutonomousDirector", () => {
       "在当前维度向 north 挖一个 2 格深的安全避难所，并用 dirt 封口",
       "在当前维度向 east 挖一个 2 格深的安全避难所，并用 dirt 封口",
       "在当前维度向 south 挖一个 2 格深的安全避难所，并用 dirt 封口",
-      expect.stringMatching(/^移动到坐标/),
+      expect.stringMatching(/^探索区块/),
     ]);
     // The third failure suppresses SHELTER for the cooldown window; a later
     // kick may dispatch other needs (e.g. exploration) but never a fourth
@@ -853,12 +854,14 @@ function failedPlanResult(errorCode: string): never {
   } as never;
 }
 
-function completedPlanResult(skillId: string, output: unknown): never {
+function completedPlanResult(skillId: string, output: unknown, context?: { record: BotRegistryRecord; taskId: string; input: unknown }): never {
   return {
     action: "skill_result",
     reasonCode: "ADVANCE_TASK",
-    invocation: { payload: { skillId } },
-    result: { payload: { outcome: "completed", output } },
+    invocation: { botId: context?.record.botId, taskId: context?.taskId,
+      payload: { skillId, input: context?.input, invocationId: "test-invocation", skillVersion: "1.0.0" } },
+    result: { botId: context?.record.botId, taskId: context?.taskId, source: { instanceId: context?.record.runtimeInstanceId },
+      payload: { skillId, invocationId: "test-invocation", skillVersion: "1.0.0", outcome: "completed", output } },
     ai: {},
   } as never;
 }

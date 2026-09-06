@@ -21,7 +21,7 @@ export interface PursuitBot {
   /** 到目标的直线距离（格）。 */
   distanceTo(entityId: number): number | null;
   /** 对目标挥击（含攻击冷却判定由调用方或此函数内部处理）。 */
-  attack(entityId: number): Promise<void> | void;
+  attack(entityId: number, signal: AbortSignal): Promise<void> | void;
   /** 动态追踪寻路（GoalFollow 语义：目标移动自动重规划）。 */
   followTarget(entityId: number, range: number): void;
   stopFollowing(): void;
@@ -31,7 +31,19 @@ export interface PursuitDeps {
   readonly now: () => number;
   readonly log: (event: string, fields: Record<string, unknown>) => void;
   /** 获取 COMBAT 运动租约；被更高优先级持有时返回 null（追击让位）。 */
-  readonly acquireLease: () => { release: (reason: string) => void } | null;
+  readonly acquireLease: () => PursuitLease | null;
+  readonly canContinue: () => boolean;
+}
+
+export interface PursuitLease {
+  readonly signal: AbortSignal;
+  isCurrent(): boolean;
+  release(reason: string): unknown;
+}
+
+export interface PursuitCombat {
+  canContinue(): boolean;
+  attack(entityId: number, signal: AbortSignal): Promise<void>;
 }
 
 export interface PursuitOptions {
@@ -65,7 +77,10 @@ const DEFAULT_ATTACK_COOLDOWN_MS = 625; // 1.9+ 满蓄力节奏
 export class PursuitController {
   private state: PursuitState = "idle";
   private targetId: number | null = null;
-  private lease: { release: (reason: string) => void } | null = null;
+  private lease: PursuitLease | null = null;
+  private attackPending = false;
+  private epoch = 0;
+  private readonly onLeaseAbort = () => this.stop("stopped_no_lease");
   private lastContactAtMs = 0;
   private lastSwingAtMs = 0;
   private readonly opts: Required<PursuitOptions>;
@@ -97,6 +112,7 @@ export class PursuitController {
     if (this.state === "pursuing") return this.targetId === targetId;
     // 终态（stopped_*/idle）可重新进入（新一轮交火）。
     this.state = "idle";
+    if (!this.deps.canContinue()) return false;
     const lease = this.deps.acquireLease();
     if (lease === null) {
       this.state = "stopped_no_lease";
@@ -104,11 +120,19 @@ export class PursuitController {
       return false;
     }
     this.lease = lease;
+    this.epoch++;
+    this.attackPending = false;
     this.targetId = targetId;
     this.lastContactAtMs = this.deps.now();
-    this.lastSwingAtMs = 0;
+    this.lastSwingAtMs = -Infinity;
     this.state = "pursuing";
-    this.bot.followTarget(targetId, this.opts.followRange);
+    lease.signal.addEventListener("abort", this.onLeaseAbort, { once: true });
+    if (!lease.isCurrent() || lease.signal.aborted) {
+      this.stop("stopped_no_lease");
+      return false;
+    }
+    try { this.bot.followTarget(targetId, this.opts.followRange); }
+    catch { this.stop("stopped_external"); return false; }
     this.deps.log("bot_runtime_pursuit_engaged", {
       targetId,
       commitmentMs: this.opts.commitmentMs,
@@ -123,6 +147,11 @@ export class PursuitController {
    */
   tick(): boolean {
     if (this.state !== "pursuing" || this.targetId === null) return false;
+    const lease = this.lease;
+    if (!lease?.isCurrent() || lease.signal.aborted || !this.deps.canContinue()) {
+      this.stop("stopped_no_lease");
+      return false;
+    }
     const now = this.deps.now();
     const view = this.bot.entityView(this.targetId);
     if (view === null || !view.alive) {
@@ -130,7 +159,7 @@ export class PursuitController {
       return false;
     }
     const distance = this.bot.distanceTo(this.targetId);
-    if (distance === null) {
+    if (distance === null || !Number.isFinite(distance) || distance < 0) {
       this.stop("stopped_target_gone");
       return false;
     }
@@ -147,9 +176,16 @@ export class PursuitController {
       this.lastContactAtMs = now;
     }
     if (distance <= this.opts.attackRange) {
-      if (now - this.lastSwingAtMs >= this.opts.attackCooldownMs) {
+      if (!this.attackPending && now - this.lastSwingAtMs >= this.opts.attackCooldownMs) {
         this.lastSwingAtMs = now;
-        void this.bot.attack(this.targetId);
+        this.attackPending = true;
+        const epoch = this.epoch;
+        try {
+          void Promise.resolve(this.bot.attack(this.targetId, lease.signal)).then(
+            () => { if (epoch === this.epoch) this.attackPending = false; },
+            () => { if (epoch === this.epoch) this.stop("stopped_external"); },
+          );
+        } catch { this.stop("stopped_external"); return false; }
       }
       return true;
     }
@@ -164,13 +200,17 @@ export class PursuitController {
 
   /** 外部停止（L0 抢占/断线/手动）。终态保留（stopped_*）供观测。 */
   stop(reason: string): void {
-    if (this.state === "idle") return;
+    if (this.state !== "pursuing") return;
+    const lease = this.lease;
+    this.epoch++;
+    this.attackPending = false;
+    lease?.signal.removeEventListener("abort", this.onLeaseAbort);
     try {
-      this.bot.stopFollowing();
+      if (lease?.isCurrent()) this.bot.stopFollowing();
     } catch {
       /* 尽力而为 */
     }
-    this.lease?.release(reason);
+    if (lease?.isCurrent()) lease.release(reason);
     this.lease = null;
     this.deps.log("bot_runtime_pursuit_stopped", {
       targetId: this.targetId,

@@ -179,7 +179,7 @@ const LIMITATIONS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   "movement.get-to-block": ["Loaded candidate scan and approach; does not automatically activate containers or blocks."],
   "world.explore": ["Current loaded chunk observations; no durable Baritone region cache or long-range exploration guarantee."],
   "build.clear-area": ["Bounded allowlisted clearing; protects team assets and rejects fluids, falling blocks, and unknown neighbors."],
-  "movement.elytra": ["Airborne start with equipped elytra; loaded straight descent corridor and landing only.", "No rocket routing, obstacle detours, takeoff automation, or real-server validation."],
+  "movement.elytra": ["Isolated-test only: bounded takeoff, non-explosive rocket readback, waypoints, cruise and emergency landing controller.", "Full flight and airborne cancellation require isolated-server validation; no obstacle detour planner."],
   "movement.goto": [
     "完成半径 ~4 格（模板锚点按停点动态折算）",
     "死亡掉落回收依赖 coordinator DEATH_RECOVERY goal（同维度、15 分钟窗口）",

@@ -70,6 +70,53 @@ function fakeBot(overrides: Record<string, unknown> = {}): Bot {
 }
 
 describe("MineflayerCombatAdapter", () => {
+  it("does not swing or restore old controls after cancellation during a critical jump", async () => {
+    vi.useFakeTimers();
+    try {
+      const bot = fakeBot();
+      const adapter = new MineflayerCombatAdapter(bot, SERVER, true);
+      const controller = new AbortController();
+      const pending = adapter.execute({ kind: "MELEE_ATTACK", targetEntityId: 42, weaponSlot: 0 }, controller.signal);
+      expect(bot.setControlState).toHaveBeenCalled();
+      controller.abort();
+      vi.mocked(bot.setControlState).mockClear();
+      vi.mocked(bot.clearControlStates).mockClear();
+      expect(await pending).toMatchObject({ outcome: "failed", reasonCode: "SKILL_CANCELLED" });
+      expect(bot.attack).not.toHaveBeenCalled();
+      expect(bot.setControlState).not.toHaveBeenCalled();
+      expect(bot.clearControlStates).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("pins entity identity across the critical wait instead of attacking a reused id", async () => {
+    vi.useFakeTimers();
+    try {
+      const bot = fakeBot();
+      const adapter = new MineflayerCombatAdapter(bot, SERVER, true);
+      const pending = adapter.execute({ kind: "MELEE_ATTACK", targetEntityId: 42, weaponSlot: 0 }, new AbortController().signal);
+      bot.entities[42] = { ...bot.entities[42]!, uuid: "33333333-3333-4333-8333-333333333333" };
+      await vi.advanceTimersByTimeAsync(450);
+      expect(await pending).toMatchObject({ outcome: "failed", reasonCode: "COMBAT_TARGET_NOT_FOUND" });
+      expect(bot.attack).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("cannot mutate a new combat epoch when an old attack finishes waiting", async () => {
+    vi.useFakeTimers();
+    try {
+      const bot = fakeBot();
+      const adapter = new MineflayerCombatAdapter(bot, SERVER, true);
+      const pending = adapter.execute({ kind: "MELEE_ATTACK", targetEntityId: 42, weaponSlot: 0 }, new AbortController().signal);
+      adapter.reset();
+      vi.mocked(bot.setControlState).mockClear();
+      vi.mocked(bot.clearControlStates).mockClear();
+      await vi.advanceTimersByTimeAsync(450);
+      expect(await pending).toMatchObject({ outcome: "failed", reasonCode: "SKILL_CANCELLED" });
+      expect(bot.attack).not.toHaveBeenCalled();
+      expect(bot.setControlState).not.toHaveBeenCalled();
+      expect(bot.clearControlStates).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
   it("normalizes dimensions and preserves complete enemy gear facts", () => {
     const adapter = new MineflayerCombatAdapter(fakeBot(), SERVER, true);
     const snapshot = adapter.observation(1_000);

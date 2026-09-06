@@ -29,6 +29,7 @@ import {
   loadAutonomousConfig,
 } from "./autonomous-config.js";
 import { AutonomousDirector } from "./autonomous-director.js";
+import { ExplorationJournal } from "./exploration-journal.js";
 import {
   ControlLinkConfigError,
   loadControlLinkConfig,
@@ -270,6 +271,9 @@ async function main(): Promise<void> {
   // AGENTS.md §0.4"AI 宕机 fail-closed 到确定性层，而不是停下"一致。
   // 此前整个 AutonomousDirector 被装配在 Spark 配置块里，Spark 不可用
   // 时自主生存完全停摆，而它本来一步都不需要模型。
+  const explorationJournal = new ExplorationJournal(process.env.STUDIO_EXPLORATION_CACHE_PATH?.trim() || path.join("runtime-data", "exploration-cache.json"));
+  await explorationJournal.initialize();
+  logger.info("exploration_cache_loaded", explorationJournal.health());
   if (localAIConfig.enabled && localAIConfig.baseUrl && resolvedAIModel) {
     const taskPersistence = await createTaskStateMachine();
     taskPool = taskPersistence.pool;
@@ -294,7 +298,7 @@ async function main(): Promise<void> {
       transport: runtimeServer,
       coordinatorInstanceId: instanceId,
       workstationRegistry,
-      planJournalStore, baseRegistry, persistBaseState,
+      planJournalStore, baseRegistry, facilityRegistry, persistBaseState, explorationJournal,
       logger,
     });
   } else {
@@ -315,7 +319,7 @@ async function main(): Promise<void> {
       transport: runtimeServer,
       coordinatorInstanceId: instanceId,
       workstationRegistry,
-      planJournalStore, baseRegistry, persistBaseState,
+      planJournalStore, baseRegistry, facilityRegistry, persistBaseState, explorationJournal,
       logger,
     });
     logger.warn("coordinator_planner_deterministic_only", {
@@ -325,6 +329,7 @@ async function main(): Promise<void> {
   if (autonomousConfig.enabled) {
     autonomousDirector = new AutonomousDirector({
       baseRegistry, facilityRegistry, planJournalStore, persistBaseState,
+      explorationJournal,
       registry,
       planner: localPlanner,
       intervalMs: autonomousConfig.intervalMs,

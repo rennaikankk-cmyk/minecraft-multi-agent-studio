@@ -1293,7 +1293,7 @@
     },
     {
       "skillId": "movement.elytra",
-      "schemaVersion": "1.0.0",
+      "schemaVersion": "1.1.0",
       "family": "movement",
       "status": "Partial",
       "maturityLevel": "L3",
@@ -1318,6 +1318,7 @@
       ],
       "failureCodes": [
         "BOT_NOT_ONLINE",
+        "ELYTRA_ISOLATED_VALIDATION_REQUIRED",
         "NORMAL_ACTIONS_PAUSED",
         "TARGET_DIMENSION_MISMATCH",
         "TARGET_SERVER_PROFILE_MISMATCH"
@@ -1330,8 +1331,8 @@
       "realScenarioIds": [],
       "evidenceRefs": [],
       "limitations": [
-        "Airborne start with equipped elytra; loaded straight descent corridor and landing only.",
-        "No rocket routing, obstacle detours, takeoff automation, or real-server validation."
+        "Isolated-test only: bounded takeoff, non-explosive rocket readback, waypoints, cruise and emergency landing controller.",
+        "Full flight and airborne cancellation require isolated-server validation; no obstacle detour planner."
       ],
       "ownerModule": "packages/skills/src/baritone-processes.ts"
     }

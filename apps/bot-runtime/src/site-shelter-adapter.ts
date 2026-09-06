@@ -119,10 +119,15 @@ export function observeSite(bot: Bot, profile: string, input: { candidate: Posit
     if (!b) complete = false;
     else samples.push({ p: c.offset(x, 0, z), n: b.name });
   }
-  const nearest = (pred: (name: string) => boolean): number | null => {
+  const nearest = (pred: (name: string) => boolean, requiredClearance: number): number | null => {
     const distances = samples.filter((sample) => pred(sample.n)).map((sample) => sample.p.distanceTo(c));
-    return distances.length ? Math.min(...distances) : r;
+    // Sparse local samples can disprove clearance, never prove an empty wider region.
+    if (distances.length) return Math.min(...distances);
+    return requiredClearance === 0 ? 0 : null;
   };
+  const portalDistance = nearest((name) => name === "nether_portal", input.policy.minPortalLineDistance);
+  const hazardDistance = nearest((name) => hazards.has(name), input.policy.hazardClearance);
+  if (portalDistance === null || hazardDistance === null) complete = false;
   let overheadCoverDepthBlocks = 0;
   // burialDepth is the consecutive solid overhead cover above the candidate,
   // measured in blocks toward the surface. Air ends the cover; an unavailable
@@ -145,8 +150,8 @@ export function observeSite(bot: Bot, profile: string, input: { candidate: Posit
     complete,
     spawnDistance: Math.hypot(c.x, c.z),
     nearestHighwayDistance: Math.min(Math.abs(c.x), Math.abs(c.z)),
-    nearestPortalLineDistance: nearest((name) => name === "nether_portal"),
-    nearestHazardDistance: nearest((name) => hazards.has(name)),
+    nearestPortalLineDistance: portalDistance,
+    nearestHazardDistance: hazardDistance,
     resources: {
       wood: Math.min(1, samples.filter((sample) => logs.has(sample.n)).length / 4),
       stone: Math.min(1, samples.filter((sample) => sample.n === "stone" || sample.n === "cobblestone").length / 4),

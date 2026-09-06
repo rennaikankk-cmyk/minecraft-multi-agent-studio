@@ -28,6 +28,12 @@ import {
 import {
   GoalPlanner,
   BaseRegistry,
+  type FacilityRegistry,
+  readFarmProduction,
+  farmSustainInputSchema,
+  exploreInputSchema,
+  siteAssessInputSchema,
+  DEFAULT_UNVERIFIED_SITE_POLICY,
   buildBlueprintInputSchema,
   processContinuationCode,
   PlanSupervisor,
@@ -48,6 +54,7 @@ import { appendFileSync, mkdirSync, openSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 
 import type { BotRegistry, BotRegistryRecord } from "./bot-registry.js";
+import type { ExplorationJournal } from "./exploration-journal.js";
 import { InMemoryGoalLifecycleStore } from "./in-memory-goal-store.js";
 import {
   type PlanExecutionJournal,
@@ -561,6 +568,8 @@ export type CoordinatorLocalPlannerOptions = Readonly<{
   /** Experimental workface selector; STUDIO_BLUEPRINT_WORKSET=1 opts in when omitted. */
   blueprintWorksetEnabled?: boolean;
   baseRegistry?: BaseRegistry;
+  facilityRegistry?: FacilityRegistry;
+  explorationJournal?: ExplorationJournal;
   persistBaseState?: () => void;
   /**
    * 蓝图文件目录（默认 apps/coordinator/blueprints）。测试可注入临时目录；
@@ -1546,6 +1555,31 @@ export class CoordinatorLocalPlanner {
       }
       return null;
     }
+    if (parsed.kind === "assess-site") {
+      const entry = availableSkills.find((s) => s.skillId === "site.assess" && s.availability === "available");
+      const dimension = record.currentStatus?.position.dimension;
+      if (!entry || !dimension || !this.options.baseRegistry) throw new LocalPlannerError("PLANNER_GOAL_UNSUPPORTED", "SITE_ASSESSMENT_UNAVAILABLE");
+      const ownRecords = this.options.baseRegistry.serialize().bases.filter((base) => base.serverProfileId === record.serverProfileId && base.dimension === dimension)
+        .map((base) => ({ ...base.anchor, serverProfileId: base.serverProfileId, dimension: base.dimension, kind: "OWN_HIDEOUT" as const }));
+      return { planItems: null, skill: { action: "invoke_skill", botId: request.botId, taskId: request.taskId,
+        skillId: "site.assess", skillVersion: entry.skillVersion, input: skillJsonValueSchema.parse(siteAssessInputSchema.parse({
+          candidate: { x: parsed.x, y: parsed.y, z: parsed.z, serverProfileId: record.serverProfileId, dimension },
+          ownRecords, policy: DEFAULT_UNVERIFIED_SITE_POLICY, observedAt: this.now().toISOString(), staleAfterMs: 60_000,
+        })), reasonCode: "DETERMINISTIC_SITE_ASSESSMENT" } };
+    }
+    if (parsed.kind === "sustain-farm") {
+      const facility = this.options.facilityRegistry?.get(parsed.facilityId);
+      const base = record.currentStatus && this.options.baseRegistry?.forMember(request.botId, record.serverProfileId, record.currentStatus.position.dimension);
+      const production = facility && readFarmProduction(facility);
+      const entry = availableSkills.find((s) => s.skillId === "farm.sustain" && s.availability === "available");
+      if (!facility || !base || facility.baseId !== base.id || facility.serverProfileId !== record.serverProfileId ||
+        facility.dimension !== record.currentStatus?.position.dimension || !production?.sustain || !production.enabled || !entry) {
+        throw new LocalPlannerError("PLANNER_GOAL_UNSUPPORTED", "FARM_CONFIGURATION_UNAVAILABLE");
+      }
+      return { planItems: null, skill: { action: "invoke_skill", botId: request.botId, taskId: request.taskId,
+        skillId: "farm.sustain", skillVersion: entry.skillVersion,
+        input: farmSustainInputSchema.parse(production.sustain), reasonCode: "DETERMINISTIC_FARM_SUSTAIN" } };
+    }
     if (parsed.kind === "acquire-item") {
       return {
         planItems: {
@@ -2482,11 +2516,16 @@ export class CoordinatorLocalPlanner {
         1,
         Math.floor(invocationDeadlineMs - dispatchStartedAt.getTime()),
       );
+      let trustedInput = input.trustedInput;
+      if (input.decision.skillId === "world.explore" && this.options.explorationJournal) {
+        const parsed = exploreInputSchema.parse(trustedInput);
+        trustedInput = { ...parsed, visited: this.options.explorationJournal.list(parsed.serverProfileId, parsed.dimension, parsed.center, parsed.radiusChunks) };
+      }
       const invocation = this.invocation(
         input.request,
         input.decision.skillId,
         input.decision.skillVersion,
-        input.trustedInput,
+        trustedInput,
         dispatchStartedAt,
         invocationDeadlineMs,
       );
@@ -2507,6 +2546,15 @@ export class CoordinatorLocalPlanner {
       this.assertWithinDeadline(input.deadlineMs, input.request.signal);
       await this.assertExecutionAttemptFresh(input.request, execution, input.claim);
       if (result.payload.outcome === "completed") {
+        if (invocation.payload.skillId === "world.explore" && this.options.explorationJournal) {
+          try {
+            await this.options.explorationJournal.recordReceipt(invocation.payload.input, result.payload.output);
+            const health = this.options.explorationJournal.health();
+            if (health.errorCode) this.options.logger?.warn("exploration_cache_degraded", health);
+          } catch {
+            this.options.logger?.warn("exploration_receipt_rejected", { errorCode: "EXPLORATION_RECEIPT_INVALID" });
+          }
+        }
         return { invocation, result, execution };
       }
       const retryExecution = await this.prepareL0RecoveryRetry({
@@ -4075,6 +4123,15 @@ function deterministicSkillDecision(
     );
     return entry?.skillVersion ?? null;
   };
+  if (parsed.kind === "sustain-farm" || parsed.kind === "assess-site") return null;
+  if (parsed.kind === "explore-chunks") {
+    const skillVersion = advertisedVersion("world.explore");
+    if (!skillVersion) return null;
+    const input = { ...exploreInputSchema.parse({ serverProfileId: "placeholder", dimension,
+      center: { x: parsed.x, z: parsed.z }, radiusChunks: parsed.radius }), serverProfileId: TRUSTED_SERVER_PROFILE_PLACEHOLDER };
+    return { action: "invoke_skill", botId: request.botId, taskId: request.taskId, skillId: "world.explore", skillVersion,
+      input, reasonCode: "DETERMINISTIC_EXPLORE" };
+  }
   if (parsed.kind === "maintain-farm") {
     const skillVersion = advertisedVersion("farm.maintain");
     if (skillVersion === null) return null;

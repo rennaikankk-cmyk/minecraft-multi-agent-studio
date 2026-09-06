@@ -1,5 +1,5 @@
 import { createBot, type Bot } from "mineflayer";
-import { setTimeout as processDelay } from "node:timers/promises";
+import { setTimeout as processDelay, setImmediate as processYield } from "node:timers/promises";
 import { randomUUID } from "node:crypto";
 import { ActiveWorkstationLease } from "./workstation-lease.js";
 import { withWorkAreaLease } from "./work-area-lease.js";
@@ -8,6 +8,8 @@ import { createFarmPort } from "./farm-mineflayer-port.js";
 import { sustainFarm } from "./farm-sustain-adapter.js";
 import { createFoodFarmPort } from "./farm-sustain-mineflayer.js";
 import { FoodReserves } from "./food-reserves.js";
+import { balanceFarmStorage } from "./farm-storage.js";
+import { executeVillagerTrades, type MerchantWindow } from "./villager-trading.js";
 import { clearWorkArea } from "./clear-area-adapter.js";
 import { glideToLanding } from "./elytra-process-adapter.js";
 import { runNavigationGoal, followEntity, getToBlock, exploreChunks, type NavigationProcessPort } from "./navigation-process-adapter.js";
@@ -20,7 +22,7 @@ import { Vec3 } from "vec3";
 import { runSpawnEscape } from "./spawn-escape.js";
 import { NearbyBlockScanner } from "./nearby-block-scanner.js";
 import { MovementSyncShaper, type MovementWire } from "./movement-sync.js";
-import { PursuitController } from "./pursuit-controller.js";
+import { PursuitController, type PursuitCombat } from "./pursuit-controller.js";
 
 /** 追击循环定时器（engage 时创建，tick 失败时清除）。 */
 type Vec3Like = { x: number; y: number; z: number };
@@ -932,25 +934,24 @@ export type CollectReachability<TBlock> = Readonly<{
  * 拒绝直接上抛（CollectBlock.js:31，第 33 行还留着 `// TODO:
  * options.ignoreNoPath`），所以**一个**到不了的目标就会中止整批采集。实测 40 个
  * 暴露候选里有 7 个是 noPath，而选择只按距离排序，撞上纯属运气。
- * tickTimeout == timeout 让切片背靠背跑，wall ≈ compute；1500ms 是实测最坏
- * 定论耗时 678ms 的两倍余量，且仍然有界。
+ * 每个候选保留 1500ms 计算预算，按 5ms 切片让出事件循环。让出期间的时间
+ * 不计入候选 CPU 预算，整个扫描仍受 6000ms 墙钟上限约束。
  *
  * 只数 `noPath`，因为 AStar.compute() 只有四个状态（astar.js:66-120）：
  * `partial` 是切片没跑完，`timeout` 是总预算耗尽，`success` 是找到了，
  * `noPath` 是开集排空——**只有最后一个**是"这里确实没有路"的证明。而
- * `timeout` 在本函数这个配置下是真能出现的：tickTimeout == timeout 时第一次
- * compute() 先撞 tick 检查返回 partial，getPathFromTo 再驱动一次
- * （index.js:96-100），这次 `now - startTime > timeout` 已经成立就报 timeout。
+ * `timeout` 也可能是调度或全局墙钟预算耗尽。
  * 把它记成证明会让一个只是没算完的搜索冒充定论，正是
  * failure-classifier.ts:180 明令不许合并的那两件事。未知状态同样不算证明：
  * 拿不准时少声称，而不是多声称。
  */
-export function collectReachableTargets<TBlock extends { position: Vec3 }>(
+export async function collectReachableTargets<TBlock extends { position: Vec3 }>(
   bot: Pick<Bot, "pathfinder" | "entity" | "world">,
   movements: Movements,
   targets: readonly TBlock[],
   wanted: number = targets.length,
-): CollectReachability<TBlock> {
+  signal?: AbortSignal,
+): Promise<CollectReachability<TBlock>> {
   const reachable: TBlock[] = [];
   const unproven: TBlock[] = [];
   let provenPathless = 0;
@@ -958,6 +959,7 @@ export function collectReachableTargets<TBlock extends { position: Vec3 }>(
   let stoppedOnTotalBudget = false;
   const deadline = Date.now() + COLLECT_PRECHECK_TOTAL_BUDGET_MS;
   for (let index = 0; index < targets.length; index += 1) {
+    if (signal?.aborted) throw new SkillFault("SKILL_CANCELLED");
     const target = targets[index]!;
     // 够数就停：池子放大是为了有替补，不是为了多采。攒到需求量就不再花钱，
     // 也顺手把交给 collect() 的目标数压在请求量之内。
@@ -977,15 +979,26 @@ export function collectReachableTargets<TBlock extends { position: Vec3 }>(
       bot.entity.position,
       new goals.GoalLookAtBlock(target.position, bot.world),
       {
-        timeout: COLLECT_PRECHECK_BUDGET_MS,
-        tickTimeout: COLLECT_PRECHECK_BUDGET_MS,
+        timeout: Math.max(1, deadline - Date.now()),
+        tickTimeout: 5,
         searchRadius: -1,
       },
     );
     let status: string | undefined;
-    for (const step of generator) {
-      status = step.result.status;
-      if (status !== "partial") break;
+    let computeMs = 0;
+    try {
+      for (;;) {
+        if (signal?.aborted) throw new SkillFault("SKILL_CANCELLED");
+        const sliceStarted = performance.now();
+        const step = generator.next();
+        computeMs += performance.now() - sliceStarted;
+        if (step.done) break;
+        status = step.value.result.status;
+        if (status !== "partial" || computeMs >= COLLECT_PRECHECK_BUDGET_MS || Date.now() >= deadline) break;
+        await processYield();
+      }
+    } finally {
+      generator.return?.();
     }
     if (status === "success") {
       reachable.push(target);
@@ -1854,18 +1867,25 @@ export class MineflayerBotClient implements BotClient {
         const food = this.safeFoodItems()[0];
         if (!food) return { outcome: "skipped", errorCode: "NO_SAFE_FOOD" };
         this.bot.clearControlStates();
-        await this.actionLocks.withLock(
+        const consumed = await this.actionLocks.withLock(
           "inventory",
           {
             owner: `safety:${action.kind}`,
             ttlMs: ACTION_LOCK_TTL_MS,
+            signal: movementLease.signal,
           },
           async () => {
-            await this.bot.equip(food.item, "hand");
+            movementLease.assertCurrent();
+            const fresh = this.safeFoodItems()[0];
+            if (!fresh) return false;
+            await this.bot.equip(fresh.item, "hand");
+            movementLease.assertCurrent();
+            if (!this.safeFoodItems().some((entry) => entry.item.type === fresh.item.type)) return false;
             await this.bot.consume();
+            return true;
           },
         );
-        return { outcome: "executed", errorCode: null };
+        return consumed ? { outcome: "executed", errorCode: null } : { outcome: "skipped", errorCode: "NO_SAFE_FOOD" };
       }
       if (action.kind === "FORAGE_SAFE_FOOD") {
         if (this.actionLocks.ownerOf("blockInteraction") || this.actionLocks.ownerOf("inventory")) {
@@ -2075,6 +2095,7 @@ export class MineflayerBotClient implements BotClient {
         if (seed) this.foodReserves.reserve(seed, input.seedReserve, sustain?.foodReserve ?? 0);
       }
       return this.withActionLocks(request, ["inventory", "container"], () => this.withAreaProcess(request, area, async (port, assertEffect) => {
+        const farmSignal = this.activeProcessSignal!;
         this.placementPurpose = "farm";
         try {
           const farm = createFarmPort(this.bot, input, {
@@ -2128,7 +2149,7 @@ export class MineflayerBotClient implements BotClient {
             },
           }), sustain));
           return farmMaintainOutputSchema.parse(await maintainFarm(farm, input));
-        } finally { this.placementPurpose = undefined; }
+        } finally { if (this.activeProcessSignal === farmSignal) this.placementPurpose = undefined; }
       }));
     }
     if (request.capability === "world.interact" && request.operation === "build.clear-area-safe") {
@@ -2292,7 +2313,7 @@ export class MineflayerBotClient implements BotClient {
       request.capability === "world.interact" &&
       request.operation === "trade.villager-safe"
     ) {
-      return this.invokeTradeVillager(request);
+      return this.withActionLocks(request, ["container", "inventory"], () => this.invokeTradeVillager(request));
     }
     if (
       request.capability === "world.read" &&
@@ -2389,6 +2410,8 @@ export class MineflayerBotClient implements BotClient {
     if (!lease) throw new SkillFault("BOT_MOVEMENT_BUSY");
     const signal = AbortSignal.any([parent, lease.signal]);
     this.activeProcessSignal = signal;
+    this.activeWorkAreaLeaseId = undefined;
+    this.placementPurpose = undefined;
     const stop = () => { this.stopPathfinder(); this.bot.stopDigging?.(); };
     signal.addEventListener("abort", stop, { once: true });
     const assertActive = () => {
@@ -2408,7 +2431,12 @@ export class MineflayerBotClient implements BotClient {
     } finally {
       if (lease.isCurrent()) { this.stopPathfinder(); this.bot.clearControlStates(); }
       signal.removeEventListener("abort", stop);
-      lease.release(); this.activeProcessSignal = undefined;
+      lease.release();
+      if (this.activeProcessSignal === signal) {
+        this.activeProcessSignal = undefined;
+        this.activeWorkAreaLeaseId = undefined;
+        this.placementPurpose = undefined;
+      }
     }
   }
 
@@ -2417,9 +2445,11 @@ export class MineflayerBotClient implements BotClient {
     this.assertServerProfileMatch(area.serverProfileId); this.assertDimensionMatch(area.dimension);
     return withWorkAreaLease(this.worldOperations.workAreas, area, `${this.workstationRuntimeId}:${request.taskId}:${request.invocationId}`,
       request.signal, async (leaseId, signal, assertEffect) => {
-        this.activeWorkAreaLeaseId = leaseId;
-        try { return await this.withProcessNavigation({ ...request, signal }, area, (port) => work(port, assertEffect)); }
-        finally { this.activeWorkAreaLeaseId = undefined; }
+        return this.withProcessNavigation({ ...request, signal }, area, async (port) => {
+          this.activeWorkAreaLeaseId = leaseId;
+          try { return await work(port, assertEffect); }
+          finally { if (this.activeWorkAreaLeaseId === leaseId) this.activeWorkAreaLeaseId = undefined; }
+        });
       });
   }
 
@@ -2710,52 +2740,37 @@ export class MineflayerBotClient implements BotClient {
     if (typeof botWithTrade.openVillager !== "function" || typeof botWithTrade.trade !== "function") {
       throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE");
     }
-    let window: any = null;
-    try {
-      window = await botWithTrade.openVillager(villager);
-      const trades = Array.isArray(window?.trades) ? window.trades : [];
-      const index = trades.findIndex((trade: any) => String(trade?.outputItem?.name ?? trade?.outputItem?.type) === input.data.wantItem);
-      if (index < 0) throw new SkillFault("TRADE_OFFER_NOT_FOUND");
-      const trade = trades[index] as any;
-      const uses = Number(trade?.nbTradeUses ?? trade?.uses ?? 0);
-      const maximum = Number(trade?.maximumNbTradeUses ?? trade?.maxUses ?? 0);
-      if (trade?.tradeDisabled === true || (maximum > 0 && uses >= maximum)) throw new SkillFault("TRADE_DISABLED");
-      const realPrice = Math.max(0, Number(trade?.realPrice ?? trade?.inputItem1?.count ?? trade?.price ?? 0));
-      const specialPrice = Math.max(0, Number(trade?.specialPrice ?? realPrice));
-      if (realPrice > input.data.maxUnitPrice || specialPrice > input.data.maxUnitPrice) throw new SkillFault("TRADE_PRICE_UNACCEPTABLE");
-      const paymentName = String(trade?.inputItem1?.name ?? trade?.inputItem1?.type ?? "");
-      if (!paymentName || this.countInventoryItem(paymentName) < realPrice) throw new SkillFault("TRADE_ITEM_NOT_IN_INVENTORY");
-      if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
-      const beforeSpent = this.countInventoryItem(paymentName);
-      const beforeReceived = this.countInventoryItem(input.data.wantItem);
-      const maxAvailable = maximum > 0 ? Math.max(0, maximum - uses) : input.data.maxTrades;
-      const times = Math.min(input.data.maxTrades, maxAvailable);
-      await botWithTrade.trade(window, index, times);
-      // Mineflayer copies merchant-window slots back into the player
-      // inventory when the window closes. Read deltas only after that sync;
-      // otherwise a successful server-side trade is reported as uncertain.
-      window.close?.();
-      window = null;
-      const spent = Math.max(0, beforeSpent - this.countInventoryItem(paymentName));
-      const received = Math.max(0, this.countInventoryItem(input.data.wantItem) - beforeReceived);
-      const completedTrades = Math.min(times, received > 0 ? Math.max(1, Math.floor(received / Math.max(1, Number(trade?.outputItem?.count ?? 1)))) : Math.floor(spent / Math.max(1, realPrice)));
-      if (completedTrades < 1) throw new SkillFault("NON_IDEMPOTENT_RESULT_UNCERTAIN");
-      return tradeVillagerCapabilityOutputSchema.parse({
-        villagerEntityId: String(villager.id),
-        wantItem: input.data.wantItem,
-        requestedTrades: input.data.maxTrades,
-        completedTrades,
-        receivedCount: received,
-        spentCount: spent,
-        actualUnitPrice: Math.ceil(spent / completedTrades),
-      });
-    } catch (error) {
-      if (error instanceof SkillFault) throw error;
-      if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
-      throw new SkillFault("SKILL_CAPABILITY_FAILED");
-    } finally {
-      try { window?.close?.(); } catch { /* close is best effort */ }
-    }
+    const anchor = villager.position.clone() as Vec3;
+    const cell = anchor.floored();
+    const area: WorkArea = { serverProfileId: input.data.serverProfileId, dimension: input.data.dimension,
+      min: { x: cell.x - 1, y: cell.y, z: cell.z - 1 }, max: { x: cell.x + 1, y: cell.y + 2, z: cell.z + 1 } };
+    return this.withAreaProcess(request, area, async (port, assertLease) => {
+      const signal = this.activeProcessSignal!;
+      const assertActive = async () => {
+        port.assertActive();
+        await assertLease();
+        port.assertActive();
+        if (this.bot.entities[villager.id] !== villager || villager.isValid === false || villager.position.distanceTo(anchor) > 0.75) {
+          throw new SkillFault("VILLAGER_NOT_FOUND");
+        }
+        if (this.bot.entity.position.distanceTo(villager.position) > 3.8) throw new SkillFault("VILLAGER_OUT_OF_REACH");
+      };
+      return tradeVillagerCapabilityOutputSchema.parse(await executeVillagerTrades({
+        signal, assertActive,
+        open: () => botWithTrade.openVillager!(villager),
+        close: (window) => {
+          // A late callback may only close its own merchant window.
+          if ((this.bot.currentWindow as unknown) === window) (window as MerchantWindow & { close(): void }).close();
+        },
+        trade: (window, index) => botWithTrade.trade!(window, index, 1),
+        count: (name) => this.countInventoryItem(name),
+        hasRoom: (name, count) => {
+          const stackSize = this.bot.registry.itemsByName[name]?.stackSize ?? 1;
+          return this.bot.inventory.emptySlotCount() * stackSize + this.bot.inventory.items()
+            .filter((item) => item.name === name).reduce((sum, item) => sum + stackSize - item.count, 0) >= count;
+        },
+      }, input.data, String(villager.id)));
+    });
   }
   combatObservation(nowMs: number): CombatDriverObservation | null {
     return this.combatAdapter.observation(nowMs);
@@ -2781,6 +2796,9 @@ export class MineflayerBotClient implements BotClient {
     action: CombatPrimitiveAction,
     signal: AbortSignal,
   ): Promise<CombatActionAcknowledgement> {
+    if (action.kind === "DISENGAGE") this.stopPursuit();
+    const epoch = this.combatEpoch;
+    const target = action.kind === "MELEE_ATTACK" ? this.bot.entities[action.targetEntityId] : null;
     const promise = this.combatAdapter.execute(action, signal);
     // 追击移交（用户实测 2026-09-04 两轮：①"反击几下就停"②"压根不追"——
     // 第二轮实锤 anarchyNavigation 闸把非 anarchy bot 的追击全关了，本地
@@ -2791,13 +2809,15 @@ export class MineflayerBotClient implements BotClient {
     void promise.then((ack) => {
       if (
         process.env.STUDIO_PURSUIT !== "0" &&
+        !signal.aborted && epoch === this.combatEpoch &&
         action.kind === "MELEE_ATTACK" &&
         ack.outcome === "executed" &&
+        this.bot.entities[action.targetEntityId] === target &&
         this.isPlayerEntity(action.targetEntityId)
       ) {
         this.engagePursuit(action.targetEntityId);
       }
-    });
+    }).catch(() => undefined);
     return promise;
   }
 
@@ -2809,11 +2829,14 @@ export class MineflayerBotClient implements BotClient {
   private engagePursuit(entityId: number): void {
     if (this.activePursuit !== null || this.pursuitTimer !== null) return; // 已在追击
     const botRef = this.bot;
+    const combat = this.pursuitCombat;
+    const pinnedTarget = botRef.entities[entityId];
+    if (!combat || !pinnedTarget || !combat.canContinue()) return;
     const controller = new PursuitController(
       {
         entityView: (id) => {
           const entity = (botRef.entities as Record<number, { position?: Vec3Like }> | undefined)?.[id];
-          if (!entity?.position) return null;
+          if (!entity?.position || botRef.entities[id] !== pinnedTarget || pinnedTarget.isValid === false) return null;
           return { x: entity.position.x, y: entity.position.y, z: entity.position.z, alive: true };
         },
         distanceTo: (id) => {
@@ -2826,10 +2849,7 @@ export class MineflayerBotClient implements BotClient {
             entity.position.z - self.z,
           );
         },
-        attack: (id) => {
-          const entity = (botRef.entities as Record<number, unknown> | undefined)?.[id];
-          if (entity !== undefined) void (botRef as unknown as { attack: (e: unknown) => Promise<void> }).attack(entity);
-        },
+        attack: (id, signal) => combat.attack(id, signal),
         followTarget: (id, range) => {
           const entity = (botRef.entities as Record<number, unknown> | undefined)?.[id];
           if (entity !== undefined) {
@@ -2851,6 +2871,7 @@ export class MineflayerBotClient implements BotClient {
         },
       },
       {
+        canContinue: () => combat.canContinue() && botRef.entities[entityId] === pinnedTarget,
         now: () => Date.now(),
         log: (event, fields) => {
           console.warn(
@@ -2894,7 +2915,17 @@ export class MineflayerBotClient implements BotClient {
   }
 
   resetCombat(): void {
+    this.combatEpoch++;
+    this.stopPursuit();
     this.combatAdapter.reset();
+  }
+
+  private combatEpoch = 0;
+  private pursuitCombat: PursuitCombat | null = null;
+
+  setPursuitCombat(combat: PursuitCombat): void {
+    this.stopPursuit();
+    this.pursuitCombat = combat;
   }
 
   /**
@@ -4194,12 +4225,13 @@ export class MineflayerBotClient implements BotClient {
           );
         if (
           nearbyTargets.length > 0 &&
-          collectReachableTargets(
+          (await collectReachableTargets(
             this.bot,
             movements,
             nearbyTargets,
             maxCount,
-          ).reachable.length > 0
+            request.signal,
+          )).reachable.length > 0
         ) {
           break;
         }
@@ -4212,11 +4244,12 @@ export class MineflayerBotClient implements BotClient {
           target.boundingBox !== "empty" &&
           this.matchesBlockName(target.name, blockName)
         );
-      const reachableAfterExcavation = collectReachableTargets(
+      const reachableAfterExcavation = await collectReachableTargets(
         this.bot,
         movements,
         liveTargets,
         maxCount,
+        request.signal,
       );
       for (const target of reachableAfterExcavation.reachable) {
         if (targetBlocksDug >= maxCount) break;
@@ -4693,11 +4726,12 @@ export class MineflayerBotClient implements BotClient {
     // 仍会在 collect() 自己的 goto 上以 Timeout 被拒（见
     // COLLECT_LIVE_PATH_SUBSTITUTES）。多出来的候选不交给这一轮 collect()，
     // 只在实跑被拒后才用。
-    const reachability = collectReachableTargets(
+    const reachability = await collectReachableTargets(
       this.bot,
       movements,
       targets,
       input.data.maxCount + COLLECT_LIVE_PATH_SUBSTITUTES,
+      request.signal,
     );
     if (
       this.staircaseResourceDropNames(input.data.blockName) !== null &&
@@ -5932,7 +5966,8 @@ export class MineflayerBotClient implements BotClient {
       }
       await lease.assertCurrent();
       if (input.data.direction === "deposit") {
-        await window.deposit(itemType.id, null, input.data.count);
+        const count = Math.min(input.data.count, this.foodReserves.available(input.data.itemName, before));
+        if (count > 0) await window.deposit(itemType.id, null, count);
       } else {
         await window.withdraw(itemType.id, null, input.data.count);
       }
@@ -5989,30 +6024,30 @@ export class MineflayerBotClient implements BotClient {
   private async invokeFarmStorage(request: SkillCapabilityRequest, position: WorkPosition, retain: number): Promise<{
     before: number; after: number; deposited: number; withdrawn: number; full: boolean;
   }> {
-    const foodNames = [...SAFE_FOOD_NAMES].sort();
-    const count = () => foodNames.reduce((sum, name) => sum + this.countInventoryItem(name), 0);
-    const before = count();
-    let deposited = 0;
-    // Keep the seed and emergency ration floor in the bot inventory. Every
-    // transfer is acknowledged by the existing container capability.
-    for (const itemName of foodNames) {
-      const total = this.countInventoryItem(itemName);
-      const allowed = this.foodReserves.available(itemName, total);
-      if (allowed <= 0) continue;
-      const amount = Math.min(allowed, Math.max(0, before - retain));
-      if (amount <= 0) break;
-      try {
-        const receipt = await this.invokeContainerTransfer({ ...request, capability: "container.write", operation: "container.transfer-safe",
-          input: { direction: "deposit", itemName, count: amount, container: position,
-            dimension: normalizeDimension(String(this.bot.game?.dimension ?? "minecraft:overworld")), serverProfileId: this.serverProfileId! } });
-        if (receipt && typeof receipt === "object" && "movedCount" in receipt) deposited += Number(receipt.movedCount) || 0;
-      } catch (error) {
-        if (error instanceof SkillFault && ["CONTAINER_FULL", "CONTAINER_NOT_FOUND", "CONTAINER_TRANSFER_FAILED"].includes(error.code)) break;
-        throw error;
-      }
-    }
-    const after = count();
-    return { before, after, deposited, withdrawn: 0, full: deposited === 0 && before > retain };
+    const dimension = normalizeDimension(String(this.bot.game.dimension));
+    const block = this.bot.blockAt(new Vec3(position.x, position.y, position.z));
+    if (block?.name !== "barrel") throw new SkillFault("CONTAINER_NOT_FOUND");
+    if (!this.withinInteractionReach(block.position)) throw new SkillFault("CONTAINER_OUT_OF_REACH");
+    await this.workstationRegistry.register(this.serverProfileId!, dimension, "barrel", position);
+    const lease = await ActiveWorkstationLease.acquire(this.workstationRegistry,
+      { serverProfileId: this.serverProfileId!, dimension, position, botId: request.botId },
+      { ownerRuntimeId: this.workstationRuntimeId, ownerTaskId: request.taskId, ownerAttemptId: request.invocationId }, request.signal);
+    let window: Awaited<ReturnType<Bot["openContainer"]>> | undefined;
+    const close = () => { try { window?.close(); } catch { /* an abort never yields a receipt */ } };
+    const assertActive = async () => { await lease.assertCurrent(); this.assertDimensionMatch(dimension);
+      if (lease.signal.aborted) throw new SkillFault("SKILL_CANCELLED"); };
+    lease.signal.addEventListener("abort", close, { once: true });
+    try {
+      await assertActive(); window = await this.bot.openContainer(block); await assertActive();
+      const beforeBag = window.items().filter((i) => i.name === "carrot").reduce((n, i) => n + i.count, 0);
+      const balance = await balanceFarmStorage(this.bot, window, retain, assertActive);
+      close();
+      await assertActive(); window = await this.bot.openContainer(block); await assertActive();
+      const stored = window.containerItems().filter((i) => i.name === "carrot").reduce((n, i) => n + i.count, 0);
+      const bag = window.items().filter((i) => i.name === "carrot").reduce((n, i) => n + i.count, 0);
+      if (stored !== balance.after || bag !== beforeBag - balance.deposited + balance.withdrawn) throw new SkillFault("FARM_STORAGE_READBACK_MISMATCH");
+      return balance;
+    } finally { close(); lease.signal.removeEventListener("abort", close); await lease.release(); }
   }
 
   private transferredItemCount(

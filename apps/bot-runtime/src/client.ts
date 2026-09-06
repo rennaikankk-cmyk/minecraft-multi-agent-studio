@@ -143,6 +143,7 @@ export interface BotClient {
     signal: AbortSignal,
   ): Promise<CombatActionAcknowledgement>;
   resetCombat?(): void;
+  setPursuitCombat?(combat: import("./pursuit-controller.js").PursuitCombat): void;
   setCombatClock?(clock: () => number): void;
   versionCompatibility(): MinecraftVersionCompatibility;
   skillCompatibilityEnvironment(): SkillCompatibilityEnvironment;

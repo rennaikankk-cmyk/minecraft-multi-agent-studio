@@ -33,6 +33,7 @@ import {
   type BlueprintCell,
 } from "./planning/blueprint-planner.js";
 import type { BlockPosition } from "./workstation-registry.js";
+import { baseLayoutSchema, planBaseLayout, type BaseLayout } from "./base-layout.js";
 
 // ---------------------------------------------------------------------------
 // starter_base_v1
@@ -163,6 +164,7 @@ export interface BaseRecord {
   protectedBounds?: { min: BlockPosition; max: BlockPosition };
   memberBotIds?: string[];
   phaseFacts?: Record<string, BasePhaseFact>;
+  layout?: BaseLayout;
   status: BaseStatus;
   /** 已确认放置的 cell 数（0..totalCells）。 */
   placedCells: number;
@@ -236,6 +238,18 @@ export class BaseRegistry {
     }
     base.protectedBounds = bounds;
     base.updatedAt = new Date(this.now()).toISOString();
+  }
+
+  ensureLayout(id: string): BaseLayout {
+    const base = this.bases.get(id);
+    if (!base || base.source === "operator_adopted") throw new Error("BASE_LAYOUT_NOT_AUTONOMOUS");
+    const layout = baseLayoutSchema.parse(base.layout ?? planBaseLayout(base));
+    if (layout.mainArea.serverProfileId !== base.serverProfileId || layout.mainArea.dimension !== base.dimension ||
+        ["x", "y", "z"].some((axis) => layout.anchor[axis as keyof BlockPosition] !== base.anchor[axis as keyof BlockPosition])) {
+      throw new Error("BASE_LAYOUT_SCOPE_INVALID");
+    }
+    base.layout = layout;
+    return layout;
   }
 
   create(params: Readonly<{

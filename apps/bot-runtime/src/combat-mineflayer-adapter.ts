@@ -390,13 +390,18 @@ export class MineflayerCombatAdapter {
    * 注入时钟可能被冻结用于断言（实测把 deadline 卡成永不到达），
    * 而这是物理等待不是被测事件的时间戳。
    */
-  private waitForCriticalWindow(budgetMs: number): Promise<boolean> {
+  private waitForCriticalWindow(budgetMs: number, signal: AbortSignal): Promise<boolean> {
     return new Promise((resolve) => {
       const deadline = Date.now() + budgetMs;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (value: boolean) => { clearTimeout(timer); signal.removeEventListener("abort", abort); resolve(value); };
+      const abort = () => finish(false);
+      signal.addEventListener("abort", abort, { once: true });
       const poll = () => {
-        if (inCriticalWindow(this.bot)) return resolve(true);
-        if (Date.now() >= deadline) return resolve(false);
-        setTimeout(poll, 50);
+        if (signal.aborted) return finish(false);
+        if (inCriticalWindow(this.bot)) return finish(true);
+        if (Date.now() >= deadline) return finish(false);
+        timer = setTimeout(poll, 50);
       };
       poll();
     });
@@ -578,6 +583,8 @@ export class MineflayerCombatAdapter {
   ): Promise<CombatActionAcknowledgement> {
     if (!this.enabled) return { outcome: "unavailable", reasonCode: "COMBAT_DRIVER_UNAVAILABLE" };
     if (signal.aborted) return { outcome: "failed", reasonCode: "SKILL_CANCELLED" };
+    const epoch = this.executionEpoch;
+    const active = () => !signal.aborted && epoch === this.executionEpoch;
     const bot = this.bot as unknown as CombatBotLike;
     try {
       switch (action.kind) {
@@ -606,6 +613,12 @@ export class MineflayerCombatAdapter {
             (entity) => entity.id === action.targetEntityId,
           );
           if (!target || !bot.attack) return { outcome: "unavailable", reasonCode: "COMBAT_TARGET_NOT_FOUND" };
+          const targetUuid = target.uuid;
+          const targetCurrent = () => active() && Object.values(bot.entities ?? {}).some((entity) => entity === target) &&
+            target.uuid === targetUuid && !!bot.entity?.position && !!target.position &&
+            Math.hypot(target.position.x - bot.entity.position.x, target.position.y - bot.entity.position.y,
+              target.position.z - bot.entity.position.z) <= 3;
+          if (!targetCurrent()) return { outcome: "failed", reasonCode: "COMBAT_TARGET_NOT_FOUND" };
           // ---- Critical Hit Engine（参考项目学习的产物，本轮接入）----
           // 策略选择：物理不可靠/高延迟/追击/贴脸/天花板各走各的路径；
           // PACKET_CRIT 只在 anarchy 档（无反作弊）启用。
@@ -672,8 +685,10 @@ export class MineflayerCombatAdapter {
           ) {
             primeCritical(critBotView, critical.strategy);
             // 等待下落窗口（物理跳起后 ~150-300ms 到达攻击判定段）。
-            const windowOpened = await this.waitForCriticalWindow(400);
+            const windowOpened = await this.waitForCriticalWindow(400, signal);
+            if (!active()) return { outcome: "failed", reasonCode: "SKILL_CANCELLED" };
             releaseCriticalPriming(critBotView);
+            if (!targetCurrent()) return { outcome: "failed", reasonCode: "COMBAT_TARGET_NOT_FOUND" };
             if (!windowOpened) {
               // P0-C13: 暴击窗口未打开——不能假报 executed。
               // 降级为普通攻击（真实攻击 + fallback 标注）。
@@ -702,6 +717,7 @@ export class MineflayerCombatAdapter {
             targetDistance: distance,
             inCombo: distance < 2.5,
           });
+          if (!targetCurrent()) return { outcome: "failed", reasonCode: "COMBAT_TARGET_NOT_FOUND" };
           const restoreWTap = primeWTap(
             critBotView as unknown as { setControlState: (n: string, s: boolean) => void },
             wtap,
@@ -709,8 +725,7 @@ export class MineflayerCombatAdapter {
           await bot.attack(target);
           // P0-C14: W-Tap 需要 tick 间隔让 sprint 真正重置——50ms = 1 tick
           await new Promise((resolve) => setTimeout(resolve, 50));
-          restoreWTap();
-          releaseCriticalPriming(critBotView);
+          if (active()) { restoreWTap(); releaseCriticalPriming(critBotView); }
           return { outcome: "executed", executedAtMs: this.clock() };
         }
         case "DRAW_RANGED_WEAPON": {
@@ -776,7 +791,7 @@ export class MineflayerCombatAdapter {
           return { outcome: "unavailable", reasonCode: "COMBAT_ACTION_ADAPTER_UNAVAILABLE" };
       }
     } catch {
-      bot.clearControlStates?.();
+      if (active()) bot.clearControlStates?.();
       return {
         outcome: "failed",
         reasonCode: signal.aborted
@@ -787,6 +802,7 @@ export class MineflayerCombatAdapter {
   }
 
   reset(): void {
+    this.executionEpoch++;
     const bot = this.bot as unknown as CombatBotLike;
     this.totemPopTracker.reset();
     this.hitWindowTracker.reset();
@@ -797,6 +813,8 @@ export class MineflayerCombatAdapter {
     bot.pathfinder?.stop?.();
     bot.clearControlStates?.();
   }
+
+  private executionEpoch = 0;
 
   /**
    * MovementController needs an honest local hazard set. Mineflayer's blockAt

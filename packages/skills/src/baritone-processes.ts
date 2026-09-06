@@ -4,6 +4,7 @@ import { defineSkill } from "./types.js";
 import { workAreaSchema, workPositionSchema, workScopeSchema } from "./work-area.js";
 
 export const processStateSchema = z.object({ online: z.boolean(), normalActionsAllowed: z.boolean(),
+  isolatedTestServer: z.boolean().default(false),
   retreatInProgress: z.boolean().default(false), serverProfileId: workScopeSchema.shape.serverProfileId,
   position: z.object({ x: z.number().finite(), y: z.number().finite(), z: z.number().finite(),
     dimension: workScopeSchema.shape.dimension }).strip().nullable() }).strip();
@@ -56,12 +57,18 @@ export const clearAreaOutputSchema = z.object({ completed: z.boolean(),
   observedAt: z.string().datetime(),
 }).strict();
 export const elytraInputSchema = workScopeSchema.extend({
-  target: workPositionSchema, radius: z.number().min(2).max(8).default(4),
-  maxFlightMs: z.number().int().min(1000).max(30_000).default(15_000),
+  target: workPositionSchema, waypoints: z.array(workPositionSchema).max(16).default([]), radius: z.number().min(2).max(8).default(4),
+  maxFlightMs: z.number().int().min(1000).max(120_000).default(30_000),
+  useFireworks: z.boolean().default(true), minimumFireworks: z.number().int().min(0).max(64).default(2),
+  maxFireworks: z.number().int().min(0).max(64).default(16),
+  rocketReserve: z.number().int().min(0).max(64).default(1),
+  autoEquip: z.boolean().default(true),
   minimumDurability: z.number().int().min(20).max(400).default(40),
 }).strict();
-export const elytraOutputSchema = z.object({ landed: z.literal(true), reached: z.literal(true),
-  position: workPositionSchema, observedAt: z.string().datetime() }).strict();
+export const elytraOutputSchema = z.object({ landed: z.literal(true), reached: z.boolean(),
+  touchdown: workPositionSchema.optional(), groundApproachDistance: z.number().finite().min(0).max(24).default(0),
+  status: z.enum(["TARGET_LANDED", "EMERGENCY_LANDED"]), reason: z.string().max(80).nullable(),
+  position: workPositionSchema, segments: z.number().int().positive(), distance: z.number().finite().nonnegative(), fireworksUsed: z.number().int().nonnegative(), observedAt: z.string().datetime() }).strict();
 
 function processSkill<I, O>(id: string, inputSchema: z.ZodType<I>, outputSchema: z.ZodType<O>,
   capability: SkillCapability, scope: (input: I) => { serverProfileId: string; dimension: string }) {
@@ -85,7 +92,13 @@ export const followEntitySkill = processSkill("movement.follow", followEntityInp
 export const getToBlockSkill = processSkill("movement.get-to-block", getToBlockInputSchema, getToBlockOutputSchema, "bot.move", (i) => i);
 export const exploreSkill = processSkill("world.explore", exploreInputSchema, exploreOutputSchema, "bot.move", (i) => i);
 export const clearAreaSkill = processSkill("build.clear-area", clearAreaInputSchema, clearAreaOutputSchema, "world.interact", (i) => i.area);
-export const elytraSkill = defineSkill({ ...processSkill("movement.elytra", elytraInputSchema, elytraOutputSchema, "bot.move", (i) => i),
+const elytraProcess = processSkill("movement.elytra", elytraInputSchema, elytraOutputSchema, "bot.move", (i) => i);
+export const elytraSkill = defineSkill({ ...elytraProcess,
+  version: "1.1.0", timeoutMs: 150_000,
+  preconditions: [
+    ...elytraProcess.preconditions,
+    { id: "flight.isolated-validation", failureCode: "ELYTRA_ISOLATED_VALIDATION_REQUIRED", check: (_i, s) => s.isolatedTestServer },
+  ],
   compatibility: { variants: [{ id: "mineflayer-elytra", requirements: [{ kind: "resource", resource: "item", names: ["elytra"], match: "all" }], verifiedMinecraftVersions: [] }] },
 });
 export const baritoneProcessSkills = [navigationGoalSkill, followEntitySkill, getToBlockSkill, exploreSkill, clearAreaSkill, elytraSkill] as const;

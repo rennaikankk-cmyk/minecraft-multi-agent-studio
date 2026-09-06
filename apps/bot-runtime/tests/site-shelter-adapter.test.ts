@@ -28,7 +28,7 @@ describe("N2 site-shelter runtime adapter", () => {
       policy: { minHighwayDistance: 1_000, minPortalLineDistance: 512, hazardClearance: 64, burialDepthTarget: 24 },
     });
     expect(result.complete).toBe(false);
-    expect(result.nearestHazardDistance).toBe(32);
+    expect(result.nearestHazardDistance).toBeNull();
   });
 
   it("rejects straight down before inspecting or mutating the world", async () => {

@@ -9,6 +9,9 @@ overrides:
   sharp: 0.35.0
   uuid: 11.1.1
 
+patchedDependencies:
+  prismarine-chunk@1.40.0: b378e3328b3803be3f88a31c3b4a129a4086ef27e1eeaa441f4fe66858b68cee
+
 importers:
 
   .:
@@ -3828,7 +3831,7 @@ snapshots:
       prismarine-biome: 1.4.0(prismarine-registry@1.12.0)
       prismarine-block: 1.23.0(prismarine-registry@1.12.0)
       prismarine-chat: 1.13.0
-      prismarine-chunk: 1.40.0
+      prismarine-chunk: 1.40.0(patch_hash=b378e3328b3803be3f88a31c3b4a129a4086ef27e1eeaa441f4fe66858b68cee)
       prismarine-entity: 2.6.0
       prismarine-item: 1.18.0
       prismarine-nbt: 2.8.0
@@ -4024,7 +4027,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  prismarine-chunk@1.40.0:
+  prismarine-chunk@1.40.0(patch_hash=b378e3328b3803be3f88a31c3b4a129a4086ef27e1eeaa441f4fe66858b68cee):
     dependencies:
       prismarine-biome: 1.4.0(prismarine-registry@1.12.0)
       prismarine-block: 1.23.0(prismarine-registry@1.12.0)

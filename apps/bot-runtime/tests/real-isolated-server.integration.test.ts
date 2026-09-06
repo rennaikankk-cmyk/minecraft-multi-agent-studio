@@ -2,6 +2,8 @@ import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import type { Bot } from "mineflayer";
+import { Vec3 } from "vec3";
 
 import {
   skillInvocationV1Schema,
@@ -9,7 +11,7 @@ import {
   type SkillJsonValue,
 } from "@minecraft-studio/protocol";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { farmMaintainOutputSchema } from "@minecraft-studio/skills";
+import { farmMaintainOutputSchema, farmSustainOutputSchema, elytraOutputSchema, builtinSkills } from "@minecraft-studio/skills";
 
 import { createMineflayerClient } from "../src/mineflayer-client.js";
 import { SingleBotRuntime } from "../src/runtime.js";
@@ -18,6 +20,10 @@ import type { RuntimeLogger } from "../src/runtime-types.js";
 import { SharedStateServer } from "../../coordinator/src/shared-state-server.js";
 
 const enabled = process.env.RUN_REAL_MC_TEST === "1";
+const foodSoakMinutes = Number(process.env.MC_FOOD_SOAK_MINUTES ?? 0);
+const observedClients = new Map<string, Bot>();
+const farmPackets = new Map<string, unknown[]>();
+const farmLights = new Map<string, unknown[]>();
 const integrationDescribe = enabled ? describe : describe.skip;
 const ACCEPTANCE_COORDINATOR_ID = "coordinator-real-acceptance";
 const REAL_ACCEPTANCE_SKILL_IDS = [
@@ -256,7 +262,39 @@ async function createAcceptanceBots(): Promise<AcceptanceBot[]> {
       zone,
       messages,
       runtime: new SingleBotRuntime(profile, {
-        createClient: createMineflayerClient,
+        createClient: (profile, worldState) => {
+          const client = createMineflayerClient(profile, worldState);
+          const raw = (client as unknown as { bot: Bot }).bot;
+          observedClients.set(profile.botId, raw);
+          if (foodSoakMinutes > 0) {
+            const packets: unknown[] = []; farmPackets.set(profile.botId, packets);
+            const lights: unknown[] = []; farmLights.set(profile.botId, lights);
+            raw._client.on("update_light", (packet) => {
+              const low = (mask: Array<[number, number]>) => mask[0]?.[1] ?? 0;
+              const mask = low(packet.blockLightMask);
+              let bufferIndex = 0;
+              const sections = [];
+              for (let section = 0; section < 26; section++) if (mask & 1 << section) {
+                const bytes = Buffer.from(packet.blockLight[bufferIndex++]!);
+                const levels = [64, 65, 66].map((y) => {
+                  const index = (y & 15) << 8 | 11 << 4 | (zone.origin.x & 15);
+                  return { y, value: (bytes[index >> 1]! >> (index % 2 * 4)) & 15 };
+                });
+                sections.push({ section, nonzero: bytes.filter((b) => b !== 0).length, levels });
+              }
+              lights.push({ x: packet.chunkX, z: packet.chunkZ, mask: packet.blockLightMask, empty: packet.emptyBlockLightMask, sections });
+              if (lights.length > 3) lights.shift();
+            });
+            const write = raw._client.write.bind(raw._client);
+            raw._client.write = (name, data) => {
+              if (["block_place", "held_item_slot", "teleport_confirm"].includes(name)) {
+                packets.push({ name, data }); if (packets.length > 12) packets.shift();
+              }
+              write(name, data);
+            };
+          }
+          return client;
+        },
         messageSink: (message) => messages.push(message),
         logger,
       }),
@@ -299,7 +337,7 @@ async function executeAcceptanceSkill(
     payload: {
       invocationId: acceptanceUuid(sequence * 3 + 1),
       skillId,
-      skillVersion: "1.0.0",
+      skillVersion: builtinSkills.find((skill) => skill.id === skillId)!.version,
       expiresAt,
       input,
       authorization: {
@@ -345,11 +383,19 @@ async function runSkill(
       ? latestStatus.payload.position
       : null;
     const reason = error instanceof Error ? error.message : String(error);
+    const rawBot = observedClients.get(bot.profile.botId);
+    const farmDebug = skillId === "farm.sustain" && rawBot ? {
+      heldItem: rawBot.heldItem?.name, inventory: rawBot.inventory.items().map((item) => ({ name: item.name, count: item.count })),
+      packets: farmPackets.get(bot.profile.botId),
+      blocks: [new Vec3(bot.zone.origin.x, 64, -15), new Vec3(bot.zone.origin.x, 65, -15)].map((p) => ({
+        at: p.toString(), name: rawBot.blockAt(p)?.name, properties: rawBot.blockAt(p)?.getProperties(),
+      })),
+    } : null;
     throw new Error(
       `${reason}; runtimeState=${bot.runtime.getState()}; position=${JSON.stringify(position)}; ` +
         `completed=${bot.completedSkillIds.join(",")}; ` +
         `safety=${JSON.stringify(latestStatus?.type === "bot.status.v1" ? latestStatus.payload.safety : null)}; ` +
-        `events=${runtimeEvents.slice(-30).join(",")}; faults=${JSON.stringify(runtimeFaults.slice(-2))}; diagnostics=${JSON.stringify(runtimeDiagnostics)}`,
+        `events=${runtimeEvents.slice(-30).join(",")}; faults=${JSON.stringify(runtimeFaults.slice(-2))}; diagnostics=${JSON.stringify(runtimeDiagnostics)}; farmDebug=${JSON.stringify(farmDebug)}`,
       { cause: error },
     );
   }
@@ -851,6 +897,102 @@ integrationDescribe("real isolated Minecraft 1.21.8 server", () => {
     },
     480_000,
   );
+
+  it.skipIf(process.env.MC_ELYTRA_TEST !== "1")("flies powered elytra routes and confirms grounded arrival", async () => {
+    const setupRequest = process.env.MC_SKILL_SETUP_REQUEST_FILE!, setupReady = process.env.MC_SKILL_SETUP_READY_FILE!;
+    const bots = await createAcceptanceBots();
+    bots.forEach((bot) => bot.runtime.start());
+    try {
+      await Promise.all(bots.map((bot) => waitForBotMessage(bot,
+        (message): message is Extract<BotTelemetryMessageV1, { type: "bot.status.v1" }> => message.type === "bot.status.v1" && message.payload.connectionState === "online", 45_000)));
+      await writeFile(`${setupRequest}.flight`, "flight.v1\n", { flag: "wx" });
+      await waitForFile(`${setupReady}.flight`, 45_000);
+      await Promise.all(bots.map((bot) => observedClients.get(bot.profile.botId)!.waitForTicks(10)));
+      for (const [index, bot] of bots.entries()) {
+        const client = observedClients.get(bot.profile.botId)!;
+        const samples: unknown[] = [];
+        const sample = () => { if (samples.length < 1600) samples.push({ at: Date.now(), position: client.entity.position.clone(),
+          velocity: client.entity.velocity.clone(), onGround: client.entity.onGround, flying: client.entity.elytraFlying, health: client.health }); };
+        client.on("physicsTick", sample);
+        let receipt: unknown = null;
+        try {
+          const healthBefore = client.health;
+          const result = elytraOutputSchema.parse(await runSkill(bot, "movement.elytra", { serverProfileId: bot.profile.id,
+            dimension: "minecraft:overworld", target: { x: 100, y: 128, z: index === 0 ? 104 : 116 }, maxFlightMs: 45_000 }));
+          receipt = result;
+          expect(result).toMatchObject({ landed: true, reached: true, status: "TARGET_LANDED" });
+          expect(result.fireworksUsed).toBeGreaterThan(0);
+          expect(client.entity.onGround).toBe(true);
+          expect(client.health).toBeGreaterThanOrEqual(healthBefore);
+        } finally {
+          client.removeListener("physicsTick", sample);
+          await writeFile(path.join(path.dirname(setupReady), `elytra-${bot.profile.botId}.json`), JSON.stringify({ schemaVersion: "1.0", receipt, samples,
+            inventory: client.inventory.items().map((item) => ({ name: item.name, count: item.count, components: item.components })),
+          }, null, 2));
+        }
+      }
+    } finally { await stopAcceptanceBots(bots, "elytra_cleanup"); }
+  }, 240_000);
+
+  it.skipIf(foodSoakMinutes <= 0)("sustains two food gardens with natural random ticks and actual barrel balances", async () => {
+    const setupRequest = process.env.MC_SKILL_SETUP_REQUEST_FILE!, setupReady = process.env.MC_SKILL_SETUP_READY_FILE!;
+    const bots = await createAcceptanceBots();
+    bots.forEach((bot) => bot.runtime.start());
+    try {
+      await Promise.all(bots.map((bot) => waitForBotMessage(bot,
+        (message): message is Extract<BotTelemetryMessageV1, { type: "bot.status.v1" }> => message.type === "bot.status.v1" && message.payload.connectionState === "online", 45_000)));
+      await writeFile(`${setupRequest}.food`, "food.sustain.v1\n", { flag: "wx" });
+      await waitForFile(`${setupReady}.food`, 45_000);
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await Promise.all(bots.map((bot) => observedClients.get(bot.profile.botId)!.waitForTicks(5)));
+      await Promise.all(bots.map(async (bot) => {
+        const input = { serverProfileId: bot.profile.id, dimension: "minecraft:overworld",
+          center: { x: bot.zone.origin.x, y: 65, z: -18 }, waterSource: { x: bot.zone.origin.x - 3, y: 64, z: -13 },
+          seedReserve: 8, foodReserve: 8, maxActions: 64 };
+        const deadline = Date.now() + foodSoakMinutes * 60_000;
+        const receipts = [];
+        let initialStock: number | null = null;
+        while (Date.now() < deadline) {
+          const result = farmSustainOutputSchema.parse(await runSkill(bot, "farm.sustain", input));
+          receipts.push(result);
+          await writeFile(path.join(path.dirname(setupReady), `food-soak-${bot.profile.botId}.json`), JSON.stringify({
+            schemaVersion: "1.0", growth: "natural-random-ticks-3", receipts,
+            cropObservations: Array.from({ length: 25 }, (_, i) => {
+              const p = new Vec3(input.center.x - 2 + i % 5, input.center.y, input.center.z - 2 + Math.floor(i / 5));
+              const b = observedClients.get(bot.profile.botId)!.blockAt(p);
+              return { name: b?.name, properties: b?.getProperties(), light: b?.light, skyLight: b?.skyLight };
+            }),
+            diagnostics: result.status === "WAITING_INFRASTRUCTURE" ? {
+              packets: farmPackets.get(bot.profile.botId),
+              lights: farmLights.get(bot.profile.botId),
+              cells: Array.from({ length: 162 }, (_, i) => {
+                const p = new Vec3(input.center.x - 4 + i % 9, input.center.y + Math.floor(i / 81), input.center.z - 4 + Math.floor((i % 81) / 9));
+                const b = observedClients.get(bot.profile.botId)!.blockAt(p);
+                return { position: p, name: b?.name, light: b?.light, skyLight: b?.skyLight };
+              }),
+            } : null,
+          }, null, 2));
+          expect(["PASS_COMPLETE", "BATCH_LIMIT", "WAITING_GROWTH"], result.reason ?? "farm receipt").toContain(result.status);
+          expect(result.supply.waterReady).toBe(true);
+          expect(result.supply.enclosureReady).toBe(true);
+          expect(result.supply.lightingReady).toBe(true);
+          expect(result.supply.seedReserved).toBe(8);
+          expect(result.supply.foodReserved).toBe(8);
+          if (result.supply.plantedPlots === 24 && initialStock === null) initialStock = result.supply.inventoryFood + result.supply.storageAfter!;
+          const productive = receipts.filter((r) => (r.maintenance?.harvested ?? 0) > 0 && r.supply.deposited > 0);
+          if (productive.length >= 3 && Date.parse(productive[productive.length - 1]!.observedAt) - Date.parse(productive[0]!.observedAt) >= 300_000) break;
+          await new Promise((resolve) => setTimeout(resolve, result.status === "BATCH_LIMIT" ? 2000 : 30_000));
+        }
+        const last = receipts[receipts.length - 1]!;
+        const productive = receipts.filter((r) => (r.maintenance?.harvested ?? 0) > 0 && r.supply.deposited > 0);
+        expect(productive.length).toBeGreaterThanOrEqual(3);
+        expect(Date.parse(productive[productive.length - 1]!.observedAt) - Date.parse(productive[0]!.observedAt)).toBeGreaterThanOrEqual(300_000);
+        expect(last.supply.plantedPlots).toBe(24);
+        expect(last.supply.hydratedPlots).toBe(24);
+        expect(last.supply.inventoryFood + last.supply.storageAfter!).toBeGreaterThan(initialStock!);
+      }));
+    } finally { await stopAcceptanceBots(bots, "food_soak_cleanup"); }
+  }, foodSoakMinutes * 60_000 + 180_000);
 
   it(
     "reports an unexpected server stop and begins bounded reconnect for both bots",

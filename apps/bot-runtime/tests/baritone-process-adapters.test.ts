@@ -123,6 +123,18 @@ describe("navigation process observations", () => {
     const result = await exploreChunks(port, exploreInputSchema.parse({ ...scope, center: { x: 0, z: 0 }, radiusChunks: 0, visited: [{ x: 0, z: 0 }] }));
     expect(result).toMatchObject({ completed: false, status: "WAITING_OBSERVATION", visited: [] });
   });
+  it("visits an unseen sector before a historical sector and confirms its live column", async () => {
+    const port = navigationFixture();
+    const loaded = new Set<string>();
+    port.bot.world.getColumn = ((x: number, z: number) => loaded.has(`${x},${z}`) ? {} : null) as never;
+    port.goto = vi.fn(async (goal: object) => {
+      const p = goal as { x: number; z: number };
+      loaded.add(`${Math.floor(p.x / 16)},${Math.floor(p.z / 16)}`);
+    });
+    const result = await exploreChunks(port, exploreInputSchema.parse({ ...scope, center: { x: 0, z: 0 }, radiusChunks: 1, maxChunks: 1, visited: [{ x: 0, z: 0 }] }));
+    expect(port.goto).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ status: "BATCH_LIMIT", visited: [{ x: 0, z: -1 }], newlyObserved: 1 });
+  });
   it("does not complete a tracking interval when the follower never gets close", async () => {
     const port = navigationFixture();
     port.bot.entities[3] = { position: new Vec3(20, 64, 0), isValid: true } as never;
@@ -142,6 +154,6 @@ describe("navigation process observations", () => {
       lookAt: vi.fn(async () => {}), elytraFly: vi.fn(async () => {}) });
     Object.assign(port.bot.entity, { position: new Vec3(0.5, 72, 0.5), onGround: false, elytraFlying: true });
     port.wait = async (ms) => { port.advance(ms); Object.assign(port.bot.entity, { position: new Vec3(10.5, 64, 0.5), onGround: true }); };
-    expect(await glideToLanding(port, elytraInputSchema.parse({ ...scope, target: { x: 10, y: 64, z: 0 } }))).toMatchObject({ landed: true, reached: true });
+    expect(await glideToLanding(port, elytraInputSchema.parse({ ...scope, useFireworks: false, target: { x: 10, y: 64, z: 0 } }))).toMatchObject({ landed: true, reached: true, status: "TARGET_LANDED", fireworksUsed: 0 });
   });
 });

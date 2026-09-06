@@ -2436,6 +2436,49 @@ describe("MineflayerBotClient travel.route capability", () => {
   });
 });
 
+describe("MineflayerBotClient process ownership", () => {
+  it("clears inherited farm context and ignores late cleanup after another process takes ownership", async () => {
+    const bot = new EventEmitter() as unknown as Bot;
+    Object.assign(bot, { game: { dimension: "overworld" }, entity: { position: new Vec3(0, 64, 0) },
+      pathfinder: { setMovements: vi.fn(), stop: vi.fn() }, clearControlStates: vi.fn(), stopDigging: vi.fn() });
+    const client = new MineflayerBotClient(bot, "auto", "isolated-test-profile");
+    const internals = client as unknown as {
+      activeProcessSignal: AbortSignal | undefined; activeWorkAreaLeaseId: string | undefined; placementPurpose: string | undefined;
+      withProcessNavigation(request: Parameters<MineflayerBotClient["invokeSkillCapability"]>[0],
+        scope: { serverProfileId: string; dimension: string },
+        work: (port: { assertActive(): void }) => Promise<void>): Promise<void>;
+    };
+    const controller = new AbortController();
+    const scope = { serverProfileId: "isolated-test-profile", dimension: "minecraft:overworld" };
+    const request = { invocationId: "old-farm", traceId: "trace", taskId: "task", botId: "bot", skillId: "farm.sustain",
+      skillVersion: "1.0.0", capability: "bot.move" as const, operation: "test", signal: controller.signal, input: {} };
+    let finishOld!: () => void, finishNew!: () => void;
+    const old = internals.withProcessNavigation(request, scope, async (port) => {
+      internals.placementPurpose = "farm"; internals.activeWorkAreaLeaseId = "old-area";
+      await new Promise<void>((resolve) => { finishOld = resolve; });
+      port.assertActive();
+    });
+    const oldResult = expect(old).rejects.toMatchObject({ code: "SKILL_CANCELLED" });
+    controller.abort();
+    const next = internals.withProcessNavigation({ ...request, invocationId: "new-process", signal: new AbortController().signal }, scope, async (port) => {
+      expect(internals.placementPurpose).toBeUndefined();
+      expect(internals.activeWorkAreaLeaseId).toBeUndefined();
+      internals.activeWorkAreaLeaseId = "new-area";
+      await new Promise<void>((resolve) => { finishNew = resolve; });
+      port.assertActive();
+    });
+    const nextSignal = internals.activeProcessSignal;
+    const stops = vi.mocked(bot.pathfinder.stop).mock.calls.length;
+    finishOld(); await oldResult;
+    expect(internals.activeProcessSignal).toBe(nextSignal);
+    expect(internals.activeWorkAreaLeaseId).toBe("new-area");
+    expect(bot.pathfinder.stop).toHaveBeenCalledTimes(stops);
+    finishNew(); await next;
+    expect(internals.activeProcessSignal).toBeUndefined();
+    expect(internals.activeWorkAreaLeaseId).toBeUndefined();
+  });
+});
+
 describe("MineflayerBotClient world.scan capability", () => {
   const request = {
     invocationId: "invocation-scan",
@@ -2674,10 +2717,10 @@ describe("collectReachableTargets", () => {
 
   const movements = {} as Movements;
 
-  it("counts only proven-pathless searches and reports how many it examined", () => {
+  it("counts only proven-pathless searches and reports how many it examined", async () => {
     const bot = pathfinderReturning(["noPath", "timeout", "noPath"]);
 
-    const result = collectReachableTargets(bot, movements, targetsAt(3), 3);
+    const result = await collectReachableTargets(bot, movements, targetsAt(3), 3);
 
     expect(result.reachable).toHaveLength(0);
     expect(result.unproven).toHaveLength(1);
@@ -2688,16 +2731,16 @@ describe("collectReachableTargets", () => {
     expect(result.stoppedOnTotalBudget).toBe(false);
   });
 
-  it("stops at the requested count instead of draining the whole bench", () => {
+  it("stops at the requested count instead of draining the whole bench", async () => {
     const bot = pathfinderReturning(["success", "success", "success"]);
 
-    const result = collectReachableTargets(bot, movements, targetsAt(3), 1);
+    const result = await collectReachableTargets(bot, movements, targetsAt(3), 1);
 
     expect(result.reachable).toHaveLength(1);
     expect(result.examined).toBe(1);
   });
 
-  it("marks the total budget as the binding constraint when it truncates the sweep", () => {
+  it("marks the total budget as the binding constraint when it truncates the sweep", async () => {
     // 每个候选推进 2500ms 的假时钟：第三个之前 6000ms 总预算就到了。
     vi.useFakeTimers();
     try {
@@ -2706,7 +2749,7 @@ describe("collectReachableTargets", () => {
         () => vi.advanceTimersByTime(2_500),
       );
 
-      const result = collectReachableTargets(bot, movements, targetsAt(9), 9);
+      const result = await collectReachableTargets(bot, movements, targetsAt(9), 9);
 
       expect(result.reachable).toHaveLength(0);
       expect(result.unproven).toHaveLength(9);
@@ -2717,6 +2760,18 @@ describe("collectReachableTargets", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("allows L0 cancellation between partial search slices", async () => {
+    const controller = new AbortController();
+    let slices = 0;
+    const bot = pathfinderReturning([]);
+    bot.pathfinder.getPathFromTo = function* () {
+      for (;;) { slices++; yield { result: { status: "partial" } } as never; }
+    } as typeof bot.pathfinder.getPathFromTo;
+    setImmediate(() => controller.abort());
+    await expect(collectReachableTargets(bot, movements, targetsAt(1), 1, controller.signal)).rejects.toMatchObject({ code: "SKILL_CANCELLED" });
+    expect(slices).toBe(1);
   });
 });
 

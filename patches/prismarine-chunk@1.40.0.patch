@@ -1,0 +1,34 @@
+diff --git a/src/pc/1.18/ChunkColumn.js b/src/pc/1.18/ChunkColumn.js
+index 88163f2028d465d0570016d37b4cb5964ea0d4d6..0402be1027912ede5381eb2ad144132382a9bfb2 100644
+--- a/src/pc/1.18/ChunkColumn.js
++++ b/src/pc/1.18/ChunkColumn.js
+@@ -278,7 +278,10 @@ module.exports = (Block, mcData) => {
+ 
+           if (!isEmpty) {
+             const sectionReader = Buffer.from(data[currentSectionIndex++])
+-            bitArray.readBuffer(SmartBuffer.fromBuffer(sectionReader))
++            // Light is a low-nibble-first byte array, not network-order longs.
++            for (let i = 0; i < bitArray.data.length; i++) {
++              bitArray.data[i] = sectionReader.readUInt32LE(i * 4)
++            }
+           }
+         }
+       }
+@@ -342,7 +345,7 @@ module.exports = (Block, mcData) => {
+       this.skyLightSections.forEach((section, index) => {
+         if (section !== null && this.skyLightMask.get(index)) {
+           const smartBuffer = new SmartBuffer()
+-          section.writeBuffer(smartBuffer)
++          for (const word of section.data) smartBuffer.writeUInt32LE(word)
+           skyLight.push(Uint8Array.from(smartBuffer.toBuffer()))
+         }
+       })
+@@ -350,7 +353,7 @@ module.exports = (Block, mcData) => {
+       this.blockLightSections.forEach((section, index) => {
+         if (section !== null && this.blockLightMask.get(index)) {
+           const smartBuffer = new SmartBuffer()
+-          section.writeBuffer(smartBuffer)
++          for (const word of section.data) smartBuffer.writeUInt32LE(word)
+           blockLight.push(Uint8Array.from(smartBuffer.toBuffer()))
+         }
+       })

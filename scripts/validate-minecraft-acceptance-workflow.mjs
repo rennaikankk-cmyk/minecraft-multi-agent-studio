@@ -129,7 +129,9 @@ const requiredRunnerGuards = [
   '"MMS_FIXTURE_READY_V1"',
   "$fixtureLoaded = $true",
   "if ($fixtureLoaded)",
-  ".AddMinutes(8)",
+  "[ValidateRange(0, 60)][int]$FoodSoakMinutes = 0",
+  "$testDeadline = [DateTime]::UtcNow.AddMinutes(8 + $FoodSoakMinutes)",
+  "if ([DateTime]::UtcNow -ge $testDeadline)",
   "ReadToEndAsync()",
 ];
 

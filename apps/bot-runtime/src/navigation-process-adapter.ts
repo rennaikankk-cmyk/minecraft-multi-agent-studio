@@ -98,6 +98,7 @@ export async function getToBlock(port: NavigationProcessPort, input: z.infer<typ
 export async function exploreChunks(port: NavigationProcessPort, input: z.infer<typeof exploreInputSchema>) {
   const key = (p: { x: number; z: number }) => `${p.x},${p.z}`;
   const excluded = new Set(input.excluded.map(key));
+  const history = new Set(input.visited.map(key));
   const visited = new Map<string, { x: number; z: number }>();
   const candidates: { x: number; z: number }[] = [];
   for (let z = input.center.z - input.radiusChunks; z <= input.center.z + input.radiusChunks; z++) {
@@ -105,7 +106,8 @@ export async function exploreChunks(port: NavigationProcessPort, input: z.infer<
       if (!excluded.has(key({ x, z }))) candidates.push({ x, z });
     }
   }
-  candidates.sort((a, b) => Math.hypot(a.x - input.center.x, a.z - input.center.z) - Math.hypot(b.x - input.center.x, b.z - input.center.z));
+  candidates.sort((a, b) => Number(history.has(key(a))) - Number(history.has(key(b))) ||
+    Math.hypot(a.x - input.center.x, a.z - input.center.z) - Math.hypot(b.x - input.center.x, b.z - input.center.z));
   let newlyObserved = 0;
   let status: "AREA_OBSERVED" | "BATCH_LIMIT" | "WAITING_PATH" | "WAITING_OBSERVATION" = "AREA_OBSERVED";
   const loaded = (p: { x: number; z: number }) => port.bot.world.getColumn(p.x, p.z) != null;

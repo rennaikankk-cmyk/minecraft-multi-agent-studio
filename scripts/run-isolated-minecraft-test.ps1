@@ -4,10 +4,16 @@ param(
   [string]$ServerDirectory = $env:MC_TEST_SERVER_DIR,
   [string]$ServerProfilePath = $env:BOT_SERVER_PROFILE_PATH,
   [string]$PnpmExecutable = $env:MC_TEST_PNPM_EXE,
-  [string]$ServerPort = $env:MC_TEST_SERVER_PORT
+  [string]$ServerPort = $env:MC_TEST_SERVER_PORT,
+  [ValidateRange(0, 60)][int]$FoodSoakMinutes = 0,
+  [switch]$FoodOnly,
+  [switch]$FoodResume,
+  [switch]$ElytraOnly
 )
 
 $ErrorActionPreference = "Stop"
+if ($FoodOnly -and $ElytraOnly) { throw "Select one isolated scenario." }
+if ($FoodResume -and -not $FoodOnly) { throw "FoodResume requires FoodOnly." }
 
 function Ensure-FileHashCommand {
   if ($null -ne (Get-Command Get-FileHash -ErrorAction SilentlyContinue)) {
@@ -164,6 +170,10 @@ foreach ($guardedDirectory in @($acceptanceRoot, $serverLogsDirectory, $serverWo
 $readyFile = Join-Path $acceptanceRoot "bot-ready.marker"
 $skillSetupRequest = Join-Path $acceptanceRoot "builtin-skills.setup-request.marker"
 $skillSetupReady = Join-Path $acceptanceRoot "builtin-skills.setup-ready.marker"
+$foodSetupRequest = "$skillSetupRequest.food"
+$foodSetupReady = "$skillSetupReady.food"
+$flightSetupRequest = "$skillSetupRequest.flight"
+$flightSetupReady = "$skillSetupReady.flight"
 $testStdout = Join-Path $acceptanceRoot "vitest.stdout.log"
 $testStderr = Join-Path $acceptanceRoot "vitest.stderr.log"
 $latestServerLog = Join-Path $serverLogsDirectory "latest.log"
@@ -266,7 +276,7 @@ if ($null -ne $existingListener) {
 
 New-Item -ItemType Directory -Path $acceptanceRoot -Force | Out-Null
 Assert-NoReparsePointInPath -Path $acceptanceRoot -Label "Acceptance directory"
-foreach ($artifact in @($readyFile, $skillSetupRequest, $skillSetupReady, $testStdout, $testStderr)) {
+foreach ($artifact in @($readyFile, $skillSetupRequest, $skillSetupReady, $foodSetupRequest, $foodSetupReady, $flightSetupRequest, $flightSetupReady, $testStdout, $testStderr)) {
   $artifact = Assert-ContainedPath -Candidate $artifact -Root $acceptanceRoot -Label "Acceptance artifact"
   Assert-NoReparsePointInPath -Path $artifact -Label "Acceptance artifact"
   if (Test-Path -LiteralPath $artifact) {
@@ -284,6 +294,12 @@ $previousRealTest = $env:RUN_REAL_MC_TEST
 $previousReadyFile = $env:MC_TEST_READY_FILE
 $previousSkillSetupRequest = $env:MC_SKILL_SETUP_REQUEST_FILE
 $previousSkillSetupReady = $env:MC_SKILL_SETUP_READY_FILE
+$previousFoodSoak = $env:MC_FOOD_SOAK_MINUTES
+$previousElytraTest = $env:MC_ELYTRA_TEST
+$flightFixtureSent = $false
+$flightLogOffset = 0
+$foodFixtureSent = $false
+$foodLogOffset = 0
 
 try {
   $serverStart = [Diagnostics.ProcessStartInfo]::new()
@@ -321,9 +337,18 @@ try {
   $env:MC_TEST_READY_FILE = $readyFile
   $env:MC_SKILL_SETUP_REQUEST_FILE = $skillSetupRequest
   $env:MC_SKILL_SETUP_READY_FILE = $skillSetupReady
+  $env:MC_FOOD_SOAK_MINUTES = "$FoodSoakMinutes"
+  $env:MC_ELYTRA_TEST = if ($ElytraOnly) { "1" } else { "0" }
   $testStart = [Diagnostics.ProcessStartInfo]::new()
   $testStart.FileName = $env:ComSpec
   $testStart.Arguments = '/d /s /c ""{0}" --filter @minecraft-studio/bot-runtime test:integration"' -f $PnpmExecutable
+  if ($FoodOnly) {
+    if ($FoodSoakMinutes -eq 0) { throw "FoodOnly requires a positive FoodSoakMinutes." }
+    $testStart.Arguments = '/d /s /c ""{0}" --filter @minecraft-studio/bot-runtime exec vitest run tests/real-isolated-server.integration.test.ts -t "sustains two food gardens""' -f $PnpmExecutable
+  }
+  if ($ElytraOnly) {
+    $testStart.Arguments = '/d /s /c ""{0}" --filter @minecraft-studio/bot-runtime exec vitest run tests/real-isolated-server.integration.test.ts -t "flies powered elytra routes""' -f $PnpmExecutable
+  }
   $testStart.WorkingDirectory = $projectRoot
   $testStart.UseShellExecute = $false
   $testStart.CreateNoWindow = $true
@@ -336,11 +361,11 @@ try {
   }
   $testStdoutTask = $testProcess.StandardOutput.ReadToEndAsync()
   $testStderrTask = $testProcess.StandardError.ReadToEndAsync()
-  $testDeadline = [DateTime]::UtcNow.AddMinutes(8)
+  $testDeadline = [DateTime]::UtcNow.AddMinutes(8 + $FoodSoakMinutes)
 
   while (-not $testProcess.HasExited) {
     if ([DateTime]::UtcNow -ge $testDeadline) {
-      throw "Real Minecraft integration tests exceeded the 8 minute hard deadline."
+      throw "Real Minecraft integration tests exceeded the configured hard deadline."
     }
     if ((Test-Path -LiteralPath $skillSetupRequest) -and -not (Test-Path -LiteralPath $skillSetupReady)) {
       # Fixed scenario; marker contents are never interpreted as commands.
@@ -450,6 +475,70 @@ try {
       }
       [IO.File]::WriteAllText($skillSetupReady, "ready`n", [Text.UTF8Encoding]::new($false))
     }
+    if ($ElytraOnly -and (Test-Path -LiteralPath $flightSetupRequest) -and -not $flightFixtureSent) {
+      $flightLogOffset = (Get-Content -LiteralPath $latestServerLog -Raw).Length
+      $serverProcess.StandardInput.WriteLine("forceload add -8 96 151 123")
+      $serverProcess.StandardInput.Flush()
+      Start-Sleep -Milliseconds 1000
+      $flightCommands = @("fill -8 127 96 151 127 123 minecraft:stone replace")
+      for ($flightX = -8; $flightX -le 136; $flightX += 16) {
+        $flightCommands += "fill $flightX 128 96 $($flightX + 15) 191 123 minecraft:air replace"
+      }
+      $flightCommands += @(
+        "gamemode survival StudioBot01", "gamemode survival StudioBot02",
+        "clear StudioBot01", "clear StudioBot02",
+        "effect clear StudioBot01", "effect clear StudioBot02",
+        "give StudioBot01 minecraft:elytra", "give StudioBot02 minecraft:elytra",
+        "give StudioBot01 minecraft:firework_rocket[minecraft:fireworks={flight_duration:1,explosions:[]}] 32",
+        "give StudioBot02 minecraft:firework_rocket[minecraft:fireworks={flight_duration:1,explosions:[]}] 32",
+        "tp StudioBot01 0.5 128 104.5", "tp StudioBot02 0.5 128 116.5",
+        "say MMS_FLIGHT_FIXTURE_READY_V1"
+      )
+      foreach ($command in $flightCommands) { $serverProcess.StandardInput.WriteLine($command) }
+      $serverProcess.StandardInput.Flush()
+      $flightFixtureSent = $true
+    }
+    if ($flightFixtureSent -and -not (Test-Path -LiteralPath $flightSetupReady)) {
+      $flightLog = Get-Content -LiteralPath $latestServerLog -Raw
+      if ($flightLog.Length -ge $flightLogOffset -and $flightLog.Substring($flightLogOffset).Contains("MMS_FLIGHT_FIXTURE_READY_V1")) {
+        [IO.File]::WriteAllText($flightSetupReady, "ready`n", [Text.UTF8Encoding]::new($false))
+      }
+    }
+    if ($FoodSoakMinutes -gt 0 -and (Test-Path -LiteralPath $foodSetupRequest) -and -not $foodFixtureSent) {
+      $foodLogOffset = (Get-Content -LiteralPath $latestServerLog -Raw).Length
+      $foodCommands = @(
+        "gamerule randomTickSpeed 3",
+        "gamerule doDaylightCycle true",
+        "fill -8 62 -26 28 80 -10 minecraft:air replace",
+        "fill -8 64 -26 28 80 -10 minecraft:barrier outline",
+        "fill -8 63 -26 28 64 -10 minecraft:stone replace",
+        "fill -4 64 -22 4 64 -13 minecraft:dirt replace",
+        "fill 16 64 -22 24 64 -13 minecraft:dirt replace",
+        "fill -4 64 -14 -2 64 -13 minecraft:water replace",
+        "fill 16 64 -14 18 64 -13 minecraft:water replace",
+        "kill @e[type=minecraft:item,x=-8,y=62,z=-26,dx=36,dy=18,dz=16]",
+        "clear StudioBot01", "clear StudioBot02",
+        "tp StudioBot01 0 65 -14", "tp StudioBot02 20 65 -14",
+        "give StudioBot01 minecraft:carrot 64", "give StudioBot02 minecraft:carrot 64",
+        "give StudioBot01 minecraft:stone_hoe", "give StudioBot02 minecraft:stone_hoe",
+        "give StudioBot01 minecraft:oak_fence 23", "give StudioBot02 minecraft:oak_fence 23",
+        "give StudioBot01 minecraft:oak_fence_gate", "give StudioBot02 minecraft:oak_fence_gate",
+        "give StudioBot01 minecraft:torch 4", "give StudioBot02 minecraft:torch 4",
+        "give StudioBot01 minecraft:barrel", "give StudioBot02 minecraft:barrel",
+        "give StudioBot01 minecraft:bucket", "give StudioBot02 minecraft:bucket",
+        "say MMS_FOOD_FIXTURE_READY_V1"
+      )
+      if ($FoodResume) { $foodCommands = @("say MMS_FOOD_FIXTURE_READY_V1") }
+      foreach ($command in $foodCommands) { $serverProcess.StandardInput.WriteLine($command) }
+      $serverProcess.StandardInput.Flush()
+      $foodFixtureSent = $true
+    }
+    if ($foodFixtureSent -and -not (Test-Path -LiteralPath $foodSetupReady)) {
+      $foodLog = Get-Content -LiteralPath $latestServerLog -Raw
+      if ($foodLog.Length -ge $foodLogOffset -and $foodLog.Substring($foodLogOffset).Contains("MMS_FOOD_FIXTURE_READY_V1")) {
+        [IO.File]::WriteAllText($foodSetupReady, "ready`n", [Text.UTF8Encoding]::new($false))
+      }
+    }
     if (-not $serverStopSent -and (Test-Path -LiteralPath $readyFile)) {
       $serverProcess.StandardInput.WriteLine("stop")
       $serverProcess.StandardInput.Flush()
@@ -482,6 +571,9 @@ try {
         $serverProcess.StandardInput.WriteLine("forceload remove -40 -40 60 40")
         $serverProcess.StandardInput.Flush()
       }
+      if ($flightFixtureSent) {
+        $serverProcess.StandardInput.WriteLine("forceload remove -8 96 151 123")
+      }
       $serverProcess.StandardInput.WriteLine("stop")
       $serverProcess.StandardInput.Flush()
       if (-not $serverProcess.WaitForExit(20000)) {
@@ -498,6 +590,8 @@ try {
   $env:MC_TEST_READY_FILE = $previousReadyFile
   $env:MC_SKILL_SETUP_REQUEST_FILE = $previousSkillSetupRequest
   $env:MC_SKILL_SETUP_READY_FILE = $previousSkillSetupReady
+  $env:MC_FOOD_SOAK_MINUTES = $previousFoodSoak
+  $env:MC_ELYTRA_TEST = $previousElytraTest
 }
 
 Write-Output "REAL_MINECRAFT_INTEGRATION=PASS"

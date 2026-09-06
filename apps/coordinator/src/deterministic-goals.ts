@@ -160,6 +160,9 @@ export function parseBlueprintFileGoal(
 }
 
 export type DeterministicGoal =
+  | Readonly<{ kind: "assess-site"; x: number; y: number; z: number }>
+  | Readonly<{ kind: "sustain-farm"; facilityId: string }>
+  | Readonly<{ kind: "explore-chunks"; x: number; z: number; radius: number }>
   | Readonly<{ kind: "maintain-farm"; crop: "carrots" | "potatoes" | "wheat" | "beetroots"; min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number } }>
   | ParsedAcquisitionGoal
   | ParsedMovementGoal
@@ -180,6 +183,12 @@ export function parseDeterministicGoal(
   operatorGoal: string,
   plannedItemNames: readonly string[],
 ): DeterministicGoal | null {
+  const site = /^评估基地选址 x=(-?\d+) y=(-?\d+) z=(-?\d+)$/u.exec(operatorGoal.trim());
+  if (site) return { kind: "assess-site", x: Number(site[1]), y: Number(site[2]), z: Number(site[3]) };
+  const sustain = /^维护食物设施 ([a-zA-Z0-9_.:-]+)$/u.exec(operatorGoal.trim());
+  if (sustain) return { kind: "sustain-farm", facilityId: sustain[1]! };
+  const explore = /^探索区块 x=(-?\d+) z=(-?\d+) radius=(\d+)$/u.exec(operatorGoal.trim());
+  if (explore) return { kind: "explore-chunks", x: Number(explore[1]), z: Number(explore[2]), radius: Number(explore[3]) };
   const farm = /^维护农场 (carrots|potatoes|wheat|beetroots) min x=(-?\d+) y=(-?\d+) z=(-?\d+) max x=(-?\d+) y=(-?\d+) z=(-?\d+)$/u.exec(operatorGoal.trim());
   if (farm) return { kind: "maintain-farm", crop: farm[1] as "carrots" | "potatoes" | "wheat" | "beetroots",
     min: { x: Number(farm[2]), y: Number(farm[3]), z: Number(farm[4]) },

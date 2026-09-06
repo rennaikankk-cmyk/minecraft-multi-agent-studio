@@ -1240,6 +1240,19 @@ export class SingleBotRuntime {
     try {
       const client = this.dependencies.createClient(this.profile, this.worldState);
       this.client = client;
+      const pursuitAllowed = () => activeGeneration === this.generation && this.client === client &&
+        this.state === "online" && this.safetyAllowsDefensiveCombat() &&
+        this.combatDriver !== null && this.combatDriver.status().stance !== "retreating";
+      client.setPursuitCombat?.({
+        canContinue: pursuitAllowed,
+        attack: async (targetId, signal) => {
+          if (!pursuitAllowed() || signal.aborted) throw new Error("PURSUIT_CANCELLED");
+          const receipt = await this.runCombatEngage(this.now().getTime(), client, signal, true, targetId);
+          if (!pursuitAllowed() || signal.aborted || receipt.actual.disposition === "dropped") {
+            throw new Error("PURSUIT_CANCELLED");
+          }
+        },
+      });
       client.setPerfSpanWrap?.((category, fn) => this.perfSpans.spanSync(category, fn));
       client.setPerfRecorder?.((category, durationMs, detail) => this.perfSpans.record(category, durationMs, detail));
       client.setHandlers({
@@ -2605,6 +2618,7 @@ export class SingleBotRuntime {
     activeClient: BotClient,
     signal: AbortSignal,
     retaliation = false,
+    pursuitTargetId?: number,
   ): Promise<CombatDriverReceipt> {
     let observation: ReturnType<NonNullable<BotClient["combatObservation"]>>;
     try {
@@ -2631,8 +2645,12 @@ export class SingleBotRuntime {
         "COMBAT_OBSERVATION_UNAVAILABLE",
       );
     }
-    const execute = (action: CombatPrimitiveAction, actionSignal: AbortSignal) =>
-      activeClient.executeCombatAction!(action, actionSignal);
+    const execute = (action: CombatPrimitiveAction, actionSignal: AbortSignal) => {
+      if (pursuitTargetId !== undefined && "targetEntityId" in action && action.targetEntityId !== pursuitTargetId) {
+        return Promise.resolve({ outcome: "failed" as const, reasonCode: "COMBAT_TARGET_CHANGED" });
+      }
+      return activeClient.executeCombatAction!(action, actionSignal);
+    };
     return retaliation
       ? this.combatDriver!.retaliate(
           observation,
@@ -2903,6 +2921,7 @@ export class SingleBotRuntime {
     const maxDurationMs = anarchy
       ? ANARCHY_COMBAT_REACTION_MAX_DURATION_MS
       : COMBAT_REACTION_MAX_DURATION_MS;
+    let stepDueAtMonotonicMs = this.monotonicNow();
     for (let step = 0; step < maxSteps; step += 1) {
       if (
         !this.combatReactionIsActive(
@@ -2920,17 +2939,12 @@ export class SingleBotRuntime {
       }
 
       const requestedAtMs = this.now().getTime();
-      // 反射探针步长测量：monotonic 差值覆盖 observation→engage→log 全步，
-      // 事件循环被挤占会直接体现在这里（见 combat-reflex-probe.ts 文件头）。
-      const stepStartedAtMonotonicMs = this.monotonicNow();
+      // Include lateness relative to the scheduled tick, excluding its intentional wait.
       const receipt = await this.runCombatEngage(
         requestedAtMs,
         activeClient,
         controller.signal,
         retaliation,
-      );
-      this.combatReflexProbeSource?.recordStepDurationMs(
-        this.monotonicNow() - stepStartedAtMonotonicMs,
       );
       this.dependencies.logger.info(
         "bot_runtime_damage_reaction_step",
@@ -2949,6 +2963,9 @@ export class SingleBotRuntime {
       if (this.tacticsCoreEnabled) {
         this.runTacticsShadowStep(activeClient, step, taskId, anarchy);
       }
+      this.combatReflexProbeSource?.recordStepDurationMs(
+        Math.max(0, this.monotonicNow() - stepDueAtMonotonicMs),
+      );
       if (controller.signal.aborted) return "cancelled";
       if (combatReactionShouldStop(receipt, anarchy)) return "completed";
       if (
@@ -2957,6 +2974,8 @@ export class SingleBotRuntime {
       ) {
         return "completed";
       }
+      stepDueAtMonotonicMs = this.monotonicNow() +
+        (anarchy ? ANARCHY_COMBAT_REACTION_TICK_MS : COMBAT_REACTION_TICK_MS);
       if (
         !(await this.waitForCombatReactionTick(
           controller.signal,

@@ -8,6 +8,7 @@ export interface FoodFarmPort {
   irrigate(): Promise<void>;
   enter(): Promise<void>;
   leave(): Promise<void>;
+  waitForObservation?(): Promise<void>;
   store(retain: number): Promise<{ before: number; after: number; deposited: number; withdrawn: number; full: boolean }>;
 }
 
@@ -59,23 +60,28 @@ export async function sustainFarm(port: FoodFarmPort, input: FarmSustainInput): 
       await port.irrigate(); result.supply.repairs += 2;
     }
     observe();
+    if (!result.supply.lightingReady && port.waitForObservation) {
+      await port.waitForObservation();
+      observe();
+    }
     if (!result.supply.waterReady || !result.supply.lightingReady || !result.supply.enclosureReady) {
       throw new SkillFault("FARM_INFRASTRUCTURE_UNCONFIRMED");
     }
     await port.leave();
     await ensure(layout.storage, "barrel");
     // Refill first, so a hungry returning worker can recover from its own stock.
-    const first = await port.store(input.seedReserve + input.foodReserve + 24 - result.supply.plantedPlots);
+    const first = await port.store(input.seedReserve + input.foodReserve + Math.max(1, 24 - result.supply.plantedPlots));
     result.supply.storageBefore = first.before;
-    result.supply.deposited += Number(first.deposited) || 0; result.supply.withdrawn += Number(first.withdrawn) || 0;
+    result.supply.storageAfter = first.after;
+    result.supply.deposited += first.deposited; result.supply.withdrawn += first.withdrawn;
     await port.enter();
     const remaining = input.maxActions - result.supply.repairs;
     if (remaining < 2) throw new SkillFault("FARM_REPAIR_BUDGET");
-    result.maintenance = await maintainFarm(port.farm, { ...foodFarmMaintenance(input), maxActions: remaining });
+    result.maintenance = await maintainFarm(port.farm, { ...foodFarmMaintenance(input), seedReserve: input.seedReserve + input.foodReserve, maxActions: remaining });
     await port.leave();
     const storage = await port.store(input.seedReserve + input.foodReserve);
     result.supply.storageAfter = storage.after;
-    result.supply.deposited += Number(storage.deposited) || 0; result.supply.withdrawn += Number(storage.withdrawn) || 0;
+    result.supply.deposited += storage.deposited; result.supply.withdrawn += storage.withdrawn;
     result.status = storage.full ? "STORAGE_FULL" : result.maintenance.status;
     result.reason = storage.full ? "FARM_STORAGE_FULL" : null;
   } catch (error) {
@@ -83,9 +89,18 @@ export async function sustainFarm(port: FoodFarmPort, input: FarmSustainInput): 
       "FARM_WATER_SOURCE_UNSAFE", "FARM_INFRASTRUCTURE_UNCONFIRMED", "FARM_OBSERVATION_UNAVAILABLE",
       "FARM_SITE_OCCUPIED", "FARM_SITE_UNSUPPORTED"].includes(error.code)) throw error;
     result.status = error.code === "FARM_REPAIR_BUDGET" ? "BATCH_LIMIT" : error.code === "FARM_OBSERVATION_UNAVAILABLE" ? "WAITING_OBSERVATION" : "WAITING_INFRASTRUCTURE";
-    result.reason = error.message;
+    result.reason = error.message.startsWith(`${error.code}:`) ? error.message : error.code;
   }
   port.farm.assertActive();
   observe();
+  if (["PASS_COMPLETE", "WAITING_GROWTH"].includes(result.status)) {
+    if (!result.supply.waterReady || !result.supply.lightingReady || !result.supply.enclosureReady) {
+      result.status = "WAITING_INFRASTRUCTURE";
+      result.reason = "FARM_INFRASTRUCTURE_UNCONFIRMED";
+    } else if (result.supply.seedReserved < input.seedReserve || result.supply.foodReserved < input.foodReserve) {
+      result.status = "WAITING_SEEDS";
+      result.reason = "FARM_RESERVES_LOW";
+    }
+  }
   return result;
 }

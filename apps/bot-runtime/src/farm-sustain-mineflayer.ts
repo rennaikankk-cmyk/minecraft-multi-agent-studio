@@ -62,28 +62,40 @@ export function createFoodFarmPort(bot: Bot, input: FarmSustainInput, farm: Farm
     await setGate(false);
   };
   return { farm, inspect, enter: () => cross(true), leave: () => cross(false),
+    waitForObservation: async () => {
+      await confirm(() => {
+        for (let x = -2; x <= 2; x++) for (let z = -2; z <= 2; z++) {
+          if (x === 0 && z === 0) continue;
+          if ((inspect(v(input.center).offset(x, 0, z))?.light ?? 0) < 9) return false;
+        }
+        return true;
+      });
+    },
     ensure: async (position, name) => {
       const cell = read(position);
       if (!cell) throw new SkillFault("FARM_OBSERVATION_UNAVAILABLE");
       if (cell.name === name) return;
-      if (!air(cell.name)) throw new SkillFault("FARM_SITE_OCCUPIED");
+      if (!air(cell.name)) throw new SkillFault("FARM_SITE_OCCUPIED", `FARM_SITE_OCCUPIED:${cell.name}`);
       const support = read({ ...position, y: position.y - 1 });
-      if (!support || support.boundingBox !== "block") {
-        // The central slab attaches to the side of the surrounding soil.
-        if (name !== "cobblestone_slab") throw new SkillFault("FARM_SITE_UNSUPPORTED");
-      }
-      await dependencies.approach(support?.boundingBox === "block" ? support.position : { ...position, x: position.x + 1, y: position.y - 1 });
+      if (!support || support.boundingBox !== "block") throw new SkillFault("FARM_SITE_UNSUPPORTED");
+      await dependencies.approach(support.position);
       await equip(name);
       await effect(position);
       if (name === "oak_fence_gate") await bot.look(0, 0, true);
-      if (name === "cobblestone_slab" && support?.boundingBox !== "block") {
-        // Place on the upper soil face next to the channel only if there is an
-        // adjacent solid block at crop height; otherwise use a waterlogged slab.
-        const reference = read(layout.water);
-        if (!reference || reference.name !== "water") throw new SkillFault("FARM_SITE_UNSUPPORTED");
-        await bot.placeBlock(reference, new Vec3(0, 1, 0));
-      } else {
-        await bot.placeBlock(support!, new Vec3(0, 1, 0));
+      const count = () => bot.inventory.items().filter((item) => item.name === name).reduce((sum, item) => sum + item.count, 0);
+      const before = count();
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try { await bot.placeBlock(support, new Vec3(0, 1, 0)); break; }
+        catch (error) {
+          farm.assertActive();
+          if (inspect(position)?.name === name) break;
+          if (attempt > 0 || !(error instanceof Error) || !error.message.startsWith("Event blockUpdate:") ||
+              !air(inspect(position)?.name ?? "unknown") || count() !== before) throw error;
+          await dependencies.wait(250);
+          await effect(position);
+          if (inspect(position)?.name === name) break;
+          if (!air(inspect(position)?.name ?? "unknown") || count() !== before || read(support.position)?.stateId !== support.stateId) throw error;
+        }
       }
       await confirm(() => inspect(position)?.name === name);
     },
@@ -95,6 +107,7 @@ export function createFoodFarmPort(bot: Bot, input: FarmSustainInput, farm: Farm
           [new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)].filter((d) => inspect(v(source).plus(d))?.source).length < 2) {
           throw new SkillFault("FARM_WATER_BUCKET_REQUIRED");
         }
+        await cross(false);
         await dependencies.approach({ ...source, y: source.y - 1 });
         await equip("bucket"); await effect(source);
         await bot.lookAt(v(source).offset(0.5, 0.5, 0.5), true);
@@ -102,6 +115,7 @@ export function createFoodFarmPort(bot: Bot, input: FarmSustainInput, farm: Farm
         await confirm(() => bot.inventory.items().some((i) => i.name === "water_bucket"));
         bot.deactivateItem();
         await confirm(() => inspect(source)?.source === true);
+        await cross(true);
       }
       const water = read(layout.water);
       if (!water) throw new SkillFault("FARM_OBSERVATION_UNAVAILABLE");
@@ -109,15 +123,21 @@ export function createFoodFarmPort(bot: Bot, input: FarmSustainInput, farm: Farm
       for (const delta of [new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1), new Vec3(0, -1, 0)]) {
         if (!inspect(v(layout.water).plus(delta))?.solid) throw new SkillFault("FARM_WATER_SOURCE_UNSAFE");
       }
-      await dependencies.approach(layout.water);
+      // Stand at the channel edge: from farther away the ray hits adjacent soil.
+      await dependencies.goto(v(layout.water).offset(0, 1, 1));
       if (["dirt", "grass_block", "farmland"].includes(water.name)) {
         await effect(layout.water); await bot.dig(water);
       } else if (!air(water.name) && water.name !== "water") throw new SkillFault("FARM_SITE_OCCUPIED");
       await equip("water_bucket"); await effect(layout.water);
-      const below = read({ ...layout.water, y: layout.water.y - 1 });
-      if (!below) throw new SkillFault("FARM_OBSERVATION_UNAVAILABLE");
-      await bot.activateBlock(below, new Vec3(0, 1, 0));
-      await confirm(() => inspect(layout.water)?.source === true && !bot.heldItem?.name.startsWith("water_bucket"));
+      // Buckets use the server's item raycast, not a block interaction packet.
+      await bot.lookAt(v(layout.water).offset(0.5, 0.05, 0.5), true);
+      farm.assertActive();
+      const hit = bot.blockAtCursor(5);
+      if (!hit?.position.equals(v(layout.water).offset(0, -1, 0))) throw new SkillFault("FARM_WATER_SOURCE_UNSAFE");
+      bot.activateItem();
+      try {
+        await confirm(() => inspect(layout.water)?.source === true && bot.heldItem?.name === "bucket");
+      } finally { bot.deactivateItem(); }
     },
     store: (retain) => dependencies.store(layout.storage, retain),
   };

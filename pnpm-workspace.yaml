@@ -20,3 +20,5 @@ strictDepBuilds: true
 strictPeerDependencies: true
 trustLockfile: false
 verifyStoreIntegrity: true
+patchedDependencies:
+  prismarine-chunk@1.40.0: patches/prismarine-chunk@1.40.0.patch

@@ -15,7 +15,8 @@ import {
   type TaskExecutionRecord,
   type TaskExecutionStore,
 } from "@minecraft-studio/task-system";
-import { vanillaResourceRecipes, buildBlueprintInputSchema, farmMaintainInputSchema } from "@minecraft-studio/skills";
+import { vanillaResourceRecipes, buildBlueprintInputSchema, farmMaintainInputSchema, exploreInputSchema } from "@minecraft-studio/skills";
+import { ExplorationJournal } from "../src/exploration-journal.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
@@ -45,6 +46,26 @@ let registry: BotRegistry;
 describe("CoordinatorLocalPlanner", () => {
   beforeEach(() => {
     registry = readyRegistry();
+  });
+
+  it("injects scoped exploration history and records the validated runtime receipt", async () => {
+    const current = registry.get(BOT_ID, NOW)!;
+    const record = { ...current, skillCatalog: { ...current.skillCatalog!, skills: [
+      { ...current.skillCatalog!.skills[0]!, skillId: "world.explore", idempotent: true,
+        inputSchema: z.toJSONSchema(exploreInputSchema) as Record<string, unknown> },
+    ] } };
+    const journal = new ExplorationJournal(null, () => NOW.getTime());
+    const input = exploreInputSchema.parse({ serverProfileId: record.serverProfileId, dimension: "minecraft:overworld", center: { x: 0, z: 0 }, radiusChunks: 1 });
+    await journal.recordReceipt(input, { completed: false, status: "BATCH_LIMIT", visited: [{ x: 0, z: 0 }], newlyObserved: 1, observedAt: new Date(NOW.getTime() - 1000).toISOString() });
+    const sendSkillInvocation = vi.fn<SkillInvocationTransport["sendSkillInvocation"]>(async (invocation) =>
+      skillResult(invocation, "completed", undefined, 1, { completed: false, status: "BATCH_LIMIT", visited: [{ x: 1, z: 0 }], newlyObserved: 1, observedAt: NOW.toISOString() }));
+    const planner = new CoordinatorLocalPlanner({ registry: { get: () => record }, transport: { sendSkillInvocation }, explorationJournal: journal,
+      coordinatorInstanceId: "coordinator-01", now: () => NOW, randomId: uuidSequence() });
+    await planner.planAndDispatch({ ...planRequest(), operatorGoal: "探索区块 x=0 z=0 radius=1" });
+    expect(sendSkillInvocation).toHaveBeenCalledOnce();
+    expect(sendSkillInvocation.mock.calls[0]![0].payload.input).toMatchObject({ serverProfileId: record.serverProfileId, visited: [{ x: 0, z: 0 }] });
+    expect(journal.has(record.serverProfileId, "minecraft:overworld", 1, 0)).toBe(true);
+    expect(journal.has("other-server", "minecraft:overworld", 1, 0)).toBe(false);
   });
 
   it("dispatches a bounded farm goal with the current server identity and no model", async () => {

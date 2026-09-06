@@ -195,6 +195,7 @@ describe("AutonomousDirector blueprint batch chaining", () => {
     const BATCH = 18;
     const TOTAL = 85;
     const planAndDispatch = vi.fn(async (request: { operatorGoal: string }) => {
+      if (request.operatorGoal.startsWith("评估基地选址")) return hardSiteResult(record, nowMs);
       dispatchGoals.push(request.operatorGoal);
       if (/挖一个.*避难所/.test(request.operatorGoal)) {
         return completedPlanResult("survival.shelter", {});
@@ -279,6 +280,7 @@ describe("AutonomousDirector blueprint batch chaining", () => {
       }),
     };
     const planAndDispatch = vi.fn(async (request: { operatorGoal: string }) => {
+      if (request.operatorGoal.startsWith("评估基地选址")) return hardSiteResult(record, nowMs);
       dispatchGoals.push(request.operatorGoal);
       if (/挖一个.*避难所/.test(request.operatorGoal)) {
         return completedPlanResult("survival.shelter", {});
@@ -344,6 +346,7 @@ describe("AutonomousDirector blueprint batch chaining", () => {
       }),
     };
     const planAndDispatch = vi.fn(async (request: { operatorGoal: string }) => {
+      if (request.operatorGoal.startsWith("评估基地选址")) return hardSiteResult(record, nowMs);
       dispatchGoals.push(request.operatorGoal);
       if (/挖一个.*避难所/.test(request.operatorGoal)) {
         return completedPlanResult("survival.shelter", {});
@@ -556,6 +559,66 @@ function uuidSequence(): () => string {
 // ---------------------------------------------------------------------------
 
 describe("AutonomousDirector site verdict consult", () => {
+  it("cancels an in-flight deterministic site assessment on shutdown", async () => {
+    const record = readyRecord("studio-bot-01");
+    let nowMs = NOW.getTime();
+    let reviewSignal: AbortSignal | undefined;
+    const listeners = new Set<(record: BotRegistryRecord) => void>();
+    const registry = { list: () => [record], get: () => record,
+      subscribe: (listener: (record: BotRegistryRecord) => void) => { listeners.add(listener); return () => listeners.delete(listener); } };
+    const planAndDispatch = vi.fn(async ({ operatorGoal, signal }: { operatorGoal: string; signal?: AbortSignal }) => {
+      if (operatorGoal.startsWith("评估基地选址")) {
+        reviewSignal = signal;
+        return new Promise<never>((_resolve, reject) => signal!.addEventListener("abort", () => reject(new Error("cancelled")), { once: true }));
+      }
+      return completedPlanResult(operatorGoal.includes("避难所") ? "survival.shelter" : "movement.goto", {});
+    });
+    const director = new AutonomousDirector({ registry, planner: { planAndDispatch }, intervalMs: 60_000,
+      goalTimeoutMs: 60_000, failureCooldownMs: 5_000, terminalRetentionMs: 10_000, now: () => new Date(nowMs), randomId: uuidSequence() });
+    director.start();
+    try {
+      await flushDirector();
+      for (let i = 0; i < 5 && !reviewSignal; i++) {
+        nowMs += 2_000; listeners.forEach((listener) => listener(record)); await flushDirector();
+      }
+      expect(reviewSignal).toBeDefined();
+      await director.stop();
+      expect(reviewSignal!.aborted).toBe(true);
+      expect(planAndDispatch.mock.calls.some(([r]) => r.operatorGoal.includes("starter-base-v1"))).toBe(false);
+    } finally { await director.stop(); }
+  });
+  it.each(["missing", "rejected", "stale", "other-server"])("never reserves a site from %s hard evidence", async (mode) => {
+    const record = readyRecord("studio-bot-01");
+    let nowMs = NOW.getTime();
+    const listeners = new Set<(record: BotRegistryRecord) => void>();
+    const registry = { list: () => [record], get: () => record,
+      subscribe: (listener: (record: BotRegistryRecord) => void) => { listeners.add(listener); return () => listeners.delete(listener); } };
+    const planAndDispatch = vi.fn(async ({ operatorGoal }: { operatorGoal: string }) => {
+      if (operatorGoal.startsWith("评估基地选址")) {
+        if (mode === "missing") return completedPlanResult("movement.goto", {});
+        const result = JSON.parse(JSON.stringify(hardSiteResult(record, nowMs)));
+        if (mode === "rejected") result.result.payload.output.assessment.verdict = "REJECT";
+        if (mode === "stale") result.result.payload.output.memoryRecord.observedAt = new Date(nowMs - 60_001).toISOString();
+        if (mode === "other-server") result.result.payload.output.memoryRecord.serverProfileId = "other-server";
+        return result;
+      }
+      return completedPlanResult(operatorGoal.includes("避难所") ? "survival.shelter" : "movement.goto", {});
+    });
+    const siteAI = { generate: vi.fn(async () => ({ value: { content: JSON.stringify({ verdict: "accept", confidence: 1, reasons: ["accept"] }) } })) };
+    const director = new AutonomousDirector({ registry, planner: { planAndDispatch }, siteAI: siteAI as never,
+      intervalMs: 60_000, goalTimeoutMs: 60_000, failureCooldownMs: 5_000, terminalRetentionMs: 10_000,
+      now: () => new Date(nowMs), randomId: uuidSequence() });
+    director.start();
+    try {
+      await flushDirector();
+      for (let i = 0; i < 5; i++) {
+        nowMs += 2_000; listeners.forEach((listener) => listener(record));
+        await flushDirector(); await director.waitForSiteVerdicts();
+      }
+      expect(planAndDispatch.mock.calls.some(([r]) => r.operatorGoal.includes("starter-base-v1"))).toBe(false);
+      expect(siteAI.generate).not.toHaveBeenCalled();
+    } finally { await director.stop(); }
+  });
   it("reject re-explores the next sector, accept opens construction (facts flow into the prompt)", async () => {
     const record = readyRecord("studio-bot-01");
     let nowMs = NOW.getTime();
@@ -573,6 +636,7 @@ describe("AutonomousDirector site verdict consult", () => {
       }),
     };
     const planAndDispatch = vi.fn(async (request: { operatorGoal: string }) => {
+      if (request.operatorGoal.startsWith("评估基地选址")) return hardSiteResult(record, nowMs);
       dispatchGoals.push(request.operatorGoal);
       if (/挖一个.*避难所/.test(request.operatorGoal)) {
         return completedPlanResult("survival.shelter", {});
@@ -641,7 +705,7 @@ describe("AutonomousDirector site verdict consult", () => {
     await director.stop();
   });
 
-  it("fails open when the model is unavailable (site reserved, pipeline continues)", async () => {
+  it("continues with valid deterministic evidence when the model is unavailable", async () => {
     const record = readyRecord("studio-bot-01");
     let nowMs = NOW.getTime();
     const dispatchGoals: string[] = [];
@@ -655,6 +719,7 @@ describe("AutonomousDirector site verdict consult", () => {
       }),
     };
     const planAndDispatch = vi.fn(async (request: { operatorGoal: string }) => {
+      if (request.operatorGoal.startsWith("评估基地选址")) return hardSiteResult(record, nowMs);
       dispatchGoals.push(request.operatorGoal);
       if (/挖一个.*避难所/.test(request.operatorGoal)) {
         return completedPlanResult("survival.shelter", {});
@@ -696,7 +761,7 @@ describe("AutonomousDirector site verdict consult", () => {
     await director.stop();
   });
 
-  it("force-accepts after the reject limit instead of consulting forever", async () => {
+  it("bounds optional model reviews while still requiring deterministic evidence", async () => {
     const record = readyRecord("studio-bot-01");
     let nowMs = NOW.getTime();
     const listeners = new Set<(record: BotRegistryRecord) => void>();
@@ -709,6 +774,7 @@ describe("AutonomousDirector site verdict consult", () => {
       }),
     };
     const planAndDispatch = vi.fn(async (request: { operatorGoal: string }) => {
+      if (request.operatorGoal.startsWith("评估基地选址")) return hardSiteResult(record, nowMs);
       if (/挖一个.*避难所/.test(request.operatorGoal)) {
         return completedPlanResult("survival.shelter", {});
       }
@@ -755,6 +821,17 @@ describe("AutonomousDirector site verdict consult", () => {
     await director.stop();
   });
 });
+
+function hardSiteResult(record: BotRegistryRecord, nowMs: number): never {
+  const assessment = { score01: 0.9, verdict: "ACCEPT", hardRuleFailures: [], exposureFactors: [] };
+  const p = record.currentStatus!.position;
+  return completedPlanResult("site.assess", { assessment, memoryRecord: {
+    serverProfileId: record.serverProfileId, dimension: p.dimension,
+    position: { x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) },
+    kind: "SAFE_SITE", observedAt: new Date(nowMs).toISOString(), staleAfterMs: 60_000, confidence: 0.9,
+    payload: { assessment },
+  } });
+}
 
 function scanPlanResult(
   blockName: string,

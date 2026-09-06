@@ -6,9 +6,10 @@ import {
   identifierSchema,
   type PublicBotDetailV1,
 } from "@minecraft-studio/protocol";
-import { scanBlocksOutputSchema, farmMaintainInputSchema, cropRules, readFarmProduction, registerCropProduction,
+import { scanBlocksOutputSchema, siteAssessOutputSchema, plannedBlueprintAnchor, farmMaintainInputSchema, farmSustainInputSchema, cropRules, readFarmProduction, registerCropProduction, registerFoodProduction, farmProductionReady,
   recordFarmProduction, type FacilityRegistry, type BaseRegistry } from "@minecraft-studio/skills";
 import type { PlanJournalStore } from "./plan-journal.js";
+import { ExplorationJournal } from "./exploration-journal.js";
 
 import type {
   BotRegistry,
@@ -91,8 +92,8 @@ export type AutonomousDirectorOptions = Readonly<{
   /**
    * 基地选址评审（可选，Spark）：选址 goal 完成后采集候选点事实快照
    * （村庄标记/水/岩浆/木材的相对距离），模型做 accept/reject 裁决。
-   * 未注入 = 旧行为（走到哪算哪，完成即翻门）。模型缺位/超时/不合法
-   * 输出一律 fail-open accept——选址永不因模型死锁。见 site-verdict.ts。
+   * 确定性选址必须先通过；模型缺位或超时只能省略可选评审，不能
+   * 补足缺失的世界证据。见 site-verdict.ts。
    */
   siteAI?: { generate: ScheduledAIRouter["generate"] };
   /**
@@ -104,6 +105,7 @@ export type AutonomousDirectorOptions = Readonly<{
   facilityRegistry?: FacilityRegistry;
   planJournalStore?: PlanJournalStore;
   persistBaseState?: () => void;
+  explorationJournal?: ExplorationJournal;
 }>;
 
 type InternalTask = PublicTask & {
@@ -245,6 +247,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
    */
   private readonly siteRejects = new Map<string, number>();
   private readonly siteVerdictInFlight = new Map<string, Promise<void>>();
+  private readonly siteVerdictControllers = new Map<string, AbortController>();
   private readonly consecutiveNeedFailures = new Map<string, number>();
   private readonly needSuppressedUntil = new Map<string, number>();
   private readonly explorationCursor = new Map<string, number>();
@@ -275,8 +278,10 @@ export class AutonomousDirector implements AutonomousTaskSource {
   private unsubscribeRegistry: (() => void) | null = null;
   private started = false;
   private readonly baseSessions = new Map<string, string>();
+  private readonly explorationJournal: ExplorationJournal;
 
   constructor(private readonly options: AutonomousDirectorOptions) {
+    this.explorationJournal = options.explorationJournal ?? new ExplorationJournal();
     this.basePhase = new BasePhaseTracker(options.baseRegistry ? (botId) => {
       const snapshot = emptyBasePhaseSnapshot();
       const record = options.registry.get(botId);
@@ -321,7 +326,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
   }
 
   async stop(): Promise<void> {
-    if (!this.started && this.active.size === 0) return;
+    if (!this.started && this.active.size === 0 && this.siteVerdictInFlight.size === 0) return;
     this.started = false;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
@@ -331,7 +336,8 @@ export class AutonomousDirector implements AutonomousTaskSource {
     this.unsubscribeRegistry = null;
     const active = [...this.active.values()];
     for (const run of active) run.controller.abort(new Error("director_shutdown"));
-    await Promise.allSettled(active.map(({ promise }) => promise));
+    for (const controller of this.siteVerdictControllers.values()) controller.abort(new Error("director_shutdown"));
+    await Promise.allSettled([...active.map(({ promise }) => promise), ...this.siteVerdictInFlight.values()]);
     this.log("info", "coordinator_autonomous_director_stopped", {});
   }
 
@@ -347,9 +353,11 @@ export class AutonomousDirector implements AutonomousTaskSource {
    */
   async requestManualControl(botId: string): Promise<boolean> {
     const run = this.active.get(botId);
-    if (!run) return false;
-    run.controller.abort(new Error("manual_control_requested"));
-    await Promise.allSettled([run.promise]);
+    const review = this.siteVerdictInFlight.get(botId);
+    if (!run && !review) return false;
+    run?.controller.abort(new Error("manual_control_requested"));
+    this.siteVerdictControllers.get(botId)?.abort(new Error("manual_control_requested"));
+    await Promise.allSettled([...(run ? [run.promise] : []), ...(review ? [review] : [])]);
     return true;
   }
 
@@ -655,20 +663,32 @@ export class AutonomousDirector implements AutonomousTaskSource {
       }
     }
     const farmBuild = this.persistedBuild(record.botId, "BASE_FACILITY_FARM");
-    if (base && this.options.facilityRegistry && farmBuild?.verification === "VERIFIED") {
-      registerCropProduction(this.options.facilityRegistry, base.id, farmMaintainInputSchema.parse({
-        area: { serverProfileId: record.serverProfileId, dimension: base.dimension,
-          min: { x: farmBuild.anchor.x - 3, y: farmBuild.anchor.y - 1, z: farmBuild.anchor.z - 3 },
-          max: { x: farmBuild.anchor.x + 3, y: farmBuild.anchor.y, z: farmBuild.anchor.z + 3 } },
-        crops: ["carrots"], plantEmpty: "carrots", prepareSoil: true, maxActions: 32,
+    if (base && !adopted && this.options.baseRegistry && this.options.facilityRegistry && !farmBuild &&
+        this.basePhase.snapshotFor(record.botId).STARTER_BASE_ACTIVE) {
+      const center = plannedBlueprintAnchor(this.options.baseRegistry.ensureLayout(base.id), "carrot-farm-9x9")!;
+      registerFoodProduction(this.options.facilityRegistry, base.id, farmSustainInputSchema.parse({
+        serverProfileId: record.serverProfileId, dimension: base.dimension, center,
       }));
+      this.options.persistBaseState?.();
     }
-    const farm = base ? this.options.facilityRegistry?.findByBase(base.id).find((facility) => {
+    const farm = base ? this.options.facilityRegistry?.findByBase(base.id).filter((facility) => {
       const production = readFarmProduction(facility);
       return production?.enabled && !this.productionRuns.has(facility.id) && production.nextRunAtMs <= nowMs &&
         facility.serverProfileId === record.serverProfileId && facility.dimension === base.dimension;
-    }) : null;
-    if (farm) {
+    }).sort((a, b) => readFarmProduction(a)!.nextRunAtMs - readFarmProduction(b)!.nextRunAtMs || a.id.localeCompare(b.id))[0] : null;
+    if (farm && readFarmProduction(farm)?.sustain) {
+      const production = readFarmProduction(farm)!;
+      const inventory = record.currentStatus?.inventory ?? [];
+      const missing = /^FARM_MATERIAL_REQUIRED:(oak_fence|oak_fence_gate|torch|barrel|bucket)$/u.exec(production.reason ?? "")?.[1];
+      const materialCount: Record<string, number> = { oak_fence: 24, oak_fence_gate: 1, torch: 4, barrel: 1, bucket: 1 };
+      const hasHoe = inventory.some((item) => item.itemName.endsWith("_hoe") && item.count > 0);
+      const seedsMissing = production.status === "WAITING_SEEDS" && inventory.filter((i) => i.itemName === "carrot").reduce((n, i) => n + i.count, 0) <= production.sustain!.seedReserve + production.sustain!.foodReserve;
+      const materialMissing = missing && inventory.filter((i) => i.itemName === missing).reduce((n, i) => n + i.count, 0) === 0;
+      const goal = !hasHoe ? "获取 stone_hoe" : materialMissing ? `获取 ${materialCount[missing!]} 个 ${missing}`
+        : seedsMissing ? `获取 ${production.sustain!.seedReserve + production.sustain!.foodReserve + 24} 个 carrot` : `维护食物设施 ${farm.id}`;
+      needs.push({ key: "BASE_FARM_MAINTENANCE", score: 75, title: "维持食物设施", reason: production.reason ?? "food production inspection due", operatorGoal: goal, sourceBlock: null });
+      needs.sort((a, b) => b.score - a.score);
+    } else if (farm) {
       const production = readFarmProduction(farm)!;
       const inventory = record.currentStatus?.inventory ?? [];
       const crop = production.input.plantEmpty;
@@ -693,6 +713,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
     const eligible = needs.filter(
       (need) =>
         !(adopted && (BASE_BUILD_NEED_KEYS.has(need.key) || need.key === "BASE_SITE_SELECTION" || need.key === "SHELTER")) &&
+        !(need.key === "BASE_FACILITY_FARM" && base && this.options.facilityRegistry?.findByBase(base.id).some((f) => readFarmProduction(f)?.sustain)) &&
         !(need.key === "SHELTER" && build) &&
         !((need.key === "BASE_FACILITY_COBBLE" || need.key === "BASE_FACILITY_FARM") &&
           this.persistedBuild(record.botId, need.key)?.verification === "VERIFIED") &&
@@ -732,7 +753,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
         needKey: need.key,
         key: "exploration",
         title: `${need.title} (${target.blockName})`,
-        operatorGoal: `移动到坐标 x=${target.x} y=${target.y} z=${target.z} 附近，继续观察 ${target.blockName} 方块`,
+        operatorGoal: `探索区块 x=${Math.floor(target.x / 16)} z=${Math.floor(target.z / 16)} radius=1`,
         reason: need.reason,
         blockName: target.blockName,
         directionalMining: false,
@@ -803,11 +824,16 @@ export class AutonomousDirector implements AutonomousTaskSource {
     ]!;
     // 基于稳定 botId 哈希的扇区偏移：同批 Bot 各自从不同扇区开始扫。
     const sectorBase = stableSector(record.botId);
-    const sector = (sectorBase + cursor) % 8;
-    const angle = (sector / 8) * Math.PI * 2;
-    const x = Math.floor(position.x + Math.cos(angle) * radius);
-    const z = Math.floor(position.z + Math.sin(angle) * radius);
-    this.explorationCursor.set(record.botId, cursor + 1);
+    let x = 0, z = 0, offset = 0;
+    for (; offset < 8; offset++) {
+      const sector = (sectorBase + cursor + offset) % 8;
+      const angle = (sector / 8) * Math.PI * 2;
+      x = Math.floor(position.x + Math.cos(angle) * radius);
+      z = Math.floor(position.z + Math.sin(angle) * radius);
+      if (!this.explorationJournal.has(record.serverProfileId, position.dimension, Math.floor(x / 16), Math.floor(z / 16))) break;
+    }
+    // All local sectors covered: still permit a live revisit to advance the frontier.
+    this.explorationCursor.set(record.botId, cursor + Math.min(offset + 1, 8));
     this.explorationRadiusStep.set(
       record.botId,
       Math.min(step + 1, AUTONOMOUS_EXPLORATION_RADII.length - 1),
@@ -853,6 +879,16 @@ export class AutonomousDirector implements AutonomousTaskSource {
     if (nameMatch === null) return operatorGoal;
     const progress = this.baseBuilds.get(botId);
     if (progress === undefined || progress.blueprintName !== nameMatch[1]) {
+      const record = this.options.registry.get(botId);
+      const dimension = record?.currentStatus?.position.dimension;
+      const base = record && dimension && this.options.baseRegistry?.forMember(botId, record.serverProfileId, dimension);
+      if (base && base.source !== "operator_adopted" && this.options.baseRegistry) {
+        const anchor = plannedBlueprintAnchor(this.options.baseRegistry.ensureLayout(base.id), nameMatch[1]!);
+        if (anchor) {
+          this.options.persistBaseState?.();
+          return `使用蓝图文件 ${nameMatch[1]} 施工：锚点 x=${anchor.x} y=${anchor.y} z=${anchor.z}，从第 0 格开始`;
+        }
+      }
       return operatorGoal;
     }
     if (progress.nextIndex <= 0 || progress.nextIndex >= progress.totalCells) {
@@ -973,15 +1009,22 @@ export class AutonomousDirector implements AutonomousTaskSource {
     const production = readFarmProduction(facility);
     if (!production) return;
     const nowMs = validDate(this.now()).getTime();
-    if (result.action === "skill_result" && result.invocation.payload.skillId === "farm.maintain") {
-      recordFarmProduction(facility, taskId, result.result.payload.outcome === "completed" ? result.result.payload.output : null, nowMs,
-        result.result.payload.outcome === "completed" ? undefined : autonomousFailureCode(result) ?? "FARM_MAINTENANCE_FAILED");
+    if (result.action === "skill_result" && ["farm.maintain", "farm.sustain"].includes(result.invocation.payload.skillId)) {
+      const invoked = result.invocation, returned = result.result;
+      const schema = production.sustain ? farmSustainInputSchema : farmMaintainInputSchema;
+      const actual = schema.safeParse(invoked.payload.input);
+      const expectedSkill = production.sustain ? "farm.sustain" : "farm.maintain";
+      const matches = actual.success && JSON.stringify(actual.data) === JSON.stringify(production.sustain ?? production.input) &&
+        invoked.payload.skillId === expectedSkill && returned.payload.skillId === expectedSkill &&
+        invoked.botId === record.botId && returned.botId === record.botId && invoked.taskId === taskId && returned.taskId === taskId &&
+        returned.source.instanceId === record.runtimeInstanceId && invoked.payload.invocationId === returned.payload.invocationId &&
+        invoked.payload.skillVersion === returned.payload.skillVersion;
+      recordFarmProduction(facility, taskId, matches && returned.payload.outcome === "completed" ? returned.payload.output : null, nowMs,
+        !matches ? "FARM_RECEIPT_SCOPE_MISMATCH" : returned.payload.outcome === "completed" ? undefined : autonomousFailureCode(result) ?? "FARM_MAINTENANCE_FAILED");
       const observed = readFarmProduction(facility)!;
-      const samples = observed.samples;
-      const producing = observed.status === "PRODUCING" && samples.length >= 2 &&
-        samples[samples.length - 1]!.atMs - samples[0]!.atMs >= 60_000;
+      const producing = farmProductionReady(observed, nowMs);
       if (facility.baseId) this.options.baseRegistry?.recordPhaseEvidence(facility.baseId, "FOOD_FACILITY_ACTIVE",
-        producing ? "AVAILABLE" : "UNVERIFIED", producing ? "multiple positive harvest receipts" : observed.reason ?? observed.status, "farm-production-receipts");
+        producing ? "AVAILABLE" : "UNVERIFIED", producing ? "three positive production cycles across five minutes" : observed.reason ?? observed.status, "farm-production-receipts");
     } else {
       const failure = autonomousFailureCode(result);
       if (failure) recordFarmProduction(facility, taskId, null, nowMs, failure);
@@ -1000,7 +1043,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
       blueprintId: "starter-base-v1", createdByBotId: botId,
     });
     // Structure completion cannot establish food production or trade replenishment.
-    if (phase === "SHELTER_MINIMAL_READY" || phase === "BASE_SITE_RESERVED") {
+    if (phase === "SHELTER_MINIMAL_READY") {
       this.options.baseRegistry.recordPhaseEvidence(base.id, phase, "AVAILABLE", "verified deterministic goal result", "director-goal-result");
       this.options.persistBaseState?.();
     }
@@ -1008,12 +1051,11 @@ export class AutonomousDirector implements AutonomousTaskSource {
 
   /**
    * 选址评审是否应启动：siteAI 已接线 + 门未翻 + 无在途评审 + 未达
-   * reject 上限（达上限后下个完成直接翻门，不再浪费模型调用）。
+   * reject 上限（达上限后仍需确定性证据，但省略模型调用）。
    */
   private shouldConsultSiteVerdict(botId: string): boolean {
     if (!this.options.siteAI) return false;
     if (this.basePhase.snapshotFor(botId).BASE_SITE_RESERVED) return false;
-    if (this.siteVerdictInFlight.has(botId)) return false;
     if ((this.siteRejects.get(botId) ?? 0) >= SITE_VERDICT_REJECT_LIMIT) {
       return false;
     }
@@ -1023,6 +1065,10 @@ export class AutonomousDirector implements AutonomousTaskSource {
   /** 启动一次选址评审：抑制选址+探索需求（扫描期间别把 bot 派走），
    *  预算超时自动解抑（防挂起吞掉需求节拍）。恢复时只回收自己设的闸。 */
   private beginSiteVerdict(botId: string, goal: AutonomousGoal): void {
+    if (this.siteVerdictInFlight.has(botId)) return;
+    const controller = new AbortController();
+    this.siteVerdictControllers.set(botId, controller);
+    const timeout = setTimeout(() => controller.abort(new Error("site_review_timeout")), SITE_VERDICT_TIMEOUT_MS * 2);
     const nowMs = validDate(this.now()).getTime();
     const hold = nowMs + SITE_VERDICT_TIMEOUT_MS * 2;
     const prior: Array<[string, number]> = [];
@@ -1030,10 +1076,12 @@ export class AutonomousDirector implements AutonomousTaskSource {
       prior.push([key, this.needSuppressedUntil.get(key) ?? 0]);
       this.needSuppressedUntil.set(key, hold);
     }
-    const promise = this.consultSiteVerdict(botId, goal)
+    const promise = this.consultSiteVerdict(botId, goal, controller)
       .catch(() => undefined)
       .finally(() => {
         this.siteVerdictInFlight.delete(botId);
+        this.siteVerdictControllers.delete(botId);
+        clearTimeout(timeout);
         for (const [key, was] of prior) {
           if ((this.needSuppressedUntil.get(key) ?? 0) !== hold) continue;
           if (was > 0) this.needSuppressedUntil.set(key, was);
@@ -1044,23 +1092,41 @@ export class AutonomousDirector implements AutonomousTaskSource {
   }
 
   /**
-   * 选址评审主体：采集事实（4 项只读扫描，相对距离）→ 模型裁决 →
-   * accept/限额/模型缺位=翻门，未达限额的 reject=不翻门（需求重新触发，
-   * 扇区游标已推进，走下一个候选点）。单项扫描失败=该事实缺失，不是
-   * 整次评审失败。
+   * A fresh deterministic assessment is required before optional model review.
+   * Model availability cannot override missing world evidence.
    */
   private async consultSiteVerdict(
     botId: string,
     goal: AutonomousGoal,
+    controller: AbortController,
   ): Promise<void> {
-    const ai = this.options.siteAI;
-    if (!ai) return;
     const record = this.options.registry.get(botId, validDate(this.now()));
-    if (!record || record.connectionState !== "online") return;
+    const position = record?.currentStatus?.position;
+    if (!record || record.connectionState !== "online" || !position) return;
+    const candidate = { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) };
+    const unchanged = () => {
+      const latest = this.options.registry.get(botId);
+      const p = latest?.currentStatus?.position;
+      return !controller.signal.aborted && this.started && latest?.connectionState === "online" && latest.runtimeInstanceId === record.runtimeInstanceId && latest.serverProfileId === record.serverProfileId &&
+        p?.dimension === position.dimension && Math.hypot(p.x - candidate.x, p.y - candidate.y, p.z - candidate.z) <= 3;
+    };
+    const checked = await this.dispatchInternal(botId, `评估基地选址 x=${candidate.x} y=${candidate.y} z=${candidate.z}`, controller);
+    const hard = checked.action === "skill_result" && checked.invocation.payload.skillId === "site.assess" && checked.result.payload.outcome === "completed"
+      ? siteAssessOutputSchema.safeParse(checked.result.payload.output) : null;
+    const evidence = hard?.success ? hard.data.memoryRecord : null;
+    const ageMs = evidence ? validDate(this.now()).getTime() - Date.parse(evidence.observedAt) : Infinity;
+    if (!hard?.success || hard.data.assessment.verdict !== "ACCEPT" || hard.data.assessment.hardRuleFailures.length ||
+        !evidence || evidence.serverProfileId !== record.serverProfileId || evidence.dimension !== position.dimension ||
+        evidence.position.x !== candidate.x || evidence.position.y !== candidate.y || evidence.position.z !== candidate.z ||
+        ageMs < 0 || ageMs > 60_000 || !unchanged()) {
+      this.log("warn", "coordinator_autonomous_site_unverified", { botId, goal: goal.key, reason: "DETERMINISTIC_SITE_EVIDENCE_REQUIRED" });
+      return;
+    }
+    const ai = this.shouldConsultSiteVerdict(botId) ? this.options.siteAI : undefined;
     let verdict: SiteVerdict | null = null;
-    try {
-      const facts = await this.gatherSiteFacts(record);
-      if (!this.started) return;
+    if (ai) try {
+      const facts = await this.gatherSiteFacts(record, controller);
+      if (!unchanged()) return;
       const requestId = identifierSchema.parse(this.randomId());
       verdict = await askSiteVerdict({
         ai,
@@ -1068,11 +1134,12 @@ export class AutonomousDirector implements AutonomousTaskSource {
         botId,
         traceId: requestId,
         prompt: buildSiteVerdictPrompt(facts),
+        signal: controller.signal,
       });
     } catch {
       verdict = null;
     }
-    if (!this.started) return;
+    if (!unchanged()) return;
     const rejects = this.siteRejects.get(botId) ?? 0;
     if (verdict !== null && verdict.verdict === "reject" && rejects < SITE_VERDICT_REJECT_LIMIT) {
       this.siteRejects.set(botId, rejects + 1);
@@ -1085,11 +1152,18 @@ export class AutonomousDirector implements AutonomousTaskSource {
       });
       return;
     }
-    const fallback = verdict === null; // 模型缺位/超时/不合法 → fail-open
+    const fallback = verdict === null;
     const forcedByLimit = verdict !== null && verdict.verdict === "reject";
+    if (this.options.baseRegistry) {
+      const base = this.options.baseRegistry.create({ name: "autonomous-base", serverProfileId: record.serverProfileId,
+        dimension: position.dimension, anchor: candidate, blueprintId: "starter-base-v1" });
+      this.options.baseRegistry.assignMember(base.id, record.serverProfileId, position.dimension, botId);
+      this.options.baseRegistry.ensureLayout(base.id);
+      this.options.baseRegistry.recordPhaseEvidence(base.id, "BASE_SITE_RESERVED", "AVAILABLE", "site.assess accepted current scoped candidate", "site.assess");
+      this.options.persistBaseState?.();
+    }
     this.siteRejects.set(botId, 0);
     this.basePhase.forcePhase(botId, "BASE_SITE_RESERVED");
-    this.recordBaseFact(botId, "BASE_SITE_RESERVED");
     this.log("info", "coordinator_autonomous_site_accepted", {
       botId,
       goal: goal.key,
@@ -1105,8 +1179,8 @@ export class AutonomousDirector implements AutonomousTaskSource {
    */
   private async gatherSiteFacts(
     record: BotRegistryRecord,
+    controller: AbortController,
   ): Promise<SiteFacts> {
-    const controller = new AbortController();
     const scans: ReadonlyArray<[keyof SiteFacts, string]> = [
       ["village", "hay_block"],
       ["water", "water"],
@@ -1120,6 +1194,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
       wood: null,
     };
     for (const [key, blockName] of scans) {
+      if (controller.signal.aborted) break;
       try {
         const result = await this.dispatchInternal(
           record.botId,
@@ -1182,7 +1257,16 @@ export class AutonomousDirector implements AutonomousTaskSource {
         goal.needKey,
         goal.operatorGoal,
       );
-      if (goal.productionFacilityId) this.productionRuns.set(goal.productionFacilityId, taskId);
+      if (goal.productionFacilityId) {
+        this.productionRuns.set(goal.productionFacilityId, taskId);
+        const facility = this.options.facilityRegistry?.get(goal.productionFacilityId);
+        const production = facility && readFarmProduction(facility);
+        if (facility && production) {
+          // A restarted coordinator waits past the previous task's bounded lifetime.
+          facility.metadata.production = { ...production, nextRunAtMs: validDate(this.now()).getTime() + this.options.goalTimeoutMs + 60_000 };
+          this.options.persistBaseState?.();
+        }
+      }
       let result = await this.options.planner.planAndDispatch({
         requestId: taskId,
         traceId: taskId,
@@ -1226,6 +1310,14 @@ export class AutonomousDirector implements AutonomousTaskSource {
     } catch (cause) {
       const status: TaskStatus = controller.signal.aborted ? "cancelled" : "failed";
       const failureCode = autonomousFailureCode(cause);
+      if (goal.productionFacilityId) {
+        const facility = this.options.facilityRegistry?.get(goal.productionFacilityId);
+        if (facility) {
+          recordFarmProduction(facility, taskId, null, validDate(this.now()).getTime(), failureCode ?? "FARM_TASK_INTERRUPTED");
+          if (facility.baseId) this.options.baseRegistry?.recordPhaseEvidence(facility.baseId, "FOOD_FACILITY_ACTIVE", "UNVERIFIED", "production task interrupted", "farm-production-receipts");
+          this.options.persistBaseState?.();
+        }
+      }
       let keepGoal = false;
       if (failureCode !== null && !controller.signal.aborted) {
         const recovery = await this.recoverResourceGoal(
@@ -1609,8 +1701,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
       // accept 才 forcePhase；评审期间需求被抑制（防重触发竞态）。
       if (!this.hasOngoingBaseBuild(botId, goal.needKey)) {
         if (
-          goal.needKey === "BASE_SITE_SELECTION" &&
-          this.shouldConsultSiteVerdict(botId)
+          goal.needKey === "BASE_SITE_SELECTION"
         ) {
           this.beginSiteVerdict(botId, goal);
         } else {

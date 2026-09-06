@@ -5,9 +5,9 @@
 // （TotemManager.decideForLiveCombat 等）一律以 NO_PROBE_DATA 拒绝——fail-closed
 // 是对的，但"没测过"和"测过、确实不达标"在遥测上不可区分。
 //
-// 这个探针测量的是战斗反应循环自身的步长（每步 observation→engage→log 的
-// 真实耗时，monotonic 时钟）：事件循环若被物理 tick/寻路/扫描挤占，步长
-// 直接反映出来。刻意不做独立打点循环——多一个定时器本身就会改变被测负载。
+// 记录每步计划唤醒时间到 observation→engage→log 完成的 monotonic 耗时，
+// 包含定时器迟到，扣除主动等待。首步从反应循环开始计时；不包含网络 RTT、
+// 包到达前的延迟或服务端确认，不可宣称为端到端命中延迟。
 //
 // 诚实边界（对齐 packages/combat/src/reflex-clearance.ts 的契约）：
 //   - 无样本 → report() 返回 null（NO_PROBE_DATA，fail-closed）；

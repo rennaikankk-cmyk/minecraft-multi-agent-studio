@@ -2,7 +2,7 @@ import { readFileSync, statSync } from "node:fs";
 import { z } from "zod";
 import { identifierSchema } from "@minecraft-studio/protocol";
 import { BaseRegistry, FacilityRegistry, workPositionSchema, workScopeSchema, withinWorkArea,
-  farmMaintainInputSchema, registerCropProduction } from "@minecraft-studio/skills";
+  farmMaintainInputSchema, registerCropProduction, registerFoodProduction, farmSustainInputSchema, foodFarmLayout } from "@minecraft-studio/skills";
 
 export const operatorBaseAssignmentsSchema = z.object({
   schemaVersion: z.literal("1.0"),
@@ -15,6 +15,9 @@ export const operatorBaseAssignmentsSchema = z.object({
       min: workPositionSchema, max: workPositionSchema,
       crop: z.enum(["carrots", "potatoes", "wheat", "beetroots"]),
     }).strict()).max(8).default([]),
+    foodGardens: z.array(z.object({ center: farmSustainInputSchema.shape.center, waterSource: farmSustainInputSchema.shape.waterSource,
+      seedReserve: farmSustainInputSchema.shape.seedReserve, foodReserve: farmSustainInputSchema.shape.foodReserve,
+      maxActions: farmSustainInputSchema.shape.maxActions }).strict()).max(8).default([]),
   }).strict().superRefine((a, ctx) => {
     if (["x", "y", "z"].some((axis) => {
       const key = axis as "x" | "y" | "z";
@@ -25,6 +28,12 @@ export const operatorBaseAssignmentsSchema = z.object({
     for (const farm of a.farms) {
       if (!withinWorkArea({ ...a, ...a.bounds }, farm.min) || !withinWorkArea({ ...a, ...a.bounds }, farm.max)) {
         ctx.addIssue({ code: "custom", message: "Farm must remain inside the adopted base." });
+      }
+    }
+    for (const garden of a.foodGardens) {
+      const layout = foodFarmLayout(garden.center);
+      if (!withinWorkArea({ ...a, ...a.bounds }, layout.min) || !withinWorkArea({ ...a, ...a.bounds }, layout.max)) {
+        ctx.addIssue({ code: "custom", message: "Food garden infrastructure must remain inside the adopted base." });
       }
     }
   })).max(32),
@@ -56,6 +65,8 @@ export function applyOperatorBaseAssignments(raw: unknown, bases: BaseRegistry, 
       area: { serverProfileId: base.serverProfileId, dimension: base.dimension, min: farm.min, max: farm.max },
       crops: [farm.crop], plantEmpty: farm.crop, prepareSoil: true, maxActions: 32,
     }));
+    for (const garden of assignment.foodGardens) registerFoodProduction(draftFacilities, base.id,
+      farmSustainInputSchema.parse({ ...garden, serverProfileId: base.serverProfileId, dimension: base.dimension }));
   }
   bases.absorb(draftBases);
   facilities.absorb(draftFacilities);

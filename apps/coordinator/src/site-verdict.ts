@@ -96,6 +96,7 @@ export async function askSiteVerdict(options: {
   botId: string;
   traceId: string;
   prompt: string;
+  signal?: AbortSignal;
 }): Promise<SiteVerdict | null> {
   let ai: AIScheduledResult<GenerateResult>;
   try {
@@ -112,6 +113,7 @@ export async function askSiteVerdict(options: {
       temperature: 0,
       timeoutMs: SITE_VERDICT_TIMEOUT_MS,
       traceId: options.traceId,
+      ...(options.signal ? { signal: options.signal } : {}),
     });
   } catch {
     return null;
