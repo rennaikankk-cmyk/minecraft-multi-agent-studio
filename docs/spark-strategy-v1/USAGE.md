@@ -1,5 +1,7 @@
 # Spark Strategy V1 使用说明
 
+当前 main 的默认关闭观察入口、真实 Registry 来源与回滚见 [OBSERVER_INTEGRATION.md](OBSERVER_INTEGRATION.md)；live 预算与结果见 [TAKEOVER_RESULTS_2026-09-06.md](TAKEOVER_RESULTS_2026-09-06.md)。下列 GLM 分支命令作为历史离线复现保留，正常启动不自动启动 Minecraft。
+
 ## 前置
 
 ```bash

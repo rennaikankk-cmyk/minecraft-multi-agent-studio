@@ -1,5 +1,7 @@
 # Spark Strategy V1 证据与验证记录
 
+当前已完成补修、D3、只读接线与现有模型 live 评测，证据见 [TAKEOVER_RESULTS_2026-09-06.md](TAKEOVER_RESULTS_2026-09-06.md)。本文件的旧测试总数、未执行项及 CI 根因不代表当前状态。
+
 环境：Windows 11 + Git Bash；worktree `../studio-spark-strategy`（分支 `feat/spark-strategy-v1-glm`，基线 `75cab90`）。
 
 ## GLM 历史验证矩阵（不是补修后的结果）

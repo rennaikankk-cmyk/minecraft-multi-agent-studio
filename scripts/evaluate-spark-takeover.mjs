@@ -126,7 +126,8 @@ finally{
   report.summary={samples:report.samples.length,parsed:report.samples.filter((s)=>s.score?.parsed).length,
     accepted:report.samples.filter((s)=>s.score?.accepted).length,behaviorMatched:report.samples.filter((s)=>s.score?.behaviorMatch).length,
     incorrectWait:report.samples.filter((s)=>s.score?.incorrectWait).length,wrongAcceptedAction:report.samples.filter((s)=>s.score?.wrongAcceptedAction).length,
-    p50Ms:p(.5),p95Ms:p(.95),p99Ms:p(.99),throughputRequestsPerMinute:report.samples.length*60000/report.durationMs,
+    p50Ms:p(.5),p95Ms:p(.95),p99Ms:p(.99),attemptSettlementsPerMinute:report.samples.length*60000/report.durationMs,
+    throughputRequestsPerMinute:report.samples.filter((s)=>['valid-proposal','parse-failed','complete'].includes(s.accounting.outcome)).length*60000/report.durationMs,
     promptTokens:report.samples.reduce((n,s)=>n+(s.accounting.usage?.promptTokens??0),0),completionTokens:report.samples.reduce((n,s)=>n+(s.accounting.usage?.completionTokens??0),0)};
   save();console.log(JSON.stringify({dir,summary:report.summary,stopReasons:report.stopReasons}));
 }
