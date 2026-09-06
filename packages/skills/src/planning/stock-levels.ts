@@ -2,7 +2,7 @@ import { identifierSchema } from "@minecraft-studio/protocol";
 import { z } from "zod";
 
 import { SkillFault } from "../errors.js";
-import { defineSkill, type SkillExecutionContext } from "../types.js";
+import { defineSkill } from "../types.js";
 import {
   containerTransferCapabilityInputSchema,
   containerTransferCapabilityOutputSchema,
@@ -102,7 +102,10 @@ export const storeSortInputSchema = z.object({
   routes: z.array(materialRouteSchema).min(1).max(MAX_STORE_TRANSFERS),
   startIndex: z.number().int().min(0).max(MAX_STORE_TRANSFERS),
   maxTransfers: z.number().int().min(1).max(MAX_STORE_TRANSFERS),
-}).strict();
+  remainingCount: z.number().int().min(1).max(TRANSFER_MAX_COUNT).optional(),
+}).strict().refine((input) => input.startIndex < input.routes.length &&
+  (input.remainingCount === undefined || input.remainingCount <= input.routes[input.startIndex]!.count),
+  { message: "A pending route and a valid residual count are required." });
 export type StoreSortInput = z.infer<typeof storeSortInputSchema>;
 
 const observedPositionSchema = z.object({
@@ -132,6 +135,8 @@ export const storeSortOutputSchema = z.object({
   nextIndex: z.number().int().min(0).max(MAX_STORE_TRANSFERS),
   totalRoutes: z.number().int().min(1).max(MAX_STORE_TRANSFERS),
   moved: z.array(transferReceiptSchema).max(MAX_STORE_TRANSFERS),
+  remainingCount: z.number().int().min(0).max(TRANSFER_MAX_COUNT),
+  completed: z.boolean(),
 }).strict();
 
 export const packShulkerInputSchema = z.object({
@@ -141,7 +146,10 @@ export const packShulkerInputSchema = z.object({
   serverProfileId: identifierSchema,
   startIndex: z.number().int().min(0).max(27),
   maxTransfers: z.number().int().min(1).max(27),
-}).strict();
+  remainingCount: z.number().int().min(1).max(TRANSFER_MAX_COUNT).optional(),
+}).strict().refine((input) => input.startIndex < input.items.length &&
+  (input.remainingCount === undefined || input.remainingCount <= input.items[input.startIndex]!.count),
+  { message: "A pending item and a valid residual count are required." });
 export type PackShulkerInput = z.infer<typeof packShulkerInputSchema>;
 export const packShulkerOutputSchema = z.object({
   startIndex: z.number().int().min(0).max(27),
@@ -149,6 +157,7 @@ export const packShulkerOutputSchema = z.object({
   totalItems: z.number().int().min(1).max(27),
   packed: z.array(transferReceiptSchema).max(27),
   completed: z.boolean(),
+  remainingCount: z.number().int().min(0).max(TRANSFER_MAX_COUNT),
 }).strict();
 
 export const storeSortCapabilityInputSchema = containerTransferCapabilityInputSchema;
@@ -183,13 +192,21 @@ export const storeSortSkill = defineSkill({
   execute: async (context, input, state) => {
     const routes = input.routes.slice(input.startIndex, input.startIndex + input.maxTransfers);
     const moved: z.infer<typeof transferReceiptSchema>[] = [];
+    let nextIndex = input.startIndex;
+    let remainingCount = input.remainingCount ?? routes[0]!.count;
     for (const route of routes) {
+      if (context.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
       executeStatePreconditions(route, state);
-      const raw = await context.callCapability("container.write", "container.transfer-safe", storeSortCapabilityInputSchema.parse({ direction: "deposit", itemName: route.itemName, count: route.count, container: route.container, dimension: route.dimension, serverProfileId: route.serverProfileId }));
+      const raw = await context.callCapability("container.write", "container.transfer-safe", storeSortCapabilityInputSchema.parse({ direction: "deposit", itemName: route.itemName, count: remainingCount, container: route.container, dimension: route.dimension, serverProfileId: route.serverProfileId }));
       const receipt = storeSortCapabilityOutputSchema.parse(raw);
+      if (receipt.direction !== "deposit" || receipt.itemName !== route.itemName || receipt.requestedCount !== remainingCount) throw new SkillFault("CONTAINER_RECEIPT_MISMATCH");
       moved.push({ itemName: route.itemName, requestedCount: receipt.requestedCount, movedCount: receipt.movedCount, container: route.container });
+      remainingCount -= receipt.movedCount;
+      if (remainingCount > 0) break;
+      nextIndex += 1;
+      remainingCount = input.routes[nextIndex]?.count ?? 0;
     }
-    return storeSortOutputSchema.parse({ startIndex: input.startIndex, nextIndex: input.startIndex + moved.length, totalRoutes: input.routes.length, moved });
+    return storeSortOutputSchema.parse({ startIndex: input.startIndex, nextIndex, totalRoutes: input.routes.length, moved, remainingCount, completed: nextIndex === input.routes.length });
   },
 });
 
@@ -215,14 +232,20 @@ export const packShulkerSkill = defineSkill({
     executeStatePreconditions({ serverProfileId: input.serverProfileId, dimension: input.dimension }, state);
     const entries = input.items.slice(input.startIndex, input.startIndex + input.maxTransfers);
     const packed: z.infer<typeof transferReceiptSchema>[] = [];
+    let nextIndex = input.startIndex;
+    let remainingCount = input.remainingCount ?? entries[0]!.count;
     for (const entry of entries) {
       if (context.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
-      const raw = await context.callCapability("container.write", "container.transfer-safe", packShulkerCapabilityInputSchema.parse({ direction: "deposit", itemName: entry.itemName, count: entry.count, container: input.shulker, dimension: input.dimension, serverProfileId: input.serverProfileId }));
+      const raw = await context.callCapability("container.write", "container.transfer-safe", packShulkerCapabilityInputSchema.parse({ direction: "deposit", itemName: entry.itemName, count: remainingCount, container: input.shulker, dimension: input.dimension, serverProfileId: input.serverProfileId }));
       const receipt = packShulkerCapabilityOutputSchema.parse(raw);
+      if (receipt.direction !== "deposit" || receipt.itemName !== entry.itemName || receipt.requestedCount !== remainingCount) throw new SkillFault("CONTAINER_RECEIPT_MISMATCH");
       packed.push({ itemName: entry.itemName, requestedCount: receipt.requestedCount, movedCount: receipt.movedCount, container: input.shulker });
+      remainingCount -= receipt.movedCount;
+      if (remainingCount > 0) break;
+      nextIndex += 1;
+      remainingCount = input.items[nextIndex]?.count ?? 0;
     }
-    const nextIndex = input.startIndex + packed.length;
-    return packShulkerOutputSchema.parse({ startIndex: input.startIndex, nextIndex, totalItems: input.items.length, packed, completed: nextIndex >= input.items.length });
+    return packShulkerOutputSchema.parse({ startIndex: input.startIndex, nextIndex, totalItems: input.items.length, packed, remainingCount, completed: nextIndex === input.items.length });
   },
 });
 

@@ -13,7 +13,7 @@ import { defineSkill } from "../types.js";
 // 箱子存取技能，自研（mineflayer 原生 openContainer + deposit/withdraw）。
 // 基地存储与后勤的底座：分类入库、按角色补货套件都建立在"把 N 个 X 从背包
 // 移到坐标 (x,y,z) 的箱子 / 反向取出"这一个原子动作上。
-// 遥测报"实际移动数量"（操作前后读回背包差值），不伪造成功。
+// 遥测报箱子和背包双向读回一致的实际移动数量。
 // ---------------------------------------------------------------------------
 
 export const CONTAINER_TRANSFER_TIMEOUT_MS = 15_000;
@@ -80,9 +80,16 @@ export const containerTransferOutputSchema = z
     direction: z.enum(["deposit", "withdraw"]),
     itemName: itemNameSchema,
     requestedCount: z.number().int().min(1).max(TRANSFER_MAX_COUNT),
-    // 实际移动数量 = 操作前后背包该物品数量差的绝对值（读回，非理论值）。
+    // 实际移动数量来自箱子与背包一致的有向增量。
     // 少于请求量（箱子满/物品不够）如实上报，由上层决定下一步。
     movedCount: z.number().int().min(0).max(TRANSFER_MAX_COUNT),
+    verification: z.object({
+      inventoryBefore: z.number().int().nonnegative(),
+      inventoryAfter: z.number().int().nonnegative(),
+      containerBefore: z.number().int().nonnegative(),
+      containerAfter: z.number().int().nonnegative(),
+      observedAt: z.string().datetime(),
+    }).strict().optional(),
   })
   .strict()
   .superRefine((output, context) => {
@@ -92,6 +99,14 @@ export const containerTransferOutputSchema = z
         path: ["movedCount"],
         message: "movedCount cannot exceed requestedCount.",
       });
+    }
+    if (output.verification) {
+      const v = output.verification;
+      const sign = output.direction === "deposit" ? 1 : -1;
+      if ((v.inventoryBefore - v.inventoryAfter) * sign !== output.movedCount ||
+          (v.containerAfter - v.containerBefore) * sign !== output.movedCount) {
+        context.addIssue({ code: "custom", path: ["verification"], message: "Both inventories must confirm the same transfer." });
+      }
     }
   });
 

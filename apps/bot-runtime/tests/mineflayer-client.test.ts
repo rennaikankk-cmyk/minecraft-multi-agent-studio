@@ -2184,8 +2184,11 @@ describe("MineflayerBotClient lifecycle", () => {
     const emitter = new EventEmitter();
     const bot = emitter as unknown as Bot;
     let cobblestoneCount = 5;
+    let storedCount = 0;
+    let opens = 0;
     const deposit = vi.fn(async (_type: number, _metadata: number | null, count: number) => {
       cobblestoneCount -= count;
+      storedCount += count;
     });
     Object.assign(bot, {
       game: { dimension: "overworld" },
@@ -2199,8 +2202,11 @@ describe("MineflayerBotClient lifecycle", () => {
       blockAt: vi.fn(() => ({ name: "chest", position: new Vec3(5, 65, -2), getProperties: () => ({ type: "single" }) })),
       openContainer: vi.fn(async () => {
         // Simulate the prior place-block slot update arriving with window sync.
-        cobblestoneCount = 4;
-        return { deposit, withdraw: vi.fn(), close: vi.fn() };
+        if (opens++ === 0) cobblestoneCount = 4;
+        const window = { deposit, withdraw: vi.fn(), close: vi.fn(), items: () => bot.inventory.items(),
+          containerItems: () => [{ name: "cobblestone", count: storedCount }] };
+        Object.assign(bot, { currentWindow: window });
+        return window;
       }),
     });
     const client = new MineflayerBotClient(
@@ -2234,6 +2240,88 @@ describe("MineflayerBotClient lifecycle", () => {
     expect(deposit).toHaveBeenCalledWith(1, null, 4);
   });
 
+  it.each(["missing-in-store", "server-rejected", "partial"])("reconciles transfer using a reopened server window (%s)", async (mode) => {
+    const bot = new EventEmitter() as unknown as Bot;
+    let bag = 4, stored = 0, opens = 0;
+    const deposit = vi.fn(async () => { bag = mode === "partial" ? 2 : 0; stored = mode === "partial" ? 2 : 0; });
+    Object.assign(bot, { game: { dimension: "overworld" }, registry: { itemsByName: { stone: { id: 1 } } },
+      inventory: { items: () => [{ name: "stone", count: bag }] },
+      blockAt: () => ({ name: "barrel", position: new Vec3(0, 64, 0), getProperties: () => ({}) }),
+      openContainer: async () => {
+        if (opens++ > 0 && mode === "server-rejected") bag = 4;
+        const window = { deposit, items: () => [{ name: "stone", count: bag }],
+          containerItems: () => [{ name: "stone", count: stored }], close: vi.fn() };
+        Object.assign(bot, { currentWindow: window });
+        return window;
+      } });
+    const client = new MineflayerBotClient(bot, "auto", "fixture", false, undefined, "safe", null, undefined, new InMemoryWorkstationRegistry());
+    const result = client.invokeSkillCapability({ invocationId: "transfer", taskId: "task", traceId: "trace", botId: "bot",
+      skillId: "container.transfer", skillVersion: "1.0.0", capability: "container.write", operation: "container.transfer-safe",
+      input: { direction: "deposit", itemName: "stone", count: 4, container: { x: 0, y: 64, z: 0 }, dimension: "minecraft:overworld", serverProfileId: "fixture" },
+      signal: new AbortController().signal });
+    if (mode === "missing-in-store") await expect(result).rejects.toMatchObject({ code: "CONTAINER_TRANSFER_UNCERTAIN" });
+    else expect(await result).toMatchObject({ movedCount: mode === "partial" ? 2 : 0,
+      verification: { inventoryAfter: bag, containerAfter: stored } });
+    expect(opens).toBe(2);
+  });
+
+  it("rejects a normal chest for pack.shulker before acquiring or opening it", async () => {
+    const bot = new EventEmitter() as unknown as Bot;
+    Object.assign(bot, { game: { dimension: "overworld" }, registry: { itemsByName: { stone: { id: 1 } } },
+      blockAt: () => ({ name: "chest", position: new Vec3(0, 64, 0) }), openContainer: vi.fn() });
+    const client = new MineflayerBotClient(bot, "auto", "fixture");
+    await expect(client.invokeSkillCapability({ invocationId: "pack", taskId: "task", traceId: "trace", botId: "bot",
+      skillId: "pack.shulker", skillVersion: "1.0.0", capability: "container.write", operation: "container.transfer-safe",
+      input: { direction: "deposit", itemName: "stone", count: 1, container: { x: 0, y: 64, z: 0 }, dimension: "minecraft:overworld", serverProfileId: "fixture" },
+      signal: new AbortController().signal })).rejects.toMatchObject({ code: "SHULKER_REQUIRED" });
+    expect(bot.openContainer).not.toHaveBeenCalled();
+  });
+
+  it.each(["stone", "dirt"])("preserves the target cell with alternate support and verifies the placed type (%s)", async (placedName) => {
+    const bot = new EventEmitter() as unknown as Bot;
+    const target = new Vec3(1, 65, 0), support = new Vec3(0, 65, 0);
+    let changed = false;
+    const blockAt = (p: Vec3) => ({ name: p.equals(support) ? "cobblestone" : p.equals(target) && changed ? placedName : "air",
+      boundingBox: p.equals(support) || p.equals(target) && changed ? "block" : "empty", position: p });
+    const placeBlock = vi.fn(async (reference: any, face: Vec3) => {
+      expect(reference.position.plus(face)).toEqual(target);
+      changed = true;
+    });
+    Object.assign(bot, { game: { dimension: "overworld" }, inventory: { items: () => [{ name: "stone", type: 1, count: 1 }] },
+      blockAt, equip: vi.fn(async () => {}), placeBlock });
+    const client = new MineflayerBotClient(bot, "auto", "fixture");
+    const result = (client as any).invokePlaceBlock({ invocationId: "place", taskId: "task", traceId: "trace", botId: "bot",
+      skillId: "world.place-block", skillVersion: "1.0.0", capability: "world.interact", operation: "block.place-safe",
+      input: { itemName: "stone", referenceBlock: { x: 1, y: 64, z: 0 }, face: { x: 0, y: 1, z: 0 },
+        dimension: "minecraft:overworld", serverProfileId: "fixture" }, signal: new AbortController().signal });
+    if (placedName === "stone") await expect(result).resolves.toMatchObject({ position: target, placedBlockName: "stone" });
+    else await expect(result).rejects.toMatchObject({ code: "PLACE_NOT_CONFIRMED" });
+    expect(placeBlock).toHaveBeenCalledOnce();
+  });
+
+  it("does not loop food rounds that claim progress without an inventory increase", async () => {
+    const bot = new EventEmitter() as unknown as Bot;
+    Object.assign(bot, { registry: { foodsByName: { bread: { foodPoints: 5 } } },
+      inventory: { items: () => [{ name: "bread", count: 1 }] } });
+    const client = new MineflayerBotClient(bot, "auto");
+    const round = vi.spyOn(client as any, "forageRound").mockResolvedValue({ outcome: "executed", errorCode: null });
+    await expect(client.secureSafeFood({ targetCount: 16 })).resolves.toMatchObject({ targetReached: false, secured: 0 });
+    expect(round).toHaveBeenCalledOnce();
+  });
+
+  it("propagates proactive food cancellation into the active forage round", async () => {
+    const bot = new EventEmitter() as unknown as Bot;
+    Object.assign(bot, { registry: {}, inventory: { items: () => [] } });
+    const client = new MineflayerBotClient(bot, "auto");
+    const controller = new AbortController();
+    vi.spyOn(client as any, "forageRound").mockImplementation(async (...args: unknown[]) => {
+      expect(args[1]).toBe(controller.signal);
+      controller.abort();
+      return { outcome: "executed", errorCode: null };
+    });
+    await expect(client.secureSafeFood({ targetCount: 16 }, controller.signal)).rejects.toMatchObject({ code: "SKILL_CANCELLED" });
+  });
+
   it.each(["north", "east", "south", "west", "legacy"] as const)("fences double chest halves across Runtime instances (%s)", async (facing) => {
     const registry = new InMemoryWorkstationRegistry();
     const offset = facing === "east" ? new Vec3(0, 0, 1) : facing === "south" ? new Vec3(-1, 0, 0)
@@ -2244,7 +2332,8 @@ describe("MineflayerBotClient lifecycle", () => {
     const makeClient = () => {
       const bot = new EventEmitter() as unknown as Bot;
       let count = 2;
-      const deposit = vi.fn(async () => { await blocked; count = 1; });
+      let storedCount = 0;
+      const deposit = vi.fn(async () => { await blocked; count = 1; storedCount = 1; });
       Object.assign(bot, { game: { dimension: "overworld" }, registry: { itemsByName: { stone: { id: 1 } } },
         inventory: { items: () => [{ name: "stone", count }] },
         blockAt: (position: Vec3) => {
@@ -2254,7 +2343,12 @@ describe("MineflayerBotClient lifecycle", () => {
             : { name: "chest", position, getProperties: () => facing === "legacy" ? { facing: "north" }
               : { facing, type: index === 0 || index === 2 ? "left" : "right" } };
         },
-        openContainer: vi.fn(async () => ({ deposit, withdraw: vi.fn(), close: vi.fn() })),
+        openContainer: vi.fn(async () => {
+          const window = { deposit, withdraw: vi.fn(), close: vi.fn(), items: () => bot.inventory.items(),
+            containerItems: () => [{ name: "stone", count: storedCount }] };
+          Object.assign(bot, { currentWindow: window });
+          return window;
+        }),
       });
       return { deposit, client: new MineflayerBotClient(bot, "auto", "fixture", false, undefined, "safe", null, undefined, registry) };
     };

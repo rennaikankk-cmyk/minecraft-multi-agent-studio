@@ -121,6 +121,56 @@ async function ackExecutor(actions: CombatPrimitiveAction[]) {
 }
 
 describe("CombatDriver W0 deterministic wiring", () => {
+  it("raises a shield before trading blows with a nearby skeleton", async () => {
+    const actions: CombatPrimitiveAction[] = [];
+    const execute = await ackExecutor(actions);
+    const skeleton = {
+      entity: {
+        entityId: 77,
+        kind: "monster" as const,
+        username: null,
+        uuid: null,
+        mobType: "skeleton",
+      },
+      position: { x: 8, y: 64, z: 0 },
+      velocity: null,
+      health: 20,
+      armorPoints: 0,
+      wieldingWeapon: true,
+      crystalNearby: false,
+      anchorNearby: false,
+      gear: null,
+    };
+    const result = await driver().engage(
+      observation({
+        self: { ...observation().self, health: 12, hasShield: true },
+        entities: [skeleton],
+      }),
+      1_000,
+      execute,
+      new AbortController().signal,
+    );
+    expect(result.actual.reasonCode).toBe("COMBAT_RANGED_THREAT_SHIELDED");
+    expect(actions[0]).toEqual({ kind: "SHIELD_BLOCK", durationMs: 300 });
+  });
+
+  it("raises a shield for a nearby non-whitelisted bow player", async () => {
+    const actions: CombatPrimitiveAction[] = [];
+    const execute = await ackExecutor(actions);
+    const bowPlayer = {
+      ...observation().entities[0],
+      entity: { ...observation().entities[0].entity, entityId: 78 },
+      rangedWeapon: true,
+      position: { x: 10, y: 64, z: 0 },
+    };
+    const result = await driver().engage(
+      observation({ self: { ...observation().self, health: 12, hasShield: true }, entities: [bowPlayer] }),
+      1_000, execute, new AbortController().signal,
+    );
+    expect(result.actual.reasonCode).toBe("COMBAT_RANGED_THREAT_SHIELDED");
+    expect(actions[0]?.kind).toBe("SHIELD_BLOCK");
+  });
+
   it("treats a non-whitelisted player as hostile and executes only after an ack", async () => {
     const actions: CombatPrimitiveAction[] = [];
     const execute = await ackExecutor(actions);

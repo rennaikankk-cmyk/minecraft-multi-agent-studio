@@ -6,6 +6,7 @@ import {
   packShulkerSkill,
   stockLevelSchema,
   storeSortSkill,
+  secureFoodOutputSchema,
 } from "../src/index.js";
 
 describe("stock levels and storage skills", () => {
@@ -42,5 +43,39 @@ describe("stock levels and storage skills", () => {
     expect(packOutput.completed).toBe(true);
     expect(operations).toEqual(["container.transfer-safe", "container.transfer-safe"]);
   });
-});
 
+  it.each([0, 1])("keeps a partially filled route pending and resumes only its residual (%s moved)", async (amount) => {
+    const scope = { serverProfileId: "fixture", dimension: "minecraft:overworld" };
+    const context = { signal: new AbortController().signal, callCapability: async (_c: string, _o: string, input: any) =>
+      ({ direction: "deposit", itemName: input.itemName, requestedCount: input.count, movedCount: amount }) } as any;
+    const state = { ...scope, online: true, normalActionsAllowed: true, position: { ...scope, x: 0, y: 64, z: 0 } };
+    const route = { ...scope, itemName: "stone", count: 2, container: { x: 1, y: 64, z: 0 } };
+    const input = { routes: [route, { ...route, itemName: "dirt" }], startIndex: 0, maxTransfers: 2 };
+    const result = await storeSortSkill.execute(context, input, state);
+    expect(result).toMatchObject({ nextIndex: 0, remainingCount: 2 - amount, completed: false });
+    expect(result.moved).toHaveLength(1);
+    const calls: number[] = [];
+    context.callCapability = async (_c: string, _o: string, input: any) => {
+      calls.push(input.count);
+      return { direction: "deposit", itemName: input.itemName, requestedCount: input.count, movedCount: input.count };
+    };
+    expect(await storeSortSkill.execute(context, { ...input, remainingCount: result.remainingCount }, state)).toMatchObject({ nextIndex: 2, completed: true, remainingCount: 0 });
+    expect(calls).toEqual([2 - amount, 2]);
+  });
+
+  it("does not report shulker completion after a partial transfer", async () => {
+    const scope = { serverProfileId: "fixture", dimension: "minecraft:overworld" };
+    const context = { signal: new AbortController().signal, callCapability: async () =>
+      ({ direction: "deposit", itemName: "stone", requestedCount: 4, movedCount: 1 }) } as any;
+    const state = { ...scope, online: true, normalActionsAllowed: true, position: { ...scope, x: 0, y: 64, z: 0 } };
+    expect(await packShulkerSkill.execute(context, { ...scope, shulker: { x: 1, y: 64, z: 0 },
+      items: [{ itemName: "stone", count: 4 }], startIndex: 0, maxTransfers: 1 }, state))
+      .toMatchObject({ nextIndex: 0, remainingCount: 3, completed: false });
+  });
+
+  it("accepts a real pickup larger than the requested food target and rejects contradictory receipts", () => {
+    const receipt = { safeFoodCount: 64, secured: 64, targetCount: 16, targetReached: true, reasonCode: "TARGET_REACHED" };
+    expect(secureFoodOutputSchema.safeParse(receipt).success).toBe(true);
+    expect(secureFoodOutputSchema.safeParse({ ...receipt, targetReached: false }).success).toBe(false);
+  });
+});

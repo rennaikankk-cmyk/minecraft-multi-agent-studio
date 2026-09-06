@@ -82,8 +82,8 @@ export type SkillSystemV1Manifest = Readonly<{
  * llm = 仅经 v13 planner prompt 的 advertised catalog。
  */
 const PLANNER_REACHABILITY: Readonly<Record<string, PlannerReachability>> = Object.freeze({
-  "farm.maintain": "llm", "farm.sustain": "llm", "movement.goal": "llm", "movement.follow": "llm", "movement.get-to-block": "llm",
-  "world.explore": "llm", "build.clear-area": "llm", "movement.elytra": "llm",
+  "farm.maintain": "llm", "farm.sustain": "both", "movement.goal": "llm", "movement.follow": "llm", "movement.get-to-block": "llm",
+  "world.explore": "both", "build.clear-area": "llm", "movement.elytra": "llm",
   "movement.goto": "both",
   "world.scan": "both",
   "food.secure": "both",
@@ -102,7 +102,7 @@ const PLANNER_REACHABILITY: Readonly<Record<string, PlannerReachability>> = Obje
   "trade.villager": "llm",
   "mine.branch": "llm",
   "mine.vein": "llm",
-  "site.assess": "llm",
+  "site.assess": "both",
   "stock.levels": "llm",
   "store.sort": "llm",
   "pack.shulker": "llm",
@@ -177,7 +177,7 @@ const LIMITATIONS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   "movement.goal": ["Mineflayer goal composition with bounded search; no original Baritone Java runtime."],
   "movement.follow": ["Bounded tracking interval; disappearing or replaced entities stop the process."],
   "movement.get-to-block": ["Loaded candidate scan and approach; does not automatically activate containers or blocks."],
-  "world.explore": ["Current loaded chunk observations; no durable Baritone region cache or long-range exploration guarantee."],
+  "world.explore": ["Coordinator exploration journal persists scoped visited/excluded chunks; live observations remain required.", "No original Baritone disk-region cache or long-range exploration guarantee."],
   "build.clear-area": ["Bounded allowlisted clearing; protects team assets and rejects fluids, falling blocks, and unknown neighbors."],
   "movement.elytra": ["Isolated-test only: bounded takeoff, non-explosive rocket readback, waypoints, cruise and emergency landing controller.", "Full flight and airborne cancellation require isolated-server validation; no obstacle detour planner."],
   "movement.goto": [
@@ -185,8 +185,8 @@ const LIMITATIONS: Readonly<Record<string, readonly string[]>> = Object.freeze({
     "死亡掉落回收依赖 coordinator DEATH_RECOVERY goal（同维度、15 分钟窗口）",
   ],
   "build.blueprint": [
-    "确定性通道为单行模板（≤64 格/行）；更大结构需多行 goal 或文件蓝图（未实现）",
-    "place-block 不移动：bot 必须站在行中点可达范围（≤3.8 格）",
+    "File blueprints and durable cell journals are connected; bounded workset batches re-read server blocks and materials.",
+    "Large terrain preparation and complete facility production need separate lifecycle evidence.",
   ],
   "combat.engage": [
     "战术比较层（belief/utility）在战术核心落地前仍为固定闸门（见 docs/research/PVP_SYSTEM_RESEARCH.md §2）",
@@ -203,11 +203,12 @@ const LIMITATIONS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   ],
   "mine.branch": ["分支挖掘受安全前置（岩浆邻接/虚空风险）拒绝"],
   "mine.vein": ["同 mine.branch 安全前置"],
-  "food.secure": ["依赖 hasSafeFood 判定与采集回退链"],
+  "food.secure": ["Bounded forage rounds require net inventory progress, propagate cancellation and protect seed reserves.", "A returned call with an unmet food target remains pending at the task layer."],
   "smelt.item": ["F1-F3 真实验证过；F4/F5（重启 reconcile/false-success）本轮补齐"],
-  "container.transfer": ["读写统一走授权通道（transfer-safe）"],
-  "pack.shulker": ["依赖 container.transfer 通道与潜影盒在场"],
-  "store.sort": ["依赖 container.transfer 通道"],
+  "container.transfer": ["Exclusive canonical container lease; reopen and reconcile both inventory deltas before issuing a receipt.", "Uncertain transfers require observation before retry, never blind replay."],
+  "pack.shulker": ["Requires an actual shulker box; partial transfers retain nextIndex and remainingCount."],
+  "store.sort": ["Partial routes retain nextIndex and remainingCount; callers must persist receipts before continuing."],
+  "stock.levels": ["Pure arithmetic over caller-supplied counts, not a server stock observation or proof of inventory ownership."],
   "world.place-block": ["放置不移动；目标被占时 PLACE_TARGET_OCCUPIED"],
 });
 

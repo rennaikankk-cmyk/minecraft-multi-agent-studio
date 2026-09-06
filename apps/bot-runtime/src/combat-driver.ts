@@ -86,6 +86,8 @@ export type CombatDriverEntityObservation = CombatEntityObservation &
     invulnerableRemainingMs?: number;
     /** Opponent swing cooldown estimate; observation-only for spacing telemetry. */
     targetCooldownRatio01?: number;
+    /** Entity is currently holding a bow/crossbow (authoritative equipment fact). */
+    rangedWeapon?: boolean;
   }>;
 
 export type CombatDriverObservation = Readonly<{
@@ -105,7 +107,9 @@ export type CombatDriverObservation = Readonly<{
     orientation: CombatOrientation;
     heldItemSlot: number | null;
     /** Mineflayer's authoritative use-item state for bow/crossbow charging. */
-    usingHeldItem?: boolean;
+      usingHeldItem?: boolean;
+    /** A shield is available in inventory or off-hand for ranged defense. */
+    hasShield?: boolean;
     onGround: boolean;
     fallDistance: number | null;
   }>;
@@ -152,6 +156,10 @@ export type CombatPrimitiveAction =
       kind: "RELEASE_RANGED_WEAPON";
       targetEntityId: number;
       weaponSlot: number;
+    }>
+  | Readonly<{
+      kind: "SHIELD_BLOCK";
+      durationMs: number;
     }>
   | Readonly<{
       kind: "MOVE";
@@ -701,6 +709,34 @@ export class CombatDriver {
         "COMBAT_NO_TOTEM_AVAILABLE",
         null,
         this.fallbackRetreatDirection(observation),
+      );
+    }
+
+    // Skeletons and other bow users can kill an under-geared bot before a
+    // melee exchange starts. Treat a nearby skeleton as a deterministic
+    // ranged-defense trigger; no model decision is involved. The adapter
+    // executes a bounded shield window and releases it automatically.
+    const rangedThreat = observation.entities.some(({ entity, position, rangedWeapon }) =>
+      ((entity.kind === "monster" &&
+        (entity.mobType === "skeleton" || entity.mobType === "stray" || entity.mobType === "bogged")) ||
+        (entity.kind === "player" && rangedWeapon === true)) &&
+      distanceBetween(observation.self.position, position) <= 16,
+    );
+    if (rangedThreat && observation.self.hasShield === true && observation.self.health <= 16) {
+      return this.executeAction(
+        "ENGAGE",
+        requestedAtMs,
+        { kind: "SHIELD_BLOCK", durationMs: 300 },
+        observation,
+        execute,
+        signal,
+        expectedGeneration,
+        {
+          disposition: "modified",
+          action: "ENGAGE",
+          reasonCode: "COMBAT_RANGED_THREAT_SHIELDED",
+          targetEntityId: null,
+        },
       );
     }
 

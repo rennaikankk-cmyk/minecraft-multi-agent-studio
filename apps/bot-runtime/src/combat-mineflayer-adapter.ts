@@ -542,6 +542,7 @@ export class MineflayerCombatAdapter {
         orientation,
         heldItemSlot: this.heldItemSlot(bot),
         usingHeldItem: (bot as CombatBotHeldItemState).usingHeldItem === true,
+        hasShield: inventoryItems.some((item) => item.name === "shield") || offhand?.name === "shield",
         onGround: self.onGround === true,
         fallDistance: finiteNumber((self as EntityLike & { fallDistance?: unknown }).fallDistance)
           ? Number((self as EntityLike & { fallDistance?: unknown }).fallDistance)
@@ -748,6 +749,22 @@ export class MineflayerCombatAdapter {
           }
           bot.deactivateItem();
           return { outcome: "executed", executedAtMs: this.clock() };
+        case "SHIELD_BLOCK": {
+          const shield = (bot.inventory?.items?.() ?? []).find(
+            (candidate) => candidate.name === "shield",
+          );
+          if (!shield || !bot.equip || !bot.activateItem) {
+            return { outcome: "unavailable", reasonCode: "COMBAT_SHIELD_UNAVAILABLE" };
+          }
+          await bot.equip(shield, "off-hand");
+          if (!active()) return { outcome: "failed", reasonCode: "SKILL_CANCELLED" };
+          bot.activateItem(true);
+          const durationMs = Math.max(50, Math.min(1000, action.durationMs));
+          setTimeout(() => {
+            if (active()) bot.deactivateItem?.();
+          }, durationMs);
+          return { outcome: "executed", executedAtMs: this.clock() };
+        }
         case "ROTATE":
           if (!bot.look) return { outcome: "unavailable", reasonCode: "COMBAT_ROTATION_UNAVAILABLE" };
           await bot.look(
@@ -919,6 +936,7 @@ export class MineflayerCombatAdapter {
       health: finiteNumber(entity.health) ? Number(entity.health) : null,
       armorPoints: this.entityArmorPoints(entity),
       wieldingWeapon: this.entityWieldsWeapon(entity),
+      rangedWeapon: this.entityWieldsRangedWeapon(entity),
       // 真实观测：已加载实体里有没有贴脸的末影水晶（敌人放的水雷）。
       // 此前硬编码 false 让 CRYSTAL_PLACED 威胁加分与 CRYSTAL_THREAT 撤退
       // 信号永远死置。anchor 仍显式 false：重生锚需要方块枚举确认，
@@ -1166,6 +1184,13 @@ export class MineflayerCombatAdapter {
 
   private entityWieldsWeapon(entity: EntityLike): boolean {
     return (entity.equipment ?? []).some((item) => weaponKindForName(normalizeItemName(item)) !== null);
+  }
+
+  private entityWieldsRangedWeapon(entity: EntityLike): boolean {
+    return (entity.equipment ?? []).some((item) => {
+      const name = normalizeItemName(item);
+      return name === "bow" || name === "crossbow";
+    });
   }
 
   private async applyMovement(

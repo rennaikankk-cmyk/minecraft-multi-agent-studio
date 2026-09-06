@@ -2,6 +2,7 @@ import { createBot, type Bot } from "mineflayer";
 import { setTimeout as processDelay, setImmediate as processYield } from "node:timers/promises";
 import { randomUUID } from "node:crypto";
 import { ActiveWorkstationLease } from "./workstation-lease.js";
+import { attachPlayerLoaded } from "./player-loaded.js";
 import { withWorkAreaLease } from "./work-area-lease.js";
 import { maintainFarm } from "./farm-maintenance-adapter.js";
 import { createFarmPort } from "./farm-mineflayer-port.js";
@@ -1323,6 +1324,7 @@ export class MineflayerBotClient implements BotClient {
       ...(process.env.STUDIO_SHARED_STATE_TOKEN ? { token: process.env.STUDIO_SHARED_STATE_TOKEN } : {}),
     }),
   ) {
+    attachPlayerLoaded(bot);
     /** 无规则服导航档：true = 沿途挖掘/疾跑/跑酷/搭高全部放开。 */
     this.anarchyNavigation = navigationProfile === "anarchy";
     this.serverAddress = serverAddress;
@@ -2036,7 +2038,7 @@ export class MineflayerBotClient implements BotClient {
         return await this.actionLocks.withLock("blockInteraction", options, () =>
           this.actionLocks.withLock("inventory", options, async () => {
             const restore = this.installServerConfirmedDigging(movementLease.signal);
-            try { return await this.forageSafeFood(); }
+            try { return await this.forageSafeFood(movementLease.signal); }
             finally { restore(); }
           }));
       }
@@ -2553,7 +2555,7 @@ export class MineflayerBotClient implements BotClient {
     this.activeProcessSignal = signal;
     this.activeWorkAreaLeaseId = undefined;
     this.placementPurpose = undefined;
-    const stop = () => { this.stopPathfinder(); this.bot.stopDigging?.(); };
+    const stop = () => { if (lease.isCurrent()) { this.stopPathfinder(); this.bot.stopDigging?.(); } };
     signal.addEventListener("abort", stop, { once: true });
     const assertActive = () => {
       if (signal.aborted || !lease.isCurrent() || this.requestedStop) throw new SkillFault("SKILL_CANCELLED");
@@ -2869,7 +2871,8 @@ export class MineflayerBotClient implements BotClient {
     const entities = Object.values(this.bot.entities ?? {}) as Array<any>;
     const villager = entities
       .filter((entity) => String(entity?.name ?? "").toLowerCase() === "villager")
-      .filter((entity) => input.data.villagerEntityId === "nearest" || String(entity?.id) === input.data.villagerEntityId)
+      .filter((entity) => entity.isValid !== false && (input.data.villagerEntityId === "nearest" ||
+        String(entity?.id) === input.data.villagerEntityId || entity.uuid === input.data.villagerEntityId))
       .sort((left, right) =>
         this.bot.entity.position.distanceTo(left.position) -
         this.bot.entity.position.distanceTo(right.position),
@@ -2913,7 +2916,7 @@ export class MineflayerBotClient implements BotClient {
           return this.bot.inventory.emptySlotCount() * stackSize + this.bot.inventory.items()
             .filter((item) => item.name === name).reduce((sum, item) => sum + stackSize - item.count, 0) >= count;
         },
-      }, input.data, String(villager.id)));
+      }, input.data, villager.uuid ?? String(villager.id)));
     });
   }
   combatObservation(nowMs: number): CombatDriverObservation | null {
@@ -4479,6 +4482,8 @@ export class MineflayerBotClient implements BotClient {
     budgetMs: number,
   ): Promise<void> {
     if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+    const ownerToken = this.movementController.currentLease()?.token;
+    const stopOwnedPath = () => { if (this.movementController.currentLease()?.token === ownerToken) this.stopPathfinder(); };
     let timer: ReturnType<typeof setTimeout> | null = null;
     let rejectAbort: (error: Error) => void = () => {};
     const abortError = new Error("Collection path was cancelled.");
@@ -4488,7 +4493,7 @@ export class MineflayerBotClient implements BotClient {
     );
     timeoutError.name = "Timeout";
     const onAbort = () => {
-      this.stopPathfinder();
+      stopOwnedPath();
       rejectAbort(abortError);
     };
     const aborted = new Promise<never>((_resolve, reject) => {
@@ -4497,7 +4502,7 @@ export class MineflayerBotClient implements BotClient {
     });
     const timedOut = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => {
-        this.stopPathfinder();
+        stopOwnedPath();
         reject(timeoutError);
       }, budgetMs);
       if (typeof timer.unref === "function") timer.unref();
@@ -5909,50 +5914,27 @@ export class MineflayerBotClient implements BotClient {
     this.assertServerProfileMatch(input.data.serverProfileId);
     this.assertDimensionMatch(input.data.dimension);
 
-    const { referenceBlock, face } = input.data;
+    const { referenceBlock } = input.data;
+    let face = new Vec3(input.data.face.x, input.data.face.y, input.data.face.z);
+    const targetPosition = new Vec3(referenceBlock.x + face.x, referenceBlock.y + face.y, referenceBlock.z + face.z);
+    const expectedNames = new Set([input.data.itemName]);
+    if (["torch", "soul_torch", "redstone_torch"].includes(input.data.itemName)) expectedNames.add(input.data.itemName.replace(/torch$/u, "wall_torch"));
+    else if (input.data.itemName.endsWith("_hanging_sign")) expectedNames.add(input.data.itemName.replace(/_hanging_sign$/u, "_wall_hanging_sign"));
+    else if (input.data.itemName.endsWith("_sign")) expectedNames.add(input.data.itemName.replace(/_sign$/u, "_wall_sign"));
     let reference = this.bot.blockAt(
       new Vec3(referenceBlock.x, referenceBlock.y, referenceBlock.z),
     );
     if (fixedBlueprintTarget && (!reference || reference.boundingBox !== "block")) {
       throw new SkillFault("BLUEPRINT_STEP_BLOCKED");
     }
-    if (!reference || reference.name === "air") {
-      // 变通：参考位悬空时从下方或邻近找替代参考——bot 改造环境
-      // 而非被地形卡死。优先检查正下方（参考位 y-1）；
-      // 仍不行则尝试在参考位自己放一个垫脚方块（用最常有的 cobblestone/dirt）。
-      const below = this.bot.blockAt(new Vec3(referenceBlock.x, referenceBlock.y - 1, referenceBlock.z));
-      if (below && below.boundingBox !== "empty" && below.name !== "air") {
-        // 下方实心 → 调整参考到下方块、face 朝上——等效原语义
-        return this.invokePlaceBlock({
-          ...request,
-          input: {
-            ...input.data,
-            referenceBlock: { x: referenceBlock.x, y: referenceBlock.y - 1, z: referenceBlock.z },
-            face: { x: 0, y: 1, z: 0 },
-          },
-        } as typeof request);
+    if (!reference || reference.boundingBox !== "block") {
+      // Alternate support faces must preserve the requested target cell.
+      for (const candidateFace of [new Vec3(0, 1, 0), new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1), new Vec3(0, -1, 0)]) {
+        const support = this.bot.blockAt(targetPosition.minus(candidateFace));
+        if (support?.boundingBox === "block") { reference = support; face = candidateFace; break; }
       }
-      // 下方也空 → 放一个垫脚方块再重试（用背包里有的廉价方块）
-      const fillerItem = this.bot.inventory.items().find((candidate) =>
-        candidate.name === "cobblestone" || candidate.name === "dirt" || candidate.name === "oak_planks"
-      );
-      if (fillerItem) {
-        const fillerBelow = this.bot.blockAt(new Vec3(referenceBlock.x, referenceBlock.y - 1, referenceBlock.z));
-        if (fillerBelow && fillerBelow.boundingBox !== "empty") {
-          // fall through——在下方参考位上放目标方块
-          reference = fillerBelow;
-        } else {
-          throw new SkillFault("REFERENCE_BLOCK_NOT_FOUND");
-        }
-      } else {
-        throw new SkillFault("REFERENCE_BLOCK_NOT_FOUND");
-      }
+      if (!reference || reference.boundingBox !== "block") throw new SkillFault("REFERENCE_BLOCK_NOT_FOUND");
     }
-    const targetPosition = new Vec3(
-      referenceBlock.x + face.x,
-      referenceBlock.y + face.y,
-      referenceBlock.z + face.z,
-    );
     const occupant = this.bot.blockAt(targetPosition);
     if (fixedBlueprintTarget) {
       if (!occupant) throw new SkillFault("BUILD_VERIFY_TIMEOUT");
@@ -5961,7 +5943,7 @@ export class MineflayerBotClient implements BotClient {
       }
     }
     if (occupant && occupant.boundingBox !== "empty") {
-      if (occupant.name === input.data.itemName) {
+      if (expectedNames.has(occupant.name)) {
         return placeBlockCapabilityOutputSchema.parse({
           placed: true,
           placedBlockName: occupant.name,
@@ -6029,7 +6011,7 @@ export class MineflayerBotClient implements BotClient {
     }
 
     const placedBlock = this.bot.blockAt(targetPosition);
-    if (!placedBlock || placedBlock.boundingBox === "empty") {
+    if (!placedBlock || !expectedNames.has(placedBlock.name)) {
       throw new SkillFault("PLACE_NOT_CONFIRMED");
     }
     return placeBlockCapabilityOutputSchema.parse({
@@ -6074,11 +6056,15 @@ export class MineflayerBotClient implements BotClient {
     if (!containerBlock || !CONTAINER_BLOCK_NAMES.has(containerBlock.name)) {
       throw new SkillFault("CONTAINER_NOT_FOUND");
     }
+    if (request.skillId === "pack.shulker" && !/^(?:[a-z_]+_)?shulker_box$/u.test(containerBlock.name)) {
+      throw new SkillFault("SHULKER_REQUIRED");
+    }
 
     if (request.signal.aborted) {
       throw new SkillFault("SKILL_CANCELLED");
     }
-    let before: number | null = null;
+    let inventoryBefore: number | null = null;
+    let containerBefore: number | null = null;
     let window: Awaited<ReturnType<Bot["openContainer"]>> | null = null;
     let lease: ActiveWorkstationLease | null = null;
     // Both halves of a double chest must resolve to the same exclusive key.
@@ -6107,7 +6093,22 @@ export class MineflayerBotClient implements BotClient {
       }
     }
     request = { ...request, signal: AbortSignal.any([request.signal, this.workstationDisconnected.signal]) };
-    const closeWindow = () => { try { window?.close(); } catch { /* cancellation is not a receipt */ } };
+    const closeWindow = () => this.closeOwnedContainer(window);
+    const assertActive = async () => {
+      if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      this.assertServerProfileMatch(input.data.serverProfileId);
+      this.assertDimensionMatch(input.data.dimension);
+      await lease!.assertCurrent();
+      const live = this.bot.blockAt(containerBlock.position);
+      if (live?.name !== containerBlock.name) throw new SkillFault("CONTAINER_NOT_FOUND");
+    };
+    const counts = () => {
+      if (!window || this.bot.currentWindow !== window) throw new SkillFault("CONTAINER_OBSERVATION_UNAVAILABLE");
+      return {
+        inventory: window.items().filter((item) => item.name === input.data.itemName).reduce((sum, item) => sum + item.count, 0),
+        container: window.containerItems().filter((item) => item.name === input.data.itemName).reduce((sum, item) => sum + item.count, 0),
+      };
+    };
     try {
       try {
         await this.workstationRegistry.register(input.data.serverProfileId, input.data.dimension,
@@ -6118,69 +6119,61 @@ export class MineflayerBotClient implements BotClient {
         { ownerRuntimeId: this.workstationRuntimeId, ownerTaskId: request.taskId, ownerAttemptId: request.invocationId }, request.signal);
       request = { ...request, signal: lease.signal };
       request.signal.addEventListener("abort", closeWindow, { once: true });
-      await lease.assertCurrent();
+      await assertActive();
       window = await this.bot.openContainer(containerBlock);
       // Opening the window synchronizes pending inventory slot updates from
       // earlier actions. Use that acknowledged state as the transfer baseline.
-      before = this.countInventoryItem(input.data.itemName);
-      if (request.signal.aborted) {
-        throw new SkillFault("SKILL_CANCELLED");
+      await assertActive();
+      const before = counts();
+      inventoryBefore = before.inventory;
+      containerBefore = before.container;
+      let operationFailed = false;
+      try {
+        if (input.data.direction === "deposit") {
+          const count = Math.min(input.data.count, this.foodReserves.available(input.data.itemName, before.inventory));
+          if (count > 0) await window.deposit(itemType.id, null, count);
+        } else {
+          const count = Math.min(input.data.count, before.container);
+          if (count > 0) await window.withdraw(itemType.id, null, count);
+        }
+      } catch { operationFailed = true; }
+      await assertActive();
+      // Mineflayer click operations optimistically update slots. Reopening gets
+      // the server's full window contents before trusting a delivery receipt.
+      closeWindow();
+      window = await this.bot.openContainer(containerBlock);
+      await assertActive();
+      const after = counts();
+      const sign = input.data.direction === "deposit" ? 1 : -1;
+      const movedCount = (before.inventory - after.inventory) * sign;
+      if (movedCount < 0 || movedCount > input.data.count || (after.container - before.container) * sign !== movedCount) {
+        throw new SkillFault("CONTAINER_TRANSFER_UNCERTAIN");
       }
-      await lease.assertCurrent();
-      if (input.data.direction === "deposit") {
-        const count = Math.min(input.data.count, this.foodReserves.available(input.data.itemName, before));
-        if (count > 0) await window.deposit(itemType.id, null, count);
-      } else {
-        await window.withdraw(itemType.id, null, input.data.count);
-      }
-      if (request.signal.aborted) {
-        throw new SkillFault("SKILL_CANCELLED");
-      }
+      if (operationFailed && movedCount === 0) throw new SkillFault("CONTAINER_TRANSFER_FAILED");
+      return containerTransferCapabilityOutputSchema.parse({
+        direction: input.data.direction, itemName: input.data.itemName, requestedCount: input.data.count, movedCount,
+        verification: { inventoryBefore, inventoryAfter: after.inventory, containerBefore, containerAfter: after.container, observedAt: new Date().toISOString() },
+      });
     } catch (error) {
       if (error instanceof SkillFault) throw error;
       if (request.signal.aborted) {
         throw new SkillFault("SKILL_CANCELLED");
       }
-      // deposit/withdraw 在数量不足时抛错——读回增量如实上报部分成功。
-      const partial = before === null
-        ? 0
-        : this.transferredItemCount(
-            input.data.direction,
-            before,
-            this.countInventoryItem(input.data.itemName),
-          );
-      if (partial > 0) {
-        return containerTransferCapabilityOutputSchema.parse({
-          direction: input.data.direction,
-          itemName: input.data.itemName,
-          requestedCount: input.data.count,
-          movedCount: partial,
-        });
-      }
-      throw new SkillFault("CONTAINER_TRANSFER_FAILED");
+      throw new SkillFault(inventoryBefore === null ? "CONTAINER_TRANSFER_FAILED" : "CONTAINER_TRANSFER_UNCERTAIN",
+        error instanceof Error ? error.message : undefined);
     } finally {
-      try {
-        window?.close();
-      } catch {
-        // 关窗失败不掩盖真实结果。
-      }
+      closeWindow();
       request.signal.removeEventListener("abort", closeWindow);
       if (lease) {
         try { await lease.release(); } catch { console.warn("workstation_release_failed"); }
       }
     }
 
-    const movedCount = this.transferredItemCount(
-      input.data.direction,
-      before ?? this.countInventoryItem(input.data.itemName),
-      this.countInventoryItem(input.data.itemName),
-    );
-    return containerTransferCapabilityOutputSchema.parse({
-      direction: input.data.direction,
-      itemName: input.data.itemName,
-      requestedCount: input.data.count,
-      movedCount,
-    });
+  }
+
+  private closeOwnedContainer(window: Awaited<ReturnType<Bot["openContainer"]>> | null | undefined): void {
+    if (!window || this.bot.currentWindow !== window) return;
+    try { window.close(); } catch { /* Closing never confirms a transfer. */ }
   }
 
   private async invokeFarmStorage(request: SkillCapabilityRequest, position: WorkPosition, retain: number): Promise<{
@@ -6195,7 +6188,7 @@ export class MineflayerBotClient implements BotClient {
       { serverProfileId: this.serverProfileId!, dimension, position, botId: request.botId },
       { ownerRuntimeId: this.workstationRuntimeId, ownerTaskId: request.taskId, ownerAttemptId: request.invocationId }, request.signal);
     let window: Awaited<ReturnType<Bot["openContainer"]>> | undefined;
-    const close = () => { try { window?.close(); } catch { /* an abort never yields a receipt */ } };
+    const close = () => this.closeOwnedContainer(window);
     const assertActive = async () => { await lease.assertCurrent(); this.assertDimensionMatch(dimension);
       if (lease.signal.aborted) throw new SkillFault("SKILL_CANCELLED"); };
     lease.signal.addEventListener("abort", close, { once: true });
@@ -6210,16 +6203,6 @@ export class MineflayerBotClient implements BotClient {
       if (stored !== balance.after || bag !== beforeBag - balance.deposited + balance.withdrawn) throw new SkillFault("FARM_STORAGE_READBACK_MISMATCH");
       return balance;
     } finally { close(); lease.signal.removeEventListener("abort", close); await lease.release(); }
-  }
-
-  private transferredItemCount(
-    direction: "deposit" | "withdraw",
-    before: number,
-    after: number,
-  ): number {
-    return direction === "deposit"
-      ? Math.max(0, before - after)
-      : Math.max(0, after - before);
   }
 
   versionCompatibility() {
@@ -6332,15 +6315,17 @@ export class MineflayerBotClient implements BotClient {
       );
   }
 
-  private async forageSafeFood(): Promise<L0SafetyActionResult> {
+  private async forageSafeFood(signal?: AbortSignal): Promise<L0SafetyActionResult> {
     if (this.safeFoodItems().length > 0) {
       return { outcome: "skipped", errorCode: "SAFE_FOOD_ALREADY_AVAILABLE" };
     }
-    return this.forageRound();
+    return this.forageRound(SAFE_FORAGE_TOTAL_BUDGET_MS, signal);
   }
 
   private safeFoodCount(): number {
-    return this.safeFoodItems().reduce((total, entry) => total + entry.item.count, 0);
+    const totals = new Map<string, number>();
+    for (const { item } of this.safeFoodItems()) totals.set(item.name, (totals.get(item.name) ?? 0) + item.count);
+    return [...totals].reduce((sum, [name, count]) => sum + this.foodReserves.available(name, count, true), 0);
   }
 
   /** food.secure 的能力入口：校验输入 → 复用觅食轮次 → 按输出 schema 读回。 */
@@ -6349,11 +6334,10 @@ export class MineflayerBotClient implements BotClient {
     if (!input.success) {
       throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
     }
-    const output = await this.secureSafeFood(
-      { targetCount: input.data.targetCount },
-      request.signal,
-    );
-    return secureFoodCapabilityOutputSchema.parse(output);
+    return this.withProcessNavigation(request, input.data, async () => {
+      const output = await this.secureSafeFood({ targetCount: input.data.targetCount }, this.activeProcessSignal);
+      return secureFoodCapabilityOutputSchema.parse(output);
+    });
   }
 
   /**
@@ -6411,6 +6395,7 @@ export class MineflayerBotClient implements BotClient {
     secured: number;
     reasonCode: "TARGET_REACHED" | "NO_SAFE_FOOD_SOURCE" | "BUDGET_EXHAUSTED";
   }> {
+    if (signal?.aborted) throw new SkillFault("SKILL_CANCELLED");
     const target = Math.max(1, Math.min(32, Math.floor(input.targetCount)));
     const before = this.safeFoodCount();
     if (before >= target) {
@@ -6418,9 +6403,12 @@ export class MineflayerBotClient implements BotClient {
     }
     const deadline = Date.now() + SECURE_FOOD_TOTAL_BUDGET_MS;
     let sawSource = false;
-    while (this.safeFoodCount() < target && !signal?.aborted && Date.now() < deadline) {
-      const result = await this.forageRound();
-      if (result.outcome === "executed") {
+    for (let round = 0; round < 32 && this.safeFoodCount() < target && Date.now() < deadline; round += 1) {
+      if (signal?.aborted) throw new SkillFault("SKILL_CANCELLED");
+      const roundBefore = this.safeFoodCount();
+      const result = await this.forageRound(Math.min(SAFE_FORAGE_TOTAL_BUDGET_MS, deadline - Date.now()), signal);
+      if (signal?.aborted) throw new SkillFault("SKILL_CANCELLED");
+      if (result.outcome === "executed" && this.safeFoodCount() > roundBefore) {
         sawSource = true;
         continue;
       }
@@ -6448,7 +6436,8 @@ export class MineflayerBotClient implements BotClient {
    * a short exploration hop, all inside the round budget. Shared by the L0
    * reaction (any single food item counts) and the proactive food.secure skill.
    */
-  private async forageRound(budgetMs: number = SAFE_FORAGE_TOTAL_BUDGET_MS): Promise<L0SafetyActionResult> {
+  private async forageRound(budgetMs: number = SAFE_FORAGE_TOTAL_BUDGET_MS, parentSignal?: AbortSignal): Promise<L0SafetyActionResult> {
+    if (parentSignal?.aborted) throw new SkillFault("SKILL_CANCELLED");
     if (
       !this.bot.pathfinder ||
       typeof this.bot.pathfinder.goto !== "function" ||
@@ -6460,10 +6449,14 @@ export class MineflayerBotClient implements BotClient {
       ? Number(this.bot.health)
       : null;
     const deadline = Date.now() + budgetMs;
+    const foodBefore = this.safeFoodCount();
+    const ownerToken = this.movementController.currentLease()?.token;
     const controller = new AbortController();
+    const abort = () => controller.abort();
+    parentSignal?.addEventListener("abort", abort, { once: true });
     const timeout = setTimeout(
       () => controller.abort(),
-      SAFE_FORAGE_TOTAL_BUDGET_MS,
+      Math.max(1, budgetMs),
     );
     timeout.unref?.();
     try {
@@ -6479,6 +6472,7 @@ export class MineflayerBotClient implements BotClient {
         errorCode: "NO_SAFE_FOOD_SOURCE",
       };
       for (let pass = 0; pass < 2; pass += 1) {
+        if (controller.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
         const droppedFood = this.nearestSafeFoodDropPosition();
         if (
           droppedFood &&
@@ -6493,6 +6487,7 @@ export class MineflayerBotClient implements BotClient {
         }
 
         for (const blockTarget of await this.safeForageBlocks(controller.signal)) {
+          if (controller.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
           const result = await this.harvestSafeForageBlock(
             blockTarget,
             startedHealth,
@@ -6516,7 +6511,7 @@ export class MineflayerBotClient implements BotClient {
 
         if (pass === 0 && Date.now() < deadline) {
           await this.exploreForSafeFood(controller.signal, deadline);
-          if (this.safeFoodItems().length > 0) {
+          if (this.safeFoodCount() > foodBefore) {
             return { outcome: "executed", errorCode: null };
           }
           continue;
@@ -6526,9 +6521,12 @@ export class MineflayerBotClient implements BotClient {
       return lastSkipped;
     } finally {
       clearTimeout(timeout);
+      parentSignal?.removeEventListener("abort", abort);
       controller.abort();
-      this.stopPathfinder();
-      this.bot.clearControlStates();
+      if (this.movementController.currentLease()?.token === ownerToken) {
+        this.stopPathfinder();
+        this.bot.clearControlStates();
+      }
     }
   }
 
@@ -6664,6 +6662,8 @@ export class MineflayerBotClient implements BotClient {
     signal: AbortSignal,
     deadline: number,
   ): Promise<L0SafetyActionResult> {
+    if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+    const foodBefore = this.safeFoodCount();
     if (this.forageTookDamage(startedHealth)) {
       return { outcome: "failed", errorCode: "FORAGE_ABORTED_ON_DAMAGE" };
     }
@@ -6708,8 +6708,10 @@ export class MineflayerBotClient implements BotClient {
       return { outcome: "skipped", errorCode: "SAFE_FOOD_SOURCE_STALE" };
     }
 
+    if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
     this.stopPathfinder();
     await this.bot.lookAt(liveBlock.position.offset(0.5, 0.5, 0.5), true);
+    if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
     if (this.forageTookDamage(startedHealth)) {
       return { outcome: "failed", errorCode: "FORAGE_ABORTED_ON_DAMAGE" };
     }
@@ -6735,7 +6737,8 @@ export class MineflayerBotClient implements BotClient {
     } catch {
       return { outcome: "skipped", errorCode: "SAFE_FOOD_HARVEST_FAILED" };
     }
-    if (this.safeFoodItems().length > 0) {
+    if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+    if (this.safeFoodCount() > foodBefore) {
       return { outcome: "executed", errorCode: null };
     }
     const drop = this.nearestSafeFoodDropPosition() ??
@@ -6776,6 +6779,7 @@ export class MineflayerBotClient implements BotClient {
     signal: AbortSignal,
     deadline: number,
   ): Promise<boolean> {
+    const foodBefore = this.safeFoodCount();
     await this.trySafetyGoto(
       new goals.GoalNear(
         Math.floor(position.x),
@@ -6794,11 +6798,11 @@ export class MineflayerBotClient implements BotClient {
       Date.now() + SAFE_FORAGE_PICKUP_BUDGET_MS,
     );
     while (!signal.aborted && Date.now() < pickupDeadline) {
-      if (this.safeFoodItems().length > 0) return true;
+      if (this.safeFoodCount() > foodBefore) return true;
       if (this.forageTookDamage(startedHealth)) return false;
       await waitForDelay(100);
     }
-    return this.safeFoodItems().length > 0;
+    return !signal.aborted && this.safeFoodCount() > foodBefore;
   }
 
   private forageTookDamage(startedHealth: number | null): boolean {
@@ -6815,6 +6819,7 @@ export class MineflayerBotClient implements BotClient {
     signal: AbortSignal,
     deadline: number,
   ): Promise<L0SafetyActionResult> {
+    const foodBefore = this.safeFoodCount();
     let lastTargetPosition = target.position.clone();
     while (!signal.aborted && Date.now() < deadline) {
         if (this.requestedStop) {
@@ -6866,6 +6871,9 @@ export class MineflayerBotClient implements BotClient {
           ),
           true,
         );
+        if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+        const currentTarget = this.bot.entities[liveTarget.id];
+        if (currentTarget !== liveTarget || currentTarget.isValid === false) break;
         await this.bot.attack(liveTarget);
         await waitForDelay(
           Math.min(
@@ -6881,7 +6889,7 @@ export class MineflayerBotClient implements BotClient {
       if (targetStillAlive) {
         return { outcome: "skipped", errorCode: "FORAGE_TARGET_NOT_DEFEATED" };
       }
-      if (this.safeFoodItems().length > 0) {
+      if (!signal.aborted && this.safeFoodCount() > foodBefore) {
         return { outcome: "executed", errorCode: null };
       }
 
@@ -6904,7 +6912,7 @@ export class MineflayerBotClient implements BotClient {
       );
       let approachedDrop = false;
       while (!signal.aborted && Date.now() < pickupDeadline) {
-        if (this.safeFoodItems().length > 0) {
+        if (this.safeFoodCount() > foodBefore) {
           return { outcome: "executed", errorCode: null };
         }
         if (!approachedDrop) {

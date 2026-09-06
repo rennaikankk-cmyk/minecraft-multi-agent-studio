@@ -17,13 +17,54 @@ export const farmProductionSchema = z.object({
   samples: z.array(z.object({ atMs: z.number().nonnegative(), netFood: z.number().int().positive() }).strict()).max(16),
   supply: farmSustainOutputSchema.shape.supply.nullable().default(null),
   supplySamples: z.array(z.object({ atMs: z.number().nonnegative(), stock: z.number().int().nonnegative(),
-    harvested: z.number().int().nonnegative(), netFood: z.number().int(), deposited: z.number().int().nonnegative() }).strict()).max(32).default([]),
+    harvested: z.number().int().nonnegative(), netFood: z.number().int(), deposited: z.number().int().nonnegative(),
+    consumedFood: z.number().int().nonnegative().default(0) }).strict()).max(32).default([]),
   cycles: z.number().int().nonnegative().default(0),
   lastNetFood: z.number().int().default(0),
   lastDeposited: z.number().int().nonnegative().default(0),
   recentTaskIds: z.array(z.string()).max(32).default([]),
 }).strict();
 export type FarmProduction = z.infer<typeof farmProductionSchema>;
+
+export type FoodDemandSample = Readonly<{
+  atMs: number;
+  harvested: number;
+  deposited: number;
+  consumedFood: number;
+}>;
+
+/**
+ * Evaluate food self-sufficiency over observed activity. Consumption is
+ * supplied by Runtime telemetry (eating events and inventory deltas), never
+ * inferred from harvest alone. A missing/short window is explicitly
+ * unproven so a busy Bot cannot mark a farm healthy on one large harvest.
+ */
+export function foodDemandCoverage(
+  samples: readonly FoodDemandSample[],
+  nowMs: number,
+  minimumWindowMs = 300_000,
+): Readonly<{ covered: boolean; observedWindowMs: number; produced: number; consumed: number; surplus: number }> {
+  const ordered = [...samples].filter((sample) => Number.isFinite(sample.atMs)).sort((a, b) => a.atMs - b.atMs);
+  if (ordered.length === 0) return { covered: false, observedWindowMs: 0, produced: 0, consumed: 0, surplus: 0 };
+  const first = ordered[0]!;
+  const last = ordered[ordered.length - 1]!;
+  const observedWindowMs = Math.max(0, Math.min(nowMs, last.atMs) - first.atMs);
+  const produced = ordered.reduce((sum, sample) => sum + Math.max(0, sample.deposited), 0);
+  const consumed = ordered.reduce((sum, sample) => sum + Math.max(0, sample.consumedFood), 0);
+  return { covered: observedWindowMs >= minimumWindowMs && produced > 0 && produced >= consumed, observedWindowMs, produced, consumed, surplus: produced - consumed };
+}
+
+/** Attach an authoritative eating delta to the matching production window. */
+export function recordFoodConsumption(facility: Facility, consumedFood: number, atMs: number): boolean {
+  const current = readFarmProduction(facility);
+  if (!current || !Number.isSafeInteger(consumedFood) || consumedFood < 0 || !Number.isSafeInteger(atMs) || atMs < 0) return false;
+  const samples = current.supplySamples;
+  const index = samples.findIndex((sample) => sample.atMs === atMs);
+  if (index < 0) return false;
+  const nextSamples = samples.map((sample, i) => i === index ? { ...sample, consumedFood: consumedFood } : sample);
+  facility.metadata.production = farmProductionSchema.parse({ ...current, supplySamples: nextSamples });
+  return true;
+}
 
 export function readFarmProduction(facility: Facility): FarmProduction | null {
   const result = farmProductionSchema.safeParse(facility.metadata.production);
@@ -92,6 +133,7 @@ export function recordFarmProduction(facility: Facility, taskId: string, output:
       next.supplySamples = ready ? [...current.supplySamples.filter((s) => s.atMs >= nowMs - 3_600_000 && s.harvested > 0), {
         atMs: Date.parse(observedAt), stock: supply.storageAfter! + supply.inventoryFood,
         harvested: result?.harvested ?? 0, netFood, deposited: supply.deposited,
+        consumedFood: 0,
       }].slice(-32) : [];
     }
   }

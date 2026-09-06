@@ -104,12 +104,16 @@ function makeFixture() {
     }),
     close: vi.fn(),
   });
+  let storedCobblestone = 0;
   const container = {
+    items: () => items,
+    containerItems: () => [{ name: "cobblestone", count: storedCobblestone }],
     deposit: vi.fn(async (_itemType: number, _metadata: null, count: number) => {
       removeItem("cobblestone", count);
+      storedCobblestone += count;
     }),
     withdraw: vi.fn(async () => undefined),
-    close: vi.fn(),
+    close: vi.fn(() => { bot.currentWindow = null; }),
   };
 
   const bot = emitter as unknown as Bot;
@@ -144,7 +148,10 @@ function makeFixture() {
     equip,
     placeBlock,
     openFurnace: vi.fn(async () => furnace),
-    openContainer: vi.fn(async () => container),
+    openContainer: vi.fn(async () => {
+      bot.currentWindow = container as unknown as NonNullable<Bot["currentWindow"]>;
+      return container;
+    }),
     consume: vi.fn(async () => undefined),
     getEquipmentDestSlot: vi.fn(() => 40),
     clearControlStates: vi.fn(),

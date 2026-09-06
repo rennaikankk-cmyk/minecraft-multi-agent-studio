@@ -60,7 +60,7 @@ export const secureFoodOutputSchema = z
     /** 安全食物总数是否达到目标。预算耗尽而未达标时如实为 false。 */
     targetReached: z.boolean(),
     /** 本轮实际新获得的安全食物份数（读回差值）。 */
-    secured: z.number().int().min(0).max(SECURE_FOOD_MAX_TARGET),
+    secured: z.number().int().min(0).max(2_304),
     /**
      * 未达标时的诚实原因码：NO_SAFE_FOOD_SOURCE 附近确实没有食物来源；
      * BUDGET_EXHAUSTED 预算先到。两者都算 completed——技能如实报告
@@ -68,7 +68,9 @@ export const secureFoodOutputSchema = z
      */
     reasonCode: z.enum(["TARGET_REACHED", "NO_SAFE_FOOD_SOURCE", "BUDGET_EXHAUSTED"]),
   })
-  .strict();
+  .strict().refine((output) => output.targetReached === (output.safeFoodCount >= output.targetCount) &&
+    (output.reasonCode === "TARGET_REACHED") === output.targetReached && output.secured <= output.safeFoodCount,
+    { message: "Food result must agree with observed counts." });
 
 export const secureFoodCapabilityInputSchema = secureFoodInputSchema;
 export const secureFoodCapabilityOutputSchema = secureFoodOutputSchema;

@@ -487,7 +487,8 @@
       "realScenarioIds": [],
       "evidenceRefs": [],
       "limitations": [
-        "读写统一走授权通道（transfer-safe）"
+        "Exclusive canonical container lease; reopen and reconcile both inventory deltas before issuing a receipt.",
+        "Uncertain transfers require observation before retry, never blind replay."
       ],
       "ownerModule": "packages/skills/src/builtin/container-transfer.ts"
     },
@@ -580,7 +581,8 @@
       "realScenarioIds": [],
       "evidenceRefs": [],
       "limitations": [
-        "依赖 hasSafeFood 判定与采集回退链"
+        "Bounded forage rounds require net inventory progress, propagate cancellation and protect seed reserves.",
+        "A returned call with an unmet food target remains pending at the task layer."
       ],
       "ownerModule": "packages/skills/src/builtin/secure-food.ts"
     },
@@ -713,7 +715,7 @@
       "family": "observation",
       "status": "Partial",
       "maturityLevel": "L3",
-      "plannerReachability": "llm",
+      "plannerReachability": "both",
       "runtimeCapabilities": [
         "world.read"
       ],
@@ -838,8 +840,8 @@
         "F1-smelt-lifecycle@cce98c7"
       ],
       "limitations": [
-        "确定性通道为单行模板（≤64 格/行）；更大结构需多行 goal 或文件蓝图（未实现）",
-        "place-block 不移动：bot 必须站在行中点可达范围（≤3.8 格）"
+        "File blueprints and durable cell journals are connected; bounded workset batches re-read server blocks and materials.",
+        "Large terrain preparation and complete facility production need separate lifecycle evidence."
       ],
       "ownerModule": "packages/skills/src/planning/blueprint-planner.ts"
     },
@@ -870,7 +872,9 @@
       "runtimeWired": false,
       "realScenarioIds": [],
       "evidenceRefs": [],
-      "limitations": [],
+      "limitations": [
+        "Pure arithmetic over caller-supplied counts, not a server stock observation or proof of inventory ownership."
+      ],
       "ownerModule": "packages/skills/src/planning/stock-levels.ts"
     },
     {
@@ -910,7 +914,7 @@
       "realScenarioIds": [],
       "evidenceRefs": [],
       "limitations": [
-        "依赖 container.transfer 通道"
+        "Partial routes retain nextIndex and remainingCount; callers must persist receipts before continuing."
       ],
       "ownerModule": "packages/skills/src/planning/stock-levels.ts"
     },
@@ -954,7 +958,7 @@
       "realScenarioIds": [],
       "evidenceRefs": [],
       "limitations": [
-        "依赖 container.transfer 通道与潜影盒在场"
+        "Requires an actual shulker box; partial transfers retain nextIndex and remainingCount."
       ],
       "ownerModule": "packages/skills/src/planning/stock-levels.ts"
     },
@@ -1047,7 +1051,7 @@
       "family": "production",
       "status": "Partial",
       "maturityLevel": "L3",
-      "plannerReachability": "llm",
+      "plannerReachability": "both",
       "runtimeCapabilities": [
         "world.interact",
         "bot.move",
@@ -1214,7 +1218,7 @@
       "family": "observation",
       "status": "Partial",
       "maturityLevel": "L3",
-      "plannerReachability": "llm",
+      "plannerReachability": "both",
       "runtimeCapabilities": [
         "bot.move"
       ],
@@ -1245,7 +1249,8 @@
       "realScenarioIds": [],
       "evidenceRefs": [],
       "limitations": [
-        "Current loaded chunk observations; no durable Baritone region cache or long-range exploration guarantee."
+        "Coordinator exploration journal persists scoped visited/excluded chunks; live observations remain required.",
+        "No original Baritone disk-region cache or long-range exploration guarantee."
       ],
       "ownerModule": "packages/skills/src/baritone-processes.ts"
     },
