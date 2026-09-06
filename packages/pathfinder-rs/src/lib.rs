@@ -4,7 +4,8 @@
 //!
 //! 测试构建纪律（CI Linux 链接修复）：napi 符号只在 Node 运行时存在，
 //! 把它们全部关进 `#[cfg(not(test))]`——`cargo test` 的测试二进制
-//! （lib 单元测试 + 集成测试）不再引用 napi_*，纯逻辑模块可独立链接。
+//! （含迁入的内部测试模块）不再引用 napi_*，纯逻辑模块可独立链接。
+//! 外部集成测试仍链接非 test 库，不自动获得此隔离。
 //! 非 test 构建（`cargo build --release` → .node addon）完全不变。
 
 mod astar;
