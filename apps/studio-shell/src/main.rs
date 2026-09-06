@@ -44,6 +44,19 @@ fn check_for_update(manifest_url: String) -> UpdateStatus {
         sha256: None,
         error: None,
     };
+    let manifest_url = if manifest_url.trim().is_empty() {
+        match env::var("STUDIO_UPDATE_MANIFEST_URL") {
+            Ok(value) => value,
+            Err(_) => {
+                return UpdateStatus {
+                    error: Some("update manifest is not configured".into()),
+                    ..base
+                }
+            }
+        }
+    } else {
+        manifest_url
+    };
     let response = match reqwest::blocking::get(&manifest_url) {
         Ok(value) => value,
         Err(error) => {
