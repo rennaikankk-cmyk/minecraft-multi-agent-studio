@@ -39,6 +39,7 @@ export const facilitySchema = z.object({
   facilityId: z.string().min(1),
   kind: z.string().min(1), // farm / furnace / storage / ...
   status: z.enum(["available", "busy", "unknown"]),
+  heldByBotId: z.string().min(1).optional(),
 });
 export type Facility = z.infer<typeof facilitySchema>;
 
@@ -99,6 +100,7 @@ export type CapabilityEntry = z.infer<typeof capabilityEntrySchema>;
 
 export const phaseGateSchema = z.object({
   gate: z.string().min(1),
+  botId: z.string().min(1).optional(),
   satisfied: unknownable(z.boolean()),
 });
 export type PhaseGate = z.infer<typeof phaseGateSchema>;

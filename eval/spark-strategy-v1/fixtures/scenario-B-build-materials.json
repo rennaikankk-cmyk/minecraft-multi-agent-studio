@@ -2,9 +2,10 @@
   "sampleId": "B1-build-materials",
   "scenario": "build-materials",
   "mode": "offline",
+  "evaluationNowMs": 1780010001000,
   "expectation": { "desiredBehavior": "act", "acceptableVerdicts": ["acceptable"] },
   "facts": {
-    "scope": { "serverProfileId": "local-test-1.21.11", "dimension": "overworld", "observedAtMs": 1780010000000, "sessionEpoch": 7 },
+    "scope": { "serverProfileId": "local-test-1.21.11", "dimension": "minecraft:overworld", "observedAtMs": 1780010000000, "sessionEpoch": 7 },
     "capturedAtMs": 1780010000000,
     "bots": [
       { "botId": "B01", "online": true, "currentTask": null, "survival": { "health": 20, "food": 16, "armorPoints": 4 }, "inventory": [{ "itemName": "iron_pickaxe", "count": 1 }], "deaths": 1 },
@@ -30,7 +31,7 @@
         { "skillId": "mine.branch", "supported": true },
         { "skillId": "food.secure", "supported": true }
       ],
-      "phaseGates": [{ "gate": "shelterEstablished", "satisfied": false }],
+      "phaseGates": [{ "gate": "BASE_SITE_RESERVED", "satisfied": true }],
       "nonPreemptibleBots": [],
       "allowedChangeScope": "material gathering and construction assignments"
     },
@@ -39,8 +40,8 @@
   "injectedResponse": {
     "proposalId": "prop-B1",
     "factVersion": "{{factVersion}}",
-    "scope": { "serverProfileId": "local-test-1.21.11", "dimension": "overworld" },
-    "validUntilMs": 1780010600000,
+    "scope": { "serverProfileId": "local-test-1.21.11", "dimension": "minecraft:overworld" },
+    "validUntilMs": 1780010120000,
     "generatedBy": "fixture:scenario-B",
     "objective": "close blueprint material gaps with parallel gathering then staged build; no duplicate construction of existing facilities",
     "assignments": [
@@ -48,7 +49,7 @@
         "assignmentId": "b-logs",
         "botId": "B01",
         "role": "wood-gatherer",
-        "action": { "kind": "deterministicGoal", "template": "acquisition", "goalText": "采集蓝图行：锚点 x=A y=B z=C，沿 +x 放置 8 个 item，每批最多 2 格，从第 1 格开始" },
+        "action": { "kind": "deterministicGoal", "template": "acquisition", "goalText": "获取 24 个 oak_log" },
         "successSignals": ["sharedInventory oak_log >= 12"],
         "maxAttempts": 2,
         "onFailure": { "strategy": "escalate", "reason": "no reachable trees found twice" }
@@ -57,7 +58,7 @@
         "assignmentId": "b-stone",
         "botId": "B02",
         "role": "stone-gatherer",
-        "action": { "kind": "skill", "skillId": "mine.branch", "params": {} },
+        "action": { "kind": "deterministicGoal", "template": "acquisition", "goalText": "获取 30 个 cobblestone" },
         "successSignals": ["sharedInventory cobblestone >= 30"],
         "maxAttempts": 2
       },
@@ -65,7 +66,7 @@
         "assignmentId": "b-build",
         "botId": "B03",
         "role": "builder",
-        "action": { "kind": "deterministicGoal", "template": "blueprint", "goalText": "施工蓝图行：锚点 x=A y=B z=C，沿 +x 放置 8 个 item，每批最多 2 格，从第 1 格开始" },
+        "action": { "kind": "deterministicGoal", "template": "blueprint", "goalText": "使用蓝图文件 starter-base-v1 施工", "targetRef": "facility:build-site-shelter" },
         "preconditions": ["b-logs and b-stone delivered to site storage"],
         "requiredGates": [],
         "resources": ["facility:build-site-shelter"],

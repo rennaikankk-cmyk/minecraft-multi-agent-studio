@@ -3,5 +3,6 @@ export * from "./facts.js";
 export * from "./summary.js";
 export * from "./proposal.js";
 export * from "./validator.js";
+export * from "./action-contract.js";
 export * from "./model-client.js";
 export * from "./replay.js";

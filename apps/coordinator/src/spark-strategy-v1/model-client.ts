@@ -65,6 +65,7 @@ export type ProposalRequestAccounting = {
   clientLatencyMs: number | null;
   finishReason: ModelResponse["finishReason"] | null;
   usage?: ModelResponse["usage"];
+  schedulerTimings?: ModelResponse["schedulerTimings"];
   detail?: string;
 };
 
@@ -106,6 +107,7 @@ export async function askTeamProposal(options: {
         clientLatencyMs: response.clientLatencyMs,
         finishReason: response.finishReason,
         usage: response.usage,
+        schedulerTimings: response.schedulerTimings,
       },
       proposal: parse.proposal,
     };
@@ -118,6 +120,7 @@ export async function askTeamProposal(options: {
       clientLatencyMs: response.clientLatencyMs,
       finishReason: response.finishReason,
       usage: response.usage,
+      schedulerTimings: response.schedulerTimings,
       detail: parse.detail,
     },
     proposal: null,

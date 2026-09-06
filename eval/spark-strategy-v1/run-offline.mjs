@@ -16,9 +16,9 @@
 import { readdirSync, readFileSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
 
-const repoRoot = path.resolve(path.dirname(path.dirname(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")))));
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const args = process.argv.slice(2);
 const flag = (name, fallback) => {
   const index = args.indexOf(`--${name}`);
@@ -34,6 +34,11 @@ if (!existsSync(distIndex)) {
   process.exit(1);
 }
 const strategy = await import(pathToFileURL(distIndex).href);
+const { loadBlueprintFiles } = await import(pathToFileURL(path.join(repoRoot, "apps/coordinator/dist/blueprint-files.js")).href);
+const actionContext = {
+  blueprints: loadBlueprintFiles(),
+  targets: new Map(Object.entries(JSON.parse(readFileSync(path.join(repoRoot, "eval/spark-strategy-v1/trusted-fixture-targets.json"), "utf8")))),
+};
 
 function readFixture(file, seen = new Set()) {
   const raw = JSON.parse(readFileSync(file, "utf8"));
@@ -82,6 +87,7 @@ for (const file of files) {
     mode: fixture.mode ?? "offline",
     facts,
     expectation: fixture.expectation,
+    evaluationNowMs: fixture.evaluationNowMs,
   });
   responses.set(fixture.sampleId, responseText);
 }
@@ -90,6 +96,7 @@ const report = await strategy.runReplayBatch(samples, {
   client: strategy.injectedModelClient(responses),
   systemPrompt: SYSTEM_PROMPT,
   gitCommit: gitCommit(),
+  actionContext,
   // 不传 nowMs：样本用 fixture 相对时钟（observedAt+1s）——离线判定确定
   // 性、不随真实时间漂移；报告 generatedAtMs 仍取真实时间。
 });
@@ -102,7 +109,7 @@ writeFileSync(mdPath, strategy.renderReportMarkdown(report) + "\n");
 
 const a = report.aggregates;
 console.log(
-  `[spark-strategy-v1] offline replay complete: samples=${a.samples} valid=${a.validProposals} parseFailures=${a.parseFailures} ` +
+  `[spark-strategy-v1] offline replay complete: samples=${a.samples} parsed=${a.parsedProposals} validated=${a.validatedProposals} parseFailures=${a.parseFailures} expectedParseFailures=${a.expectedParseFailures} ` +
     `matched=${a.matchedExpectationCount} shouldActButNoop=${a.shouldActButNoop} shouldWaitCorrectly=${a.shouldWaitCorrectlyWaiting}`,
 );
 console.log(`report: ${jsonPath}`);

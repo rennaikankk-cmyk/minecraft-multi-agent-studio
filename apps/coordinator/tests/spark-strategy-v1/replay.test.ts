@@ -2,6 +2,8 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { loadBlueprintFiles } from "../../src/blueprint-files.js";
+import type { ActionContext } from "../../src/spark-strategy-v1/action-contract.js";
 import {
   factVersion,
   parseTeamFactsInput,
@@ -14,6 +16,10 @@ import {
 
 const fixturesDir = path.resolve(__dirname, "../../../../eval/spark-strategy-v1/fixtures");
 const NOW = 1_780_000_000_000;
+const actionContext: ActionContext = {
+  blueprints: loadBlueprintFiles(),
+  targets: new Map(Object.entries(JSON.parse(readFileSync(path.join(fixturesDir, "../trusted-fixture-targets.json"), "utf8")))),
+};
 
 function loadFixture(name: string): Record<string, unknown> {
   return JSON.parse(readFileSync(path.join(fixturesDir, name), "utf8")) as Record<string, unknown>;
@@ -50,6 +56,7 @@ describe("runReplayBatch（离线注入）", () => {
         mode: "offline",
         facts,
         expectation: fixture.expectation as ReplaySample["expectation"],
+        evaluationNowMs: fixture.evaluationNowMs as number,
       });
       responses.set(fixture.sampleId as string, responseText);
     }
@@ -58,13 +65,14 @@ describe("runReplayBatch（离线注入）", () => {
       client: injectedModelClient(responses),
       systemPrompt: SYSTEM_PROMPT,
       gitCommit: "test-commit",
-      nowMs: NOW,
+      actionContext,
     });
     expect(report.evalVersion).toBe(REPLAY_EVAL_VERSION);
     expect(report.mode).toBe("offline");
     expect(report.environment.serverMetrics).toBe("unavailable");
     expect(report.aggregates.samples).toBe(5);
-    expect(report.aggregates.validProposals).toBe(4);
+    expect(report.aggregates.parsedProposals).toBe(4);
+    expect(report.aggregates.validatedProposals).toBe(3);
     expect(report.aggregates.parseFailures).toBe(1);
     expect(report.aggregates.parseReasons).toEqual({ "invalid-json": 1 });
     expect(report.aggregates.matchedExpectationCount).toBe(4);
@@ -91,7 +99,7 @@ describe("runReplayBatch（离线注入）", () => {
       client: injectedModelClient(responses),
       systemPrompt: SYSTEM_PROMPT,
       gitCommit: "test-commit",
-      nowMs: NOW,
+      actionContext,
     });
     expect(again.aggregates).toEqual(report.aggregates);
   });

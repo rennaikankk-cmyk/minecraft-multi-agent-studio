@@ -2,7 +2,7 @@
 
 环境：Windows 11 + Git Bash；worktree `../studio-spark-strategy`（分支 `feat/spark-strategy-v1-glm`，基线 `75cab90`）。
 
-## 验证矩阵
+## GLM 历史验证矩阵（不是补修后的结果）
 
 | # | 验证 | 命令 | 结果 | commit |
 |---|---|---|---|---|
@@ -15,7 +15,7 @@
 **未执行项（如实）**：
 - LIVE_MEASURED：0 项——live 请求未运行（未确认 Spark 空闲窗口；待执行命令见 USAGE.md）。服务端排队/KV/吞吐指标 unavailable。
 - 真实 Minecraft fixture 场景：未运行（本期默认 offline、不启动 Studio/不连服务器）。
-- GitHub CI：本分支未推送、未触发 CI（推送授权按用户指示处理）。
+- GLM 分支随后已推送至 `bca26e1e13118dfae173ff7601d5a28d9bd9874a`，原 4 个提交由后续集成分支保留。当前补修和 CI 记录见 [TAKEOVER_VALIDATION.md](TAKEOVER_VALIDATION.md)。
 
 ## 已知限制
 
@@ -23,7 +23,7 @@
 - 验证器为静态/快照检查，不含资源 lease、任务发布、世界重检（D3/集成阶段职责）。
 - token 计数为估计口径（无 tokenizer）。
 
-## 离线回放报告（真实执行输出，`runtime-data/spark-strategy-v1/report.md` 快照）
+## GLM 历史离线报告（含后续发现的判据缺口，不作为当前通过证据）
 
 ```markdown
 # Spark Strategy V1 回放报告（mode=offline）

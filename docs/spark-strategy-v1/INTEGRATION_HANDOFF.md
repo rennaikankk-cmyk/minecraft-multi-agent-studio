@@ -1,6 +1,6 @@
 # INTEGRATION_HANDOFF —— 交给 Codex（D3 集成审查后接线）
 
-状态：**OFFLINE_READY**；生产接线 = **WAITING_FOR_D3_INTEGRATION**。本文定位基于 `75cab90` 基线源码；集成时请以 D3 分支实际 HEAD 重新定位。
+GLM 原交接基线为 `75cab90`，原交付分支已推至 `bca26e1`。五项缺口由 Codex 在独立集成分支补修；生产接线仍须通过 D3 依赖门。当前证据见 [TAKEOVER_VALIDATION.md](TAKEOVER_VALIDATION.md)。
 
 ## 1. 输入/输出接口与来源
 
@@ -36,13 +36,13 @@ TeamFactsInput（apps/coordinator/src/spark-strategy-v1/facts.ts）
    本模块已提供同形适配器 `scheduledRouterModelClient`（spark-strategy-v1/model-client.ts），
    字段与生产调用 `askStrategyReview`（apps/coordinator/src/strategy-review.ts:155）逐一对齐。
    生产装配点在 apps/coordinator/src/main.ts:321-322（`replanAI`/`siteAI` 旁）——
-   新增一个 strategy-v1 专用入口时**不要**绕过 scheduler；并发仍走全局 maxConcurrency=2。
+   新增 strategy-v1 入口复用同一 scheduler；实际并发取装配值，不能假设为默认 2。本次启动配置和最近日志均为 3。
 2. **周期触发**：若做全队周期评审，挂在 `AutonomousDirector.runStrategyReviews`
    （autonomous-director.ts:483）同一 tick 旁，但**必须独立冷却键**（per-team 而非
    per-bot），建议默认 15min + 仅当团队事实版本变化才发起（去重）。
 3. **观测去重/冷却**：incident 快照按 fingerprint 聚合已有先例
    （packages/skills/src/incidents.ts incidentFingerprint）；报告触发同理按
-   factVersion+scenario 去重。
+   内容指纹+scenario 去重。factVersion 含采样时间，不能直接用于判断内容变化。
 4. **下发前重检（硬要求）**：任何 assignment 真正下发前必须重新执行
    `validateProposal`（用当时最新事实，不是摘要时快照），并逐条核对：
    bot 仍 idle（goalExecutionReady 单一定义在 BotRegistry）、资源未被新租约占用、
@@ -57,7 +57,7 @@ TeamFactsInput（apps/coordinator/src/spark-strategy-v1/facts.ts）
   `deduplicationKey: \`team-proposal:${factVersion}\`` 防同版本重复请求。
 - maxTokens 建议 3000（EVAL_CONTRACT 校准链同值）；temperature=0。
 - 不建议为策略请求单独开 adapter/端口——同一 Spark 实例；容量结论以
-  scripts/benchmark-spark-capacity.mjs 既有实测（推荐 3 并发）为界。
+  当前服务端 seqs=4 为本轮设计上界。旧短请求脚本不能决定真实规划的应用并发，须完成本轮 1/2/3/4 档实测。
 
 ## 4. 首个可验证场景与候选接线方式（默认关）
 

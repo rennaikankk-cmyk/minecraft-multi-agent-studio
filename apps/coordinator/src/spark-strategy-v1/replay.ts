@@ -15,6 +15,7 @@ import { buildSituationSummary, type SituationSummary } from "./summary.js";
 import { askTeamProposal, type ModelClient, type ProposalRequestAccounting } from "./model-client.js";
 import { validateProposal, type ValidationResult } from "./validator.js";
 import type { TeamProposal } from "./proposal.js";
+import type { ActionContext } from "./action-contract.js";
 
 export type ReplayMode = "offline" | "mock" | "replay" | "live";
 
@@ -24,6 +25,8 @@ export type SampleExpectation = {
   desiredBehavior: "act" | "wait-or-escalate";
   /** 判定 acceptable 即算达标；needs-reobservation 对 wait-or-escalate 也算达标。 */
   acceptableVerdicts: ReadonlyArray<ValidationResult["verdict"]>;
+  botBehaviors?: Readonly<Record<string, "act" | "wait">>;
+  expectedParseReason?: string;
 };
 
 export type ReplaySample = {
@@ -34,6 +37,7 @@ export type ReplaySample = {
   /** offline/mock/replay：注入的模型响应文本；live：忽略（真实请求）。 */
   injectedResponse?: string;
   expectation: SampleExpectation;
+  evaluationNowMs?: number;
 };
 
 export type ReplaySampleResult = {
@@ -76,7 +80,9 @@ export type ReplayReport = {
   samples: ReplaySampleResult[];
   aggregates: {
     samples: number;
-    validProposals: number;
+    parsedProposals: number;
+    validatedProposals: number;
+    expectedParseFailures: number;
     parseFailures: number;
     requestFailures: number;
     matchedExpectationCount: number;
@@ -113,9 +119,11 @@ export async function runReplaySample(sample: ReplaySample, options: {
   /** 显式时钟（live 用）；缺省=fixture 相对时钟（observedAt+1s，确定性）。 */
   nowMs?: number;
   systemPrompt: string;
+  actionContext?: ActionContext;
 }): Promise<ReplaySampleResult> {
   const facts: TeamFactsInput = parseTeamFactsInput(sample.facts);
-  const nowMs = options.nowMs ?? facts.scope.observedAtMs + 1_000;
+  const nowMs = options.nowMs ?? sample.evaluationNowMs;
+  if (nowMs === undefined || !Number.isSafeInteger(nowMs)) throw new RangeError("replay requires an explicit evaluation clock");
   const version = factVersion(facts);
   const summary = buildSituationSummary(facts, { nowMs });
   const { accounting, proposal } = await askTeamProposal({
@@ -135,7 +143,7 @@ export async function runReplaySample(sample: ReplaySample, options: {
   });
   let validation: ValidationResult | null = null;
   if (proposal !== null) {
-    validation = validateProposal(proposal, facts, { nowMs });
+    validation = validateProposal(proposal, facts, { ...options.actionContext, nowMs });
   }
   const unsupported = validation?.reasons.some((r) => r.code === "UNSUPPORTED_CAPABILITY" || r.code === "UNSUPPORTED_GOAL_TEMPLATE") ?? false;
   const conflicts = validation?.reasons.some(
@@ -144,7 +152,16 @@ export async function runReplaySample(sample: ReplaySample, options: {
   const verdict = validation?.verdict ?? null;
   const actionKinds = new Set((proposal?.assignments ?? []).map((a) => a.action.kind));
   const hasActionable = [...actionKinds].some((kind) => kind === "skill" || kind === "deterministicGoal");
-  const matchedExpectation = verdict !== null && sample.expectation.acceptableVerdicts.includes(verdict);
+  const behaviors = sample.expectation.botBehaviors;
+  const behaviorMatches = proposal !== null && (behaviors
+    ? Object.entries(behaviors).every(([botId, expected]) => {
+        const assignments = proposal.assignments.filter((a) => a.botId === botId);
+        return assignments.length > 0 && assignments.every((a) => expected === "act"
+          ? a.action.kind === "skill" || a.action.kind === "deterministicGoal"
+          : a.action.kind === "wait" || a.action.kind === "noop");
+      })
+    : sample.expectation.desiredBehavior === "act" ? hasActionable : !hasActionable);
+  const matchedExpectation = verdict !== null && sample.expectation.acceptableVerdicts.includes(verdict) && behaviorMatches;
   return {
     sampleId: sample.sampleId,
     scenario: sample.scenario,
@@ -162,8 +179,7 @@ export async function runReplaySample(sample: ReplaySample, options: {
         !hasActionable,
       shouldWaitCorrectlyWaiting:
         sample.expectation.desiredBehavior === "wait-or-escalate" &&
-        verdict !== null &&
-        sample.expectation.acceptableVerdicts.includes(verdict),
+        behaviorMatches && verdict === "acceptable",
       /** 建议判定与 fixture 期望一致（负样本的正确拒绝也算匹配）。 */
       matchedExpectation,
       invalidCapabilityReference: unsupported,
@@ -179,6 +195,7 @@ export async function runReplayBatch(samples: ReplaySample[], options: {
   nowMs?: number;
   systemPrompt: string;
   gitCommit?: string | null;
+  actionContext?: ActionContext;
 }): Promise<ReplayReport> {
   const nowMs = options.nowMs ?? Date.now();
   const results: ReplaySampleResult[] = [];
@@ -188,12 +205,15 @@ export async function runReplayBatch(samples: ReplaySample[], options: {
         client: options.client,
         ...(options.nowMs !== undefined ? { nowMs: options.nowMs } : {}),
         systemPrompt: options.systemPrompt,
+        ...(options.actionContext ? { actionContext: options.actionContext } : {}),
       }),
     );
   }
   const verdicts: Record<string, number> = {};
   const parseReasons: Record<string, number> = {};
-  let validProposals = 0;
+  let parsedProposals = 0;
+  let validatedProposals = 0;
+  let expectedParseFailures = 0;
   let parseFailures = 0;
   let requestFailures = 0;
   let matchedExpectationCount = 0;
@@ -208,10 +228,12 @@ export async function runReplayBatch(samples: ReplaySample[], options: {
       parseFailures += 1;
       const reason = result.accounting.parseReason ?? "unknown";
       parseReasons[reason] = (parseReasons[reason] ?? 0) + 1;
+      if (samples.find((s) => s.sampleId === result.sampleId)?.expectation.expectedParseReason === reason) expectedParseFailures++;
     } else {
-      validProposals += 1;
+      parsedProposals += 1;
     }
     if (result.validation !== null) {
+      if (result.validation.verdict === "acceptable") validatedProposals++;
       verdicts[result.validation.verdict] = (verdicts[result.validation.verdict] ?? 0) + 1;
     }
     if (result.usefulness.matchedExpectation) matchedExpectationCount += 1;
@@ -226,12 +248,14 @@ export async function runReplayBatch(samples: ReplaySample[], options: {
     generatedAtMs: nowMs,
     environment: {
       modelIdentifiedBy: live ? "live-client" : "fixture-injected",
-      serverMetrics: live ? "SOURCE-REPORTED" : "unavailable",
+      serverMetrics: "unavailable",
     },
     samples: results,
     aggregates: {
       samples: results.length,
-      validProposals,
+      parsedProposals,
+      validatedProposals,
+      expectedParseFailures,
       parseFailures,
       requestFailures,
       matchedExpectationCount,

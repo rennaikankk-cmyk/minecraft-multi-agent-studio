@@ -2,9 +2,10 @@
   "sampleId": "A1-food-shortage",
   "scenario": "food-shortage",
   "mode": "offline",
+  "evaluationNowMs": 1780000001000,
   "expectation": { "desiredBehavior": "act", "acceptableVerdicts": ["acceptable"] },
   "facts": {
-    "scope": { "serverProfileId": "local-test-1.21.11", "dimension": "overworld", "observedAtMs": 1780000000000, "sessionEpoch": 7 },
+    "scope": { "serverProfileId": "local-test-1.21.11", "dimension": "minecraft:overworld", "observedAtMs": 1780000000000, "sessionEpoch": 7 },
     "capturedAtMs": 1780000000000,
     "bots": [
       { "botId": "B01", "online": true, "currentTask": null, "survival": { "health": 20, "food": 9, "armorPoints": 0 }, "inventory": [{ "itemName": "stone_hoe", "count": 1 }, { "itemName": "bread", "count": 2 }], "deaths": "unknown" },
@@ -21,7 +22,7 @@
       "reservedResources": []
     },
     "events": [
-      { "kind": "completion", "atMs": 1779999940000, "source": "skill_result", "botId": "B01", "detail": "world.scan registered facility:wheat-farm-main" },
+      { "kind": "completion", "atMs": 1779999940000, "source": "isolated-fixture-receipt", "botId": "B01", "detail": "facility:wheat-farm-main production verification succeeded" },
       { "kind": "other", "atMs": 1779999880000, "source": "survival-needs", "botId": "B02", "detail": "FOOD need score elevated" }
     ],
     "constraints": {
@@ -42,37 +43,37 @@
   "injectedResponse": {
     "proposalId": "prop-A1",
     "factVersion": "{{factVersion}}",
-    "scope": { "serverProfileId": "local-test-1.21.11", "dimension": "overworld" },
-    "validUntilMs": 1780000600000,
+    "scope": { "serverProfileId": "local-test-1.21.11", "dimension": "minecraft:overworld" },
+    "validUntilMs": 1780000120000,
     "generatedBy": "fixture:scenario-A",
-    "objective": "restore team food reserve via farm harvest, replant and transport split",
+    "objective": "replenish individual food reserves and deposit available wheat",
     "assignments": [
       {
         "assignmentId": "a-harvest",
         "botId": "B01",
         "role": "harvester",
-        "action": { "kind": "skill", "skillId": "food.secure", "params": { "facilityId": "facility:wheat-farm-main", "replant": "true" } },
+        "action": { "kind": "skill", "skillId": "food.secure", "params": { "targetCount": 8 } },
         "preconditions": ["farm crop maturity observed before harvest"],
         "resources": ["facility:wheat-farm-main"],
-        "successSignals": ["sharedInventory wheat +8 or more", "farm replanted (farmland holding seeds)"],
+        "successSignals": ["B01 safeFoodCount reaches 8"],
         "maxAttempts": 2,
-        "onFailure": { "strategy": "alternative", "reason": "harvest blocked; fallback to foraging", "alternative": { "kind": "skill", "skillId": "collect.block", "params": {} } }
+        "onFailure": { "strategy": "alternative", "reason": "refresh crop observations", "alternative": { "kind": "deterministicGoal", "template": "scan", "goalText": "读取当前区域的 wheat 方块分布并给出扫描结果，只读" } }
       },
       {
         "assignmentId": "a-transport",
         "botId": "B02",
         "role": "logistics",
-        "action": { "kind": "skill", "skillId": "container.transfer", "params": { "facilityId": "facility:storage-hub" } },
-        "preconditions": ["a-harvest delivered at least 4 wheat"],
+        "action": { "kind": "skill", "skillId": "container.transfer", "targetRef": "facility:storage-hub", "params": { "direction": "deposit", "itemName": "wheat_seeds", "count": 2 } },
+        "preconditions": ["B02 inventory still contains at least 2 wheat_seeds"],
         "resources": ["facility:storage-hub"],
-        "successSignals": ["storage-hub food items >= 8"],
+        "successSignals": ["container transfer receipt moved 2 wheat_seeds"],
         "maxAttempts": 1
       },
       {
         "assignmentId": "a-stockpile",
         "botId": "B03",
         "role": "forager",
-        "action": { "kind": "skill", "skillId": "collect.block", "params": {} },
+        "action": { "kind": "deterministicGoal", "template": "food", "goalText": "获取 8 份安全食物" },
         "successSignals": ["bot inventory food items >= 4"],
         "maxAttempts": 2
       }

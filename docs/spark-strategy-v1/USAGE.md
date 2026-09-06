@@ -24,7 +24,7 @@ node eval/spark-strategy-v1/run-offline.mjs
 
 预期输出（当前 fixtures）：
 ```
-offline replay complete: samples=5 valid=4 parseFailures=1 matched=4 shouldActButNoop=0 shouldWaitCorrectly=1
+offline replay complete: samples=5 parsed=4 validated=3 parseFailures=1 expectedParseFailures=1 matched=4 shouldActButNoop=0 shouldWaitCorrectly=1
 ```
 
 ### 样本矩阵
@@ -39,7 +39,7 @@ offline replay complete: samples=5 valid=4 parseFailures=1 matched=4 shouldActBu
 
 ### 编写新 fixture
 
-字段：`sampleId / scenario / mode / facts（或 factsRef 引用其它 fixture）/ injectedResponse / expectation{desiredBehavior, acceptableVerdicts}`。
+字段：`sampleId / scenario / mode / evaluationNowMs / facts（或 factsRef 引用其它 fixture）/ injectedResponse / expectation{desiredBehavior, acceptableVerdicts, botBehaviors?, expectedParseReason?}`。回放必须显式给定评测时钟，不能从 observedAt 自动推导时钟或改写观测时间。可信测试位置在 `trusted-fixture-targets.json`，不进入模型摘要。
 `injectedResponse` 中的 `{{factVersion}}` 会被替换为该 facts 的确定性事实版本。事实里所有"未知"写字符串 `"unknown"`——绝不要写 0/false 冒充已知。
 
 ## 已有日志如何接入
@@ -71,7 +71,7 @@ curl -s http://192.168.100.2:18300/v1/models | head -c 400
 - `tokenEstimate.method=estimated-chars-div-4`：无真实 tokenizer，全部为估计值。
 - offline/mock 的时延无意义（注入器恒 0）；报告 `aggregates.latencyNote` 有声明。
 - 解析分账：`invalid-json`（无 JSON 或括号平衡但不可解析）、`truncated-json`（括号不平衡）、`reasoning-only`（检测到思考标签/关键词且无 JSON）、`empty-response`、`schema-invalid`。
-- 摘要裁剪顺序：窗口外非 failure/death 事件 → 同类事件压缩 → 条目上限截断（剩余计 dropped）→ 末级字符截断（从尾部；约束区在前段，永不丢）。库存按数量保留 top-N。
+- 摘要先保留完整作用域、短缺、阶段门、能力、任务状态、设施和占用信息；这些必需内容放不下时抛出 `SummaryBudgetError`。剩余预算才接收窗口过滤/压缩后的事件与库存详情，绝不从模型实际文本尾部截断行动约束。
 
 ## 模块地图
 
@@ -80,11 +80,12 @@ apps/coordinator/src/spark-strategy-v1/
   facts.ts         事实输入 schema（unknown 一等值）+ factVersion + 脱敏
   summary.ts       有界局势摘要（裁剪顺序 + token 估计标注）
   proposal.ts      TeamProposal zod schema + 响应解析分账
-  validator.ts     19 种原因码静态/快照验证器（三态判定）
+  validator.ts     动作、作用域、新鲜度、占用和阶段门三态验证器
+  action-contract.ts 复用真实目标解析器、ResourceGraph、技能目录和参数 Schema
   model-client.ts  注入式 ModelClient + ScheduledAIRouter 适配器 + askTeamProposal 分账
   replay.ts        回放管线 + 聚合报告 + Markdown 渲染
   index.ts         桶导出（零副作用）
-apps/coordinator/tests/spark-strategy-v1/   35 测试
+apps/coordinator/tests/spark-strategy-v1/   原 35 项 + 补修反例与边界回归，见验证记录
 eval/spark-strategy-v1/                     fixtures + run-offline.mjs CLI
 docs/spark-strategy-v1/                     本文档 + BOUNDARY/EVIDENCE/INTEGRATION_HANDOFF
 ```

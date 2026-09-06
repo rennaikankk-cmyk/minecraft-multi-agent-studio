@@ -1,0 +1,4 @@
+{
+  "facility:storage-hub": { "serverProfileId": "local-test-1.21.11", "dimension": "minecraft:overworld", "x": 4, "y": 64, "z": 4 },
+  "facility:build-site-shelter": { "serverProfileId": "local-test-1.21.11", "dimension": "minecraft:overworld", "x": 16, "y": 64, "z": 16 }
+}

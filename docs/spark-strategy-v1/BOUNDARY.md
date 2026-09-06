@@ -1,7 +1,7 @@
 # Spark 策略增强一期：工作边界与现有接线审计
 
 日期：2026-09-06。执行：GLM-5.3-Flash（开发模型；运行时推理仍调用 Spark 现有模型，不做替换）。
-分工：Codex 负责 P5-D3（世界观测消费边界等）；本轮负责 Spark 上层策略增强一期（局势摘要、全队策略建议、观测分析、离线回放与交接）。生产接线在 D3 集成审查后进行。
+原 GLM 离线交付记录。2026-09-06 用户已授权 Codex 统一接管后续补修、D3、观察集成和 live 评测；下列冻结清单只描述 GLM 当时的范围，不再限制后续必要修改。当前验证见 [TAKEOVER_VALIDATION.md](TAKEOVER_VALIDATION.md)。
 
 ## 1. 仓库核验（开工时点）
 
@@ -15,7 +15,7 @@
 
 | 事实 | 证据 | 结论 |
 |---|---|---|
-| 生产并发=2 | `apps/coordinator/src/local-ai-config.ts` `DEFAULT_MAX_CONCURRENCY = 2`（注释：唯一实测安全值）；`apps/coordinator/src/main.ts:198-199` `new AIRequestScheduler({ maxConcurrency: localAIConfig.maxConcurrency, ... })` | 启动配置=2、Coordinator 实际限制=2。`packages/ai-router/src/scheduler.ts` 类内默认 12 **不是生产值**，不得引用为生产并发 |
+| 并发配置 | `local-ai-config.ts` 默认 2，可由 `AI_MAX_CONCURRENCY` 覆盖 | 本次只读核验 `.env.local` 为 3；最近一次 Coordinator 启动日志（2026-09-04T13:39:17.085Z）configured/effective 均为 3。检查时未发现运行中的 Coordinator，不能冒充当前实时值；类默认 12 也不是生产值 |
 | 实际运行请求数 | 未知（无运行中实例可查）；日志面 `coordinator_ai_*` | 标 UNKNOWN |
 | 战略评审周期 | `strategy-review.ts` `STRATEGY_REVIEW_INTERVAL_MS = 5 * 60_000`；`autonomous-director.ts` `runStrategyReviews()` 对每个 `eligibleForAutonomy(record)` 且非活跃（`this.active.has` 跳过）的 bot 每 5 分钟一次 | 分钟级战略层，跳过活跃任务 bot |
 | 评审输入=单 Bot 摘要 | `reviewStrategyFor()`：safeFoodCount、pickaxeTier、hasSword、armorPoints、wood/coal/iron units、recentNeeds/recentFailures（内存 trail）、**`deaths: 0` 硬编码占位（547 行）** | 死亡统计未接线——占位值。新模块输入设计必须把"缺死亡统计"表达为 unknown，不复制 0 |
@@ -41,5 +41,5 @@
 
 ## 5. 已知重大现有问题（记录，不顺手修）
 
-- **CI 双红（存量，先于本轮）**：`apps/control-api/tests/goal-execution.integration.test.ts` "reobserves before safely retrying" 期望 8 次实得 12 次；首红自 `413bdaf`（planner already-satisfied 快路径）。与 D3/D2 无关，属 planner 轮修复项。
+- **CI 根因已校准**：retry 8/12 断言此前已修。a85de7f 的实际失败是 Linux Rust 外部测试链接 `napi_* undefined symbol`。PR #10 已独立修复；main `8053325daa93b58e4a6f09b85af54d2be48d7988` 两套 Ubuntu CI 均通过，链接见 TAKEOVER_VALIDATION。
 - 战略评审 `deaths: 0` 占位（上述）——本轮在设计上以 unknown 表达，修复接线留给集成阶段。

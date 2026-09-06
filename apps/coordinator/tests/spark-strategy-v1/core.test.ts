@@ -17,7 +17,7 @@ const NOW = 1_700_000_000_000;
 
 function baseFacts(overrides: Partial<TeamFactsInput> = {}): TeamFactsInput {
   return parseTeamFactsInput({
-    scope: { serverProfileId: "luv-anarchy", dimension: "overworld", observedAtMs: NOW - 5_000, sessionEpoch: 42 },
+    scope: { serverProfileId: "luv-anarchy", dimension: "minecraft:overworld", observedAtMs: NOW - 5_000, sessionEpoch: 42 },
     capturedAtMs: NOW - 5_000,
     bots: [
       {
@@ -54,6 +54,7 @@ function baseFacts(overrides: Partial<TeamFactsInput> = {}): TeamFactsInput {
         { skillId: "container.transfer", supported: true },
         { skillId: "build.blueprint", supported: true },
         { skillId: "combat.engage", supported: true },
+        { skillId: "world.scan", supported: true },
       ],
       phaseGates: [{ gate: "shelterEstablished", satisfied: true }],
       nonPreemptibleBots: [],
@@ -76,7 +77,7 @@ function validProposal(facts: TeamFactsInput, overrides: Record<string, unknown>
         assignmentId: "a1",
         botId: "B01",
         role: "harvester",
-        action: { kind: "skill", skillId: "food.secure", params: {} },
+        action: { kind: "skill", skillId: "food.secure", params: { targetCount: 8 } },
         resources: ["facility:wheat-farm-1"],
         successSignals: ["shared food count >= 16"],
         maxAttempts: 2,
@@ -85,7 +86,7 @@ function validProposal(facts: TeamFactsInput, overrides: Record<string, unknown>
         assignmentId: "a2",
         botId: "B02",
         role: "runner",
-        action: { kind: "deterministicGoal", template: "movement", goalText: "移动到农场附近" },
+        action: { kind: "deterministicGoal", template: "scan", goalText: "读取当前区域的 wheat 方块分布并给出扫描结果，只读" },
         successSignals: ["bot within 8 blocks of farm"],
         maxAttempts: 1,
       },
@@ -151,7 +152,7 @@ describe("summary", () => {
     const summary = buildSituationSummary(facts, { nowMs: NOW, maxChars: 900 });
     expect(summary.text.length).toBeLessThanOrEqual(900);
     expect(summary.text).toContain("server=luv-anarchy");
-    expect(summary.text).toContain("dim=overworld");
+    expect(summary.text).toContain("dim=minecraft:overworld");
     expect(summary.text).toContain("SHORTAGES: food");
     expect(summary.text).toContain("collect.block");
     expect(summary.trimmed.eventsDropped + summary.trimmed.eventsCompressed).toBeGreaterThan(0);

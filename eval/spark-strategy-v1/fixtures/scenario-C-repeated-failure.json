@@ -2,9 +2,10 @@
   "sampleId": "C1-repeated-failure",
   "scenario": "repeated-failure",
   "mode": "offline",
-  "expectation": { "desiredBehavior": "wait-or-escalate", "acceptableVerdicts": ["acceptable"] },
+  "evaluationNowMs": 1780020001000,
+  "expectation": { "desiredBehavior": "wait-or-escalate", "acceptableVerdicts": ["acceptable"], "botBehaviors": { "B01": "wait", "B02": "act" } },
   "facts": {
-    "scope": { "serverProfileId": "local-test-1.21.11", "dimension": "overworld", "observedAtMs": 1780020000000, "sessionEpoch": 7 },
+    "scope": { "serverProfileId": "local-test-1.21.11", "dimension": "minecraft:overworld", "observedAtMs": 1780020000000, "sessionEpoch": 7 },
     "capturedAtMs": 1780020000000,
     "bots": [
       { "botId": "B01", "online": true, "currentTask": null, "survival": { "health": 14, "food": 17, "armorPoints": 8 }, "inventory": [{ "itemName": "stone_pickaxe", "count": 1 }], "deaths": 2 },
@@ -24,7 +25,7 @@
     "constraints": {
       "capabilities": [
         { "skillId": "collect.block", "supported": true, "maturity": "L4" },
-        { "skillId": "mine.vein", "supported": true },
+        { "skillId": "world.scan", "supported": true },
         { "skillId": "movement.goto", "supported": true, "maturity": "L4" },
         { "skillId": "craft.item", "supported": true }
       ],
@@ -37,8 +38,8 @@
   "injectedResponse": {
     "proposalId": "prop-C1",
     "factVersion": "{{factVersion}}",
-    "scope": { "serverProfileId": "local-test-1.21.11", "dimension": "overworld" },
-    "validUntilMs": 1780020600000,
+    "scope": { "serverProfileId": "local-test-1.21.11", "dimension": "minecraft:overworld" },
+    "validUntilMs": 1780020120000,
     "generatedBy": "fixture:scenario-C",
     "objective": "stop repeating the failing cliff-face collect; switch approach and let the affected bot recover",
     "assignments": [
@@ -52,9 +53,9 @@
         "assignmentId": "c-alternate",
         "botId": "B02",
         "role": "alternate-miner",
-        "action": { "kind": "skill", "skillId": "mine.vein", "params": {} },
+        "action": { "kind": "deterministicGoal", "template": "scan", "goalText": "读取当前区域的 iron_ore 方块分布并给出扫描结果，只读" },
         "preconditions": ["different iron exposure than the failed cliff target"],
-        "successSignals": ["sharedInventory raw_iron >= 3"],
+        "successSignals": ["fresh iron_ore scan receipt returned for review"],
         "maxAttempts": 2,
         "onFailure": { "strategy": "escalate", "reason": "operator review of mining area required" }
       }

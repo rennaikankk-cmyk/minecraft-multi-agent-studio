@@ -10,12 +10,15 @@ export const proposalActionSchema = z.discriminatedUnion("kind", [
     kind: z.literal("skill"),
     skillId: z.string().min(1),
     params: z.record(z.string(), z.union([z.string(), z.number()])),
+    targetRef: z.string().min(1).optional(),
   }),
   z.object({
     kind: z.literal("deterministicGoal"),
     /** 复用 coordinator 确定性 goal 模板族（parseXxxGoal 可解析的文本）。 */
     template: z.enum(["acquisition", "blueprint", "movement", "food", "scan"]),
     goalText: z.string().min(1),
+    /** Only trusted code expands {{target}} to coordinates for the real parser. */
+    targetRef: z.string().min(1).optional(),
   }),
   z.object({
     kind: z.literal("noop"),
@@ -33,6 +36,10 @@ export const failureAlternativeSchema = z.object({
   reason: z.string().min(1),
   /** strategy=alternative 时的替代动作（单条，不再嵌套替代链）。 */
   alternative: proposalActionSchema.optional(),
+}).superRefine((value, ctx) => {
+  if ((value.strategy === "alternative") !== (value.alternative !== undefined)) {
+    ctx.addIssue({ code: "custom", message: "alternative is required exactly when strategy=alternative" });
+  }
 });
 export type FailureAlternative = z.infer<typeof failureAlternativeSchema>;
 
