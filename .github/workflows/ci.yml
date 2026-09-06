@@ -29,4 +29,5 @@ jobs:
           cargo fmt --manifest-path packages/pathfinder-rs/Cargo.toml --check
           cargo test --manifest-path packages/pathfinder-rs/Cargo.toml --locked
           pnpm --filter @minecraft-studio/pathfinder-rs build
+          node scripts/check-pathfinder-native.mjs
           pnpm check
