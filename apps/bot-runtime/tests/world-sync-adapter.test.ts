@@ -458,7 +458,7 @@ describe("P5-D2c WorldSyncAdapter（真实 worker 契约）", () => {
     const { column, raw } = makeRealColumn();
     raw.setBlockStateId({ x: 3, y: 70, z: 5 }, 1);
     adapter.onChunkColumnLoad(column, 0, 0);
-    await waitFor(() => adapter.getMetrics().queueDepth === 0 && adapter.getMetrics().inFlightMessages === 0, 10_000);
+    await waitFor(() => adapter.getMetrics().queuedExtractions === 0 && adapter.getMetrics().queueDepth === 0 && adapter.getMetrics().inFlightMessages === 0, 10_000);
     await sleep(50); // 泵收尾一拍（ready 翻沿）
     const health = await adapter.health();
     expect(health?.loadedChunks).toBe(1);

@@ -178,7 +178,6 @@ export async function extractColumnBudgeted(
     const sliceMs = now - sliceBegan;
     if (sliceMs > maxSliceMs) maxSliceMs = sliceMs;
     if (sliceMs > sliceBudgetMs) sliceOverruns += 1;
-    sliceBegan = now;
     return { overran: sliceMs > sliceBudgetMs };
   };
 
@@ -192,7 +191,7 @@ export async function extractColumnBudgeted(
       sections.push({ sectionY, status: "not-present", stateIds: null });
       if (i > 0) {
         const { overran } = checkBudget();
-        if (overran) await yieldFn();
+        if (overran) { await yieldFn(); sliceBegan = performance.now(); }
       }
       continue;
     }
@@ -202,7 +201,7 @@ export async function extractColumnBudgeted(
       // section 内部小批次推进：每 256 格一次预算/abort 检查，超支即让出。
       for (let base = 0; base < 4096; base += SECTION_SLICE_BATCH) {
         const { overran } = checkBudget();
-        if (overran && base > 0) await yieldFn();
+        if (overran) { await yieldFn(); sliceBegan = performance.now(); }
         for (let j = 0; j < SECTION_SLICE_BATCH; j += 1) {
           const index = base + j;
           const value = raw.data.get(index);
@@ -220,6 +219,7 @@ export async function extractColumnBudgeted(
       throw new SectionExtractionError(sectionY, error);
     }
   }
+  checkBudget();
   return {
     chunkX,
     chunkZ,
@@ -243,12 +243,14 @@ export function replayUpdates(
   for (const update of extracted.pendingUpdates) {
     const sectionY = update.y >> 4;
     const section = bySectionY.get(sectionY);
-    if (!section || section.status !== "data" || section.stateIds === null) {
+    if (!section || section.status === "not-present") {
       // Empty/NotPresent 上的 update：升级为 data？P5-C 镜像侧 fail-closed，
       // 这里同样跳过（P5-D2 oracle 会暴露差异）。
       skippedNoSection += 1;
       continue;
     }
+    if (section.status === "empty") { section.stateIds = new Uint32Array(4096); section.status = "data"; }
+    if (section.stateIds === null) { skippedNoSection += 1; continue; }
     const localIndex = ((update.y & 15) << 8) | ((update.z & 15) << 4) | (update.x & 15);
     section.stateIds[localIndex] = update.stateId;
     // 更新后可能从 empty 升级

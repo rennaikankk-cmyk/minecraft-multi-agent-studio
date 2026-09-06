@@ -38,6 +38,10 @@ parentPort.on("message", (job) => {
         result = { ack: addon.mirrorSubmitControl(job.handle, job.control) };
       } else if (job.op === "health") {
         result = { health: addon.mirrorHealth(job.handle) };
+      } else if (job.op === "spatialQuery") {
+        result = addon.mirrorSpatialQuery(job.handle, job.query);
+      } else if (job.op === "spatialMemory") {
+        result = addon.mirrorSpatialMemory(job.handle);
       } else if (job.op === "dispose") {
         result = { disposed: addon.mirrorDispose(job.handle) };
       } else {
@@ -105,7 +109,9 @@ function ensureWorker() {
     },
   });
   worker.unref();
+  const activeWorker = worker;
   worker.on("message", (message) => {
+    if (worker !== activeWorker) return;
     const entry = pending.get(message.id);
     if (!entry) return;
     pending.delete(message.id);
@@ -114,6 +120,7 @@ function ensureWorker() {
     else entry.reject(new Error(`pathfinder-rs worker: ${message.error}`));
   });
   worker.on("error", (error) => {
+    if (worker !== activeWorker) return;
     for (const [, entry] of pending) entry.reject(error);
     pending.clear();
     worker = null;
@@ -121,7 +128,7 @@ function ensureWorker() {
   });
   // Windows 树杀等外部 terminate 时 exit 可能先于 error——同样清账。
   worker.on("exit", (code) => {
-    if (worker === null) return;
+    if (worker !== activeWorker) return;
     worker = null;
     mirrorSessionsAlive = 0;
     const failure = new Error(`pathfinder-rs worker exited (code=${code})`);
@@ -157,7 +164,13 @@ function mirrorJob(op, payload, transferList) {
   const id = ++jobId;
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
-    ensureWorker().postMessage({ id, kind: "mirror", op, ...payload }, transferList ?? []);
+    try {
+      ensureWorker().postMessage({ id, kind: "mirror", op, ...payload }, transferList ?? []);
+    } catch (error) {
+      pending.delete(id);
+      if (pending.size === 0) scheduleIdleTerminate();
+      reject(error);
+    }
   });
 }
 
@@ -185,6 +198,15 @@ function mirrorDispose(handle) {
     if (result.disposed && mirrorSessionsAlive > 0) mirrorSessionsAlive -= 1;
     return result.disposed;
   });
+}
+
+function mirrorSpatialQuery(handle, query) {
+  if (pending.size >= 64) return Promise.reject(new Error("pathfinder-rs query queue capacity exceeded"));
+  return mirrorJob("spatialQuery", { handle, query });
+}
+
+function mirrorSpatialMemory(handle) {
+  return mirrorJob("spatialMemory", { handle });
 }
 
 /** 同步直调（测试/基准用；生产路径必须走 findPathAsync）。 */
@@ -231,4 +253,6 @@ module.exports = {
   mirrorHealth,
   mirrorDispose,
   mirrorAliveSessions,
+  mirrorSpatialQuery,
+  mirrorSpatialMemory,
 };

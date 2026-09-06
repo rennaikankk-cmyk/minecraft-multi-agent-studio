@@ -11,6 +11,11 @@
 mod astar;
 #[cfg(not(test))]
 pub mod mirror_napi;
+#[cfg(test)]
+mod spatial_allocation_probe;
+pub mod spatial_index;
+#[cfg(not(test))]
+mod spatial_napi;
 pub mod world_mirror;
 pub mod world_mirror_protocol;
 

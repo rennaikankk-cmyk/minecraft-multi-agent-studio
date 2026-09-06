@@ -117,6 +117,7 @@ export function mirrorTransport() {
     mirrorSubmitControl: adapter.mirrorSubmitControl.bind(adapter),
     mirrorHealth: adapter.mirrorHealth.bind(adapter),
     mirrorDispose: adapter.mirrorDispose.bind(adapter),
+    mirrorSpatialQuery: adapter.mirrorSpatialQuery.bind(adapter),
   };
 }
 
