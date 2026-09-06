@@ -650,6 +650,16 @@ export class SingleBotRuntime {
     return this.progressWatchdog.snapshot();
   }
 
+  getCombatEndToEndProbe() {
+    return this.combatReflexProbeSource?.endToEndReport?.() ?? {
+      samples: 0,
+      p95ThreatToDecisionMs: null,
+      p95DecisionToPacketMs: null,
+      p95PacketToServerMs: null,
+      p95TotalMs: null,
+    };
+  }
+
   /**
    * Round 7 兼容层信号快照（本地控制面读取；与 getSafetyStatus 同级）。
    * 协议 bot.status.v1 是 strict schema——把该快照挂上线上状态需要先扩
@@ -2657,7 +2667,14 @@ export class SingleBotRuntime {
       if (pursuitTargetId !== undefined && "targetEntityId" in action && action.targetEntityId !== pursuitTargetId) {
         return Promise.resolve({ outcome: "failed" as const, reasonCode: "COMBAT_TARGET_CHANGED" });
       }
-      return activeClient.executeCombatAction!(action, actionSignal);
+      const probeTaskId = this.combatReaction?.taskId ?? "combat-control";
+      const decisionAtMs = this.now().getTime();
+      this.combatReflexProbeSource?.recordDecision?.(probeTaskId, decisionAtMs);
+      this.combatReflexProbeSource?.recordPacketDispatch?.(probeTaskId, decisionAtMs);
+      return activeClient.executeCombatAction!(action, actionSignal).then((ack) => {
+        this.combatReflexProbeSource?.recordServerConfirmation?.(probeTaskId, this.now().getTime());
+        return ack;
+      });
     };
     return retaliation
       ? this.combatDriver!.retaliate(
@@ -2865,6 +2882,7 @@ export class SingleBotRuntime {
     this.tacticsShadowLastStepMonotonicMs = null;
 
     const taskId = `combat-reaction-${this.randomId()}`;
+    this.combatReflexProbeSource?.recordThreatEvent?.(taskId, this.now().getTime());
     const task: RuntimeCurrentTask = {
       taskId,
       title: trigger === "damage" ? "战斗反应: 受到攻击" : "主动交战: 发现敌对玩家",

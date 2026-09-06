@@ -1265,7 +1265,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
       if (goal.productionFacilityId) {
         const leaseAuthority = this.options.facilityLeaseAuthority;
         if (leaseAuthority) {
-          const lease = leaseAuthority.acquire({ facilityId: goal.productionFacilityId, ownerId: taskId, ttlMs: Math.min(15 * 60_000, this.options.goalTimeoutMs + 60_000) }, validDate(this.now()).getTime());
+          const lease = await leaseAuthority.acquire({ facilityId: goal.productionFacilityId, ownerId: taskId, ttlMs: Math.min(15 * 60_000, this.options.goalTimeoutMs + 60_000) }, validDate(this.now()).getTime());
           if (!lease) throw new LocalPlannerError("FACILITY_RUN_LEASE_BUSY", "Facility is leased by another Coordinator task.");
           this.facilityLeases.set(taskId, lease);
         }
@@ -1367,7 +1367,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
       }
       const lease = this.facilityLeases.get(taskId);
       if (lease) {
-        this.options.facilityLeaseAuthority?.release(lease, validDate(this.now()).getTime());
+        await this.options.facilityLeaseAuthority?.release(lease, validDate(this.now()).getTime());
         this.facilityLeases.delete(taskId);
       }
     }

@@ -45,9 +45,13 @@ export {
   compositeStatusSchema,
   compositeTaskSchema,
   advanceCompositeTask,
+  InMemoryCompositeTaskStore,
+  PostgresCompositeTaskStore,
   type CompositeKind,
   type CompositeStatus,
   type CompositeTask,
+  type CompositeTaskQuery,
+  type CompositeTaskStore,
 } from "./composite-task.js";
 export {
   MAX_EXPIRED_LEASE_BATCH_SIZE,

@@ -53,4 +53,19 @@ describe("CombatReactionLoopProbe", () => {
       denial: "LOAD_NOT_REPRESENTATIVE",
     });
   });
+
+  it("records threat to packet dispatch to server confirmation timings", () => {
+    const probe = new CombatReactionLoopProbe();
+    probe.recordThreatEvent("reaction-1", 100);
+    probe.recordDecision("reaction-1", 108);
+    probe.recordPacketDispatch("reaction-1", 110);
+    probe.recordServerConfirmation("reaction-1", 145);
+    expect(probe.endToEndReport()).toEqual({
+      samples: 1,
+      p95ThreatToDecisionMs: 8,
+      p95DecisionToPacketMs: 2,
+      p95PacketToServerMs: 35,
+      p95TotalMs: 45,
+    });
+  });
 });

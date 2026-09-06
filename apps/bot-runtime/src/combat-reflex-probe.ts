@@ -28,11 +28,26 @@ const MAX_PROBE_SAMPLES = 2_048;
 export type CombatReflexProbeSource = Readonly<{
   report(serverProfileId: string): CombatReflexProbeReport | null;
   recordStepDurationMs(elapsedMs: number): void;
+  recordThreatEvent?(taskId: string, atMs: number): void;
+  recordDecision?(taskId: string, atMs: number): void;
+  recordPacketDispatch?(taskId: string, atMs: number): void;
+  recordServerConfirmation?(taskId: string, atMs: number): void;
+  endToEndReport?(): CombatEndToEndReport;
+}>;
+
+export type CombatEndToEndReport = Readonly<{
+  samples: number;
+  p95ThreatToDecisionMs: number | null;
+  p95DecisionToPacketMs: number | null;
+  p95PacketToServerMs: number | null;
+  p95TotalMs: number | null;
 }>;
 
 export class CombatReactionLoopProbe implements CombatReflexProbeSource {
   private readonly samples: number[] = [];
   private readonly maxSamples: number;
+  private readonly pending = new Map<string, { threat?: number; decision?: number; packet?: number }>();
+  private readonly endToEndSamples: Array<{ threatToDecision: number; decisionToPacket: number; packetToServer: number; total: number }> = [];
 
   constructor(options: Readonly<{ maxSamples?: number }> = {}) {
     this.maxSamples = options.maxSamples ?? MAX_PROBE_SAMPLES;
@@ -71,5 +86,50 @@ export class CombatReactionLoopProbe implements CombatReflexProbeSource {
 
   get sampleCount(): number {
     return this.samples.length;
+  }
+
+  recordThreatEvent(taskId: string, atMs: number): void {
+    if (taskId.trim() && Number.isFinite(atMs)) this.pending.set(taskId, { threat: atMs });
+  }
+
+  recordDecision(taskId: string, atMs: number): void {
+    const current = this.pending.get(taskId);
+    if (current && Number.isFinite(atMs)) current.decision = atMs;
+  }
+
+  recordPacketDispatch(taskId: string, atMs: number): void {
+    const current = this.pending.get(taskId);
+    if (current && Number.isFinite(atMs)) current.packet = atMs;
+  }
+
+  recordServerConfirmation(taskId: string, atMs: number): void {
+    const current = this.pending.get(taskId);
+    if (!current || current.threat === undefined || current.decision === undefined || current.packet === undefined || !Number.isFinite(atMs)) return;
+    const sample = {
+      threatToDecision: current.decision - current.threat,
+      decisionToPacket: current.packet - current.decision,
+      packetToServer: atMs - current.packet,
+      total: atMs - current.threat,
+    };
+    if (Object.values(sample).every((value) => value >= 0 && Number.isFinite(value))) {
+      this.endToEndSamples.push(sample);
+      while (this.endToEndSamples.length > this.maxSamples) this.endToEndSamples.shift();
+    }
+    this.pending.delete(taskId);
+  }
+
+  endToEndReport(): CombatEndToEndReport {
+    const percentile = (key: keyof (typeof this.endToEndSamples)[number]): number | null => {
+      if (this.endToEndSamples.length === 0) return null;
+      const values = this.endToEndSamples.map((sample) => sample[key]).sort((a, b) => a - b);
+      return values[Math.min(values.length - 1, Math.ceil(values.length * 0.95) - 1)] ?? null;
+    };
+    return {
+      samples: this.endToEndSamples.length,
+      p95ThreatToDecisionMs: percentile("threatToDecision"),
+      p95DecisionToPacketMs: percentile("decisionToPacket"),
+      p95PacketToServerMs: percentile("packetToServer"),
+      p95TotalMs: percentile("total"),
+    };
   }
 }

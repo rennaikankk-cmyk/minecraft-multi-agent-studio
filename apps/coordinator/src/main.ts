@@ -39,7 +39,7 @@ import {
 } from "./control-link-config.js";
 import { ControlLinkServer } from "./control-link-server.js";
 import { SharedStateServer, loadSharedStateConfig } from "./shared-state-server.js";
-import { InMemoryWorkstationRegistry, BaseRegistry, FacilityRegistry, DurableStateStore,
+import { InMemoryWorkstationRegistry, BaseRegistry, FacilityRegistry, DurableStateStore, PostgresFacilityLeaseAuthority,
   durableSnapshotFrom, registriesFromDurableSnapshot } from "@minecraft-studio/skills";
 import {
   RuntimeLinkConfigError,
@@ -170,6 +170,17 @@ async function main(): Promise<void> {
   let aiRouter: AIRouter | null = null;
   let localPlanner: CoordinatorLocalPlanner | undefined;
   let taskPool: PgTaskPoolAdapter | null = null;
+  const facilityLeaseAuthority = goalPersistenceConfig
+    ? new PostgresFacilityLeaseAuthority(async (queryText, values) => {
+        if (!taskPool) throw new Error("facility lease store is not initialized");
+        const client = await taskPool.connect();
+        try {
+          return await client.query(queryText, values);
+        } finally {
+          client.release();
+        }
+      })
+    : undefined;
   let taskRepository: PostgresTaskRepository | null = null;
   const memoryGoalStore =
     !goalPersistenceConfig && localMemoryMode
@@ -349,6 +360,7 @@ async function main(): Promise<void> {
       failureCooldownMs: autonomousConfig.failureCooldownMs,
       terminalRetentionMs: autonomousConfig.terminalRetentionMs,
       logger,
+      ...(facilityLeaseAuthority ? { facilityLeaseAuthority } : {}),
       // 配置了 Local AI 时把调度路由交给重规划神谕；确定性模式不注入，
       // 神谕路径完全不激活。预算来自已装配的 localAIConfig。
       // 选址评审（site-verdict）与 replan 共用同一 router/scheduler——
