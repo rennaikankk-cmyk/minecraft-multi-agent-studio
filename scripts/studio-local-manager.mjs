@@ -3,6 +3,7 @@ import { createWriteStream, existsSync, readFileSync } from "node:fs";
 import {
   mkdir,
   readFile,
+  readdir,
   rename,
   rm,
   writeFile,
@@ -17,6 +18,7 @@ import {
   resolveCompatibilityMode,
 } from "../packages/skills/dist/compat/index.js";
 import { buildZip } from "./zip-writer.mjs";
+import { buildDiagnosticBundle, diagnosticLogPath } from "./diagnostic-export.mjs";
 import { resolveManagedGameIdentity, managedCredentialEnvNames } from "./lib/managed-game-identity.mjs";
 import {
   observeLocalTestServer,
@@ -479,6 +481,10 @@ export class StudioLocalManager {
         await this.handleIncidentExport(request, response, url);
         return;
       }
+      if (request.method === "GET" && url.pathname === "/v1/diagnostics/export") {
+        await this.handleDiagnosticExport(response, url);
+        return;
+      }
       if (request.method === "GET" && url.pathname === "/v1/incidents") {
         await this.handleIncidentList(request, response, url);
         return;
@@ -852,6 +858,21 @@ export class StudioLocalManager {
    * 单 Incident：format=json|markdown|zip|repair-prompt
    * 批量：scope=open|last24h|bot:<botId>|skill:<skillId>|selected:<INC-...,INC-...>
    */
+  async handleDiagnosticExport(response, url) {
+    const to = url.searchParams.get("to") ?? new Date().toISOString();
+    const from = url.searchParams.get("from") ?? new Date(Date.parse(to) - 86_400_000).toISOString();
+    const ids = (url.searchParams.get("botIds") ?? "").split(",").map((v) => v.trim()).filter(Boolean);
+    if (ids.some((id) => !BOT_ID_PATTERN.test(id))) { this.writeError(response, 400, "INVALID_BOT_FILTER", "Bot 筛选无效。"); return; }
+    const selected = ids.length ? ids : [...this.configs.keys()];
+    const logFiles = selected.map((id) => ({ name: `bot-${id}.log`, path: diagnosticLogPath(this.logRoot, id) })).filter((f) => existsSync(f.path));
+    try {
+      const result = await buildDiagnosticBundle({ from, to, botIds: ids, logFiles, incidents: this.incidents,
+        commit: GIT_METADATA.commit, redactSecrets, redactText: safeExportText });
+      response.statusCode = 200; response.setHeader("Content-Type", "application/zip");
+      response.setHeader("Content-Disposition", `attachment; filename="bot-diagnostics-${new Date().toISOString().replace(/[:.]/gu, "-")}.zip"`); response.end(result.zip);
+    } catch (error) { this.writeError(response, 400, error instanceof Error ? error.message : "DIAGNOSTIC_EXPORT_FAILED", "诊断包生成失败。"); }
+  }
+
   async handleIncidentExport(request, response, url, singleIncidentId = null) {
     void request;
     const format = url.searchParams.get("format") ?? "json";
