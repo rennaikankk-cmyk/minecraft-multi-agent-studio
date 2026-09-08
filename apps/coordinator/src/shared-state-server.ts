@@ -223,6 +223,11 @@ export class SharedStateServer {
       }
     }
     const host = this.options.host ?? "127.0.0.1";
+    // An unauthenticated shared-state endpoint is safe only on loopback. A
+    // typo such as 0.0.0.0 must fail closed before binding /rpc and snapshot
+    // mutation routes to the network.
+    const loopback = host === "127.0.0.1" || host === "::1" || host === "localhost";
+    if (!loopback && !this.token) throw new Error("SHARED_STATE_AUTH_REQUIRED");
     const port = this.options.port ?? 0;
     await new Promise<void>((resolve, reject) => {
       const onError = (error: Error) => reject(error);

@@ -217,6 +217,14 @@ describe("loadSharedStateConfig", () => {
   });
 });
 
+describe("SharedStateServer network binding", () => {
+  it("fails closed when a non-loopback host has no bearer token", async () => {
+    const server = new SharedStateServer({ host: "0.0.0.0", port: 0 });
+    await expect(server.start()).rejects.toThrow("SHARED_STATE_AUTH_REQUIRED");
+    await server.stop();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Phase 6：durable persistence —— coordinator 重启后记得 Base/Facility/Workstation，
 // 丢弃 lease/reservation（ephemeral）。这是四十三节 restart gate 的持久化前提。

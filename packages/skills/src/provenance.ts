@@ -92,6 +92,12 @@ export function authorizeHarvest(input: {
     }
     return { allowed: true, reason: "unprotected" };
   }
+  // A record with unknown ownership inside our base is still untrusted. Do
+  // not let a partially migrated/under-specified record bypass the same
+  // fail-closed boundary as an absent record.
+  if (input.nearOwnBase && input.record.owner === "unknown") {
+    return { allowed: false, reason: "unknown owner near own base (fail-closed)", code: "HARVEST_UNKNOWN_NEAR_BASE" };
+  }
   if (input.explicitSalvageAuthorized) {
     return { allowed: true, reason: "authorized_salvage" };
   }
@@ -240,7 +246,14 @@ export class ProvenanceStore {
     const key = ProvenanceStore.key(entry.position, entry.dimension);
     const existing = this.records.get(key);
     if (existing !== undefined) {
+      // Provenance identity is immutable after first observation. A generic
+      // asset writer may enrich purpose/facility metadata, but cannot relabel
+      // an own/team asset as external (or vice versa) to evade protection.
+      if (this.strictPersistence && (existing.source !== entry.source || existing.owner !== entry.owner)) {
+        throw new Error("PROVENANCE_IDENTITY_IMMUTABLE");
+      }
       const updated: ProvenanceRecord = { ...existing, ...entry, recordId: existing.recordId, recordedAtMs: existing.recordedAtMs };
+      if (existing.serverVerified && !entry.serverVerified) updated.serverVerified = true;
       this.records.set(key, updated);
       this.persistToDisk();
       return updated;
