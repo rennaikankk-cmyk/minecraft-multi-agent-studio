@@ -1,6 +1,8 @@
 import { createBot, type Bot } from "mineflayer";
 import { setTimeout as processDelay, setImmediate as processYield } from "node:timers/promises";
 import { randomUUID } from "node:crypto";
+import { residenceCheckInputSchema } from "@minecraft-studio/base-management";
+import { checkResidence } from "./residence-adapter.js";
 import { ActiveWorkstationLease } from "./workstation-lease.js";
 import { attachPlayerLoaded } from "./player-loaded.js";
 import { withWorkAreaLease } from "./work-area-lease.js";
@@ -31,75 +33,8 @@ import type {
   L0SafetyAction,
   L0SafetyActionResult,
 } from "@minecraft-studio/safety";
-import {
-  armorEquipCapabilityInputSchema,
-  armorEquipCapabilityOutputSchema,
-  armorSnapshotCapabilityInputSchema,
-  armorSnapshotCapabilityOutputSchema,
-  ACTION_FAMILIES,
-  collectBlockCapabilityInputSchema,
-  collectBlockCapabilityOutputSchema,
-  containerTransferCapabilityInputSchema,
-  containerTransferCapabilityOutputSchema,
-  craftItemCapabilityInputSchema,
-  craftItemCapabilityOutputSchema,
-  inventorySnapshotCapabilityInputSchema,
-  inventorySnapshotCapabilityOutputSchema,
-  placeBlockCapabilityInputSchema,
-  placeBlockCapabilityOutputSchema,
-  smeltItemCapabilityInputSchema,
-  smeltItemCapabilityOutputSchema,
-  MOVEMENT_PRIORITIES,
-  MovementController,
-  ServerBehaviorObserver,
-  authorizeHarvest,
-  farmMaintainInputSchema, farmMaintainOutputSchema, farmSustainInputSchema, farmSustainOutputSchema, foodFarmLayout, foodFarmMaintenance, cropRules, withinWorkArea,
-  navigationGoalInputSchema, navigationGoalOutputSchema, followEntityInputSchema, followEntityOutputSchema,
-  getToBlockInputSchema, getToBlockOutputSchema, exploreInputSchema, exploreOutputSchema,
-  clearAreaInputSchema, clearAreaOutputSchema, workScopeSchema,
-  elytraInputSchema, elytraOutputSchema,
-  type WorkPosition, type WorkArea,
-  type MovementLease,
-  SAFE_PATH_MAX_DISTANCE,
-  SkillFault,
-  SkillRefusal,
-  ActionLockError,
-  ActionLockManager,
-  type ActionLockKind,
-  resolveMovementProfile,
-  type ServerPolicyLimits,
-  safeMovementGotoCapabilityInputSchema,
-  safeMovementGotoCapabilityOutputSchema,
-  travelRouteCapabilityInputSchema,
-  tradeVillagerCapabilityInputSchema,
-  tradeVillagerCapabilityOutputSchema,
-  ALL_EDIBLE_ITEMS,
-  scanBlocksCapabilityInputSchema,
-  scanBlocksCapabilityOutputSchema,
-  secureFoodCapabilityInputSchema,
-  secureFoodCapabilityOutputSchema,
-  siteObserveCapabilityInputSchema,
-  siteObserveCapabilityOutputSchema,
-  shelterDigCapabilityInputSchema,
-  shelterDigCapabilityOutputSchema,
-  mineBranchCapabilityInputSchema,
-  mineBranchCapabilityOutputSchema,
-  mineVeinCapabilityInputSchema,
-  mineVeinCapabilityOutputSchema,
-  buildBlueprintCapabilityInputSchema,
-  buildBlueprintCapabilityOutputSchema,
-  blueprintSchema,
-  blueprintWorksetObservationSchema,
-  orderBlueprintCells,
-  SharedStateClient,
-  type MaybeAsyncWorkstationRegistryPort,
-  type WorkstationType,
-  type BehaviorSignalEvent,
-  type FamilyWindowStats,
-  type SkillCapabilityRequest,
-  type SkillCompatibilityEnvironment,
-  type SkillResourceKind,
-} from "@minecraft-studio/skills";
+import { armorEquipCapabilityInputSchema, armorEquipCapabilityOutputSchema, armorSnapshotCapabilityInputSchema, armorSnapshotCapabilityOutputSchema, ACTION_FAMILIES, collectBlockCapabilityInputSchema, collectBlockCapabilityOutputSchema, containerTransferCapabilityInputSchema, containerTransferCapabilityOutputSchema, craftItemCapabilityInputSchema, craftItemCapabilityOutputSchema, inventorySnapshotCapabilityInputSchema, inventorySnapshotCapabilityOutputSchema, placeBlockCapabilityInputSchema, placeBlockCapabilityOutputSchema, smeltItemCapabilityInputSchema, smeltItemCapabilityOutputSchema, MOVEMENT_PRIORITIES, MovementController, ServerBehaviorObserver, farmMaintainInputSchema, farmMaintainOutputSchema, farmSustainInputSchema, farmSustainOutputSchema, foodFarmLayout, foodFarmMaintenance, cropRules, navigationGoalInputSchema, navigationGoalOutputSchema, followEntityInputSchema, followEntityOutputSchema, getToBlockInputSchema, getToBlockOutputSchema, exploreInputSchema, exploreOutputSchema, clearAreaInputSchema, clearAreaOutputSchema, elytraInputSchema, elytraOutputSchema, type MovementLease, SAFE_PATH_MAX_DISTANCE, SkillFault, SkillRefusal, ActionLockError, ActionLockManager, type ActionLockKind, resolveMovementProfile, type ServerPolicyLimits, safeMovementGotoCapabilityInputSchema, safeMovementGotoCapabilityOutputSchema, travelRouteCapabilityInputSchema, tradeVillagerCapabilityInputSchema, tradeVillagerCapabilityOutputSchema, ALL_EDIBLE_ITEMS, scanBlocksCapabilityInputSchema, scanBlocksCapabilityOutputSchema, secureFoodCapabilityInputSchema, secureFoodCapabilityOutputSchema, siteObserveCapabilityInputSchema, siteObserveCapabilityOutputSchema, shelterDigCapabilityInputSchema, shelterDigCapabilityOutputSchema, mineBranchCapabilityInputSchema, mineBranchCapabilityOutputSchema, mineVeinCapabilityInputSchema, mineVeinCapabilityOutputSchema, buildBlueprintCapabilityInputSchema, buildBlueprintCapabilityOutputSchema, blueprintSchema, blueprintWorksetObservationSchema, orderBlueprintCells, SharedStateClient, type MaybeAsyncWorkstationRegistryPort, type BehaviorSignalEvent, type FamilyWindowStats, type SkillCapabilityRequest, type SkillCompatibilityEnvironment, type SkillResourceKind } from '@minecraft-studio/skills';
+import { authorizeHarvest, withinWorkArea, workScopeSchema, type WorkPosition, type WorkArea, type WorkstationType } from '@minecraft-studio/asset-policy';
 import type {
   CombatActionAcknowledgement,
   CombatDriverObservation,
@@ -134,6 +69,8 @@ import {
   type NoHungerController,
 } from "./no-hunger.js";
 import type { ServerProfile } from "./server-profile.js";
+import { protocolChatMessage } from "./trusted-chat.js";
+import { MachineProtection } from "./machine-protection.js";
 import {
   WorldStateStore,
   type EntityState,
@@ -1251,6 +1188,7 @@ export class MineflayerBotClient implements BotClient {
   private spawnEscape: AbortController | null = null;
   /** World effects share one scoped wrapper for the lifetime of the action lock. */
   private worldActionsWrapped = false;
+  private machineProtection: MachineProtection | null = null;
   private worldActionController: AbortController | undefined;
   private activeWorkAreaLeaseId: string | undefined;
   private placementPurpose: "farm" | undefined;
@@ -1424,6 +1362,13 @@ export class MineflayerBotClient implements BotClient {
         ? Number(bot.health)
         : null;
       this.bindInventoryEvents();
+      if (this.personalIdentity && this.serverProfileId && !this.machineProtection) {
+        this.machineProtection = new MachineProtection(bot, this.worldOperations.assets, () => ({
+          serverProfileId: this.serverProfileId!, worldId: this.personalIdentity?.worldId ?? null,
+          dimension: normalizeDimension(String(bot.game.dimension)), subject: this.personalIdentity!.botId,
+        }));
+        this.machineProtection.install();
+      }
       // WorldMirror 通道 boot（registry 就绪后一次性创建；重复 spawn 幂等）。
       this.bootWorldSync();
       // 服务器注册/登录自动认证（AuthMe 等）——全自动，不需要人配任何东西。
@@ -1463,15 +1408,11 @@ export class MineflayerBotClient implements BotClient {
           }
         },
       );
-      if (!this.chatBound) {
+      if (!this.chatBound && bot._client && typeof bot._client.on === "function") {
         this.chatBound = true;
-        // 只上报玩家聊天（第二参为玩家名时）；服务器广播/系统消息不进指挥通道。
-        bot.on("chat", (_username: string, message: string) => {
-          if (typeof message !== "string" || message.length === 0) return;
-          this.handlers?.onChat?.({
-            speaker: _username,
-            message: message.slice(0, 512),
-          });
+        bot._client.on("playerChat", (packet: unknown) => {
+          const chat = protocolChatMessage(packet, Object.values(bot.players));
+          if (chat) this.handlers?.onChat?.(chat);
         });
       }
       this.handlers?.onSpawn();
@@ -2252,6 +2193,23 @@ export class MineflayerBotClient implements BotClient {
     if (!this.serverProfileId) {
       throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE");
     }
+    if (request.capability === "world.interact" && request.operation === "base.residence-check") {
+      const input = this.processInput(residenceCheckInputSchema, request.input);
+      if (!this.personalIdentity || input.site.scope.botId !== this.personalIdentity.botId ||
+          input.site.scope.worldId !== this.personalIdentity.worldId) throw new SkillFault("RESIDENCE_IDENTITY_MISMATCH");
+      return this.withActionLocks(request, ["inventory"], () => this.withProcessNavigation(request, input.site.scope,
+        async (port) => checkResidence(input, {
+          bot: this.bot, runtimeInstanceId: this.workstationRuntimeId, signal: this.activeProcessSignal!,
+          assertActive: port.assertActive,
+          approach: async (p) => { await port.goto(new goals.GoalNear(p.x, p.y, p.z, 2)); },
+          authorize: async (action, p, observedBlock) => {
+            if (!this.machineProtection) throw new SkillFault("ASSET_POLICY_UNAVAILABLE");
+            await this.machineProtection.refresh();
+            port.assertActive();
+            this.machineProtection.assert(action, p, { observedBlock, impactRadius: action === "place" ? 1 : 0 });
+          },
+        })));
+    }
     if (request.capability === "world.interact" && ["farm.maintain-safe", "farm.sustain-safe"].includes(request.operation)) {
       const sustain = request.operation === "farm.sustain-safe" ? this.processInput(farmSustainInputSchema, request.input) : null;
       const input = sustain ? foodFarmMaintenance(sustain) : this.processInput(farmMaintainInputSchema, request.input);
@@ -2291,6 +2249,7 @@ export class MineflayerBotClient implements BotClient {
                 if (!block || !(block.name in cropRules)) throw new SkillFault("FARM_READBACK_MISMATCH");
                 if (!observation.record) await this.worldOperations.assets.record({
                   serverProfileId: input.area.serverProfileId, dimension: input.area.dimension, position,
+                  worldId: this.personalIdentity?.worldId ?? null,
                   source: "natural", owner: "none", purpose: "farm", serverVerified: true, leaseId: this.activeWorkAreaLeaseId });
                 this.grantSalvage([{ position, dimension: input.area.dimension }], 5_000);
               }
@@ -2616,7 +2575,7 @@ export class MineflayerBotClient implements BotClient {
   private async withAreaProcess<T>(request: SkillCapabilityRequest, area: WorkArea,
     work: (port: NavigationProcessPort, assertEffect: () => Promise<void>) => Promise<T>): Promise<T> {
     this.assertServerProfileMatch(area.serverProfileId); this.assertDimensionMatch(area.dimension);
-    return withWorkAreaLease(this.worldOperations.workAreas, area, `${this.workstationRuntimeId}:${request.taskId}:${request.invocationId}`,
+    return withWorkAreaLease(this.worldOperations.workAreas, { ...area, worldId: this.personalIdentity?.worldId ?? null }, `${this.workstationRuntimeId}:${request.taskId}:${request.invocationId}`,
       request.signal, async (leaseId, signal, assertEffect) => {
         return this.withProcessNavigation({ ...request, signal }, area, async (port) => {
           this.activeWorkAreaLeaseId = leaseId;
@@ -3880,6 +3839,7 @@ export class MineflayerBotClient implements BotClient {
                   // 服务器确认破坏：清除 provenance（含过期的 salvage grant）。
                   this.salvageGrants.delete(grantKey);
                   await this.worldOperations.assets.remove({ serverProfileId: this.serverProfileId!, dimension,
+                    worldId: this.personalIdentity?.worldId ?? null,
                     position: { x: block.position.x, y: block.position.y, z: block.position.z },
                     ...(leaseId ? { leaseId } : {}) });
                   return;
@@ -3942,6 +3902,7 @@ export class MineflayerBotClient implements BotClient {
         if (!observation.workAllowed) throw new SkillFault("WORK_AREA_BUSY");
         const entry = {
           serverProfileId: this.serverProfileId!,
+          worldId: this.personalIdentity?.worldId ?? null,
           dimension,
           position: target, source: "bot_placed" as const, owner: "own_team" as const,
           purpose: observation.record?.purpose ?? purpose,
@@ -3976,6 +3937,7 @@ export class MineflayerBotClient implements BotClient {
     if (!this.serverProfileId) throw new SkillFault("TARGET_SERVER_PROFILE_MISMATCH");
     try {
       return await this.worldOperations.assets.observe({ serverProfileId: this.serverProfileId,
+        worldId: this.personalIdentity?.worldId ?? null,
         dimension: normalizeDimension(String(this.bot.game.dimension)),
         position: { x: position.x, y: position.y, z: position.z },
         ...(leaseId ? { leaseId } : {}) });
@@ -6291,6 +6253,8 @@ export class MineflayerBotClient implements BotClient {
   }
 
   async close(gracePeriodMs: number): Promise<void> {
+    this.machineProtection?.stop();
+    this.machineProtection = null;
     if (this.requestedStop) return;
     this.requestedStop = true;
     this.interruptNormalActions();

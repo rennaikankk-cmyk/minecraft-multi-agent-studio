@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { skillJsonValueSchema } from "@minecraft-studio/protocol";
 import { defineSkill } from "./types.js";
 import { farmMaintainInputSchema, farmMaintainOutputSchema } from "./farm-maintenance.js";
 import { workAreaSchema, workPositionSchema, workScopeSchema, withinWorkArea, type WorkPosition } from "./work-area.js";
@@ -72,5 +73,5 @@ export const farmSustainSkill = defineSkill({
     { id: "target.server-profile-matches", failureCode: "TARGET_SERVER_PROFILE_MISMATCH", check: (i, s) => i.serverProfileId === s.serverProfileId },
     { id: "target.dimension-matches", failureCode: "TARGET_DIMENSION_MISMATCH", check: (i, s) => i.dimension === s.position?.dimension },
   ],
-  execute: async (context, input) => farmSustainOutputSchema.parse(await context.callCapability("world.interact", "farm.sustain-safe", input)),
+  execute: async (context, input) => farmSustainOutputSchema.parse(await context.callCapability("world.interact", "farm.sustain-safe", skillJsonValueSchema.parse(input))),
 });

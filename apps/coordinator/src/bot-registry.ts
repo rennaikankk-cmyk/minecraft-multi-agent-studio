@@ -1,6 +1,9 @@
 import {
   parseBotStopResult,
   parseBotTelemetryMessage,
+  verifyChatIdentity,
+  type ChatIdentityPolicy,
+  type ChatIdentityEvidence,
   type BotDisconnectedV1,
   type BotSkillCatalogV1,
   type BotStatusV1,
@@ -44,7 +47,8 @@ export type TelemetryIgnoreReason =
   | "duplicate_sequence"
   | "out_of_order"
   | "retired_runtime"
-  | "older_runtime_start";
+  | "older_runtime_start"
+  | "untrusted_chat";
 
 export type TelemetryIngestResult = Readonly<{
   accepted: boolean;
@@ -56,6 +60,9 @@ export type BotRegistryChatEvent = Readonly<{
   kind: "chat";
   speaker: string;
   message: string;
+  messageId: string;
+  timestamp: string;
+  identity: ChatIdentityEvidence;
 }>;
 
 export type BotRegistryListener = (
@@ -152,6 +159,7 @@ export type BotRegistryOptions = Readonly<{
   maxRetiredRuntimeIds?: number;
   now?: () => Date;
   personalMemory?: PersonalMemoryStore;
+  chatTrustPolicies?: readonly ChatIdentityPolicy[];
 }>;
 
 export class BotRegistry {
@@ -226,7 +234,27 @@ export class BotRegistry {
           record: this.fallbackRecord(message.botId, message, receivedMs),
         };
       }
-      this.notifyChat(chatRecord, message.payload.speaker, message.payload.message);
+      if (this.seenMessageIds.has(message.messageId)) {
+        return { accepted: false, reason: "duplicate_message", record: snapshot(chatRecord) };
+      }
+      if (chatRecord.runtimeInstanceId !== message.payload.runtimeInstanceId) {
+        return { accepted: false, reason: "retired_runtime", record: snapshot(chatRecord) };
+      }
+      const identity = message.payload.identity;
+      const policy = this.options.chatTrustPolicies?.find((p) =>
+        p.serverProfileId === chatRecord.serverProfileId && p.worldId === (chatRecord.currentStatus?.personalContext?.worldId ?? null)) ?? null;
+      if (message.payload.serverProfileId !== chatRecord.serverProfileId ||
+          chatRecord.connectionState !== "online" || !identity ||
+          identity.dimension !== chatRecord.currentStatus?.position.dimension ||
+          identity.worldId !== (chatRecord.currentStatus?.personalContext?.worldId ?? null) ||
+          receivedMs - chatEnvelopeMs > this.maxClockSkewMs ||
+          !verifyChatIdentity({ serverProfileId: chatRecord.serverProfileId,
+            speaker: message.payload.speaker, evidence: identity, policy })) {
+        return { accepted: false, reason: "untrusted_chat", record: snapshot(chatRecord) };
+      }
+      this.rememberMessageId(message.messageId);
+      this.notifyChat(chatRecord, { kind: "chat", speaker: message.payload.speaker,
+        message: message.payload.message, messageId: message.messageId, timestamp: message.timestamp, identity });
       return { accepted: true, reason: "accepted", record: snapshot(chatRecord) };
     }
 
@@ -578,12 +606,11 @@ export class BotRegistry {
 
   private notifyChat(
     record: InternalRecord,
-    speaker: string,
-    message: string,
+    event: BotRegistryChatEvent,
   ): void {
     for (const listener of this.listeners) {
       try {
-        listener(snapshot(record), { kind: "chat", speaker, message });
+        listener(snapshot(record), event);
       } catch {
         // A presentation subscriber cannot break the authoritative registry.
       }

@@ -15,6 +15,7 @@
 
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import { assetPolicyRecordSchema, worldEffectRequestSchema, worldEffectDecisionSchema } from "@minecraft-studio/asset-policy";
 import { worldAssetQuerySchema, worldAssetWriteSchema, worldAssetObservationSchema, type WorldAssetPort, type WorldAssetAuthorityPort } from "./world-assets.js";
 import { provenanceRecordSchema } from "./provenance.js";
 import { WorkAreaLeaseAuthority, workAreaClaimSchema, workAreaProofSchema, workAreaLeaseSchema, type WorkAreaLeasePort } from "./work-area-lease.js";
@@ -115,6 +116,8 @@ export function createSharedStateDispatcher(
       "area.release": (a: Record<string, unknown>) => workAreas.release(workAreaProofSchema.parse(a)),
     } : {}),
     ...(assets ? {
+      "asset.protection": (a: Record<string, unknown>) => assets.protection?.(worldEffectRequestSchema.pick({ serverProfileId: true, worldId: true, dimension: true }).parse(a)),
+      "asset.authorize": (a: Record<string, unknown>) => assets.authorize?.(worldEffectRequestSchema.parse(a)),
       "asset.observe": (a: Record<string, unknown>) => assets.observe(worldAssetQuerySchema.parse(a)),
       "asset.record": (a: Record<string, unknown>) => assets.record(worldAssetWriteSchema.parse(a)),
       "asset.remove": (a: Record<string, unknown>) => assets.remove(worldAssetQuerySchema.parse(a)),
@@ -347,6 +350,8 @@ export class SharedStateClient {
       release: async (proof) => z.boolean().parse(await this.#rpc("area.release", workAreaProofSchema.parse(proof))),
     };
     this.assets = {
+      protection: async (scope) => z.array(assetPolicyRecordSchema).max(4096).parse(await this.#rpc("asset.protection", scope)),
+      authorize: async (request) => worldEffectDecisionSchema.parse(await this.#rpc("asset.authorize", request)),
       observe: async (query) => worldAssetObservationSchema.parse(await this.#rpc("asset.observe", query)),
       record: async (entry) => provenanceRecordSchema.parse(await this.#rpc("asset.record", entry)),
       remove: async (query) => z.boolean().parse(await this.#rpc("asset.remove", query)),

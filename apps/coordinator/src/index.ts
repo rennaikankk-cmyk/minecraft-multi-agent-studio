@@ -165,6 +165,9 @@ export {
   type AutonomousTaskView,
 } from "./autonomous-director.js";
 
+export { CoordinatorResourceService, type ResourceTaskPort, type ResourceServiceOptions, type ResourceRuntimePrincipal } from "./resource-service.js";
+export { InvitationChatRouter, type InvitationChatResult } from "./invitation-chat.js";
+
 export {
   MAX_LOCAL_PLANNER_PROMPT_BYTES,
   LOCAL_PLANNER_PROMPT_VERSION,

@@ -79,6 +79,12 @@ export type BotDamageInfo = Readonly<{
 export type BotChatMessage = Readonly<{
   speaker: string;
   message: string;
+  protocolIdentity?: Readonly<{
+    senderUuid: string;
+    playerListUsername: string;
+    signatureVerified: boolean;
+    channel: "public" | "private";
+  }>;
 }>;
 
 export type BotDeathInfo = Readonly<{

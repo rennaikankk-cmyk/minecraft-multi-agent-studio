@@ -1,7 +1,8 @@
 import { EventEmitter } from "node:events";
 
 import type { Bot } from "mineflayer";
-import { InMemoryWorkstationRegistry, type SkillCapabilityRequest } from "@minecraft-studio/skills";
+import { InMemoryWorkstationRegistry } from '@minecraft-studio/asset-policy';
+import { type SkillCapabilityRequest } from '@minecraft-studio/skills';
 import { Vec3 } from "vec3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 

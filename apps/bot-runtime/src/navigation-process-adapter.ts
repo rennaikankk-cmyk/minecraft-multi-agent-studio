@@ -2,8 +2,8 @@ import type { Bot } from "mineflayer";
 import pathfinderModule from "mineflayer-pathfinder";
 import { Vec3 } from "vec3";
 import { z } from "zod";
-import { SkillFault, navigationGoalInputSchema, followEntityInputSchema, getToBlockInputSchema, exploreInputSchema,
-  type WorkPosition } from "@minecraft-studio/skills";
+import { SkillFault, navigationGoalInputSchema, followEntityInputSchema, getToBlockInputSchema, exploreInputSchema } from '@minecraft-studio/skills';
+import { type WorkPosition } from '@minecraft-studio/asset-policy';
 
 const { goals } = pathfinderModule;
 type Goal = InstanceType<typeof goals.Goal>;

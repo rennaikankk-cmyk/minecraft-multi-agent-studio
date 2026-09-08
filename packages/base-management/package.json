@@ -1,0 +1,54 @@
+{
+  "name": "@minecraft-studio/base-management",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./blueprint-contracts": {
+      "types": "./src/blueprint-contracts.ts",
+      "import": "./dist/blueprint-contracts.js",
+      "default": "./dist/blueprint-contracts.js"
+    },
+    "./base-layout": {
+      "types": "./src/base-layout.ts",
+      "import": "./dist/base-layout.js",
+      "default": "./dist/base-layout.js"
+    },
+    "./base-registry": {
+      "types": "./src/base-registry.ts",
+      "import": "./dist/base-registry.js",
+      "default": "./dist/base-registry.js"
+    },
+    "./durable-state-store": {
+      "types": "./src/durable-state-store.ts",
+      "import": "./dist/durable-state-store.js",
+      "default": "./dist/durable-state-store.js"
+    },
+    "./invitation": {
+      "types": "./src/invitation.ts",
+      "import": "./dist/invitation.js",
+      "default": "./dist/invitation.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "zod": "4.4.3",
+    "@minecraft-studio/protocol": "workspace:*",
+    "@minecraft-studio/asset-policy": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.1",
+    "typescript": "6.0.3"
+  }
+}

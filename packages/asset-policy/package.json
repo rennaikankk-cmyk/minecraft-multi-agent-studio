@@ -1,0 +1,68 @@
+{
+  "name": "@minecraft-studio/asset-policy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./asset-policy": {
+      "types": "./src/asset-policy.ts",
+      "import": "./dist/asset-policy.js",
+      "default": "./dist/asset-policy.js"
+    },
+    "./provenance": {
+      "types": "./src/provenance.ts",
+      "import": "./dist/provenance.js",
+      "default": "./dist/provenance.js"
+    },
+    "./workstation-registry": {
+      "types": "./src/workstation-registry.ts",
+      "import": "./dist/workstation-registry.js",
+      "default": "./dist/workstation-registry.js"
+    },
+    "./facility-registry": {
+      "types": "./src/facility-registry.ts",
+      "import": "./dist/facility-registry.js",
+      "default": "./dist/facility-registry.js"
+    },
+    "./work-area": {
+      "types": "./src/work-area.ts",
+      "import": "./dist/work-area.js",
+      "default": "./dist/work-area.js"
+    },
+    "./work-area-lease": {
+      "types": "./src/work-area-lease.ts",
+      "import": "./dist/work-area-lease.js",
+      "default": "./dist/work-area-lease.js"
+    },
+    "./world-assets": {
+      "types": "./src/world-assets.ts",
+      "import": "./dist/world-assets.js",
+      "default": "./dist/world-assets.js"
+    },
+    "./facility-platform": {
+      "types": "./src/facility-platform.ts",
+      "import": "./dist/facility-platform.js",
+      "default": "./dist/facility-platform.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "zod": "4.4.3",
+    "@minecraft-studio/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.1",
+    "typescript": "6.0.3"
+  }
+}

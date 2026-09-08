@@ -1,10 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import {
-  InMemoryWorkstationRegistry,
-  type SkillExecutionResultV1,
-  type SkillJsonValue,
-} from "@minecraft-studio/skills";
+import { InMemoryWorkstationRegistry } from '@minecraft-studio/asset-policy';
+import { type SkillExecutionResultV1, type SkillJsonValue } from '@minecraft-studio/skills';
 import type {
   AIScheduledResult,
   GenerateResult,

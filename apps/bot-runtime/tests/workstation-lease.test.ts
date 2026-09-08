@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { InMemoryWorkstationRegistry } from "@minecraft-studio/skills";
+import { InMemoryWorkstationRegistry } from '@minecraft-studio/asset-policy';
 import { ActiveWorkstationLease } from "../src/workstation-lease.js";
 
 const scope = { serverProfileId: "fixture", dimension: "minecraft:overworld", position: { x: 0, y: 64, z: 0 }, botId: "a" };

@@ -648,3 +648,4 @@ export * from "./farm-production.js";
 export * from "./farm-sustain.js";
 export * from "./facility-lease.js";
 export * from "./planning/resource-management.js";
+export { residenceCheckSkill } from "./builtin/residence-check.js";

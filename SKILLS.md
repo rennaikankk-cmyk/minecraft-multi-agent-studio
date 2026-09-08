@@ -30,7 +30,7 @@
 真实隔离服六类场景与 1.21.8 跨版本矩阵一次没跑过。这与编译产物里的
 `verification=unverified` 是同一个事实的两种表述（AGENTS.md §8：无隔离测试服时不得声称联机测试通过）。
 
-## `farm.sustain@1.0.0`
+## `base.residence-check@1.0.0`\r\n\r\n- 状态：**Partial**\r\n- 进度契约：`PLACE_AND_VERIFY`\r\n- 说明：检查并验证个人床复活点与 BotID 告示牌回读。\r\n\r\n## `farm.sustain@1.0.0`
 
 - 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
 - 权限：`world.interact`、`bot.move`、`container.write`；操作 `farm.sustain-safe`；超时 120 秒。
@@ -496,3 +496,4 @@
 - 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
 - 权限：策略只读
 - 约束：`SAFE` 默认关闭跑酷；`PARKOUR` 仅隔离测试服且必须同时通过 sprint/jump、空中移动和坠落限制，所有数值仍标记未实测。
+

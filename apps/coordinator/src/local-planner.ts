@@ -26,25 +26,9 @@ import {
   type SkillInvocationV1,
   type SkillJsonValue,
 } from "@minecraft-studio/protocol";
-import {
-  GoalPlanner,
-  BaseRegistry,
-  type FacilityRegistry,
-  readFarmProduction,
-  farmSustainInputSchema,
-  exploreInputSchema,
-  siteAssessInputSchema,
-  DEFAULT_UNVERIFIED_SITE_POLICY,
-  buildBlueprintInputSchema,
-  processContinuationCode,
-  PlanSupervisor,
-  type GoalRequest,
-  type PlanStep,
-  type PlannerInventory,
-  type StepOutcome,
-  type SupervisionResult,
-  type WorkstationRegistryPort,
-} from "@minecraft-studio/skills";
+import { GoalPlanner, readFarmProduction, farmSustainInputSchema, exploreInputSchema, siteAssessInputSchema, DEFAULT_UNVERIFIED_SITE_POLICY, buildBlueprintInputSchema, processContinuationCode, PlanSupervisor, type GoalRequest, type PlanStep, type PlannerInventory, type StepOutcome, type SupervisionResult } from '@minecraft-studio/skills';
+import { BaseRegistry } from '@minecraft-studio/base-management';
+import { type FacilityRegistry, type WorkstationRegistryPort } from '@minecraft-studio/asset-policy';
 import {
   PersistentTaskStateMachine,
   TaskExecutionError,
@@ -902,6 +886,16 @@ export const plannedItemGoalAliasCoverage: readonly string[] = Object.freeze(
 );
 
 export class CoordinatorLocalPlanner {
+  private readonly domainSkills = new WeakMap<LocalPlanRequest, Readonly<{ skillId: string; input: unknown }>>();
+
+  /** Trusted composition port. The capability exists only in this process;
+   * HTTP goal text and model output cannot set it. Uses the ordinary task FSM,
+   * assignment lease, catalog validation, L0 and result persistence below. */
+  async dispatchDomainSkill(request: LocalPlanRequest, skill: Readonly<{ skillId: string; input: unknown }>): Promise<LocalPlanResult> {
+    const scoped = { ...request };
+    this.domainSkills.set(scoped, skill);
+    try { return await this.planAndDispatch(scoped); } finally { this.domainSkills.delete(scoped); }
+  }
   private readonly now: () => Date;
   private readonly randomId: () => string;
   private readonly coordinatorInstanceId: string;
@@ -1033,7 +1027,17 @@ export class CoordinatorLocalPlanner {
         "Bot Runtime has no available advertised skills.",
       );
     }
-    const operatorGoal = safeOperatorGoal(request.operatorGoal, record);
+    const domainSkill = this.domainSkills.get(request);
+    if (domainSkill) {
+      const entry = availableSkills.find((s) => s.skillId === domainSkill.skillId);
+      if (!entry) throw new LocalPlannerError("PLANNER_SKILL_UNAVAILABLE", "Domain Skill is not advertised.");
+      return this.dispatchDirectSkillDecision({ request, decision: {
+        action: "invoke_skill", botId: request.botId, taskId: request.taskId, skillId: entry.skillId,
+        skillVersion: entry.skillVersion, input: skillJsonValueSchema.parse(domainSkill.input), reasonCode: "DOMAIN_INTENT",
+      }, operatorGoal: request.operatorGoal, record, availableSkills, execution, deadlineMs, ai: null, skipModelGrounding: true });
+    }
+    const rawOperatorGoal = request.operatorGoal.trim();
+    const operatorGoal = safeOperatorGoal(rawOperatorGoal, record);
     const bindability = this.coordinatorGoalBindability(availableSkills);
     this.logGoalBindability(request, bindability);
     const plannedItemNames = bindability.bindable;
@@ -1043,7 +1047,7 @@ export class CoordinatorLocalPlanner {
     // 可达物品"，任何含糊形态返回 null 照旧走模型分支；派发路径与模型
     // 分支完全同一条（grounding、安全等待、任务迁移一个不少）。
     const deterministic = this.deterministicDecisionFor(
-      operatorGoal,
+      rawOperatorGoal,
       plannedItemNames,
       request,
       record,
@@ -1077,7 +1081,7 @@ export class CoordinatorLocalPlanner {
       return this.dispatchDirectSkillDecision({
         request,
         decision: deterministic.skill,
-        operatorGoal,
+        operatorGoal: rawOperatorGoal,
         record,
         availableSkills,
         execution,
@@ -1172,7 +1176,7 @@ export class CoordinatorLocalPlanner {
     return this.dispatchDirectSkillDecision({
       request,
       decision,
-      operatorGoal,
+      operatorGoal: rawOperatorGoal,
       record,
       availableSkills,
       plannedItemNames,
@@ -1581,7 +1585,7 @@ export class CoordinatorLocalPlanner {
       }
       return { planItems: null, skill: { action: "invoke_skill", botId: request.botId, taskId: request.taskId,
         skillId: "farm.sustain", skillVersion: entry.skillVersion,
-        input: farmSustainInputSchema.parse(production.sustain), reasonCode: "DETERMINISTIC_FARM_SUSTAIN" } };
+        input: skillJsonValueSchema.parse(farmSustainInputSchema.parse(production.sustain)), reasonCode: "DETERMINISTIC_FARM_SUSTAIN" } };
     }
     if (parsed.kind === "acquire-item") {
       return {
@@ -2522,7 +2526,7 @@ export class CoordinatorLocalPlanner {
       let trustedInput = input.trustedInput;
       if (input.decision.skillId === "world.explore" && this.options.explorationJournal) {
         const parsed = exploreInputSchema.parse(trustedInput);
-        trustedInput = { ...parsed, visited: this.options.explorationJournal.list(parsed.serverProfileId, parsed.dimension, parsed.center, parsed.radiusChunks) };
+        trustedInput = skillJsonValueSchema.parse({ ...parsed, visited: this.options.explorationJournal.list(parsed.serverProfileId, parsed.dimension, parsed.center, parsed.radiusChunks) });
       }
       const invocation = this.invocation(
         input.request,
@@ -3452,12 +3456,12 @@ export class CoordinatorLocalPlanner {
     this.recordPositiveMetric(
       "bot_llm_prompt_tokens_total",
       labels,
-      ai.value.usage.promptTokens,
+      ai.value.usage?.promptTokens,
     );
     this.recordPositiveMetric(
       "bot_llm_completion_tokens_total",
       labels,
-      ai.value.usage.completionTokens,
+      ai.value.usage?.completionTokens,
     );
     this.recordPositiveMetric(
       "bot_llm_queue_time_ms_total",
@@ -3479,8 +3483,9 @@ export class CoordinatorLocalPlanner {
   private recordPositiveMetric(
     name: LifecycleMetricName,
     labels: Readonly<Record<string, string>>,
-    rawAmount: number,
+    rawAmount: number | undefined,
   ): void {
+    if (rawAmount === undefined) return;
     const amount = roundedPositiveSafeInteger(rawAmount);
     if (amount !== null) this.options.metrics?.increment(name, labels, amount);
   }
@@ -4133,7 +4138,7 @@ function deterministicSkillDecision(
     const input = { ...exploreInputSchema.parse({ serverProfileId: "placeholder", dimension,
       center: { x: parsed.x, z: parsed.z }, radiusChunks: parsed.radius }), serverProfileId: TRUSTED_SERVER_PROFILE_PLACEHOLDER };
     return { action: "invoke_skill", botId: request.botId, taskId: request.taskId, skillId: "world.explore", skillVersion,
-      input, reasonCode: "DETERMINISTIC_EXPLORE" };
+      input: skillJsonValueSchema.parse(input), reasonCode: "DETERMINISTIC_EXPLORE" };
   }
   if (parsed.kind === "maintain-farm") {
     const skillVersion = advertisedVersion("farm.maintain");
@@ -4713,7 +4718,13 @@ function safeOperatorGoal(
   operatorGoal: string,
   record: BotRegistryRecord,
 ): string {
-  const goal = operatorGoal.trim();
+  // Deterministic invitation/site parsers consume the raw goal before this
+  // boundary. Any model-bound goal receives opaque position references so a
+  // cloud provider never sees exact coordinates.
+  const goal = operatorGoal.trim().replace(
+    /(?:x\s*[:=]\s*)?-?\d{1,9}\s*(?:,|\s+)\s*(?:y\s*[:=]\s*)?-?\d{1,9}\s*(?:,|\s+)\s*(?:z\s*[:=]\s*)?-?\d{1,9}/giu,
+    "[POSITION_REF]",
+  );
   const lowerGoal = goal.toLocaleLowerCase("en-US");
   const protectedValues = [record.serverProfileId, record.runtimeInstanceId];
   const containsKnownProtectedValue = protectedValues.some(
@@ -4729,9 +4740,8 @@ function safeOperatorGoal(
     );
   const exactPosition = record.currentStatus?.position;
   const exposesCurrentPosition = exactPosition
-    ? coordinateTriplesFromGoal(goal).some(
-        ([x, y, z]) =>
-          x === exactPosition.x && y === exactPosition.y && z === exactPosition.z,
+    ? coordinateTriplesFromGoal(operatorGoal).some(
+        ([x, y, z]) => x === exactPosition.x && y === exactPosition.y && z === exactPosition.z,
       )
     : false;
   if (

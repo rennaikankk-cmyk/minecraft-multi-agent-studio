@@ -2,7 +2,8 @@ import { EventEmitter } from "node:events";
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { describe, expect, it, vi } from "vitest";
-import { WorldAssetAuthority, InMemoryWorkstationRegistry, builtinSkillVerificationManifestsV1 } from "@minecraft-studio/skills";
+import { WorldAssetAuthority, InMemoryWorkstationRegistry } from '@minecraft-studio/asset-policy';
+import { builtinSkillVerificationManifestsV1 } from '@minecraft-studio/skills';
 import { MineflayerBotClient } from "../src/mineflayer-client.js";
 
 vi.mock("mineflayer-pathfinder", async (original) => {

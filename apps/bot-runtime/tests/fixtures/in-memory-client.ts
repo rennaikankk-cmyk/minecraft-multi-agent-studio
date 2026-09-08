@@ -1,4 +1,4 @@
-import { WorldAssetAuthority, InMemoryWorkstationRegistry } from "@minecraft-studio/skills";
+import { WorldAssetAuthority, InMemoryWorkstationRegistry } from '@minecraft-studio/asset-policy';
 import { MineflayerBotClient as RuntimeClient } from "../../src/mineflayer-client.js";
 export * from "../../src/mineflayer-client.js";
 

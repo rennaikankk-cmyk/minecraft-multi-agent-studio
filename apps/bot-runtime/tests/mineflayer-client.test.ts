@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { InMemoryWorkstationRegistry } from "@minecraft-studio/skills";
+import { InMemoryWorkstationRegistry } from '@minecraft-studio/asset-policy';
 
 import type { Bot } from "mineflayer";
 import type { Movements } from "mineflayer-pathfinder";

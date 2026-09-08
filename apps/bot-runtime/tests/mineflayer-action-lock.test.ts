@@ -10,7 +10,7 @@ import { Vec3 } from "vec3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { MineflayerBotClient } from "./fixtures/in-memory-client.js";
-import { InMemoryWorkstationRegistry } from "@minecraft-studio/skills";
+import { InMemoryWorkstationRegistry } from '@minecraft-studio/asset-policy';
 
 const SERVER_PROFILE_ID = "isolated-local";
 const DIMENSION = "minecraft:overworld";

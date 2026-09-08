@@ -3,6 +3,7 @@ import { isIP } from "node:net";
 import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
+import { chatIdentityPolicySchema } from "@minecraft-studio/protocol";
 
 import { serverProfileNoHungerConfigSchema } from "./no-hunger.js";
 import { isMineflayerTestedVersion } from "./version-compatibility.js";
@@ -225,6 +226,8 @@ export const serverProfileSchema = z
     /** 缺省即启用 adaptive NoHunger；可由单服 profile 显式关闭。 */
     noHunger: serverProfileNoHungerConfigSchema.optional(),
     combat: serverProfileCombatConfigSchema.optional(),
+    /** Explicit chat authority; independent from changing combat allegiance. */
+    chatTrust: chatIdentityPolicySchema.optional(),
     /** 导航档位；缺省 safe。anarchy purpose 建议配 anarchy（也可手动选 safe）。 */
     navigation: serverProfileNavigationSchema.optional(),
     statusIntervalMs: z.number().int().min(250).max(30_000),

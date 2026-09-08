@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { chatIdentityEvidenceSchema } from "./chat-identity.js";
 
 import {
   skillIdentifierSchema,
@@ -1028,8 +1029,9 @@ export const botChatReceivedV1Schema = z
       .object({
         serverProfileId: identifierSchema,
         runtimeInstanceId: identifierSchema,
-        /** 说话玩家名（已过白名单）。 */
+        /** Display field; authorization requires identity evidence. */
         speaker: z.string().min(1).max(32),
+        identity: chatIdentityEvidenceSchema.optional(),
         /** 原文（截断到 512）。 */
         message: z.string().min(1).max(512),
       })

@@ -1,7 +1,9 @@
 import type { BotRegistryRecord } from "../src/bot-registry.js";
 import { AutonomousDirector } from "../src/autonomous-director.js";
 import { describe, expect, it, vi } from "vitest";
-import { BaseRegistry, FacilityRegistry, readFarmProduction } from "@minecraft-studio/skills";
+import { BaseRegistry } from '@minecraft-studio/base-management';
+import { FacilityRegistry } from '@minecraft-studio/asset-policy';
+import { readFarmProduction } from '@minecraft-studio/skills';
 import { applyOperatorBaseAssignments } from "../src/operator-base-assignments.js";
 
 const NOW = new Date("2026-08-28T00:00:00.000Z");

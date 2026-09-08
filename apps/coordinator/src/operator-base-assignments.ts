@@ -1,8 +1,9 @@
 import { readFileSync, statSync } from "node:fs";
 import { z } from "zod";
 import { identifierSchema } from "@minecraft-studio/protocol";
-import { BaseRegistry, FacilityRegistry, workPositionSchema, workScopeSchema, withinWorkArea,
-  farmMaintainInputSchema, registerCropProduction, registerFoodProduction, farmSustainInputSchema, foodFarmLayout } from "@minecraft-studio/skills";
+import { BaseRegistry } from '@minecraft-studio/base-management';
+import { FacilityRegistry, workPositionSchema, workScopeSchema, withinWorkArea } from '@minecraft-studio/asset-policy';
+import { farmMaintainInputSchema, registerCropProduction, registerFoodProduction, farmSustainInputSchema, foodFarmLayout } from '@minecraft-studio/skills';
 
 export const operatorBaseAssignmentsSchema = z.object({
   schemaVersion: z.literal("1.0"),

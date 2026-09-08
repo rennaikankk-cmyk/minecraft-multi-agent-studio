@@ -8,6 +8,8 @@ import { randomUUID } from "node:crypto";
 
 import {
   BOT_WORLD_STATE_MAX_INVENTORY_ITEMS,
+  verifyChatIdentity,
+  type ChatIdentityEvidence,
   BOT_WORLD_STATE_MAX_UTILITY_BLOCKS,
   botSkillCatalogV1Schema,
   botVersionV1Schema,
@@ -2710,29 +2712,36 @@ export class SingleBotRuntime {
    */
   private handleChat(
     generation: number,
-    info: Readonly<{ speaker: string; message: string }>,
+    info: import("./client.js").BotChatMessage,
   ): void {
     if (generation !== this.generation || this.stopping || !this.client) return;
+    const policy = this.profile.chatTrust;
+    const dimension = this.client.snapshot().position?.dimension;
+    if (!policy || !info.protocolIdentity || !dimension || policy.authMode !== this.profile.auth) return;
+    const identity: ChatIdentityEvidence = {
+      ...info.protocolIdentity, schemaVersion: "1.0", source: "protocol-player-chat",
+      authMode: this.profile.auth, worldId: this.profile.worldId ?? null, dimension,
+      policyRevision: policy.revision,
+    };
     const whitelist = this.profile.combat?.whitelist;
-    if (!whitelist) return;
-    const allowed =
-      whitelist.usernames.some(
-        (name) => name.toLowerCase() === info.speaker.toLowerCase(),
-      ) ||
-      whitelist.uuids.length > 0; // uuid 白名单无法在聊天事件里校验，交给协调器侧拒绝
+    const combatAllowed = whitelist && (whitelist.uuids.length > 0
+      ? whitelist.uuids.some((id) => id.replaceAll("-", "").toLowerCase() === identity.senderUuid.replaceAll("-", "").toLowerCase())
+      : whitelist.usernames.some((name) => name.toLowerCase() === info.speaker.toLowerCase()));
+    const allowed = !!combatAllowed && verifyChatIdentity({ serverProfileId: this.profile.id,
+      speaker: info.speaker, evidence: identity, policy });
     if (!allowed) {
       this.dependencies.logger.info("bot_runtime_chat_ignored", this.logFields({
         reason: "speaker_not_whitelisted",
       }));
       return;
     }
-    const message = this.emitChatReceived(info.speaker, info.message);
+    const message = this.emitChatReceived(info.speaker, info.message, identity);
     if (message) {
       this.dependencies.messageSink(message);
     }
   }
 
-  private emitChatReceived(speaker: string, message: string) {
+  private emitChatReceived(speaker: string, message: string, identity: ChatIdentityEvidence) {
     try {
       return {
         schemaVersion: "1.0" as const,
@@ -2747,6 +2756,7 @@ export class SingleBotRuntime {
           runtimeInstanceId: this.runtimeInstanceId,
           speaker: speaker.slice(0, 32),
           message: message.slice(0, 512),
+          identity,
         },
       };
     } catch {

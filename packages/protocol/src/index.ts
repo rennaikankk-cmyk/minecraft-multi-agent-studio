@@ -376,3 +376,4 @@ export {
   type ResourceAcquisitionMode,
   type StudioGameplayProfile,
 } from "./gameplay-policy.js";
+export * from "./chat-identity.js";

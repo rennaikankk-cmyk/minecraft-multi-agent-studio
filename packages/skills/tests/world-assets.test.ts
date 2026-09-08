@@ -17,9 +17,10 @@ describe("shared world asset authority", () => {
     try {
       const a = new WorldAssetAuthority({ persistDir: dir });
       a.record(entry); a.record({ ...entry, position: { ...position, x: 11 }, placedByBotId: "bot-b" });
-      a.record({ ...entry, purpose: "farm" });
+      a.record({ ...entry, facilityId: "living-room" });
       const restored = new WorldAssetAuthority({ persistDir: dir });
-      expect(restored.observe({ ...scope, position }).record?.purpose).toBe("farm");
+      expect(restored.observe({ ...scope, position }).record?.facilityId).toBe("living-room");
+      expect(restored.observe({ ...scope, position }).record?.purpose).toBe("structural");
       expect(restored.observe({ ...scope, position: { ...position, x: 11 } }).record?.placedByBotId).toBe("bot-b");
       expect(restored.observe({ ...scope, serverProfileId: "other", position }).record).toBeNull();
       expect(restored.observe({ ...scope, dimension: "minecraft:the_nether", position }).record).toBeNull();
@@ -104,7 +105,8 @@ describe("asset policy", () => {
   const policyRecord = {
     assetId: "machine-1", serverProfileId: "fixture", worldId: "world-a",
     dimension: "minecraft:overworld", position: { x: 4, y: 64, z: 4 },
-    role: "machine" as const, protection: "OUTPUT_ONLY" as const,
+    role: "container" as const, protection: "OUTPUT_ONLY" as const,
+    subjects: ["bot-a"], allowedItems: ["iron_ingot"],
     revision: 1, version: 1, allowedActions: ["container-transfer" as const],
   };
   it("requires matching scope/version and allows only confirmed output withdrawal", () => {
@@ -112,7 +114,7 @@ describe("asset policy", () => {
     policy.register(policyRecord);
     const base = { assetId: policyRecord.assetId, serverProfileId: policyRecord.serverProfileId,
       worldId: policyRecord.worldId, dimension: policyRecord.dimension, subject: "bot-a", action: "container-transfer" as const,
-      assetVersion: 1, policyRevision: 1, position: policyRecord.position };
+      assetVersion: 1, policyRevision: 1, position: policyRecord.position, itemName: "iron_ingot", count: 4 };
     expect(policy.authorize({ ...base, direction: "withdraw" })).toMatchObject({ allowed: true, reason: "authorized_output" });
     expect(policy.authorize({ ...base, direction: "deposit" })).toMatchObject({ allowed: false, code: "ASSET_OUTPUT_ONLY" });
     expect(policy.authorize({ ...base, assetVersion: 2 })).toMatchObject({ allowed: false, code: "ASSET_VERSION_STALE" });
@@ -121,7 +123,9 @@ describe("asset policy", () => {
   it("invalidates grants on revision replacement and revocation", () => {
     const policy = new AssetPolicy();
     policy.register({ ...policyRecord, protection: "PRIVATE" });
-    policy.grant({ assetId: "machine-1", subject: "bot-a", action: "use", expiresAtMs: Date.now() + 10_000, revision: 1 });
+    policy.grant({ assetId: "machine-1", subject: "bot-a", action: "use", expiresAtMs: Date.now() + 10_000, revision: 1,
+      serverProfileId: policyRecord.serverProfileId, worldId: policyRecord.worldId, dimension: policyRecord.dimension,
+      position: policyRecord.position, version: 1 });
     const request = { assetId: policyRecord.assetId, serverProfileId: policyRecord.serverProfileId,
       worldId: policyRecord.worldId, dimension: policyRecord.dimension, position: policyRecord.position,
       subject: "bot-a", action: "use" as const, assetVersion: 1, policyRevision: 1 };
@@ -129,7 +133,7 @@ describe("asset policy", () => {
     policy.register({ ...policyRecord, protection: "PRIVATE", revision: 2 });
     expect(policy.authorize({ ...request, policyRevision: 2 })).toMatchObject({ allowed: false, code: "ASSET_ACTION_DENIED" });
     expect(policy.revoke(policyRecord)).toBe(true);
-    expect(policy.authorize({ ...request, policyRevision: 2 })).toMatchObject({ allowed: false, code: "ASSET_UNKNOWN_PROTECTED" });
+    expect(policy.authorize({ ...request, policyRevision: 3 })).toMatchObject({ allowed: false, code: "ASSET_POLICY_REVOKED" });
   });
 });
 

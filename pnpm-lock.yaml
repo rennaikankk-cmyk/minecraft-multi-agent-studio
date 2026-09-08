@@ -36,6 +36,12 @@ importers:
 
   apps/bot-runtime:
     dependencies:
+      '@minecraft-studio/asset-policy':
+        specifier: workspace:*
+        version: link:../../packages/asset-policy
+      '@minecraft-studio/base-management':
+        specifier: workspace:*
+        version: link:../../packages/base-management
       '@minecraft-studio/combat':
         specifier: workspace:*
         version: link:../../packages/combat
@@ -116,12 +122,21 @@ importers:
       '@minecraft-studio/ai-router':
         specifier: workspace:*
         version: link:../../packages/ai-router
+      '@minecraft-studio/asset-policy':
+        specifier: workspace:*
+        version: link:../../packages/asset-policy
+      '@minecraft-studio/base-management':
+        specifier: workspace:*
+        version: link:../../packages/base-management
       '@minecraft-studio/observability':
         specifier: workspace:*
         version: link:../../packages/observability
       '@minecraft-studio/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+      '@minecraft-studio/resource-management':
+        specifier: workspace:*
+        version: link:../../packages/resource-management
       '@minecraft-studio/skills':
         specifier: workspace:*
         version: link:../../packages/skills
@@ -147,6 +162,9 @@ importers:
 
   apps/dashboard:
     dependencies:
+      '@minecraft-studio/base-management':
+        specifier: workspace:*
+        version: link:../../packages/base-management
       '@minecraft-studio/environment':
         specifier: workspace:*
         version: link:../../packages/environment
@@ -279,6 +297,41 @@ importers:
         specifier: 4.1.10
         version: 4.1.10(@types/node@26.1.1)(vite@8.1.5(@types/node@26.1.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.12))
 
+  packages/asset-policy:
+    dependencies:
+      '@minecraft-studio/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: 26.1.1
+        version: 26.1.1
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+
+  packages/base-management:
+    dependencies:
+      '@minecraft-studio/asset-policy':
+        specifier: workspace:*
+        version: link:../asset-policy
+      '@minecraft-studio/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: 26.1.1
+        version: 26.1.1
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+
   packages/combat:
     devDependencies:
       '@types/node':
@@ -295,6 +348,15 @@ importers:
 
   packages/domain-management:
     dependencies:
+      '@minecraft-studio/asset-policy':
+        specifier: workspace:*
+        version: link:../asset-policy
+      '@minecraft-studio/base-management':
+        specifier: workspace:*
+        version: link:../base-management
+      '@minecraft-studio/resource-management':
+        specifier: workspace:*
+        version: link:../resource-management
       zod:
         specifier: 4.4.3
         version: 4.4.3
@@ -335,6 +397,22 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
 
+  packages/resource-management:
+    dependencies:
+      '@minecraft-studio/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: 26.1.1
+        version: 26.1.1
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+
   packages/safety:
     dependencies:
       '@minecraft-studio/protocol':
@@ -353,9 +431,18 @@ importers:
 
   packages/skills:
     dependencies:
+      '@minecraft-studio/asset-policy':
+        specifier: workspace:*
+        version: link:../asset-policy
+      '@minecraft-studio/base-management':
+        specifier: workspace:*
+        version: link:../base-management
       '@minecraft-studio/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@minecraft-studio/resource-management':
+        specifier: workspace:*
+        version: link:../resource-management
       zod:
         specifier: 4.4.3
         version: 4.4.3

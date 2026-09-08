@@ -12,7 +12,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { SharedStateClient, SharedStateError } from "@minecraft-studio/skills";
-import { smeltingLinePattern } from "@minecraft-studio/skills";
+import { smeltingLinePattern } from '@minecraft-studio/asset-policy';
 import { SharedStateServer, loadSharedStateConfig } from "../src/shared-state-server.js";
 
 const SERVER = "integration-profile";

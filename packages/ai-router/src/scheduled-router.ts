@@ -1,5 +1,6 @@
 import type { GenerateOptions, GenerateResult } from './types/adapter.js';
 import { AIRouter } from './router.js';
+import { AIError } from './errors.js';
 import { AICircuitBreaker, type CircuitBreakerOptions, type CircuitBreakerSnapshot } from './circuit-breaker.js';
 import {
   AIRequestScheduler,
@@ -70,7 +71,8 @@ export class ScheduledAIRouter {
               return result;
             },
             (error: unknown) => {
-              this.breaker.recordFailure(error instanceof Error ? error.message : String(error));
+              if (scheduledSignal.aborted || (error instanceof AIError && error.code === 'AI_CANCELLED')) this.breaker.recordCancellation();
+              else this.breaker.recordFailure(error instanceof AIError ? error.code : 'AI_PROVIDER_FAILED');
               throw error;
             },
           );

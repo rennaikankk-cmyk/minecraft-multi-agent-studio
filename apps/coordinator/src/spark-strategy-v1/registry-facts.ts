@@ -1,5 +1,6 @@
 import { createHmac, randomBytes } from "node:crypto";
-import type { BaseRegistry, FacilityRegistry, InMemoryWorkstationRegistry } from "@minecraft-studio/skills";
+import type { BaseRegistry } from '@minecraft-studio/base-management';
+import type { FacilityRegistry, InMemoryWorkstationRegistry } from '@minecraft-studio/asset-policy';
 import type { BotRegistry } from "../bot-registry.js";
 import type { BotAssignmentService } from "../bot-assignment.js";
 import { canonicalJson, parseTeamFactsInput, type TeamFactsInput } from "./facts.js";

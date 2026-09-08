@@ -1,7 +1,5 @@
-import {
-  SkillFault, cropRules, selectFarmAction, workAreaPositions, withinWorkArea,
-  type FarmCell, type FarmMaintainInput, type FarmMaintainOutput, type FarmCropName, type WorkPosition,
-} from "@minecraft-studio/skills";
+import { SkillFault, cropRules, selectFarmAction, type FarmCell, type FarmMaintainInput, type FarmMaintainOutput, type FarmCropName } from '@minecraft-studio/skills';
+import { workAreaPositions, withinWorkArea, type WorkPosition } from '@minecraft-studio/asset-policy';
 
 export interface FarmMaintenancePort {
   inspect(position: WorkPosition): FarmCell;

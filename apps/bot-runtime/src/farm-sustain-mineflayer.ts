@@ -1,6 +1,7 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
-import { SkillFault, foodFarmLayout, type FarmSustainInput, type WorkPosition } from "@minecraft-studio/skills";
+import { SkillFault, foodFarmLayout, type FarmSustainInput } from '@minecraft-studio/skills';
+import { type WorkPosition } from '@minecraft-studio/asset-policy';
 import type { FarmMaintenancePort } from "./farm-maintenance-adapter.js";
 import type { FoodFarmPort } from "./farm-sustain-adapter.js";
 

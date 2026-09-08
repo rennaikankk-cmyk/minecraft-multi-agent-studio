@@ -10,6 +10,7 @@ export class AIRouter {
   async generate(opts: GenerateOptions): Promise<GenerateResult> {
     for (const adapter of this.adapters) {
       throwIfAborted(opts.signal);
+      if (adapter.requiresHealthCheck === false) return adapter.generate(opts);
       const health = await adapter.health();
       throwIfAborted(opts.signal);
       if (health.available) {

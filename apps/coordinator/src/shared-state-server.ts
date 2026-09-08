@@ -16,24 +16,12 @@ import { AddressInfo } from "node:net";
 import { botPersonalMemoryScopeSchema, botPersonalMemoryResponseV1Schema } from "@minecraft-studio/protocol";
 import { PersonalMemoryError, type PersonalMemoryStore } from "./personal-memory-store.js";
 
-import {
-  BaseRegistry,
-  WorldAssetAuthority,
-  captureSharedStateSnapshot,
-  createSharedStateDispatcher,
-  dispatchSharedState,
-  sharedStateRequestSchema,
-  DurableStateStore,
-  durableSnapshotFrom,
-  restoreSharedStateSnapshot,
-  stripEphemeralState,
-  type DurableStateSnapshot,
-  type SharedStateResponse,
-  type SharedStateSnapshot,
-} from "@minecraft-studio/skills";
-import { FacilityRegistry } from "@minecraft-studio/skills";
-import { InMemoryWorkstationRegistry } from "@minecraft-studio/skills";
-import { registriesFromDurableSnapshot } from "@minecraft-studio/skills";
+import { BaseRegistry, DurableStateStore, durableSnapshotFrom, stripEphemeralState, type DurableStateSnapshot } from '@minecraft-studio/base-management';
+import { WorldAssetAuthority } from '@minecraft-studio/asset-policy';
+import { captureSharedStateSnapshot, createSharedStateDispatcher, dispatchSharedState, sharedStateRequestSchema, restoreSharedStateSnapshot, type SharedStateResponse, type SharedStateSnapshot } from '@minecraft-studio/skills';
+import { FacilityRegistry } from '@minecraft-studio/asset-policy';
+import { InMemoryWorkstationRegistry } from '@minecraft-studio/asset-policy';
+import { registriesFromDurableSnapshot } from '@minecraft-studio/base-management';
 
 const MAX_BODY_BYTES = 256 * 1024;
 

@@ -1,5 +1,5 @@
-import { SkillFault, type BlockPosition, type MaybeAsyncWorkstationRegistryPort,
-  type WorkstationLease, type WorkstationLeaseOwner } from "@minecraft-studio/skills";
+import { SkillFault, type MaybeAsyncWorkstationRegistryPort } from '@minecraft-studio/skills';
+import { type BlockPosition, type WorkstationLease, type WorkstationLeaseOwner } from '@minecraft-studio/asset-policy';
 
 const LEASE_TTL_MS = 30_000;
 const RENEW_INTERVAL_MS = 5_000;
