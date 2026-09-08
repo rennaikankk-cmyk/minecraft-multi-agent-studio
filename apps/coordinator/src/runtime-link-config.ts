@@ -1,5 +1,10 @@
+import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import path from "node:path";
+
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const MINECRAFT_USERNAME_PATTERN = /^[A-Za-z0-9_]{3,16}$/u;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
+export const RUNTIME_LINK_PEERS_MAX_BYTES = 256 * 1_024;
 
 export type RuntimeLinkPeerConfig = Readonly<{
   keyId: string;
@@ -12,6 +17,10 @@ export type RuntimeLinkRuntimeConfig = Readonly<{
   port: number;
   botStaleAfterMs: number;
   peers: RuntimeLinkPeerConfig[];
+  /** Managed key-to-username assignments; configured keys/hashes remain the trust root. */
+  peersPath?: string;
+  /** Explicit subset managed by the file; other peers retain their static binding. */
+  managedKeyIds?: string[];
 }>;
 
 export type RuntimeLinkConfigErrorCode =
@@ -88,6 +97,17 @@ export function loadRuntimeLinkConfig(
     return peer;
   });
 
+  const peersPath = environment.COORDINATOR_RUNTIME_LINK_PEERS_PATH !== undefined
+    ? parsePeersPath(environment.COORDINATOR_RUNTIME_LINK_PEERS_PATH) : undefined;
+  let managedKeyIds: string[] | undefined;
+  if (environment.COORDINATOR_RUNTIME_LINK_MANAGED_KEY_IDS_JSON !== undefined) {
+    try {
+      managedKeyIds = [...resolveManagedRuntimeLinkKeyIds(
+        JSON.parse(environment.COORDINATOR_RUNTIME_LINK_MANAGED_KEY_IDS_JSON) as unknown, keyIds, peersPath)];
+    } catch {
+      throw new RuntimeLinkConfigError("RUNTIME_LINK_AUTH_INVALID", "Runtime Link managed key IDs are invalid.");
+    }
+  }
   return {
     host,
     port,
@@ -95,7 +115,83 @@ export function loadRuntimeLinkConfig(
       environment.COORDINATOR_BOT_STALE_AFTER_MS,
     ),
     peers,
+    ...(peersPath !== undefined ? { peersPath } : {}),
+    ...(managedKeyIds !== undefined ? { managedKeyIds } : {}),
   };
+}
+
+export function resolveManagedRuntimeLinkKeyIds(
+  input: unknown, authorizedKeyIds: ReadonlySet<string>, peersPath?: string,
+): ReadonlySet<string> {
+  // Compatibility for the original file-only option: the file owns all keys.
+  // Launchers mixing managed slots with external peers must declare the subset.
+  if (input === undefined) return new Set(peersPath === undefined ? [] : authorizedKeyIds);
+  if (!Array.isArray(input) || input.length > 1_000 || (input.length > 0 && !peersPath) ||
+    input.some((keyId) => typeof keyId !== "string" || !IDENTIFIER_PATTERN.test(keyId) || !authorizedKeyIds.has(keyId)) ||
+    new Set(input).size !== input.length) {
+    throw new RuntimeLinkConfigError("RUNTIME_LINK_AUTH_INVALID", "Runtime Link managed key IDs are invalid.");
+  }
+  return new Set(input as string[]);
+}
+
+function parsePeersPath(value: string): string {
+  if (!value.trim() || !path.isAbsolute(value) || value.includes("\0")) {
+    throw new RuntimeLinkConfigError("RUNTIME_LINK_AUTH_INVALID", "Runtime Link managed peer path must be absolute.");
+  }
+  return value;
+}
+
+/** Fresh bounded file read: missing/corrupt mappings never fall back to static Bot IDs. */
+export function readManagedRuntimeLinkPeers(
+  peersPath: string,
+  authorizedPeers: ReadonlyMap<string, RuntimeLinkPeerConfig>,
+  managedKeyIds: ReadonlySet<string> = new Set(authorizedPeers.keys()),
+): ReadonlyMap<string, RuntimeLinkPeerConfig> {
+  let fd: number | undefined;
+  try {
+    fd = openSync(parsePeersPath(peersPath), "r");
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > RUNTIME_LINK_PEERS_MAX_BYTES) throw new Error("invalid file size/type");
+    // The extra byte also catches a file growing after fstat. Never allocate
+    // from a size supplied by the file, or read unbounded data via readFile.
+    const buffer = Buffer.alloc(RUNTIME_LINK_PEERS_MAX_BYTES + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const bytes = readSync(fd, buffer, length, buffer.length - length, null);
+      if (bytes === 0) break;
+      length += bytes;
+    }
+    if (length > RUNTIME_LINK_PEERS_MAX_BYTES) throw new Error("file too large");
+    const raw = JSON.parse(buffer.toString("utf8", 0, length)) as unknown;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid envelope");
+    const envelope = raw as Record<string, unknown>;
+    if (Object.keys(envelope).sort().join(",") !== "peers,schemaVersion" || envelope.schemaVersion !== "1.0" ||
+      !Array.isArray(envelope.peers) || envelope.peers.length > 1_000) throw new Error("invalid envelope");
+    const peers = new Map<string, RuntimeLinkPeerConfig>();
+    const usernames = new Set([...authorizedPeers.values()]
+      .filter((peer) => !managedKeyIds.has(peer.keyId)).map((peer) => peer.botId.toLowerCase()));
+    const hashes = new Set<string>();
+    for (const entry of envelope.peers) {
+      const peer = parsePeer(entry);
+      const authorized = authorizedPeers.get(peer.keyId);
+      const username = peer.botId.toLowerCase();
+      if (!authorized || !managedKeyIds.has(peer.keyId) || peer.secretSha256 !== authorized.secretSha256 || peers.has(peer.keyId) ||
+        usernames.has(username) || hashes.has(peer.secretSha256) ||
+        // Existing persisted slot aliases retain only their original key binding.
+        // A rename must always be a valid Minecraft username.
+        (!MINECRAFT_USERNAME_PATTERN.test(peer.botId) && peer.botId !== authorized.botId)) {
+        throw new Error("unapproved or duplicated peer");
+      }
+      peers.set(peer.keyId, peer);
+      usernames.add(username);
+      hashes.add(peer.secretSha256);
+    }
+    return peers;
+  } catch {
+    throw new RuntimeLinkConfigError("RUNTIME_LINK_AUTH_INVALID", "Runtime Link managed peer bindings are unavailable or invalid.");
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 function parsePeer(value: unknown): RuntimeLinkPeerConfig {
@@ -116,7 +212,7 @@ function parsePeer(value: unknown): RuntimeLinkPeerConfig {
     typeof record.keyId !== "string" ||
     !IDENTIFIER_PATTERN.test(record.keyId) ||
     typeof record.botId !== "string" ||
-    !IDENTIFIER_PATTERN.test(record.botId) ||
+    !(IDENTIFIER_PATTERN.test(record.botId) || MINECRAFT_USERNAME_PATTERN.test(record.botId)) ||
     typeof record.secretSha256 !== "string"
   ) {
     throw new RuntimeLinkConfigError(

@@ -17,6 +17,7 @@ import {
   resolveCompatibilityMode,
 } from "../packages/skills/dist/compat/index.js";
 import { buildZip } from "./zip-writer.mjs";
+import { resolveManagedGameIdentity, managedCredentialEnvNames } from "./lib/managed-game-identity.mjs";
 import {
   observeLocalTestServer,
   startLocalTestServer,
@@ -60,7 +61,8 @@ const DEFAULT_SPARK_PORTS = Object.freeze([
   11435,
 ]);
 const MAX_REQUEST_BYTES = 16 * 1024;
-const BOT_ID_PATTERN = /^studio-bot-([0-9]{2})$/u;
+const LEGACY_BOT_ID_PATTERN = /^studio-bot-([0-9]{2})$/u;
+const BOT_ID_PATTERN = /^(?:studio-bot-[0-9]{2}|[A-Za-z0-9_]{3,16})$/u;
 const USERNAME_PATTERN = /^[A-Za-z0-9_]{3,16}$/u;
 const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$/u;
 const shutdownPreload = `data:text/javascript,${encodeURIComponent(
@@ -281,6 +283,9 @@ export class StudioLocalManager {
     this.runtimeRoot = path.resolve(options.runtimeRoot);
     this.botRoot = path.join(this.runtimeRoot, "bots");
     this.manifestPath = path.join(this.runtimeRoot, "local-bots.json");
+    this.bindingsPath = options.bindingsPath ?? path.join(this.runtimeRoot, "runtime-peer-bindings.json");
+    this.identityResolver = options.resolveGameIdentity ?? resolveManagedGameIdentity;
+    this.manifestWrites = Promise.resolve();
     this.logRoot = path.join(this.runtimeRoot, "logs");
     this.slots = new Map(options.slots.map((slot) => [slot.botId, slot]));
     this.aiStatus = structuredClone(options.aiStatus);
@@ -309,6 +314,7 @@ export class StudioLocalManager {
       mkdir(this.logRoot, { recursive: true }),
     ]);
     await this.loadManifest();
+    await this.writeBindings();
     // Round 8: gameplay profile fails closed — an invalid value refuses to start.
     try {
       resolveGameplayPolicy({ environment: this.options.environment });
@@ -628,7 +634,7 @@ export class StudioLocalManager {
         return;
       }
       const action = url.pathname.match(
-        /^\/v1\/bots\/(studio-bot-[0-9]{2})\/(start|stop|restart)$/u,
+        /^\/v1\/bots\/(studio-bot-[0-9]{2}|[A-Za-z0-9_]{3,16})\/(start|stop|restart)$/u,
       );
       if (request.method === "POST" && action) {
         const [, botId, operation] = action;
@@ -657,7 +663,7 @@ export class StudioLocalManager {
       // 2026-09-03 槽位枯竭缺陷：bot 只进不出（无删除端点），16 个槽位被
       // 测试残留永久占满。DELETE：先停（拒绝删除运行中的），再从 manifest
       // 移除——槽位回到可用池。
-      const deleteMatch = url.pathname.match(/^\/v1\/bots\/(studio-bot-[0-9]{2})$/u);
+      const deleteMatch = url.pathname.match(/^\/v1\/bots\/(studio-bot-[0-9]{2}|[A-Za-z0-9_]{3,16})$/u);
       if (request.method === "DELETE" && deleteMatch) {
         const botId = deleteMatch[1];
         const config = this.configs.get(botId);
@@ -1095,29 +1101,30 @@ export class StudioLocalManager {
   }
 
   async createBot(input) {
+    const identity = await this.identityResolver(input, { environment: this.options.environment });
     const duplicate = [...this.configs.values()].find(
       (bot) =>
-        bot.username.toLowerCase() === input.username.toLowerCase() &&
-        bot.serverHost.toLowerCase() === input.serverHost.toLowerCase() &&
-        bot.serverPort === input.serverPort,
+        bot.username.toLowerCase() === identity.username.toLowerCase() ||
+        (identity.gameProfileId && bot.gameProfileId === identity.gameProfileId),
     );
     if (duplicate) {
-      throw managedError("BOT_CONFLICT", "同一服务器上已经配置了同名 Bot。", 409);
+      throw managedError("BOT_CONFLICT", "该游戏身份已绑定 Bot；请先停止并移除原配置再换服。", 409);
     }
     const slot = [...this.slots.values()].find(
-      ({ botId }) => !this.configs.has(botId),
+      ({ botId }) => ![...this.configs.values()].some((bot) => (bot.slotId ?? bot.botId) === botId),
     );
     if (!slot) {
       throw managedError("BOT_LIMIT_REACHED", "本地 Bot 槽位已用完。", 409);
     }
     const now = new Date().toISOString();
     const config = {
-      botId: slot.botId,
-      username: input.username,
+      slotId: slot.botId,
+      ...identity,
+      identityBound: true,
       serverHost: input.serverHost,
       serverPort: input.serverPort,
       minecraftVersion: input.minecraftVersion,
-      auth: input.auth,
+      ...(input.worldId !== undefined ? { worldId: input.worldId } : {}),
       ...(input.purpose === "anarchy" ? { purpose: "anarchy" } : {}),
       ...(input.connectHost !== undefined ? { connectHost: input.connectHost } : {}),
       createdAt: now,
@@ -1140,7 +1147,7 @@ export class StudioLocalManager {
         this.pendingPeerRestarts.add(peer.botId);
       }
       this.schedulePeerRestartWave();
-      await this.startBot(config.botId);
+      await this.startBot(config.botId, identity);
     } catch (cause) {
       config.processState = "error";
       config.lastError = boundedError(cause);
@@ -1210,9 +1217,9 @@ export class StudioLocalManager {
     );
   }
 
-  async startBot(botId) {
+  async startBot(botId, verifiedIdentity = null) {
     const config = this.configs.get(botId);
-    const slot = this.slots.get(botId);
+    const slot = this.slots.get(config?.slotId ?? botId);
     if (!config || !slot) {
       throw managedError("BOT_NOT_FOUND", "本地 Bot 配置没有可用认证槽位。", 404);
     }
@@ -1225,12 +1232,19 @@ export class StudioLocalManager {
       }
       return;
     }
+    if (config.identityBound && config.auth === "online") {
+      const identity = verifiedIdentity ?? await this.identityResolver({ auth: "online", accountRef: config.accountRef },
+        { environment: this.options.environment });
+      if (identity.botId !== config.botId || identity.gameProfileId !== config.gameProfileId) {
+        throw managedError("AUTH_REQUIRED", "正版账号的游戏名或 UUID 已变更，拒绝沿用原 Bot 身份和记忆。", 401);
+      }
+    }
     await this.writeProfile(config);
     config.processState = "starting";
     config.desiredRunning = true;
     config.lastError = null;
     config.updatedAt = new Date().toISOString();
-    await this.writeManifest().catch(() => undefined);
+    await this.writeManifest();
     const profilePath = this.profilePath(botId);
     const entry = path.join(
       this.options.repositoryRoot,
@@ -1246,6 +1260,10 @@ export class StudioLocalManager {
       cwd: this.options.repositoryRoot,
       env: {
         ...this.options.environment,
+        ...this.runtimeIdentityEnvironment(config),
+        ...(config.identityBound && !this.options.environment.STUDIO_AUTH_STORE_DIR?.trim()
+          ? { STUDIO_AUTH_STORE_DIR: path.join(this.runtimeRoot, "server-auth") } : {}),
+        STUDIO_MICROSOFT_AUTH_CACHE_DIR: path.join(this.runtimeRoot, "microsoft-auth", `player-${botId}`),
         BOT_SERVER_PROFILE_PATH: profilePath,
         BOT_RUNTIME_LINK_URL:
           `ws://127.0.0.1:${this.options.runtimeLinkPort}/v1/runtime-link`,
@@ -1255,7 +1273,7 @@ export class StudioLocalManager {
         STUDIO_INCIDENT_ENDPOINT: `http://127.0.0.1:${this.options.port}/v1/incidents`,
         STUDIO_INCIDENT_TOKEN: this.options.token,
         // crash-safe spool：manager 不可达时的有界本地缓冲（重放幂等）
-        STUDIO_INCIDENT_SPOOL_PATH: path.join(this.runtimeRoot, "incident-spool", `${botId}.jsonl`),
+        STUDIO_INCIDENT_SPOOL_PATH: path.join(this.runtimeRoot, "incident-spool", `bot-${botId}.jsonl`),
         ...(GIT_METADATA.commit ? { STUDIO_RUNTIME_COMMIT: GIT_METADATA.commit } : {}),
         ...(GIT_METADATA.branch ? { STUDIO_RUNTIME_BRANCH: GIT_METADATA.branch } : {}),
       },
@@ -1573,6 +1591,7 @@ export class StudioLocalManager {
       ...(config.connectHost !== undefined ? { connectHost: config.connectHost } : {}),
       minecraftVersion: config.minecraftVersion,
       auth: config.auth,
+      ...(config.gameProfileId ? { gameProfileId: config.gameProfileId } : {}),
       processState: config.processState,
       pid: process?.child.exitCode === null ? process.child.pid ?? null : null,
       createdAt: config.createdAt,
@@ -1741,6 +1760,11 @@ export class StudioLocalManager {
     }
     for (const value of input.bots) {
       const config = validatePersistedBot(value, this.slots);
+      if ([...this.configs.values()].some((existing) =>
+        existing.slotId === config.slotId || existing.botId.toLowerCase() === config.botId.toLowerCase() ||
+        existing.username.toLowerCase() === config.username.toLowerCase())) {
+        throw new Error("Local Bot manifest has duplicate slot or game identity.");
+      }
       this.configs.set(config.botId, config);
     }
   }
@@ -1750,6 +1774,11 @@ export class StudioLocalManager {
       schemaVersion: "1.0",
       bots: [...this.configs.values()].map((config) => ({
         botId: config.botId,
+        slotId: config.slotId ?? config.botId,
+        identityBound: config.identityBound === true,
+        ...(config.accountRef ? { accountRef: config.accountRef } : {}),
+        ...(config.gameProfileId ? { gameProfileId: config.gameProfileId } : {}),
+        ...(config.worldId ? { worldId: config.worldId } : {}),
         username: config.username,
         serverHost: config.serverHost,
         serverPort: config.serverPort,
@@ -1761,7 +1790,35 @@ export class StudioLocalManager {
         desiredRunning: config.desiredRunning === true,
       })),
     };
-    await atomicWrite(this.manifestPath, `${JSON.stringify(body, null, 2)}\n`);
+    const bindings = this.bindingDocument();
+    const write = this.manifestWrites.then(async () => {
+      await mkdir(this.runtimeRoot, { recursive: true });
+      await atomicWrite(this.manifestPath, `${JSON.stringify(body, null, 2)}\n`);
+      await atomicWrite(this.bindingsPath, `${JSON.stringify(bindings)}\n`);
+    });
+    this.manifestWrites = write.catch(() => undefined);
+    await write;
+  }
+
+  bindingDocument() {
+    return { schemaVersion: "1.0", peers: [...this.configs.values()].map((config) => {
+      const slot = this.slots.get(config.slotId ?? config.botId);
+      if (!slot) throw new Error("Managed identity has no authorized runtime slot.");
+      return { keyId: slot.keyId, botId: config.botId, secretSha256: slot.secretSha256 };
+    }) };
+  }
+
+  async writeBindings() {
+    await atomicWrite(this.bindingsPath, `${JSON.stringify(this.bindingDocument())}\n`);
+  }
+
+  runtimeIdentityEnvironment(config) {
+    if (config.auth !== "online" || !config.identityBound) return {};
+    const source = managedCredentialEnvNames(config.accountRef);
+    const suffix = config.botId.replace(/[^A-Za-z0-9]/gu, "_").toUpperCase();
+    const target = { email: `STUDIO_BOT_EMAIL_${suffix}`, password: `STUDIO_BOT_PASSWORD_${suffix}` };
+    return { [target.email]: this.options.environment[source.email],
+      [target.password]: this.options.environment[source.password] };
   }
 
   async writeProfile(config) {
@@ -1772,8 +1829,12 @@ export class StudioLocalManager {
         : "private-lan";
     const profile = {
       schemaVersion: "1.0",
-      id: `local-${config.botId}`,
+      // Shared server facts use the same host/port identity for every managed Bot.
+      id: config.identityBound ? managedServerProfileId(config) : `local-${config.botId}`,
       botId: config.botId,
+      ...(config.worldId ? { worldId: config.worldId } : {}),
+      ...(config.identityBound ? { identityBinding: { mode: "game-username",
+        ...(config.gameProfileId ? { gameProfileId: config.gameProfileId } : {}) } } : {}),
       // Manager-created profiles are real-server targets. Keeping this
       // separate from isolated-test prevents test-only boundary probing from
       // being enabled by a Dashboard-created Bot.
@@ -1815,7 +1876,7 @@ export class StudioLocalManager {
 
   profilePath(botId) {
     if (!BOT_ID_PATTERN.test(botId)) throw new Error("Bot ID is invalid.");
-    return path.join(this.botRoot, botId, "server-profile.json");
+    return path.join(this.botRoot, LEGACY_BOT_ID_PATTERN.test(botId) ? botId : `player-${botId}`, "server-profile.json");
   }
 
   writeJson(response, status, body) {
@@ -1962,21 +2023,9 @@ function validateCreateBotRequest(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw managedError("INVALID_REQUEST", "Bot 创建请求必须是对象。", 400);
   }
-  const keys = Object.keys(input).sort().join(",");
-  // connectHost 可选（2026-09-03 canary 修正）：仅覆盖 TCP 连接目的地址；
-  // 握手 hostname 恒为 serverHost（Server Profile SSOT）。
-  const base = input.purpose === "anarchy"
-    ? "minecraftVersion,purpose,schemaVersion,serverHost,serverPort,username"
-    : "minecraftVersion,schemaVersion,serverHost,serverPort,username";
-  const allowed = new Set([
-    base,
-    ...(input.connectHost !== undefined ? [`connectHost,${base}`] : []),
-    ["auth", ...base.split(",")].sort().join(","),
-    ...(input.connectHost !== undefined
-      ? [["auth", "connectHost", ...base.split(",")].sort().join(",")]
-      : []),
-  ]);
-  if (!allowed.has(keys)) {
+  const allowed = new Set(["schemaVersion", "username", "accountRef", "auth", "purpose", "serverHost",
+    "serverPort", "minecraftVersion", "connectHost", "worldId"]);
+  if (Object.keys(input).some((key) => !allowed.has(key))) {
     throw managedError("INVALID_REQUEST", "Bot 创建请求包含未知或缺失字段。", 400);
   }
   const serverHost = String(input.serverHost ?? "").trim();
@@ -1987,8 +2036,12 @@ function validateCreateBotRequest(input) {
   const auth = input.auth === undefined ? "offline" : input.auth;
   if (
     input.schemaVersion !== "1.0" ||
-    typeof input.username !== "string" ||
-    !USERNAME_PATTERN.test(input.username) ||
+    (auth === "offline" && (typeof input.username !== "string" || !USERNAME_PATTERN.test(input.username) || input.accountRef !== undefined)) ||
+    (auth === "online" && (typeof input.accountRef !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u.test(input.accountRef))) ||
+    (input.username !== undefined && (typeof input.username !== "string" || !USERNAME_PATTERN.test(input.username))) ||
+    (input.purpose !== undefined && input.purpose !== "anarchy") ||
+    !serverHost || serverHost.length > 253 || !/^[A-Za-z0-9.:\-]+$/u.test(serverHost) ||
+    (input.worldId !== undefined && (typeof input.worldId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(input.worldId))) ||
     (input.purpose !== "anarchy" && !loopbackHost(serverHost) && !privateHost(serverHost) && serverHost !== "host.docker.internal") ||
     !Number.isSafeInteger(input.serverPort) ||
     input.serverPort < 1 ||
@@ -2006,7 +2059,9 @@ function validateCreateBotRequest(input) {
     );
   }
   return {
-    username: input.username,
+    ...(input.username !== undefined ? { username: input.username } : {}),
+    ...(input.accountRef !== undefined ? { accountRef: input.accountRef } : {}),
+    ...(input.worldId !== undefined ? { worldId: input.worldId } : {}),
     serverHost,
     serverPort: input.serverPort,
     minecraftVersion,
@@ -2020,22 +2075,35 @@ function validatePersistedBot(input, slots) {
   const createdAt = typeof input?.createdAt === "string" && Number.isFinite(Date.parse(input.createdAt))
     ? new Date(input.createdAt).toISOString()
     : null;
+  const identityBound = input?.identityBound === true;
+  const legacy = !identityBound && LEGACY_BOT_ID_PATTERN.test(input?.botId ?? "");
   const normalized = validateCreateBotRequest({
     schemaVersion: "1.0",
     username: input?.username,
     serverHost: input?.serverHost,
     serverPort: input?.serverPort,
     minecraftVersion: input?.minecraftVersion,
-    ...(input?.auth !== undefined ? { auth: input.auth } : {}),
+    // Old slot manifests remain aliases; they never acquire a fabricated UUID.
+    auth: legacy ? "offline" : input?.auth ?? "offline",
+    ...(!legacy && input?.auth === "online" ? { accountRef: input.accountRef } : {}),
+    ...(input?.worldId !== undefined ? { worldId: input.worldId } : {}),
     ...(input?.purpose === "anarchy" ? { purpose: "anarchy" } : {}),
     ...(input?.connectHost !== undefined ? { connectHost: input?.connectHost } : {}),
   });
-  if (!createdAt || typeof input?.botId !== "string" || !slots.has(input.botId)) {
+  const slotId = input?.slotId ?? input?.botId;
+  if (!createdAt || typeof input?.botId !== "string" || !BOT_ID_PATTERN.test(input.botId) || !slots.has(slotId) ||
+      (!identityBound && !legacy) || (identityBound && input.botId !== input.username) ||
+      (identityBound && input.auth === "online" && !/^[a-f0-9]{32}$/u.test(input.gameProfileId ?? "")) ||
+      (input.auth !== undefined && input.auth !== "offline" && input.auth !== "online")) {
     throw new Error("Persisted local Bot entry is invalid.");
   }
   return {
     botId: input.botId,
+    slotId,
+    identityBound,
     ...normalized,
+    auth: input.auth ?? "offline",
+    ...(identityBound && input.auth === "online" ? { gameProfileId: input.gameProfileId } : {}),
     createdAt,
     // 期望态随 manifest 持久化；缺字段（旧格式）按 stopped 处理——
     // manager 重启绝不复活用户已 stop 的 bot。
@@ -2044,6 +2112,11 @@ function validatePersistedBot(input, slots) {
     processState: "stopped",
     lastError: null,
   };
+}
+
+export function managedServerProfileId(config) {
+  const server = JSON.stringify([config.serverHost.toLowerCase().replace(/\.$/u, ""), config.serverPort]);
+  return `server-${createHash("sha256").update(server).digest("hex").slice(0, 32)}`;
 }
 
 async function readJson(request) {

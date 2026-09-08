@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   botStopResultV1Schema,
   botTelemetryMessageV1Schema,
+  botIdentitySchema,
   identifierSchema,
   stopBotCommandV1Schema,
 } from "./bot-messages.js";
@@ -51,7 +52,7 @@ export const runtimeLinkAuthenticateV1Schema = z
         coordinatorInstanceId: identifierSchema,
         challengeNonce: nonceOrProofSchema,
         clientNonce: nonceOrProofSchema,
-        botId: identifierSchema,
+        botId: botIdentitySchema,
         runtimeInstanceId: identifierSchema,
         keyId: identifierSchema,
         clientProof: nonceOrProofSchema,
@@ -69,7 +70,7 @@ export const runtimeLinkAcceptedV1Schema = z
         challengeMessageId: z.string().uuid(),
         authenticateMessageId: z.string().uuid(),
         coordinatorInstanceId: identifierSchema,
-        botId: identifierSchema,
+        botId: botIdentitySchema,
         runtimeInstanceId: identifierSchema,
         keyId: identifierSchema,
         serverProof: nonceOrProofSchema,
@@ -120,7 +121,7 @@ export const runtimeLinkStateRequestV1Schema = z
         instanceId: identifierSchema,
       })
       .strict(),
-    botId: identifierSchema,
+    botId: botIdentitySchema,
     taskId: identifierSchema,
     type: z.literal("runtime.link.state-request.v1"),
     payload: z

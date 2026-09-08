@@ -34,7 +34,7 @@
     "test:world-memory-infra": "pnpm --filter @minecraft-studio/world-memory build && node scripts/run-world-memory-infrastructure-tests.mjs",
     "test:runtime-link": "pnpm build:control-plane && pnpm --filter @minecraft-studio/bot-runtime build && node scripts/run-runtime-link-acceptance.mjs",
     "test:bot-supervisor": "pnpm build:packages && pnpm --filter @minecraft-studio/bot-runtime test:supervisor",
-    "test:studio-manager": "node --test scripts/studio-local-manager.test.mjs",
+    "test:studio-manager": "node --test scripts/studio-local-manager.test.mjs scripts/lib/managed-game-identity.test.mjs",
     "benchmark:bot-supervisor": "pnpm build:packages && pnpm --filter @minecraft-studio/bot-runtime benchmark:supervisor",
     "audit:spark": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/audit-dgx-spark.ps1",
     "benchmark:spark": "node scripts/benchmark-spark-openai.mjs",

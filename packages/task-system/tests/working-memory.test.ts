@@ -22,7 +22,7 @@ describe("bot working memory", () => {
     const time = clock();
     const store = new InMemoryWorkingMemoryStore();
     const memory = new BotWorkingMemory({
-      botId: "bot-01",
+      botId: "_Miner",
       serverProfileId: "isolated-local",
       dimension: "minecraft:overworld",
       now: time.now,
@@ -48,7 +48,7 @@ describe("bot working memory", () => {
     expect(memory.nearestBlock("crafting_table")?.position).toEqual({ x: 2, y: 64, z: 2 });
 
     const restored = new BotWorkingMemory({
-      botId: "bot-01",
+      botId: "_Miner",
       serverProfileId: "isolated-local",
       dimension: "minecraft:overworld",
       now: time.now,

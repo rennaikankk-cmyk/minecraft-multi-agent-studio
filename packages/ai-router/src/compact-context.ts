@@ -1,4 +1,4 @@
-import { botPositionSchema, identifierSchema } from "@minecraft-studio/protocol";
+import { botPositionSchema, botIdentitySchema, identifierSchema } from "@minecraft-studio/protocol";
 import { z } from "zod";
 
 /**
@@ -17,7 +17,7 @@ import { z } from "zod";
  */
 export const compactBotContextSchema = z
   .object({
-    botId: identifierSchema,
+    botId: botIdentitySchema,
     currentTask: z.string().max(1_024).nullable(),
     health: z.number().min(0).max(2_048),
     food: z.number().min(0).max(20),

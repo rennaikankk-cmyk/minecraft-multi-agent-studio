@@ -465,6 +465,21 @@ describe("SingleBotRuntime", () => {
     vi.unstubAllEnvs();
   });
 
+  it("reports the configured world generation and observed world spawn without inventing a bed", async () => {
+    const messages: BotTelemetryMessageV1[] = [];
+    const worldSpawn = { position: snapshot.position, observedAt: "2026-07-19T10:00:00.000Z", source: "server_spawn_packet" as const };
+    const client = new FakeBotClient({ ...snapshot, personalContext: { worldId: "client-untrusted", worldSpawn, verifiedRespawn: null } });
+    const runtime = new SingleBotRuntime({ ...profile, worldId: "season-2" }, {
+      createClient: () => client, messageSink: (message) => messages.push(message), logger,
+      now: () => new Date(Date.now()), randomId: () => FIXED_UUID,
+    });
+    runtime.start();
+    client.spawn();
+    const status = messages.find((message) => message.type === "bot.status.v1");
+    expect(status?.payload).toMatchObject({ personalContext: { worldId: "season-2", worldSpawn, verifiedRespawn: null } });
+    await runtime.stop("test");
+  });
+
   it("emits connecting heartbeat and real snapshot after spawn", async () => {
     const messages: BotTelemetryMessageV1[] = [];
     const client = new FakeBotClient();

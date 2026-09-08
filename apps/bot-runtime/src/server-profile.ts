@@ -170,11 +170,8 @@ export const serverProfileSchema = z
       .min(1)
       .max(128)
       .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u),
-    botId: z
-      .string()
-      .min(1)
-      .max(128)
-      .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u),
+    botId: z.string().min(1).max(128)
+      .refine((value) => /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(value) || MINECRAFT_USERNAME_PATTERN.test(value)),
     purpose: serverProfilePurposeSchema,
     networkScope: z.enum(["loopback", "private-lan", "public"]),
     host: z.string().trim().min(1).max(253),
@@ -218,6 +215,13 @@ export const serverProfileSchema = z
      * 下划线）读取，找不到即拒绝启动——不静默降级成离线模式。
      */
     auth: z.enum(["offline", "online"]),
+    /** Explicit world generation; omitted legacy profiles retain unknown generation. */
+    worldId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u).optional(),
+    /** Manager binds new identities before allocating Runtime Link permissions. */
+    identityBinding: z.object({
+      mode: z.literal("game-username"),
+      gameProfileId: z.string().regex(/^[a-f0-9]{32}$/u).optional(),
+    }).strict().optional(),
     /** 缺省即启用 adaptive NoHunger；可由单服 profile 显式关闭。 */
     noHunger: serverProfileNoHungerConfigSchema.optional(),
     combat: serverProfileCombatConfigSchema.optional(),
@@ -243,6 +247,11 @@ export const serverProfileSchema = z
   })
   .strict()
   .superRefine((profile, context) => {
+    if (profile.identityBinding && (profile.botId !== profile.username ||
+      (profile.auth === "online" && !profile.identityBinding.gameProfileId))) {
+      context.addIssue({ code: "custom", path: ["identityBinding"],
+        message: "Bound BotID must match game username; online identity requires verified profile UUID." });
+    }
     if (!hostMatchesScope(profile.host, profile.networkScope)) {
       context.addIssue({
         code: "custom",

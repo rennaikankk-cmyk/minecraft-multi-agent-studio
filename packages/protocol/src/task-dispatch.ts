@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { identifierSchema } from "./bot-messages.js";
+import { botIdentitySchema, identifierSchema } from "./bot-messages.js";
 import { skillVersionSchema } from "./skill-messages.js";
 
 const utcTimestampSchema = z.string().datetime({ offset: false });
@@ -31,7 +31,7 @@ export const taskDispatchV1Schema = z
     timestamp: utcTimestampSchema,
     source: taskQueueSourceSchema,
     taskId: z.string().uuid(),
-    botId: identifierSchema,
+    botId: botIdentitySchema,
     type: z.literal("task.dispatch.v1"),
     payload: z
       .object({

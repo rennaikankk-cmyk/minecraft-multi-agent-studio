@@ -17,7 +17,7 @@ describe("structured observability", () => {
     });
     logger.warn("test_event", {
       traceId: "trace-01",
-      botId: "worker-01",
+      botId: "_Miner",
       authorization: "Bearer should-not-appear",
       note: "line one\nBearer abcdefghijklmnopqrstuvwxyz012345",
       serverHost: "private.example",
@@ -34,7 +34,7 @@ describe("structured observability", () => {
         event: "test_event",
         traceId: "trace-01",
         taskId: null,
-        botId: "worker-01",
+        botId: "_Miner",
         skillId: null,
         modelName: null,
         authorization: "[REDACTED]",

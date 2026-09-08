@@ -75,6 +75,40 @@ import {
 } from "./fixtures/in-memory-client.js";
 
 describe("MineflayerBotClient lifecycle", () => {
+  it.each(["wrong-name", "wrong-uuid"])("refuses %s before publishing a bound online spawn", (failure) => {
+    const emitter = new EventEmitter();
+    const uuid = "0123456789abcdef0123456789abcdef";
+    const quit = vi.fn();
+    const bot = Object.assign(emitter, { username: failure === "wrong-name" ? "OtherPlayer" : "_Resident_1",
+      _client: Object.assign(new EventEmitter(), { session: { selectedProfile: { id: failure === "wrong-uuid" ? "f".repeat(32) : uuid } } }), quit });
+    const client = new MineflayerBotClient(bot as unknown as Bot, "auto", "server-a", false, undefined,
+      "safe", null, undefined, undefined, undefined,
+      { botId: "_Resident_1", username: "_Resident_1", auth: "online", identityBinding: { mode: "game-username", gameProfileId: uuid } });
+    const onSpawn = vi.fn();
+    const onError = vi.fn();
+    client.setHandlers(handlers({ onSpawn, onError }));
+    emitter.emit("spawn");
+    expect(onSpawn).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(new Error("BOT_GAME_IDENTITY_MISMATCH"));
+    expect(quit).toHaveBeenCalledWith("BOT_GAME_IDENTITY_MISMATCH");
+  });
+
+  it("records server spawn packets as historical spawn observations without asserting a bed", () => {
+    const packetEmitter = new EventEmitter();
+    const make = () => Object.assign(new EventEmitter(), { _client: packetEmitter, health: 20,
+      entity: { position: new Vec3(4, 65, 7), velocity: new Vec3(0, 0, 0), effects: {} },
+      game: { dimension: "minecraft:overworld" }, inventory: { items: () => [], slots: [] },
+      getControlState: () => false, registry: { foodsByName: {} } });
+    const client = new MineflayerBotClient(make() as unknown as Bot, "auto");
+    expect(client.snapshot().personalContext).toEqual({ worldSpawn: null, verifiedRespawn: null });
+    packetEmitter.emit("spawn_position", { location: { x: 24, y: 70, z: -30 } });
+    expect(client.snapshot().personalContext?.worldSpawn).toMatchObject({
+      position: { x: 24, y: 70, z: -30, dimension: "minecraft:overworld" }, source: "server_spawn_packet" });
+    expect(client.snapshot().personalContext?.verifiedRespawn).toBeNull();
+    const restarted = new MineflayerBotClient(make() as unknown as Bot, "auto");
+    expect(restarted.snapshot().personalContext?.worldSpawn).toBeNull();
+  });
+
   it("waits for spawn before subscribing to the deferred inventory", () => {
     const emitter = new EventEmitter();
     const bot = emitter as unknown as Bot;

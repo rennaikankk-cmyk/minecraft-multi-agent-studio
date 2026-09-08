@@ -14,6 +14,7 @@ import type {
 } from "@minecraft-studio/observability";
 import {
   goalResultSummaryFromOutput,
+  botIdentitySchema,
   identifierSchema,
   parseSkillExecutionResult,
   type BotSkillCatalogEntryV1,
@@ -128,7 +129,7 @@ const DEFAULT_MAX_SAFETY_RECOVERY_WAIT_MS = 30_000;
 const localPlannerNoopDecisionSchema = z
   .object({
     action: z.literal("noop"),
-    botId: identifierSchema,
+    botId: botIdentitySchema,
     taskId: identifierSchema,
     reasonCode: reasonCodeSchema,
   })
@@ -164,8 +165,8 @@ export type LocalPlannerTrustedIdentity = Readonly<{
  * full protocol schema still re-parses the response before dispatch.
  */
 function trustedIdentityFields(identity: LocalPlannerTrustedIdentity | undefined) {
-  if (!identity) return { botId: identifierSchema, taskId: identifierSchema };
-  const trusted = z.object({ botId: identifierSchema, taskId: identifierSchema });
+  if (!identity) return { botId: botIdentitySchema, taskId: identifierSchema };
+  const trusted = z.object({ botId: botIdentitySchema, taskId: identifierSchema });
   const parsed = trusted.safeParse(identity);
   if (!parsed.success) {
     throw new LocalPlannerError(
@@ -203,7 +204,7 @@ function localPlannerInvokeDecisionSchema<
   return z
     .object({
       action: z.literal("invoke_skill"),
-      botId: identifierSchema,
+      botId: botIdentitySchema,
       taskId: identifierSchema,
       skillId: skillIdSchema,
       skillVersion: skillVersionValueSchema,
@@ -264,7 +265,7 @@ function localPlannerPlanItemsDecisionSchema(
   return z
     .object({
       action: z.literal("plan_items"),
-      botId: identifierSchema,
+      botId: botIdentitySchema,
       taskId: identifierSchema,
       goals: z
         .array(planGoalSchema.extend({ itemName: itemNameValueSchema }))

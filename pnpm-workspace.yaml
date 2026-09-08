@@ -11,6 +11,8 @@ overrides:
   postcss: 8.5.23
   sharp: 0.35.0
   uuid: 11.1.1
+  prismarine-chunk: 1.41.0
+  minecraft-data: 3.114.0
 
 blockExoticSubdeps: true
 minimumReleaseAge: 1440
@@ -21,4 +23,4 @@ strictPeerDependencies: true
 trustLockfile: false
 verifyStoreIntegrity: true
 patchedDependencies:
-  prismarine-chunk@1.40.0: patches/prismarine-chunk@1.40.0.patch
+  prismarine-chunk@1.41.0: patches/prismarine-chunk@1.41.0.patch

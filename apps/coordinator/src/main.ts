@@ -23,6 +23,7 @@ import {
 } from "@minecraft-studio/task-system";
 
 import { BotRegistry } from "./bot-registry.js";
+import { FilePersonalMemoryStore } from "./personal-memory-store.js";
 import { RegistryFactReader } from "./spark-strategy-v1/registry-facts.js";
 import { TeamProposalObserver, teamObserverEnabled } from "./spark-strategy-v1/observer.js";
 import { scheduledRouterModelClient } from "./spark-strategy-v1/model-client.js";
@@ -129,8 +130,12 @@ async function main(): Promise<void> {
     persistBaseState();
     logger.info("coordinator_operator_bases_assigned", { count });
   }
+  const personalMemory = new FilePersonalMemoryStore(process.env.STUDIO_PERSONAL_MEMORY_DIR?.trim() ||
+    path.join("runtime-data", "personal-memory"));
+  logger.info("coordinator_personal_memory_started", { durability: personalMemory.durability, freshness: "historical" });
   const registry = new BotRegistry({
     staleAfterMs: runtimeConfig.botStaleAfterMs,
+    personalMemory,
   });
   // 聊天指挥扇入：director 构造完成后才存在，用闭包变量转接。
   let chatGoalHandler: ((botId: string, speaker: string, message: string) => boolean) | null = null;
@@ -156,6 +161,8 @@ async function main(): Promise<void> {
     port: runtimeConfig.port,
     instanceId,
     peers: runtimeConfig.peers,
+    ...(runtimeConfig.peersPath ? { peersPath: runtimeConfig.peersPath } : {}),
+    ...(runtimeConfig.managedKeyIds !== undefined ? { managedKeyIds: runtimeConfig.managedKeyIds } : {}),
     registry,
     logger,
   });
@@ -505,6 +512,7 @@ async function main(): Promise<void> {
         bases: baseRegistry,
         facilities: facilityRegistry,
         persistState: persistBaseState,
+        personalMemory,
         provenanceDir: path.join(process.cwd(), "runtime-data", "provenance"),
         host: sharedStateConfig.host,
         port: sharedStateConfig.port,

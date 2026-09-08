@@ -14,6 +14,7 @@ import {
 } from "@minecraft-studio/coordinator";
 import {
   botDetailResponseV1Schema,
+  botIdentitySchema,
   botListResponseV1Schema,
   botStreamEventV1Schema,
   botStreamSnapshotV1Schema,
@@ -60,7 +61,6 @@ import {
   type TaskHistorySource,
 } from "./task-history-source.js";
 
-const BOT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const TASK_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const JSON_HEADERS = {
   "Cache-Control": "no-store",
@@ -444,7 +444,7 @@ export class ControlApiServer {
     const stopMatch = /^\/v1\/bots\/([^/]+)\/stop$/u.exec(url.pathname);
     if (stopMatch) {
       const botId = decodePathSegment(stopMatch[1]);
-      if (!botId || !BOT_ID_PATTERN.test(botId)) {
+      if (!botId || !botIdentitySchema.safeParse(botId).success) {
         this.writeError(response, 400, requestId, "INVALID_REQUEST", "Bot identifier is invalid.");
         return;
       }
@@ -510,7 +510,7 @@ export class ControlApiServer {
       return;
     }
     const botId = decodePathSegment(detailMatch[1]);
-    if (!botId || !BOT_ID_PATTERN.test(botId)) {
+    if (!botId || !botIdentitySchema.safeParse(botId).success) {
       this.writeError(response, 400, requestId, "INVALID_REQUEST", "Bot identifier is invalid.");
       return;
     }

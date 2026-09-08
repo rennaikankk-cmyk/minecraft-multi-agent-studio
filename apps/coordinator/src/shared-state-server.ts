@@ -13,6 +13,8 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { AddressInfo } from "node:net";
+import { botPersonalMemoryScopeSchema, botPersonalMemoryResponseV1Schema } from "@minecraft-studio/protocol";
+import { PersonalMemoryError, type PersonalMemoryStore } from "./personal-memory-store.js";
 
 import {
   BaseRegistry,
@@ -50,6 +52,8 @@ export interface SharedStateServerOptions {
    */
   readonly persistPath?: string;
   readonly persistState?: () => void;
+  /** Private, explicitly scoped historical observations. Requires a token even on loopback. */
+  readonly personalMemory?: PersonalMemoryStore;
   /** 定时落盘间隔；默认 60s；<=0 表示只在 stop 时落盘。 */
   readonly persistIntervalMs?: number;
   readonly logger?: { info(message: string, meta?: unknown): void; warn(message: string, meta?: unknown): void };
@@ -136,6 +140,25 @@ export class SharedStateServer {
   private async handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
     try {
       const url = new URL(request.url ?? "/", "http://shared-state.local");
+      if (request.method === "GET" && url.pathname === "/personal-memory") {
+        if (!this.token || !this.authorized(request)) {
+          this.writeJson(response, 403, { ok: false, error: "unauthorized" });
+          return;
+        }
+        if (!this.options.personalMemory) {
+          this.writeJson(response, 503, { ok: false, error: "personal_memory_unavailable" });
+          return;
+        }
+        const scope = botPersonalMemoryScopeSchema.parse({
+          botId: url.searchParams.get("botId"), serverProfileId: url.searchParams.get("serverProfileId"),
+          worldId: url.searchParams.get("worldId"),
+        });
+        this.writeJson(response, 200, botPersonalMemoryResponseV1Schema.parse({
+          schemaVersion: "1.0", durability: this.options.personalMemory.durability,
+          freshness: "historical", memory: this.options.personalMemory.get(scope),
+        }));
+        return;
+      }
       if (request.method === "GET" && url.pathname === "/snapshot") {
         if (!this.authorized(request)) {
           this.writeJson(response, 403, { ok: false, error: "unauthorized" });
@@ -177,6 +200,10 @@ export class SharedStateServer {
       this.writeJson(response, 404, { ok: false, error: "not_found" });
     } catch (error) {
       this.logger?.warn("shared_state_request_failed", { code: error instanceof Error ? error.name : "Unknown" });
+      if (error instanceof PersonalMemoryError) {
+        this.writeJson(response, 503, { ok: false, error: error.code });
+        return;
+      }
       this.writeJson(response, 400, { ok: false, error: "bad_request" });
     }
   }

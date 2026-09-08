@@ -1,6 +1,6 @@
 import type { BotConnectionState, BotPosition } from "./runtime-types.js";
 import type { ServerProfile } from "./server-profile.js";
-import type { MinecraftVersionCompatibility } from "@minecraft-studio/protocol";
+import type { MinecraftVersionCompatibility, BotPersonalContext } from "@minecraft-studio/protocol";
 import type {
   L0SafetyAction,
   L0SafetyActionResult,
@@ -21,6 +21,8 @@ import type {
 } from "./combat-driver.js";
 
 export type BotClientSnapshot = {
+  /** Server observations only; a spawn event does not confirm a personal bed. */
+  personalContext?: Omit<BotPersonalContext, "worldId"> & { worldId?: string | null };
   health: { current: number; maximum: number | null };
   food: { level: number; saturation: number };
   armorPoints: number | null;

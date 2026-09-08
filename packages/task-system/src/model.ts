@@ -1,4 +1,5 @@
 import {
+  botIdentitySchema,
   identifierSchema,
   skillIdentifierSchema,
   skillJsonValueSchema,
@@ -337,7 +338,7 @@ export const taskCancelCommandSchema = z
 export const taskLeaseAcquireCommandSchema = z
   .object({
     ...operationBaseShape,
-    botId: identifierSchema,
+    botId: botIdentitySchema,
     leaseOwner: identifierSchema,
     leaseDurationMs: z.number().int().min(1_000).max(5 * 60_000),
   })
@@ -374,7 +375,7 @@ export const taskLeaseExpireCommandSchema = z
 export const taskAssignmentAcquireCommandSchema = z
   .object({
     ...operationBaseShape,
-    botId: identifierSchema,
+    botId: botIdentitySchema,
     leaseOwner: identifierSchema,
     leaseDurationMs: z.number().int().min(1_000).max(5 * 60_000),
     // Assignment selection is made against a concrete Runtime connection.

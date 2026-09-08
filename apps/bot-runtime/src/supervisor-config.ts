@@ -9,6 +9,7 @@ import {
 } from "@minecraft-studio/cpu-resource-manager";
 import {
   supervisorDeploymentTierSchema,
+  botIdentitySchema,
   type SupervisorBotAssignmentV1,
   type SupervisorDeploymentTier,
 } from "@minecraft-studio/protocol";
@@ -35,11 +36,7 @@ const supervisorManifestSchema = z
       .array(
         z
           .object({
-            botId: z
-              .string()
-              .min(1)
-              .max(128)
-              .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u),
+            botId: botIdentitySchema,
             profilePath: z
               .string()
               .min(1)

@@ -1,3 +1,5 @@
+import { botIdentitySchema } from "@minecraft-studio/protocol";
+
 export const aiRequestPriorities = {
   systemCritical: 0,
   combat: 10,
@@ -709,7 +711,7 @@ function validateRequest<T>(request: AIScheduledRequest<T>, defaultTimeoutMs: nu
 }
 
 function validateIdentifier(value: string, field: string): void {
-  if (!IDENTIFIER_PATTERN.test(value)) {
+  if (!(field === 'botId' ? botIdentitySchema.safeParse(value).success : IDENTIFIER_PATTERN.test(value))) {
     throw new TypeError(`${field} is invalid.`);
   }
 }

@@ -9,6 +9,7 @@ import {
   type BotWorldStateV1,
   type MinecraftVersionCompatibility,
 } from "@minecraft-studio/protocol";
+import { PersonalMemoryError, type PersonalMemoryStore } from "./personal-memory-store.js";
 
 export type RegistryConnectionState =
   BotStatusV1["payload"]["connectionState"];
@@ -68,6 +69,9 @@ export type CoordinatorTelemetryErrorCode =
   | "SOURCE_INSTANCE_MISMATCH"
   | "MESSAGE_FROM_FUTURE"
   | "SERVER_PROFILE_MISMATCH"
+  | "WORLD_ID_MISMATCH"
+  | "PERSONAL_MEMORY_READ_FAILED"
+  | "PERSONAL_MEMORY_WRITE_FAILED"
   | "CLOCK_INVALID";
 
 export class CoordinatorTelemetryError extends Error {
@@ -147,6 +151,7 @@ export type BotRegistryOptions = Readonly<{
   maxSeenMessageIds?: number;
   maxRetiredRuntimeIds?: number;
   now?: () => Date;
+  personalMemory?: PersonalMemoryStore;
 }>;
 
 export class BotRegistry {
@@ -160,7 +165,7 @@ export class BotRegistry {
   private readonly maxSeenMessageIds: number;
   private readonly maxRetiredRuntimeIds: number;
 
-  constructor(options: BotRegistryOptions) {
+  constructor(private readonly options: BotRegistryOptions) {
     this.staleAfterMs = positiveInteger(options.staleAfterMs, "staleAfterMs");
     this.maxClockSkewMs = nonnegativeInteger(
       options.maxClockSkewMs ?? 30_000,
@@ -254,8 +259,6 @@ export class BotRegistry {
     ) {
       this.assertVersionConsistency(existing, message);
     }
-    this.rememberMessageId(message.messageId);
-
     const record = existing ?? this.createRecord(message, receivedMs, observedMs);
     if (!existing) this.records.set(message.botId, record);
 
@@ -292,6 +295,16 @@ export class BotRegistry {
       return this.ignored(record, "duplicate_sequence", receivedMs);
     }
 
+    // Commit private observations before acknowledging telemetry. A disk failure
+    // remains retryable, without caching the message ID as successfully ingested.
+    if (message.type === "bot.status.v1") {
+      try { this.options.personalMemory?.observeStatus(message); }
+      catch (error) {
+        if (error instanceof PersonalMemoryError) throw new CoordinatorTelemetryError(error.code, error.code);
+        throw error;
+      }
+    }
+    this.rememberMessageId(message.messageId);
     record.lastSequence = message.payload.sequence;
     record.lastObservedMs = Math.max(record.lastObservedMs, observedMs);
     record.lastObservedAt = new Date(record.lastObservedMs).toISOString();
@@ -342,6 +355,10 @@ export class BotRegistry {
     record: InternalRecord,
     message: BotTelemetryMessageV1,
   ): void {
+    if (message.type === "bot.status.v1" && record.currentStatus &&
+      (record.currentStatus.personalContext?.worldId ?? null) !== (message.payload.personalContext?.worldId ?? null)) {
+      throw new CoordinatorTelemetryError("WORLD_ID_MISMATCH", "One runtime instance cannot change its world generation identity.");
+    }
     const incomingVersion = message.type === "bot.version.v1"
       ? message.payload.compatibility
       : message.type === "bot.status.v1"

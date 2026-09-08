@@ -1642,6 +1642,11 @@ export class SingleBotRuntime {
           armorPoints: snapshot.armorPoints,
           armorSlots: snapshot.armorSlots,
           inventory: snapshot.inventory,
+          personalContext: {
+            worldId: this.profile.worldId ?? null,
+            worldSpawn: snapshot.personalContext?.worldSpawn ?? null,
+            verifiedRespawn: snapshot.personalContext?.verifiedRespawn ?? null,
+          },
           ...(this.lastDeath ? { lastDeath: this.lastDeath } : {}),
           position: snapshot.position,
           latencyMs: snapshot.latencyMs,

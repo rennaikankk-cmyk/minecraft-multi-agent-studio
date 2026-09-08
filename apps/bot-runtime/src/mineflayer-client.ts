@@ -1205,6 +1205,8 @@ export class MineflayerBotClient implements BotClient {
   private activePursuit: { stop: (reason: string) => void } | null = null;
   /** G1 spawn-escape：服务端最近同步的出生点（重触发判定的参照原点）。 */
   private worldSpawnOrigin: { x: number; z: number; dimension: string } | null = null;
+  private observedWorldSpawn: import("@minecraft-studio/protocol").BotPersonalContext["worldSpawn"] = null;
+  private identityRejected = false;
   /** 最近一次 Rust 路由的各阶段耗时（runtime 技能完成时上报；null=未启用）。 */
   rustPathStats: RustPathStats | null = null;
   /** P5-D2c WorldMirror 同步适配器（STUDIO_WORLD_MIRROR_SYNC=1 时创建）。 */
@@ -1323,6 +1325,7 @@ export class MineflayerBotClient implements BotClient {
       baseUrl: process.env.STUDIO_SHARED_STATE_URL ?? `http://127.0.0.1:${process.env.STUDIO_SHARED_STATE_PORT ?? "8791"}`,
       ...(process.env.STUDIO_SHARED_STATE_TOKEN ? { token: process.env.STUDIO_SHARED_STATE_TOKEN } : {}),
     }),
+    private readonly personalIdentity: Pick<ServerProfile, "botId" | "username" | "auth" | "identityBinding" | "worldId"> | null = null,
   ) {
     attachPlayerLoaded(bot);
     /** 无规则服导航档：true = 沿途挖掘/疾跑/跑酷/搭高全部放开。 */
@@ -1389,14 +1392,31 @@ export class MineflayerBotClient implements BotClient {
     bot.on("login", () => {
       this.loginSeen = true;
     });
-    bot._client?.on("spawn_position", (packet: { location?: { x: number; z: number }; globalPos?: { location: { x: number; z: number }; dimensionName?: string } }) => {
+    bot._client?.on("spawn_position", (packet: { location?: { x: number; y?: number; z: number }; globalPos?: { location: { x: number; y?: number; z: number }; dimensionName?: string } }) => {
       const location = packet.globalPos?.location ?? packet.location;
       if (!location || !Number.isFinite(location.x) || !Number.isFinite(location.z)) return;
       this.worldSpawnOrigin = { x: location.x, z: location.z,
         dimension: normalizeDimension(packet.globalPos?.dimensionName ?? String(bot.game?.dimension ?? "minecraft:overworld")) };
+      if (typeof location.y === "number" && Number.isFinite(location.y)) {
+        this.observedWorldSpawn = { position: { ...this.worldSpawnOrigin, y: location.y },
+          observedAt: new Date().toISOString(), source: "server_spawn_packet" };
+      }
       if (this.spawnSeen) this.trySpawnEscape();
     });
     bot.on("spawn", () => {
+      // The Microsoft profile is authoritative. Never publish a different account
+      // under the requested BotID or let it load that account's personal memory.
+      if (this.personalIdentity?.identityBinding) {
+        const expected = this.personalIdentity;
+        const profileId = (bot._client as unknown as { session?: { selectedProfile?: { id?: string } } })?.session?.selectedProfile?.id;
+        if (bot.username !== expected.botId || (expected.auth === "online" &&
+            profileId?.replaceAll("-", "").toLowerCase() !== expected.identityBinding?.gameProfileId)) {
+          this.identityRejected = true;
+          this.handlers?.onError(new Error("BOT_GAME_IDENTITY_MISMATCH"));
+          bot.quit("BOT_GAME_IDENTITY_MISMATCH");
+          return;
+        }
+      }
       this.spawnEscape?.abort();
       this.spawnEscape = null;
       this.spawnSeen = true;
@@ -1696,6 +1716,10 @@ export class MineflayerBotClient implements BotClient {
       },
       armorPoints: readArmorPoints(this.bot),
       armorSlots: readArmorSlots(this.bot),
+      personalContext: {
+        worldSpawn: this.observedWorldSpawn,
+        verifiedRespawn: null,
+      },
       inventory: [...inventoryCounts.entries()]
         .sort(([left], [right]) => left.localeCompare(right))
         .map(([itemName, entry]) => ({
@@ -6962,6 +6986,7 @@ export class MineflayerBotClient implements BotClient {
    * 都覆盖）；远点/跨维度 spawn 不触发（防下界门误逃）。
    */
   private trySpawnEscape(): void {
+    if (this.identityRejected) return;
     if (!this.anarchyNavigation || this.spawnEscape || !this.worldSpawnOrigin) return;
     if (process.env.STUDIO_SPAWN_ESCAPE === "0") return;
     const pos = this.bot.entity?.position;
@@ -7295,6 +7320,8 @@ export function createMineflayerClient(
           // username remains the in-game identity used by the coordinator.
           username: resolveOnlineEmail(profile.botId),
           password: resolveOnlinePassword(profile.botId),
+          ...(process.env.STUDIO_MICROSOFT_AUTH_CACHE_DIR?.trim()
+            ? { profilesFolder: process.env.STUDIO_MICROSOFT_AUTH_CACHE_DIR.trim() } : {}),
         }
       : base,
   );
@@ -7310,6 +7337,9 @@ export function createMineflayerClient(
     profile.navigation ?? "safe",
     { host: profile.host, port: profile.port },
     profile.noHunger,
+    undefined,
+    undefined,
+    profile,
   );
 }
 

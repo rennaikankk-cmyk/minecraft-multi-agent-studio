@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   controlLinkGoalErrorCodeSchema,
   goalDispatchTerminalResultV1Schema,
+  botIdentitySchema,
   identifierSchema,
   type ControlLinkGoalErrorCode,
   type ControlLinkGoalRequestV1,
@@ -30,7 +31,7 @@ export const persistedGoalInputSchema = z
     taskId: z.string().uuid(),
     clientId: identifierSchema,
     actorId: identifierSchema,
-    botId: identifierSchema,
+    botId: botIdentitySchema,
     operatorGoal: z
       .string()
       .trim()

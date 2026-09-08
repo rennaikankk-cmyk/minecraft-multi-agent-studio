@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { botStopResultV1Schema, identifierSchema } from "./bot-messages.js";
+import { botStopResultV1Schema, botIdentitySchema, identifierSchema } from "./bot-messages.js";
 import {
   goalDispatchResultV1Schema,
   publicBotDetailV1Schema,
@@ -168,7 +168,7 @@ export const controlLinkStopRequestV1Schema = z
         clientId: identifierSchema,
         controlApiInstanceId: identifierSchema,
         operationId: z.string().uuid(),
-        botId: identifierSchema,
+        botId: botIdentitySchema,
         actorId: identifierSchema,
         issuedAt: timestampSchema,
         expiresAt: timestampSchema,
@@ -214,7 +214,7 @@ const stopResponseIdentityShape = {
   coordinatorInstanceId: identifierSchema,
   requestMessageId: z.string().uuid(),
   operationId: z.string().uuid(),
-  botId: identifierSchema,
+  botId: botIdentitySchema,
 };
 
 export const controlLinkStopResponseV1Schema = z.discriminatedUnion("ok", [
@@ -271,7 +271,7 @@ export const controlLinkGoalRequestV1Schema = z
         controlApiInstanceId: identifierSchema,
         operationId: z.string().uuid(),
         taskId: identifierSchema,
-        botId: identifierSchema,
+        botId: botIdentitySchema,
         actorId: identifierSchema,
         operatorGoal: z
           .string()
@@ -330,7 +330,7 @@ const goalResponseIdentityShape = {
   requestMessageId: z.string().uuid(),
   operationId: z.string().uuid(),
   taskId: identifierSchema,
-  botId: identifierSchema,
+  botId: botIdentitySchema,
 };
 
 export const controlLinkGoalResponseV1Schema = z.discriminatedUnion("ok", [

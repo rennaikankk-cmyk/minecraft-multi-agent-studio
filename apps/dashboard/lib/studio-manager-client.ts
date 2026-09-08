@@ -10,6 +10,7 @@ import {
 } from "@minecraft-studio/protocol";
 
 const TOKEN_PATTERN = /^[^\u0000-\u001f\u007f]{32,512}$/u;
+const MANAGED_BOT_ID_PATTERN = /^(?:[A-Za-z0-9_]{3,16}|studio-bot-[0-9]{2})$/u;
 
 export type StudioManagerConfig = Readonly<{
   baseUrl: string;
@@ -88,6 +89,7 @@ export async function createStudioManagedBot(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(request),
+      signal: AbortSignal.timeout(request.auth === "online" ? 35_000 : 5_000),
     },
     fetchImplementation,
   );
@@ -101,7 +103,7 @@ export async function stopStudioManagedBot(
   botId: string,
   fetchImplementation: typeof fetch = fetch,
 ): Promise<StudioManagedBotResponseV1> {
-  if (!/^studio-bot-[0-9]{2}$/u.test(botId)) {
+  if (!MANAGED_BOT_ID_PATTERN.test(botId)) {
     throw new StudioManagerClientError(
       "INVALID_REQUEST",
       "本地 Bot 标识无效。",
@@ -126,7 +128,7 @@ export async function restartStudioManagedBot(
   botId: string,
   fetchImplementation: typeof fetch = fetch,
 ): Promise<StudioManagedBotResponseV1> {
-  if (!/^studio-bot-[0-9]{2}$/u.test(botId)) {
+  if (!MANAGED_BOT_ID_PATTERN.test(botId)) {
     throw new StudioManagerClientError(
       "INVALID_REQUEST",
       "本地 Bot 标识无效。",
@@ -158,7 +160,7 @@ async function requestJson(
       ...init,
       cache: "no-store",
       redirect: "error",
-      signal: AbortSignal.timeout(5_000),
+      signal: init.signal ?? AbortSignal.timeout(5_000),
       headers: {
         Authorization: `Bearer ${config.token}`,
         ...init.headers,
@@ -203,7 +205,7 @@ function publicManagerMessage(code: StudioManagerErrorCode): string {
     case "INVALID_REQUEST":
       return "本地 Bot 请求字段无效。";
     case "AUTH_REQUIRED":
-      return "Studio Manager 认证失败。";
+      return "管理连接或正版账号身份验证失败，请检查本机认证配置。";
     default:
       return "Studio Manager 无法完成请求。";
   }

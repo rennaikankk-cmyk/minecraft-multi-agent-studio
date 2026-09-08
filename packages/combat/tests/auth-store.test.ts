@@ -38,6 +38,16 @@ function fakeBot() {
 }
 
 describe("AuthCredentialStore", () => {
+  it("isolates game usernames and supports Windows device names across restart", () => {
+    for (const botId of ["CON", "AUX", "_Resident_1"]) {
+      new AuthCredentialStore(botId, tempDir).persist("example.test", 25565, `fixture-${botId}`);
+    }
+    for (const botId of ["CON", "AUX", "_Resident_1"]) {
+      expect(new AuthCredentialStore(botId, tempDir).find("example.test", 25565)?.password).toBe(`fixture-${botId}`);
+      expect(new AuthCredentialStore(botId, tempDir).find("example.test", 25566)).toBeNull();
+    }
+  });
+
   it("generates a password on first use and persists after registration", () => {
     const store = new AuthCredentialStore("studio-bot-01", tempDir);
     const first = store.getOrCreate("example.com", 25565);
