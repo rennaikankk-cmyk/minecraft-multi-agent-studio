@@ -4,7 +4,7 @@
 
 Implementation uses an isolated worktree created from commit `748453e7073d434bdf8300f077d89c4e0601def3` on branch `codex/v2-domain-modules`. The dirty `integration/skill-reliability-20260906` worktree was preserved. No Minecraft server, production endpoint, credentials, or local model was accessed.
 
-The repository baseline `pnpm check` reached the existing bot-runtime worker suites but failed 11 tests because `packages/pathfinder-rs/pathfinder_rs.node` is not built in this environment. This is recorded as `NOT_VERIFIED`, not a passing result. The other completed suites passed before that failure.
+The first repository baseline `pnpm check` reached the existing bot-runtime worker suites but failed 11 tests because `packages/pathfinder-rs/pathfinder_rs.node` had not been built. The artifact is a generated, ignored N-API binary; source checkout alone does not provide it. Running `pnpm --filter @minecraft-studio/pathfinder-rs build` succeeded on Windows (Rust 1.98.0), after which bot-runtime passed (580 tests, 6 skipped) and the complete root `pnpm check` passed. A fresh checkout must run this build before the Worker integration tests.
 
 ## P0/P1/P2 implementation
 
@@ -33,3 +33,4 @@ The isolated checks above are the current implementation evidence. The full root
 ## Remaining stages
 
 P3 must connect invitation and survey operations to the existing Coordinator/Runtime flow and persist bed/sign records through the authoritative storage path. P4/P5 must remove duplicate survival directors, expose the resource ledger through the existing control API, and complete external API capability checks. P6/P7 require isolated Minecraft evidence for movement, real bed respawn, machine protection, output consumption, restart recovery, and 60-minute residency. No production deployment or formal-server connection is part of this change.
+
