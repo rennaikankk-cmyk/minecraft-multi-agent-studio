@@ -33,12 +33,14 @@ export const aiDeadlineProfileCeilingsMs: Readonly<Record<keyof typeof aiRequest
 
 /** 就近档位（priority 数值最接近且不超过的档；超过 background 归 background）。 */
 export function deadlineCeilingForPriority(priority: number): number {
+  // 只在 value <= priority 的档里取最大者（"不超过"语义）。
+  // 旧实现的 Math.abs 双向取最近档：priority=16 会错取 recovery 的 8s
+  // 而非 combat 的 5s，上限比文档语义更宽松。
   let ceiling = aiDeadlineProfileCeilingsMs.background;
-  let bestDistance = Number.POSITIVE_INFINITY;
+  let bestValue = Number.NEGATIVE_INFINITY;
   for (const [name, value] of Object.entries(aiRequestPriorities) as Array<[keyof typeof aiRequestPriorities, number]>) {
-    const distance = Math.abs(value - priority);
-    if (distance < bestDistance) {
-      bestDistance = distance;
+    if (value <= priority && value > bestValue) {
+      bestValue = value;
       ceiling = aiDeadlineProfileCeilingsMs[name];
     }
   }
@@ -409,6 +411,9 @@ export class AIRequestScheduler {
         ),
       );
     }, timeoutMs);
+    // background 档上限 120s：不 unref 会拖住进程退出（该包 tsconfig 无 node
+    // 类型，DOM lib 下定时器是 number——用结构化转型调用 unref）。
+    (entry.timeout as unknown as { unref?: () => void }).unref?.();
 
     if (request.signal) {
       const abort = () => {

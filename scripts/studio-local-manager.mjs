@@ -1,4 +1,4 @@
-import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { createWriteStream, existsSync, readFileSync } from "node:fs";
 import {
   mkdir,
@@ -95,10 +95,13 @@ export async function loadLocalAIKeyFile(environment, configRoot) {
 
 export async function discoverLocalAI(environment = process.env) {
   const checkedAt = new Date().toISOString();
-  const rawUrl = environment.LOCAL_AI_HUB_URL?.trim() ?? "";
-  const preferredModel = environment.LOCAL_AI_MODEL?.trim() ?? "";
-  const apiKey = environment.LOCAL_AI_API_KEY?.trim() || undefined;
-  const configuredProvider = normalizedProvider(environment.LOCAL_AI_PROVIDER);
+  // AI_* 是统一新名（本地/云端/中转站），LOCAL_AI_* 为旧名兼容；AI_* 优先。
+  const rawUrl = (environment.AI_BASE_URL ?? environment.LOCAL_AI_HUB_URL)?.trim() ?? "";
+  const preferredModel = (environment.AI_MODEL ?? environment.LOCAL_AI_MODEL)?.trim() ?? "";
+  const apiKey = (environment.AI_API_KEY ?? environment.LOCAL_AI_API_KEY)?.trim() || undefined;
+  const configuredProvider = normalizedProvider(
+    environment.AI_PROVIDER ?? (environment.AI_BASE_URL ? "openai-compatible" : environment.LOCAL_AI_PROVIDER),
+  );
   if (rawUrl) {
     const explicit = await probeExplicitEndpoint(
       rawUrl,
@@ -286,6 +289,8 @@ export class StudioLocalManager {
     this.botRoot = path.join(this.runtimeRoot, "bots");
     this.manifestPath = path.join(this.runtimeRoot, "local-bots.json");
     this.bindingsPath = options.bindingsPath ?? path.join(this.runtimeRoot, "runtime-peer-bindings.json");
+    this.aiProvidersPath = path.join(this.runtimeRoot, "ai-providers.json");
+    this.aiProviderStore = { schemaVersion: "1.0", activeProfileId: null, profiles: [] };
     this.identityResolver = options.resolveGameIdentity ?? resolveManagedGameIdentity;
     this.manifestWrites = Promise.resolve();
     this.logRoot = path.join(this.runtimeRoot, "logs");
@@ -306,6 +311,11 @@ export class StudioLocalManager {
      */
     this.pendingPeerRestarts = new Set();
     this.peerRestartTimer = null;
+    this.peerRestartWave = null;
+    // per-bot 启动互斥：start/restart/重启波并发进入 startBot 时防止双 spawn
+    // （第二个 processes.set 会覆盖第一个 child，exit handler 因 owner 不匹配
+    // 短路，被覆盖的进程永久脱管）。
+    this.botStartInFlight = new Map();
     // reporterEventId → 已记录结果（spool 重放幂等去重；有界 LRU）
     this.incidentEventCache = new Map();
   }
@@ -316,6 +326,7 @@ export class StudioLocalManager {
       mkdir(this.logRoot, { recursive: true }),
     ]);
     await this.loadManifest();
+    await this.loadAiProviderStore();
     await this.writeBindings();
     // Round 8: gameplay profile fails closed — an invalid value refuses to start.
     try {
@@ -374,6 +385,8 @@ export class StudioLocalManager {
     this.stopping = true;
     if (this.aiTimer) clearInterval(this.aiTimer);
     this.aiTimer = null;
+    // 等待进行中的 peer 重启波退出（波内检查 stopping，不会再拉起新进程）。
+    if (this.peerRestartWave) await this.peerRestartWave.catch(() => undefined);
     if (this.server) {
       await new Promise((resolve) => this.server.close(() => resolve()));
       this.server.closeAllConnections();
@@ -571,6 +584,33 @@ export class StudioLocalManager {
           issue: structuredClone(issue),
           occurrences: structuredClone(this.incidents.listOccurrences(issue.incidentId)),
         });
+        return;
+      }
+      // -----------------------------------------------------------------
+      // AI provider profiles：模型接入档案（本地推理 / 云端 API / 中转站）。
+      // 密钥只落本机文件，响应一律脱敏为 hasApiKey。
+      // -----------------------------------------------------------------
+      if (url.pathname === "/v1/ai/providers") {
+        if (request.method === "GET") {
+          this.writeJson(response, 200, this.listAiProviders());
+          return;
+        }
+        if (request.method === "POST") {
+          const saved = await this.saveAiProvider(await readJson(request));
+          this.writeJson(response, 201, saved);
+          return;
+        }
+      }
+      const aiProviderActivate = url.pathname.match(/^\/v1\/ai\/providers\/(aip-[0-9a-f]{4,32})\/activate$/u);
+      if (request.method === "POST" && aiProviderActivate) {
+        const result = await this.activateAiProvider(aiProviderActivate[1]);
+        this.writeJson(response, 200, result);
+        return;
+      }
+      const aiProviderMatch = url.pathname.match(/^\/v1\/ai\/providers\/(aip-[0-9a-f]{4,32})$/u);
+      if (request.method === "DELETE" && aiProviderMatch) {
+        await this.deleteAiProvider(aiProviderMatch[1]);
+        this.writeJson(response, 200, { schemaVersion: "1.0", deleted: aiProviderMatch[1] });
         return;
       }
       // -----------------------------------------------------------------
@@ -1194,8 +1234,11 @@ export class StudioLocalManager {
       this.peerRestartTimer = null;
       const wave = [...this.pendingPeerRestarts];
       this.pendingPeerRestarts.clear();
-      void (async () => {
+      // 记录在 flight 的波：stop() 需等待其退出，波内逐项检查 stopping，
+      // 防止 shutdown 期间/之后重新拉起 bot（连向已关闭端口的孤儿进程）。
+      this.peerRestartWave = (async () => {
         for (const botId of wave) {
+          if (this.stopping) return;
           if (!this.configs.has(botId)) continue; // 期间被删除
           const managed = this.processes.get(botId);
           if (!managed || managed.child.exitCode !== null) continue; // 不在跑
@@ -1206,7 +1249,9 @@ export class StudioLocalManager {
             // 单 peer 重启失败不阻断整波
           }
         }
-      })();
+      })().finally(() => {
+        this.peerRestartWave = null;
+      });
     }, Number.isFinite(delayMs) && delayMs >= 500 ? delayMs : 2500);
     this.peerRestartTimer.unref?.();
   }
@@ -1243,6 +1288,19 @@ export class StudioLocalManager {
   }
 
   async startBot(botId, verifiedIdentity = null) {
+    // per-bot 互斥：并发调用复用同一 in-flight Promise，避免双 spawn。
+    const inFlight = this.botStartInFlight.get(botId);
+    if (inFlight) return inFlight;
+    const started = this.startBotLocked(botId, verifiedIdentity);
+    this.botStartInFlight.set(botId, started);
+    try {
+      return await started;
+    } finally {
+      this.botStartInFlight.delete(botId);
+    }
+  }
+
+  async startBotLocked(botId, verifiedIdentity = null) {
     const config = this.configs.get(botId);
     const slot = this.slots.get(config?.slotId ?? botId);
     if (!config || !slot) {
@@ -1616,6 +1674,7 @@ export class StudioLocalManager {
       ...(config.connectHost !== undefined ? { connectHost: config.connectHost } : {}),
       minecraftVersion: config.minecraftVersion,
       auth: config.auth,
+      ...(config.purpose === "anarchy" ? { purpose: "anarchy" } : {}),
       ...(config.gameProfileId ? { gameProfileId: config.gameProfileId } : {}),
       processState: config.processState,
       pid: process?.child.exitCode === null ? process.child.pid ?? null : null,
@@ -1730,20 +1789,37 @@ export class StudioLocalManager {
   }
 
   async refreshAIStatus() {
+    // 重入保护：慢的旧探测（双候选端点各 2s 超时）完成后不得反向覆盖
+    // 更新一轮已写入的状态。
+    const generation = (this.aiStatusGeneration = (this.aiStatusGeneration ?? 0) + 1);
+    const superseded = () => this.aiStatusGeneration !== generation;
     const provider = this.aiStatus.provider;
     const baseUrl = this.aiStatus.baseUrl;
     if (!provider || !baseUrl) {
       const discovered = await discoverLocalAI(this.options.environment);
+      if (superseded()) return;
       this.aiStatus = discovered.status;
       return;
     }
-    const probe = await probeAIEndpoint({
-      provider,
-      baseUrl,
-      apiKey: this.options.environment.LOCAL_AI_API_KEY?.trim() || undefined,
-    }, 2_000);
+    const apiKey = (this.options.environment.AI_API_KEY ?? this.options.environment.LOCAL_AI_API_KEY)?.trim() || undefined;
+    const probe = await probeAIEndpoint({ provider, baseUrl, apiKey }, 2_000);
+    if (superseded()) return;
     if (!probe) {
+      if (provider === "openai-compatible") {
+        // 云端/中转站的 /v1/models 只是尽力探测：生成链路（requiresHealthCheck=false）
+        // 不依赖它，不能据此宣判不可用。
+        this.aiStatus = {
+          ...this.aiStatus,
+          state: "degraded",
+          models: [],
+          latencyMs: null,
+          lastCheckedAt: new Date().toISOString(),
+          message: "云端端点 /v1/models 探测未通过；生成链路不依赖该探测（无健康检查直连），实际可用性以真实请求为准。",
+        };
+        return;
+      }
       const discovered = await discoverLocalAI(this.options.environment);
+      if (superseded()) return;
       this.aiStatus = discovered.config
         ? discovered.status
         : {
@@ -1756,11 +1832,33 @@ export class StudioLocalManager {
           };
       return;
     }
+    if (provider === "openai-compatible") {
+      // 云端显式配置的模型即生效：中转站的 /v1/models 经常不完整，
+      // 不能用本地“发现后选择”的 fail-closed 规则误伤生成链路。
+      this.aiStatus = {
+        ...this.aiStatus,
+        state: "connected",
+        model: this.aiStatus.model ?? probe.models[0] ?? null,
+        models: probe.models,
+        latencyMs: probe.latencyMs,
+        lastCheckedAt: probe.checkedAt,
+        message: "云端 API 在线。",
+      };
+      return;
+    }
     const selection = selectModel(probe.models, this.aiStatus.model ?? "");
-  if (selection.error) {
-    return { state: "misconfigured", message: selection.error, changedAt: new Date().toISOString() };
-  }
-  const model = selection.model;
+    if (selection.error) {
+      this.aiStatus = {
+        ...this.aiStatus,
+        state: "misconfigured",
+        models: probe.models,
+        latencyMs: probe.latencyMs,
+        lastCheckedAt: probe.checkedAt,
+        message: selection.error,
+      };
+      return;
+    }
+    const model = selection.model;
     this.aiStatus = {
       ...this.aiStatus,
       state: "connected",
@@ -1770,6 +1868,138 @@ export class StudioLocalManager {
       lastCheckedAt: probe.checkedAt,
       message: "Spark 推理服务在线。",
     };
+  }
+
+  // ------------------------------------------------------------------
+  // AI provider profiles：多供应商档案（本地 vLLM/Ollama、OpenAI 兼容云端/中转站）。
+  // 密钥只落 runtime-data 文件（0600 原子写）；API 响应一律脱敏为 hasApiKey。
+  // ------------------------------------------------------------------
+  async loadAiProviderStore() {
+    try {
+      const input = JSON.parse(await readFile(this.aiProvidersPath, "utf8"));
+      if (input?.schemaVersion !== "1.0" || !Array.isArray(input.profiles)) {
+        throw new Error("invalid ai provider store schema");
+      }
+      this.aiProviderStore = {
+        schemaVersion: "1.0",
+        activeProfileId: typeof input.activeProfileId === "string" ? input.activeProfileId : null,
+        profiles: input.profiles.map((profile) => ({
+          ...validateAiProviderProfile(profile, { requireCloudKey: false }),
+          apiKey: typeof profile.apiKey === "string" && profile.apiKey.trim() ? profile.apiKey.trim() : null,
+        })),
+      };
+    } catch (cause) {
+      if (cause?.code !== "ENOENT") {
+        // 损坏文件隔离（与 local-bots.json 同策略），不静默当作“无档案”继续写。
+        await rename(this.aiProvidersPath, `${this.aiProvidersPath}.corrupt-${Date.now().toString(36)}`).catch(() => undefined);
+      }
+      this.aiProviderStore = { schemaVersion: "1.0", activeProfileId: null, profiles: [] };
+    }
+  }
+
+  async persistAiProviderStore() {
+    await atomicWrite(this.aiProvidersPath, `${JSON.stringify(this.aiProviderStore, null, 2)}\n`);
+  }
+
+  listAiProviders() {
+    return {
+      schemaVersion: "1.0",
+      activeProfileId: this.aiProviderStore.activeProfileId,
+      profiles: this.aiProviderStore.profiles.map((profile) => maskedAiProviderProfile(profile)),
+    };
+  }
+
+  async saveAiProvider(input) {
+    // 新建云端档案必须带密钥；编辑时省略密钥 = 沿用旧值（前端不回显密钥）。
+    const isUpdate = typeof input?.id === "string" && input.id.trim() !== "";
+    const profile = validateAiProviderProfile(input, { requireCloudKey: !isUpdate });
+    const now = new Date().toISOString();
+    if (profile.id) {
+      const index = this.aiProviderStore.profiles.findIndex((existing) => existing.id === profile.id);
+      if (index === -1) throw managedError("NOT_FOUND", "AI provider 档案不存在。", 404);
+      const previous = this.aiProviderStore.profiles[index];
+      const merged = {
+        ...profile,
+        apiKey: profile.apiKey || previous.apiKey,
+        createdAt: previous.createdAt,
+        updatedAt: now,
+      };
+      this.aiProviderStore.profiles[index] = merged;
+      await this.persistAiProviderStore();
+      return maskedAiProviderProfile(merged);
+    }
+    const created = { ...profile, id: `aip-${randomBytes(4).toString("hex")}`, createdAt: now, updatedAt: now };
+    this.aiProviderStore.profiles.push(created);
+    await this.persistAiProviderStore();
+    return maskedAiProviderProfile(created);
+  }
+
+  async deleteAiProvider(id) {
+    const index = this.aiProviderStore.profiles.findIndex((existing) => existing.id === id);
+    if (index === -1) throw managedError("NOT_FOUND", "AI provider 档案不存在。", 404);
+    this.aiProviderStore.profiles.splice(index, 1);
+    if (this.aiProviderStore.activeProfileId === id) this.aiProviderStore.activeProfileId = null;
+    await this.persistAiProviderStore();
+  }
+
+  async activateAiProvider(id) {
+    const profile = this.aiProviderStore.profiles.find((existing) => existing.id === id);
+    if (!profile) throw managedError("NOT_FOUND", "AI provider 档案不存在。", 404);
+    const target = this.aiEnvironmentFile();
+    const previous = await readFile(target, "utf8").catch((cause) => {
+      if (cause?.code === "ENOENT") return "";
+      throw cause;
+    });
+    await atomicWrite(target, rewriteAiEnvironment(previous, profile));
+    this.aiProviderStore.activeProfileId = id;
+    await this.persistAiProviderStore();
+    // 立即按新档案探测一次，让页面马上有真实反馈；
+    // 本 manager 进程 env 不变，完整生效仍需重启 Studio。
+    const probe = await probeAIEndpoint({
+      provider: aiProbeProvider(profile.type),
+      baseUrl: profile.baseUrl,
+      apiKey: profile.apiKey ?? undefined,
+    }, 4_000);
+    if (probe) {
+      this.aiStatus = {
+        ...this.aiStatus,
+        state: "connected",
+        provider: aiProbeProvider(profile.type),
+        baseUrl: profile.baseUrl,
+        model: profile.model,
+        models: probe.models,
+        latencyMs: probe.latencyMs,
+        lastCheckedAt: probe.checkedAt,
+        message: `已激活「${profile.name}」；重启 Studio 后新配置对协调器全面生效。`,
+      };
+    } else {
+      this.aiStatus = {
+        ...this.aiStatus,
+        state: profile.type === "openai-compatible" ? "degraded" : "unavailable",
+        provider: aiProbeProvider(profile.type),
+        baseUrl: profile.baseUrl,
+        model: profile.model,
+        models: [],
+        latencyMs: null,
+        lastCheckedAt: new Date().toISOString(),
+        message: profile.type === "openai-compatible"
+          ? `已激活「${profile.name}」，但 /v1/models 探测未通过；生成链路不依赖该探测，重启后以实际请求为准。`
+          : `已激活「${profile.name}」，但端点当前不可达；重启后 Studio 会继续探测。`,
+      };
+    }
+    return {
+      schemaVersion: "1.0",
+      activated: maskedAiProviderProfile(profile),
+      environmentFile: target,
+      restartRequired: true,
+      status: structuredClone(this.aiStatus),
+    };
+  }
+
+  aiEnvironmentFile() {
+    // 仓库模式 = 仓库根；打包模式 = exe 旁配置目录（SEA entry 注入）。
+    const configRoot = this.options.environment.STUDIO_CONFIG_ROOT?.trim() || this.options.repositoryRoot;
+    return path.join(configRoot, ".env.local");
   }
 
   async loadManifest() {
@@ -1834,7 +2064,13 @@ export class StudioLocalManager {
   }
 
   async writeBindings() {
-    await atomicWrite(this.bindingsPath, `${JSON.stringify(this.bindingDocument())}\n`);
+    // 并入 manifest 串行化链：与 writeManifest 内的 bindings 写保持同一顺序，
+    // 避免两条并发原子写交错覆盖。
+    const write = this.manifestWrites.then(async () => {
+      await atomicWrite(this.bindingsPath, `${JSON.stringify(this.bindingDocument())}\n`);
+    });
+    this.manifestWrites = write.catch(() => undefined);
+    await write;
   }
 
   runtimeIdentityEnvironment(config) {
@@ -1974,20 +2210,46 @@ async function probeExplicitEndpoint(rawUrl, provider, preferredModel, apiKey, s
 
 export async function probeAIEndpoint(candidate, timeoutMs = 1_200) {
   const startedAt = Date.now();
+  // OpenAI 风格 base 常以 /v1 结尾（直接拼 /v1/models 会变成 /v1/v1）；
+  // GLM 开放平台则是 <base>/models。两种约定都试，第一个成功即用（尽力探测，
+  // 生成链路不依赖它）。
+  const ollama = candidate.provider === "ollama";
+  const candidates = ollama
+    ? ["/api/tags"]
+    : (() => {
+        const base = new URL(candidate.baseUrl);
+        const stripped = base.pathname.replace(/\/+$/u, "").replace(/\/v1$/u, "");
+        const first = `${base.origin}${stripped}/v1/models`;
+        const second = `${base.origin}${base.pathname.replace(/\/+$/u, "")}/models`;
+        return first === second ? [first] : [first, second];
+      })();
+  for (const endpoint of candidates) {
+    const probe = await probeJsonList(
+      endpoint,
+      candidate.apiKey,
+      ollama,
+      timeoutMs,
+    );
+    if (probe) return probe;
+  }
+  return null;
+}
+
+async function probeJsonList(endpoint, apiKey, ollama, timeoutMs) {
+  const startedAt = Date.now();
   try {
-    const pathname = candidate.provider === "ollama" ? "/api/tags" : "/v1/models";
-    const response = await fetch(`${candidate.baseUrl}${pathname}`, {
+    const response = await fetch(endpoint, {
       headers: {
         Accept: "application/json",
-        ...(candidate.apiKey?.trim()
-          ? { Authorization: `Bearer ${candidate.apiKey.trim()}` }
+        ...(apiKey?.trim()
+          ? { Authorization: `Bearer ${apiKey.trim()}` }
           : {}),
       },
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) return null;
     const input = await response.json();
-    const models = candidate.provider === "ollama"
+    const models = ollama
       ? Array.isArray(input?.models)
         ? input.models.map((entry) => entry?.name)
         : []
@@ -2166,7 +2428,9 @@ async function readJson(request) {
 }
 
 async function atomicWrite(destination, content) {
-  const temporary = `${destination}.tmp-${process.pid}-${Date.now().toString(36)}`;
+  // pid+毫秒时间戳在同毫秒内可撞名（manifest 链与 writeBindings 并发时），
+  // 追加随机后缀保证唯一。
+  const temporary = `${destination}.tmp-${process.pid}-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
   try {
     await writeFile(temporary, content, { encoding: "utf8", mode: 0o600 });
     await rename(temporary, destination);
@@ -2176,7 +2440,149 @@ async function atomicWrite(destination, content) {
 }
 
 function normalizedProvider(value) {
-  return value?.trim().toLowerCase() === "ollama" ? "ollama" : "vllm";
+  const provider = value?.trim().toLowerCase();
+  if (provider === "ollama") return "ollama";
+  if (provider === "openai-compatible" || provider === "openai" || provider === "cloud") return "openai-compatible";
+  return "vllm";
+}
+
+// ---------------------------------------------------------------------------
+// AI provider profiles：校验 / 脱敏 / .env.local 重写（纯函数，供单测直接使用）
+// ---------------------------------------------------------------------------
+const AI_PROVIDER_TYPES = new Set(["local-vllm", "local-ollama", "openai-compatible"]);
+const AI_PROFILE_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$/u;
+const LOOPBACK_HOST_PATTERN = /^(localhost|127(?:\.\d{1,3}){3}|\[::1\])$/iu;
+/** 激活时由 Studio 托管的键：重写前整体清除，避免新旧两套（AI_* / LOCAL_AI_*）混用。 */
+const AI_ENV_MANAGED_KEYS = new Set([
+  "AI_PROVIDER", "AI_BASE_URL", "AI_MODEL", "AI_API_KEY", "AI_API_KEY_ENV",
+  "AI_STRUCTURED_OUTPUT", "AI_MAX_OUTPUT_TOKENS", "AI_MAX_ATTEMPTS",
+  "LOCAL_AI_PROVIDER", "LOCAL_AI_HUB_URL", "LOCAL_AI_MODEL", "LOCAL_AI_API_KEY",
+]);
+
+export function validateAiProviderProfile(input, { requireCloudKey = true } = {}) {
+  if (!input || typeof input !== "object") {
+    throw managedError("INVALID_REQUEST", "AI provider 档案格式无效。", 400);
+  }
+  const name = String(input.name ?? "").trim();
+  if (name.length < 1 || name.length > 64 || /[\r\n]/u.test(name)) {
+    throw managedError("INVALID_REQUEST", "AI provider 名称无效（1-64 字符，不含换行）。", 400);
+  }
+  const type = String(input.type ?? "").trim();
+  if (!AI_PROVIDER_TYPES.has(type)) {
+    throw managedError("INVALID_REQUEST", "AI provider 类型必须是 local-vllm / local-ollama / openai-compatible。", 400);
+  }
+  const cloud = type === "openai-compatible";
+  const rawBaseUrl = String(input.baseUrl ?? "").trim();
+  let url;
+  try {
+    url = new URL(rawBaseUrl);
+  } catch {
+    throw managedError("INVALID_REQUEST", "AI provider baseUrl 无效。", 400);
+  }
+  if (!["http:", "https:"].includes(url.protocol) || !url.hostname || url.username || url.password || url.search || url.hash) {
+    throw managedError("INVALID_REQUEST", "baseUrl 必须是显式 HTTP(S) 地址，不带凭据或查询串。", 400);
+  }
+  let baseUrl;
+  if (cloud) {
+    if (url.protocol !== "https:" && !LOOPBACK_HOST_PATTERN.test(url.hostname)) {
+      throw managedError("INVALID_REQUEST", "云端/中转地址必须 HTTPS（本机回环 HTTP 仅用于受控测试）。", 400);
+    }
+    baseUrl = rawBaseUrl.replace(/\/+$/u, "");
+  } else {
+    if (!url.port) throw managedError("INVALID_REQUEST", "本地推理地址必须带显式端口。", 400);
+    if (url.pathname !== "/" && url.pathname !== "") {
+      throw managedError("INVALID_REQUEST", "本地推理地址不能带路径。", 400);
+    }
+    baseUrl = url.origin;
+  }
+  const model = String(input.model ?? "").trim();
+  if (cloud && !AI_PROFILE_MODEL_PATTERN.test(model)) {
+    throw managedError("INVALID_REQUEST", "云端/中转 API 必须显式填写模型 ID（该类端点不依赖模型发现）。", 400);
+  }
+  if (!cloud && model && !AI_PROFILE_MODEL_PATTERN.test(model)) {
+    throw managedError("INVALID_REQUEST", "AI provider 模型 ID 无效。", 400);
+  }
+  const apiKey = String(input.apiKey ?? "").trim();
+  if (cloud && requireCloudKey && !apiKey) {
+    throw managedError("INVALID_REQUEST", "云端/中转 API 必须提供 API Key。", 400);
+  }
+  if (apiKey && (apiKey.length > 4_096 || /[\r\n]/u.test(apiKey))) {
+    throw managedError("INVALID_REQUEST", "API Key 无效（过长或含换行）。", 400);
+  }
+  const structuredOutput = String(input.structuredOutput ?? "none").trim() || "none";
+  if (!["none", "json_object", "json_schema", "tool"].includes(structuredOutput)) {
+    throw managedError("INVALID_REQUEST", "structuredOutput 必须是 none / json_object / json_schema / tool。", 400);
+  }
+  if (!cloud && structuredOutput !== "none") {
+    throw managedError("INVALID_REQUEST", "structuredOutput 仅适用于 openai-compatible 供应商。", 400);
+  }
+  const id = input.id === undefined || input.id === null || String(input.id).trim() === ""
+    ? null
+    : String(input.id).trim();
+  if (id !== null && !/^aip-[0-9a-f]{4,32}$/u.test(id)) {
+    throw managedError("INVALID_REQUEST", "AI provider 档案 ID 无效。", 400);
+  }
+  return {
+    id,
+    name,
+    type,
+    baseUrl,
+    model: model || null,
+    apiKey: apiKey || null,
+    structuredOutput: cloud ? structuredOutput : "none",
+  };
+}
+
+export function maskedAiProviderProfile(profile) {
+  return {
+    id: profile.id,
+    name: profile.name,
+    type: profile.type,
+    baseUrl: profile.baseUrl,
+    model: profile.model,
+    hasApiKey: Boolean(profile.apiKey),
+    structuredOutput: profile.structuredOutput ?? "none",
+    createdAt: profile.createdAt ?? null,
+    updatedAt: profile.updatedAt ?? null,
+  };
+}
+
+export function aiProbeProvider(profileType) {
+  if (profileType === "local-ollama") return "ollama";
+  if (profileType === "openai-compatible") return "openai-compatible";
+  return "vllm";
+}
+
+/** 保留无关行，清掉全部托管键，追加新档案的配置块（util.parseEnv 兼容的双引号转义）。 */
+export function rewriteAiEnvironment(previous, profile) {
+  const kept = previous.split(/\r?\n/u).filter((line) => {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/u);
+    return !match || !AI_ENV_MANAGED_KEYS.has(match[1]);
+  });
+  while (kept.length > 0 && kept[kept.length - 1].trim() === "") kept.pop();
+  const block = [
+    "# --- AI provider: managed by Studio（模型与 API 页激活写入；手改会被下次激活覆盖） ---",
+    ...(profile.type === "openai-compatible"
+      ? [
+          `AI_PROVIDER=${quoteEnvValue("openai-compatible")}`,
+          `AI_BASE_URL=${quoteEnvValue(profile.baseUrl)}`,
+          `AI_MODEL=${quoteEnvValue(profile.model ?? "")}`,
+          ...(profile.apiKey ? [`AI_API_KEY=${quoteEnvValue(profile.apiKey)}`] : []),
+          ...(profile.structuredOutput && profile.structuredOutput !== "none"
+            ? [`AI_STRUCTURED_OUTPUT=${quoteEnvValue(profile.structuredOutput)}`]
+            : []),
+        ]
+      : [
+          `LOCAL_AI_PROVIDER=${quoteEnvValue(profile.type === "local-ollama" ? "ollama" : "vllm")}`,
+          `LOCAL_AI_HUB_URL=${quoteEnvValue(profile.baseUrl)}`,
+          ...(profile.model ? [`LOCAL_AI_MODEL=${quoteEnvValue(profile.model)}`] : []),
+        ]),
+  ];
+  return `${[...kept, ...(kept.length > 0 ? [""] : []), ...block, ""].join("\n")}`;
+}
+
+function quoteEnvValue(value) {
+  return `"${String(value).replace(/\\/gu, "\\\\").replace(/"/gu, '\\"')}"`;
 }
 
 /**

@@ -1127,3 +1127,242 @@ test("exit classification metadata reaches the public Bot payload", async () => 
   assert.equal(bot.exit.classification, "EXPECTED_STOP");
   await cleanup();
 });
+
+// ---------------------------------------------------------------------------
+// AI provider profiles（模型与 API）：档案 CRUD / 激活写 .env.local / 密钥脱敏
+// ---------------------------------------------------------------------------
+import {
+  validateAiProviderProfile,
+  rewriteAiEnvironment,
+} from "./studio-local-manager.mjs";
+
+function managerTestOptions(runtimeRoot, repositoryRoot, environment = {}) {
+  return {
+    repositoryRoot,
+    runtimeRoot,
+    port: 0,
+    token: TOKEN,
+    slots: createLocalBotSlots(SECRET, 1),
+    aiStatus: unavailableStatus(),
+    environment: { STUDIO_SPARK_AUTO_DISCOVERY: "0", ...environment },
+    runtimeLinkPort: 3220,
+    packagedMode: false,
+  };
+}
+
+test("validates AI provider profiles with type-specific rules", () => {
+  const cloud = validateAiProviderProfile({
+    name: "GLM Plan",
+    type: "openai-compatible",
+    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    model: "glm-4.7",
+    apiKey: "sk-test",
+  });
+  assert.equal(cloud.baseUrl, "https://open.bigmodel.cn/api/paas/v4");
+  assert.equal(cloud.structuredOutput, "none");
+  assert.throws(() => validateAiProviderProfile({
+    name: "no-key",
+    type: "openai-compatible",
+    baseUrl: "https://api.example.com/v1",
+    model: "m",
+  }), /API Key/);
+  assert.throws(() => validateAiProviderProfile({
+    name: "plain-http",
+    type: "openai-compatible",
+    baseUrl: "http://api.example.com/v1",
+    model: "m",
+    apiKey: "k",
+  }), /HTTPS/);
+  assert.throws(() => validateAiProviderProfile({
+    name: "no-port",
+    type: "local-vllm",
+    baseUrl: "http://spark.local",
+  }), /端口/);
+  assert.throws(() => validateAiProviderProfile({
+    name: "local-so",
+    type: "local-vllm",
+    baseUrl: "http://spark.local:18300",
+    structuredOutput: "json_object",
+  }), /structuredOutput/);
+});
+
+test("rewriteAiEnvironment replaces managed keys and preserves unrelated lines", () => {
+  const previous = [
+    "DASHBOARD_STUDIO_MANAGER_URL=\"http://127.0.0.1:3230\"",
+    "LOCAL_AI_HUB_URL=\"http://192.168.100.2:18300\"",
+    "AI_BASE_URL=\"https://old.example.com\"",
+    "OTHER_KEY=keep-me",
+    "",
+  ].join("\n");
+  const cloud = validateAiProviderProfile({
+    name: "GLM Plan",
+    type: "openai-compatible",
+    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    model: "glm-4.7",
+    apiKey: "sk-\"quoted\"#key",
+  });
+  const rewritten = rewriteAiEnvironment(previous, cloud);
+  assert.ok(rewritten.includes("OTHER_KEY=keep-me"));
+  assert.ok(!rewritten.includes("LOCAL_AI_HUB_URL"));
+  assert.ok(!rewritten.includes("old.example.com"));
+  assert.ok(rewritten.includes('AI_BASE_URL="https://open.bigmodel.cn/api/paas/v4"'));
+  assert.ok(rewritten.includes('AI_API_KEY="sk-\\"quoted\\"#key"'));
+  const local = validateAiProviderProfile({
+    name: "Spark",
+    type: "local-vllm",
+    baseUrl: "http://192.168.100.2:18300",
+    model: "",
+  });
+  const localRewritten = rewriteAiEnvironment(rewritten, local);
+  assert.ok(localRewritten.includes('LOCAL_AI_HUB_URL="http://192.168.100.2:18300"'));
+  assert.ok(!localRewritten.includes("AI_BASE_URL"));
+});
+
+test("manages AI provider profiles over the loopback API and activates into .env.local", async (context) => {
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "studio-manager-test-"));
+  const repositoryRoot = await mkdtemp(path.join(tmpdir(), "studio-repo-test-"));
+  context.after(async () => {
+    await rm(runtimeRoot, { recursive: true, force: true });
+    await rm(repositoryRoot, { recursive: true, force: true });
+  });
+  await writeFile(
+    path.join(repositoryRoot, ".env.local"),
+    "DASHBOARD_STUDIO_MANAGER_URL=\"http://127.0.0.1:3230\"\nLOCAL_AI_HUB_URL=\"http://192.168.100.2:18300\"\nOTHER_KEY=keep\n",
+    "utf8",
+  );
+  // 可探测的假云端端点：/v1/models 带 Bearer 鉴权。
+  const hub = createServer((request, response) => {
+    if (request.url !== "/v1/models" || request.headers.authorization !== "Bearer sk-live-test") {
+      response.writeHead(404).end();
+      return;
+    }
+    response.setHeader("Content-Type", "application/json");
+    response.end(JSON.stringify({ data: [{ id: "glm-4.7" }, { id: "glm-4.7-flash" }] }));
+  });
+  await listen(hub);
+  context.after(() => close(hub));
+  const hubAddress = hub.address();
+  assert(hubAddress && typeof hubAddress !== "string");
+
+  const manager = new StudioLocalManager(
+    managerTestOptions(runtimeRoot, repositoryRoot, {
+      STUDIO_CONFIG_ROOT: repositoryRoot,
+    }),
+  );
+  const address = await manager.start();
+  context.after(() => manager.stop());
+  const base = `http://127.0.0.1:${address.port}`;
+  const reloadedBase = () => `http://127.0.0.1:${reloaded.server.address().port}`;
+  const auth = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
+
+  // 创建（云端档案，回环 HTTP 允许）→ 响应脱敏
+  const createdResponse = await fetch(`${base}/v1/ai/providers`, {
+    method: "POST",
+    headers: auth,
+    body: JSON.stringify({
+      name: "测试云端",
+      type: "openai-compatible",
+      baseUrl: `http://127.0.0.1:${hubAddress.port}/v1`,
+      model: "glm-4.7",
+      apiKey: "sk-live-test",
+    }),
+  });
+  assert.equal(createdResponse.status, 201);
+  const created = await createdResponse.json();
+  assert.ok(/^aip-[0-9a-f]+$/.test(created.id));
+  assert.equal(created.hasApiKey, true);
+  assert.ok(!("apiKey" in created), "响应不得回传密钥明文");
+
+  // 列表
+  const listResponse = await fetch(`${base}/v1/ai/providers`, { headers: auth });
+  assert.equal(listResponse.status, 200);
+  const list = await listResponse.json();
+  assert.equal(list.profiles.length, 1);
+  assert.equal(list.activeProfileId, null);
+
+  // 编辑（不带密钥）→ 保留旧密钥
+  const updatedResponse = await fetch(`${base}/v1/ai/providers`, {
+    method: "POST",
+    headers: auth,
+    body: JSON.stringify({
+      id: created.id,
+      name: "测试云端改",
+      type: "openai-compatible",
+      baseUrl: `http://127.0.0.1:${hubAddress.port}/v1`,
+      model: "glm-4.7",
+    }),
+  });
+  assert.equal(updatedResponse.status, 201);
+  const updated = await updatedResponse.json();
+  assert.equal(updated.name, "测试云端改");
+  assert.equal(updated.hasApiKey, true);
+
+  // 激活 → .env.local 托管段重写 + 状态即时探测 + restartRequired
+  const activateResponse = await fetch(`${base}/v1/ai/providers/${created.id}/activate`, {
+    method: "POST",
+    headers: auth,
+  });
+  assert.equal(activateResponse.status, 200);
+  const activated = await activateResponse.json();
+  assert.equal(activated.restartRequired, true);
+  assert.equal(activated.status.state, "connected");
+  assert.equal(activated.status.provider, "openai-compatible");
+  assert.deepEqual(activated.status.models, ["glm-4.7", "glm-4.7-flash"]);
+
+  const envFile = await readFile(path.join(repositoryRoot, ".env.local"), "utf8");
+  assert.ok(envFile.includes("OTHER_KEY=keep"), "无关键必须保留");
+  assert.ok(envFile.includes('AI_PROVIDER="openai-compatible"'));
+  assert.ok(envFile.includes(`AI_BASE_URL="http://127.0.0.1:${hubAddress.port}/v1"`));
+  assert.ok(envFile.includes('AI_MODEL="glm-4.7"'));
+  assert.ok(envFile.includes('AI_API_KEY="sk-live-test"'));
+  assert.ok(!envFile.includes("192.168.100.2"), "旧 LOCAL_AI_* 键必须清除");
+
+  // 重启后：activeProfileId 与密钥持久化
+  await manager.stop();
+  const reloaded = new StudioLocalManager(
+    managerTestOptions(runtimeRoot, repositoryRoot, { STUDIO_CONFIG_ROOT: repositoryRoot }),
+  );
+  await reloaded.start();
+  context.after(() => reloaded.stop());
+  const reloadedListResponse = await fetch(`${reloadedBase()}/v1/ai/providers`, { headers: auth });
+  const reloadedList = await reloadedListResponse.json();
+  assert.equal(reloadedList.activeProfileId, created.id);
+  assert.equal(reloadedList.profiles[0].hasApiKey, true);
+  assert.equal(reloadedList.profiles[0].name, "测试云端改");
+
+  // 删除
+  const deleteResponse = await fetch(`${reloadedBase()}/v1/ai/providers/${created.id}`, {
+    method: "DELETE",
+    headers: auth,
+  });
+  assert.equal(deleteResponse.status, 200);
+  const afterDelete = await (await fetch(`${reloadedBase()}/v1/ai/providers`, {
+    headers: auth,
+  })).json();
+  assert.equal(afterDelete.profiles.length, 0);
+  assert.equal(afterDelete.activeProfileId, null);
+});
+
+test("discovers AI_BASE_URL cloud config with bearer-authenticated model probe", async (context) => {
+  const hub = createServer((request, response) => {
+    if (request.headers.authorization !== "Bearer sk-cloud") {
+      response.writeHead(401).end();
+      return;
+    }
+    response.setHeader("Content-Type", "application/json");
+    response.end(JSON.stringify({ data: [{ id: "glm-4.7" }] }));
+  });
+  await listen(hub);
+  context.after(() => close(hub));
+  const address = hub.address();
+  assert(address && typeof address !== "string");
+  const discovered = await discoverLocalAI({
+    AI_PROVIDER: "openai-compatible",
+    AI_BASE_URL: `http://127.0.0.1:${address.port}`,
+    AI_MODEL: "glm-4.7",
+    AI_API_KEY: "sk-cloud",
+  });
+  assert.equal(discovered.config.provider, "openai-compatible");
+  assert.equal(discovered.status.state, "connected");
+  assert.deepEqual(discovered.status.models, ["glm-4.7"]);
+});

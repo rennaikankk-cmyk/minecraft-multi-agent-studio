@@ -4,7 +4,7 @@ import { botIdentitySchema, identifierSchema, minecraftVersionStringSchema } fro
 
 const timestampSchema = z.string().datetime({ offset: true });
 
-export const studioAiProviderSchema = z.enum(["vllm", "ollama"]);
+export const studioAiProviderSchema = z.enum(["vllm", "ollama", "openai-compatible"]);
 export const studioAiStateSchema = z.enum([
   "connected",
   "degraded",
@@ -68,6 +68,8 @@ export const studioManagedBotV1Schema = z
     minecraftVersion: z.union([z.literal("auto"), minecraftVersionStringSchema]),
     /** Authentication mode; omitted by legacy clients and defaults to offline. */
     auth: studioMinecraftAuthSchema.optional(),
+    /** 外部公网服务器（无规则服）用途；缺省 = 本地/局域网 managed。 */
+    purpose: z.literal("anarchy").optional(),
     /** Authenticated Java profile UUID, normalized to lowercase compact hex. */
     gameProfileId: z.string().regex(/^[a-f0-9]{32}$/u).optional(),
     /** TCP 目的地址覆盖（可选）；握手 hostname 恒为 serverHost。 */
@@ -152,6 +154,9 @@ export const studioManagerStatusV1Schema = z
       .strict(),
     /** IncidentStore writer 健康（信息性 passthrough）。 */
     incidents: z.record(z.string(), z.unknown()).nullable().optional(),
+    /** Round 7/8 起 manager 即返回的字段（dashboard 只做展示投影，不在此强类型化）。 */
+    gameplayPolicy: z.unknown().optional(),
+    compatibility: z.unknown().optional(),
   })
   .strict();
 
@@ -164,6 +169,8 @@ const studioCreateBotFields = {
     minecraftVersion: z.union([z.literal("auto"), minecraftVersionStringSchema]),
     /** TCP 目的地址覆盖（可选）；握手 hostname 恒为 serverHost。 */
     connectHost: z.string().trim().min(1).max(253).optional(),
+    /** 外部公网服务器（无规则服）：公网地址必须显式声明该用途才放行。 */
+    purpose: z.literal("anarchy").optional(),
 };
 const studioUsernameSchema = z.string().min(3).max(16).regex(/^[A-Za-z0-9_]+$/u);
 
@@ -197,6 +204,7 @@ export const studioManagerErrorCodeSchema = z.enum([
   "MANAGER_UNAVAILABLE",
   "AUTH_REQUIRED",
   "INVALID_REQUEST",
+  "NOT_FOUND",
   "BOT_LIMIT_REACHED",
   "BOT_CONFLICT",
   "BOT_NOT_FOUND",

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { ThemeSwitcher } from "@/components/theme-switcher";
-import { Badge, Card, CardContent, CardHeader, CardTitle, KeyValueRow, Skeleton, UiEmptyState } from "@/components/ui/primitives";
+import {Badge, Card, CardContent, CardHeader, CardTitle, KeyValueRow, Skeleton, UiEmptyState , PageHeader } from "@/components/ui/primitives";
 
 interface GameplayPolicyView {
   profile: string;
@@ -46,10 +46,7 @@ export default function SettingsPage() {
 
   return (
     <main>
-      <header className="mb-4">
-        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-subtle-foreground">SYSTEM · SETTINGS</p>
-        <h1 className="text-lg font-semibold tracking-tight">Settings</h1>
-      </header>
+      <PageHeader eyebrow="SYSTEM · SETTINGS" title="Settings"></PageHeader>
 
       <Card className="mb-4">
         <CardHeader><CardTitle>Gameplay Policy（产品定位 · 单一事实源）</CardTitle></CardHeader>

@@ -59,7 +59,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
   {
     label: "Intelligence",
     items: [
-      { label: "AI / Spark", href: "/ai-spark", icon: Sparkles, badge: "spark", hint: "推理连接" },
+      { label: "Models & API", href: "/models", icon: Sparkles, badge: "spark", hint: "本地推理 / 云端 API / 中转站" },
       { label: "Goals / Plans", href: "/goals", icon: Target, hint: "目标与仲裁" },
     ],
   },

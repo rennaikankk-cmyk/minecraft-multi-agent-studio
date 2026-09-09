@@ -42,6 +42,13 @@
   --color-localtest: #fb923c; /* orange —— local test */
   --color-external: #94a3b8; /* slate —— external server */
 
+  /* gen3 兼容别名：globals.css 里 badge-* / formRow 等引用这些变量，
+     此前未定义导致永远落到硬编码 GitHub 回退色（#f85149 等），
+     与 token 体系的三套红/绿并存。 */
+  --bad: var(--color-danger);
+  --info: var(--color-primary);
+  --hover: var(--color-hover);
+
   /* —— Typography —— */
   --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
     "PingFang SC", "Microsoft YaHei", sans-serif;

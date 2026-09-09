@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 
+import { PageHeader } from "@/components/ui/primitives";
+
 import { GoalConsole } from "@/components/goal-console";
 import { TaskHistory } from "@/components/task-history";
 
@@ -10,10 +12,7 @@ export const metadata: Metadata = {
 export default function TasksPage() {
   return (
     <main >
-      <header className="pageHeader">
-        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-subtle-foreground">CONTROL PLANE · TASKS</p>
-        <h1 className="text-lg font-semibold tracking-tight">任务控制</h1>
-      </header>
+      <PageHeader eyebrow="CONTROL PLANE · TASKS" title="任务控制"></PageHeader>
       <GoalConsole />
       <TaskHistory />
     </main>

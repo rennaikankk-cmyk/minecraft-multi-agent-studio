@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { copyFile, mkdir, readFile, realpath, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { gzipSync } from "node:zlib";
-import { createRequire } from "node:module";
 
 import { build as buildWithEsbuild } from "esbuild";
 
@@ -19,6 +19,28 @@ const outputPath = path.resolve(
 );
 const bundleMagic = Buffer.from("MMA_STUDIO_BUNDLE_V1\0", "ascii");
 const postjectSentinel = "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2";
+
+// CJS esbuild bundles turn `import.meta` into an empty stub, so top-level
+// `fileURLToPath(import.meta.url)` / `createRequire(import.meta.url)` crash at
+// module load. Rewrite to the __filename equivalent; the staging tree mirrors
+// the repository layout, so relative data paths (blueprints, build manifest)
+// resolve to the same sibling locations they do in the repo.
+const importMetaUrlShimPlugin = {
+  name: "import-meta-url-cjs-shim",
+  setup(build) {
+    build.onLoad({ filter: /\.m?js$/ }, async (args) => {
+      const source = await readFile(args.path, "utf8");
+      if (!source.includes("import.meta.url")) return { contents: source, loader: "js" };
+      return {
+        contents: source.replaceAll(
+          "import.meta.url",
+          'require("node:url").pathToFileURL(__filename).href',
+        ),
+        loader: "js",
+      };
+    });
+  },
+};
 
 if (process.platform !== "win32") {
   throw new Error("The Studio EXE builder currently targets Windows only.");
@@ -40,15 +62,18 @@ await bundleBackend("apps/coordinator/dist/main.js", "apps/coordinator/dist/main
 await bundleBackend("apps/control-api/dist/main.js", "apps/control-api/dist/main.js");
 await bundleBackend("apps/task-worker/dist/main.js", "apps/task-worker/dist/main.js");
 await buildBotRuntimeBundles();
-await mkdir(path.join(stagingRoot, "scripts"), { recursive: true });
-await copyFile(
-  path.join(repositoryRoot, "scripts", "start-studio.mjs"),
-  path.join(stagingRoot, "scripts", "start-studio.mjs"),
-);
-await copyFile(
-  path.join(repositoryRoot, "scripts", "studio-local-manager.mjs"),
-  path.join(stagingRoot, "scripts", "studio-local-manager.mjs"),
-);
+try {
+  await copyTree(
+    path.join(repositoryRoot, "apps", "coordinator", "blueprints"),
+    path.join(stagingRoot, "apps", "coordinator", "blueprints"),
+  );
+} catch (cause) {
+  if (cause?.code !== "ENOENT") throw cause;
+}
+// The host scripts pull in a growing closure of repo files (protocol/skills
+// dist, helper scripts, bare deps like zod). Copying them file-by-file
+// silently misses new imports, so bundle each entry self-contained instead.
+await bundleHostScripts();
 await bundleManagedIdentity();
 await writeFile(
   path.join(stagingRoot, "package.json"),
@@ -118,28 +143,7 @@ async function bundleBackend(sourceRelative, destinationRelative) {
     sourcemap: false,
     minify: false,
     logLevel: "warning",
-  });
-}
-
-async function bundleManagedIdentity() {
-  const target = path.join(stagingRoot, "scripts", "lib");
-  await mkdir(target, { recursive: true });
-  // Keep the resolver as ESM because its bounded authentication worker loads the
-  // same module by import.meta.url. Authflow itself is a fixed standalone CJS
-  // bundle so extracted executables require no development node_modules.
-  await copyFile(path.join(repositoryRoot, "scripts", "lib", "managed-game-identity.mjs"), path.join(target, "managed-game-identity.mjs"));
-  const runtimeRequire = createRequire(path.join(repositoryRoot, "apps", "bot-runtime", "package.json"));
-  await buildWithEsbuild({
-    entryPoints: [runtimeRequire.resolve("prismarine-auth")],
-    outfile: path.join(target, "prismarine-auth.cjs"),
-    absWorkingDir: repositoryRoot,
-    bundle: true,
-    platform: "node",
-    format: "cjs",
-    target: "node22",
-    sourcemap: false,
-    minify: false,
-    logLevel: "warning",
+    plugins: [importMetaUrlShimPlugin],
   });
 }
 
@@ -171,6 +175,60 @@ async function buildBotRuntimeBundles() {
     format: "cjs",
     target: "node22",
     external: ["minecraft-data"],
+    sourcemap: false,
+    minify: false,
+    logLevel: "warning",
+    plugins: [importMetaUrlShimPlugin],
+  });
+}
+
+async function bundleHostScripts() {
+  const outdir = path.join(stagingRoot, "scripts");
+  await mkdir(outdir, { recursive: true });
+  await buildWithEsbuild({
+    entryPoints: {
+      "start-studio": path.join(repositoryRoot, "scripts", "start-studio.mjs"),
+      "studio-local-manager": path.join(repositoryRoot, "scripts", "studio-local-manager.mjs"),
+    },
+    outdir,
+    absWorkingDir: repositoryRoot,
+    bundle: true,
+    platform: "node",
+    format: "esm",
+    target: "node22",
+    outExtension: { ".js": ".mjs" },
+    // The identity resolver spawns `new Worker(new URL(import.meta.url))` — it
+    // must stay a real file, not be inlined. bundleManagedIdentity() copies it
+    // (plus its standalone prismarine-auth bundle) to scripts/lib/ so the
+    // relative import resolves identically inside the extracted bundle.
+    external: ["./lib/managed-game-identity.mjs"],
+    sourcemap: false,
+    minify: false,
+    logLevel: "warning",
+  });
+}
+
+async function bundleManagedIdentity() {
+  const target = path.join(stagingRoot, "scripts", "lib");
+  await mkdir(target, { recursive: true });
+  // Keep the resolver as ESM because its bounded authentication worker loads the
+  // same module by import.meta.url. Authflow itself is a fixed standalone CJS
+  // bundle so extracted executables require no development node_modules.
+  await copyFile(
+    path.join(repositoryRoot, "scripts", "lib", "managed-game-identity.mjs"),
+    path.join(target, "managed-game-identity.mjs"),
+  );
+  const runtimeRequire = createRequire(
+    path.join(repositoryRoot, "apps", "bot-runtime", "package.json"),
+  );
+  await buildWithEsbuild({
+    entryPoints: [runtimeRequire.resolve("prismarine-auth")],
+    outfile: path.join(target, "prismarine-auth.cjs"),
+    absWorkingDir: repositoryRoot,
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    target: "node22",
     sourcemap: false,
     minify: false,
     logLevel: "warning",

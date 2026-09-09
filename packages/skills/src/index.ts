@@ -552,7 +552,6 @@ export {
   dispatchSharedState,
   sharedStateRequestSchema,
   restoreSharedStateSnapshot,
-  type Maybe,
   type MaybeAsyncFacilityRegistryPort,
   type MaybeAsyncWorkstationRegistryPort,
   type SharedStateClientOptions,

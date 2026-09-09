@@ -2415,34 +2415,34 @@ function projectBotState(
   };
 }
 
-function hmac(secretSha256: string, value: string): string {
-  return createHmac("sha256", Buffer.from(secretSha256, "hex"))
-    .update(value, "utf8")
-    .digest("base64url");
-}
 
-function proofMatches(received: string, expected: string): boolean {
-  const receivedBuffer = Buffer.from(received, "utf8");
-  const expectedBuffer = Buffer.from(expected, "utf8");
-  return (
-    receivedBuffer.length === expectedBuffer.length &&
-    timingSafeEqual(receivedBuffer, expectedBuffer)
-  );
-}
+
+import {
+  boundedInteger,
+  closeWebSocket as sharedCloseWebSocket,
+  hmac as sharedHmac,
+  isLoopbackAddress as sharedIsLoopbackAddress,
+  proofMatches as sharedProofMatches,
+  rejectUpgrade as sharedRejectUpgrade,
+  safeLog as sharedSafeLog,
+  validNow as sharedValidNow,
+  withinClockSkew as sharedWithinClockSkew,
+  boundedInteger as sharedBoundedInteger,
+} from "./link-security.js";
+
+function hmac(secretSha256: string, value: string): string { return sharedHmac(secretSha256, value); }
+function proofMatches(received: string, expected: string): boolean { return sharedProofMatches(received, expected); }
+function isLoopbackAddress(value: string | undefined): boolean { return sharedIsLoopbackAddress(value); }
+function rejectUpgrade(socket: Parameters<typeof sharedRejectUpgrade>[0], status: number, statusText: string): void { sharedRejectUpgrade(socket, status, statusText); }
+function closeWebSocket(socket: Parameters<typeof sharedCloseWebSocket>[0]): Promise<void> { return sharedCloseWebSocket(socket); }
+function safeLog(logger: Parameters<typeof sharedSafeLog>[0], level: "info" | "warn" | "error", event: string, fields: Readonly<Record<string, unknown>>): void { sharedSafeLog(logger, level, event, fields); }
 
 function validNow(value: Date): Date {
-  if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
-    throw new Error("Control Link clock is invalid.");
-  }
-  return value;
+  return sharedValidNow(value, "Control Link");
 }
 
 function withinClockSkew(value: string, now: Date): boolean {
-  const timestamp = Date.parse(value);
-  return (
-    Number.isFinite(timestamp) &&
-    Math.abs(timestamp - now.getTime()) <= MAX_CLOCK_SKEW_MS
-  );
+  return sharedWithinClockSkew(value, now, MAX_CLOCK_SKEW_MS);
 }
 
 function hasControlLinkProtocol(value: string | string[] | undefined): boolean {
@@ -2455,57 +2455,9 @@ function hasControlLinkProtocol(value: string | string[] | undefined): boolean {
   );
 }
 
-function isLoopbackAddress(value: string | undefined): boolean {
-  if (!value) return false;
-  return (
-    value === "::1" ||
-    value.startsWith("127.") ||
-    value.toLowerCase().startsWith("::ffff:127.")
-  );
-}
 
-function rejectUpgrade(socket: Duplex, status: number, statusText: string): void {
-  if (!socket.writable) {
-    socket.destroy();
-    return;
-  }
-  socket.end(
-    `HTTP/1.1 ${status} ${statusText}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n`,
-  );
-}
 
-function closeWebSocket(socket: WebSocket): Promise<void> {
-  if (socket.readyState === WebSocket.CLOSED) return Promise.resolve();
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve();
-    };
-    const timer = setTimeout(() => {
-      socket.terminate();
-      finish();
-    }, 500);
-    timer.unref();
-    socket.once("close", finish);
-    socket.close(1001, "server_shutdown");
-  });
-}
 
-function safeLog(
-  logger: AppLogger,
-  level: "info" | "warn" | "error",
-  event: string,
-  fields: Readonly<Record<string, unknown>>,
-): void {
-  try {
-    logger[level](event, fields);
-  } catch {
-    // Observability failures cannot alter authenticated transport state.
-  }
-}
 
 /**
  * Log-only detail about why a goal failed.  The planner's own code and the
@@ -2582,14 +2534,3 @@ function stopFingerprint(request: ControlLinkStopRequestV1): string {
   });
 }
 
-function boundedInteger(
-  value: number,
-  minimum: number,
-  maximum: number,
-  name: string,
-): number {
-  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
-    throw new TypeError(`${name} is outside the allowed range.`);
-  }
-  return value;
-}

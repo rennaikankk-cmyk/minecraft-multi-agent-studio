@@ -123,6 +123,26 @@ export async function stopStudioManagedBot(
   return parsed.data;
 }
 
+export async function deleteStudioManagedBot(
+  config: StudioManagerConfig,
+  botId: string,
+  fetchImplementation: typeof fetch = fetch,
+): Promise<void> {
+  if (!MANAGED_BOT_ID_PATTERN.test(botId)) {
+    throw new StudioManagerClientError(
+      "INVALID_REQUEST",
+      "本地 Bot 标识无效。",
+      400,
+    );
+  }
+  await requestJson(
+    config,
+    `/v1/bots/${encodeURIComponent(botId)}`,
+    { method: "DELETE", signal: AbortSignal.timeout(5_000) },
+    fetchImplementation,
+  );
+}
+
 export async function restartStudioManagedBot(
   config: StudioManagerConfig,
   botId: string,
@@ -204,6 +224,8 @@ function publicManagerMessage(code: StudioManagerErrorCode): string {
       return "Bot 配置已保存，但 Runtime 启动失败。";
     case "INVALID_REQUEST":
       return "本地 Bot 请求字段无效。";
+    case "NOT_FOUND":
+      return "目标资源不存在。";
     case "AUTH_REQUIRED":
       return "管理连接或正版账号身份验证失败，请检查本机认证配置。";
     default:
@@ -248,4 +270,144 @@ function defaultStatus(code: StudioManagerErrorCode): number {
     return 503;
   }
   return 502;
+}
+
+/* ---------------------------------------------------------------------------
+ * AI provider profiles（模型与 API）：本地推理 / OpenAI 兼容云端 / 中转站。
+ * 密钥只存 manager 侧文件；本客户端永远不回传密钥明文（hasApiKey 布尔）。
+ * ------------------------------------------------------------------------- */
+
+const AI_PROVIDER_ID_PATTERN = /^aip-[0-9a-f]{4,32}$/u;
+
+export type AiProviderType =
+  | "local-vllm"
+  | "local-ollama"
+  | "openai-compatible";
+
+export type AiProviderProfile = Readonly<{
+  id: string;
+  name: string;
+  type: AiProviderType;
+  baseUrl: string;
+  model: string | null;
+  hasApiKey: boolean;
+  structuredOutput: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+}>;
+
+export type AiProviderList = Readonly<{
+  schemaVersion: string;
+  activeProfileId: string | null;
+  profiles: readonly AiProviderProfile[];
+}>;
+
+export type AiProviderSaveInput = Readonly<{
+  id?: string;
+  name: string;
+  type: AiProviderType;
+  baseUrl: string;
+  model: string;
+  apiKey?: string;
+  structuredOutput?: string;
+}>;
+
+function parseAiProviderList(value: unknown): AiProviderList {
+  if (!value || typeof value !== "object") throw invalidManagerResponse();
+  const input = value as Record<string, unknown>;
+  if (!Array.isArray(input.profiles)) throw invalidManagerResponse();
+  return {
+    schemaVersion: "1.0",
+    activeProfileId:
+      typeof input.activeProfileId === "string" ? input.activeProfileId : null,
+    profiles: input.profiles.map((raw) => {
+      if (!raw || typeof raw !== "object") throw invalidManagerResponse();
+      const profile = raw as Record<string, unknown>;
+      return {
+        id: String(profile.id ?? ""),
+        name: String(profile.name ?? ""),
+        type: String(profile.type ?? "") as AiProviderType,
+        baseUrl: String(profile.baseUrl ?? ""),
+        model: profile.model === null || profile.model === undefined ? null : String(profile.model),
+        hasApiKey: Boolean(profile.hasApiKey),
+        structuredOutput: String(profile.structuredOutput ?? "none"),
+        createdAt: profile.createdAt === null || profile.createdAt === undefined ? null : String(profile.createdAt),
+        updatedAt: profile.updatedAt === null || profile.updatedAt === undefined ? null : String(profile.updatedAt),
+      };
+    }),
+  };
+}
+
+export async function fetchAiProviders(
+  config: StudioManagerConfig,
+  fetchImplementation: typeof fetch = fetch,
+): Promise<AiProviderList> {
+  const value = await requestJson(
+    config,
+    "/v1/ai/providers",
+    { method: "GET" },
+    fetchImplementation,
+  );
+  return parseAiProviderList(value);
+}
+
+export async function saveAiProvider(
+  config: StudioManagerConfig,
+  input: AiProviderSaveInput,
+  fetchImplementation: typeof fetch = fetch,
+): Promise<AiProviderProfile> {
+  if (input.id !== undefined && !AI_PROVIDER_ID_PATTERN.test(input.id)) {
+    throw new StudioManagerClientError("INVALID_REQUEST", "AI provider 档案 ID 无效。", 400);
+  }
+  const value = await requestJson(
+    config,
+    "/v1/ai/providers",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+      signal: AbortSignal.timeout(5_000),
+    },
+    fetchImplementation,
+  );
+  const [saved] = parseAiProviderList({ profiles: [value] }).profiles;
+  if (!saved) throw invalidManagerResponse();
+  return saved;
+}
+
+export async function activateAiProvider(
+  config: StudioManagerConfig,
+  profileId: string,
+  fetchImplementation: typeof fetch = fetch,
+): Promise<{ restartRequired: boolean }> {
+  if (!AI_PROVIDER_ID_PATTERN.test(profileId)) {
+    throw new StudioManagerClientError("INVALID_REQUEST", "AI provider 档案 ID 无效。", 400);
+  }
+  const value = await requestJson(
+    config,
+    `/v1/ai/providers/${profileId}/activate`,
+    {
+      method: "POST",
+      signal: AbortSignal.timeout(15_000),
+    },
+    fetchImplementation,
+  );
+  if (!value || typeof value !== "object") throw invalidManagerResponse();
+  return { restartRequired: Boolean((value as Record<string, unknown>).restartRequired) };
+}
+
+export async function deleteAiProvider(
+  config: StudioManagerConfig,
+  profileId: string,
+  fetchImplementation: typeof fetch = fetch,
+): Promise<void> {
+  if (!AI_PROVIDER_ID_PATTERN.test(profileId)) {
+    throw new StudioManagerClientError("INVALID_REQUEST", "AI provider 档案 ID 无效。", 400);
+  }
+  await requestJson(
+    config,
+    `/v1/ai/providers/${profileId}`,
+    { method: "DELETE", signal: AbortSignal.timeout(5_000) },
+    fetchImplementation,
+  );
 }
