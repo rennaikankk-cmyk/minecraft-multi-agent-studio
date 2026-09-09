@@ -9,6 +9,8 @@ const MATRIX = [
   { minecraftVersion: "1.12.2", protocolVersion: 340, majorVersion: "1.12" },
   { minecraftVersion: "1.16.5", protocolVersion: 754, majorVersion: "1.16" },
   { minecraftVersion: "1.21.11", protocolVersion: 774, majorVersion: "1.21" },
+  // Patch versions share protocol 775; the adapter normalizes them to 26.1.
+  { minecraftVersion: "26.1.2", protocolVersion: 775, majorVersion: "26.1", resolvedMinecraftVersion: "26.1" },
 ] as const;
 
 async function closeServer(server: Server): Promise<void> {
@@ -76,7 +78,11 @@ async function detectVersion(
 describe("Mineflayer automatic multi-version handshake", () => {
   for (const expected of MATRIX) {
     it(`detects ${expected.minecraftVersion} from its loopback protocol`, async () => {
-      await expect(detectVersion(expected)).resolves.toEqual(expected);
+      await expect(detectVersion(expected)).resolves.toEqual({
+        minecraftVersion: "resolvedMinecraftVersion" in expected ? expected.resolvedMinecraftVersion : expected.minecraftVersion,
+        protocolVersion: expected.protocolVersion,
+        majorVersion: expected.majorVersion,
+      });
     });
   }
 });

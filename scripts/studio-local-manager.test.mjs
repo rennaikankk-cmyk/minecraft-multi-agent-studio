@@ -179,10 +179,10 @@ test("creates and reloads a managed Bot through the loopback API", async (contex
     }),
   });
   assert.equal(createdResponse.status, 201);
-  assert.equal((await createdResponse.json()).bot.botId, "studio-bot-01");
+  assert.equal((await createdResponse.json()).bot.botId, "StudioBot1");
   const createdProfile = JSON.parse(
     await readFile(
-      path.join(runtimeRoot, "bots", "studio-bot-01", "server-profile.json"),
+      path.join(runtimeRoot, "bots", "player-StudioBot1", "server-profile.json"),
       "utf8",
     ),
   );
@@ -191,7 +191,7 @@ test("creates and reloads a managed Bot through the loopback API", async (contex
   // 2026-09-03 复活缺陷修复：显式 start 的 bot 才有 desiredRunning=true，
   // manager 重启后自动恢复；创建但从未 start 的 bot 一律保持 stopped。
   const startResponse = await fetch(
-    `http://127.0.0.1:${address.port}/v1/bots/studio-bot-01/start`,
+    `http://127.0.0.1:${address.port}/v1/bots/StudioBot1/start`,
     { method: "POST", headers: { Authorization: `Bearer ${TOKEN}` } },
   );
   assert.equal(startResponse.status, 200);
@@ -254,13 +254,15 @@ test("enables combat and isolates same-server Bot whitelists", async (context) =
 
   const profile = async (botId) => JSON.parse(
     await readFile(
-      path.join(runtimeRoot, "bots", botId, "server-profile.json"),
+      path.join(runtimeRoot, "bots", `player-${botId}`, "server-profile.json"),
       "utf8",
     ),
   );
-  const first = await profile("studio-bot-01");
-  const second = await profile("studio-bot-02");
-  const third = await profile("studio-bot-03");
+  const first = await profile("StudioBot1");
+  const second = await profile("StudioBot2");
+  const third = await profile("StudioBot3");
+  assert.equal(first.id, second.id);
+  assert.notEqual(first.id, third.id);
   assert.equal(first.combat.enabled, true);
   assert.deepEqual(first.combat.whitelist.usernames, ["StudioBot2"]);
   assert.deepEqual(second.combat.whitelist.usernames, ["StudioBot1"]);
@@ -338,8 +340,9 @@ test("ignores a stale Runtime error after a restarted Bot owns the slot", async 
     environment: { STUDIO_SPARK_AUTO_DISCOVERY: "0" },
     runtimeLinkPort: 3220,
     packagedMode: false,
-    spawn: () => {
+    spawn: (_command, _args, options) => {
       const child = new EventEmitter();
+      child.spawnOptions = options;
       child.stdout = fakeOutputStream();
       child.stderr = fakeOutputStream();
       child.exitCode = null;
@@ -690,8 +693,9 @@ async function exitTestManager(overrides = {}) {
     environment: { STUDIO_SPARK_AUTO_DISCOVERY: "0" },
     runtimeLinkPort: 3220,
     packagedMode: false,
-    spawn: () => {
+    spawn: (_command, _args, options) => {
       const child = new EventEmitter();
+      child.spawnOptions = options;
       child.stdout = fakeOutputStream();
       child.stderr = fakeOutputStream();
       child.exitCode = null;
@@ -749,6 +753,83 @@ async function exitTestManager(overrides = {}) {
 function markReady(child) {
   child.stdout.emit("data", '{"level":"info","event":"runtime_link_authenticated"}' + "\n");
 }
+
+test("managed username identity survives restart and revoked slots cannot name their replacement", async (context) => {
+  const { manager, runtimeRoot, cleanup } = await exitTestManager();
+  context.after(cleanup);
+  manager.configs.clear();
+  manager.startBot = fakeStart(manager);
+  const input = { username: "_Resident_1", auth: "offline", serverHost: "127.0.0.1",
+    serverPort: 25565, minecraftVersion: "auto", worldId: "season-1" };
+  const created = await manager.createBot(input);
+  assert.equal(created.botId, input.username);
+  const profile = JSON.parse(await readFile(manager.profilePath(created.botId), "utf8"));
+  assert.equal(profile.botId, profile.username);
+  assert.deepEqual(profile.identityBinding, { mode: "game-username" });
+  assert.equal(profile.worldId, "season-1");
+  const manifest = JSON.parse(await readFile(manager.manifestPath, "utf8"));
+  assert.equal(manifest.bots[0].slotId, "studio-bot-01");
+  const restored = new StudioLocalManager(manager.options);
+  await restored.loadManifest();
+  assert.equal(restored.configs.get(created.botId).username, created.botId);
+  await assert.rejects(manager.createBot({ ...input, username: "_resident_1", serverPort: 25566 }),
+    (error) => error.managerCode === "BOT_CONFLICT");
+  manager.configs.clear();
+  await manager.writeManifest();
+  assert.deepEqual(JSON.parse(await readFile(manager.bindingsPath, "utf8")).peers, []);
+  await manager.createBot({ ...input, username: "CON" });
+  assert.ok(manager.profilePath("CON").startsWith(path.join(runtimeRoot, "bots", "player-CON")));
+  assert.equal(JSON.parse(await readFile(manager.bindingsPath, "utf8")).peers[0].botId, "CON");
+});
+
+test("online create binds verified username, aliases credentials only to that identity and checks UUID on restart", async (context) => {
+  const uuid = "0123456789abcdef0123456789abcdef";
+  let verified = { auth: "online", botId: "_RealPlayer", username: "_RealPlayer", gameProfileId: uuid, accountRef: "account_a" };
+  let verifications = 0;
+  const { manager, children, cleanup } = await exitTestManager({
+    environment: { STUDIO_SPARK_AUTO_DISCOVERY: "0", STUDIO_BOT_EMAIL_ACCOUNT_A: "test@example.test", STUDIO_BOT_PASSWORD_ACCOUNT_A: "fixture-secret" },
+    resolveGameIdentity: async () => { verifications++; return verified; },
+  });
+  context.after(cleanup);
+  manager.configs.clear();
+  const created = await manager.createBot({ auth: "online", accountRef: "account_a", username: "ClaimedName",
+    serverHost: "127.0.0.1", serverPort: 25565, minecraftVersion: "auto" });
+  assert.equal(created.botId, "_RealPlayer");
+  assert.equal(verifications, 1);
+  assert.equal(created.gameProfileId, uuid);
+  assert.equal(children[0].spawnOptions.env.STUDIO_BOT_EMAIL__REALPLAYER, "test@example.test");
+  assert.equal(children[0].spawnOptions.env.STUDIO_BOT_PASSWORD__REALPLAYER, "fixture-secret");
+  assert.equal(children[0].spawnOptions.env.BOT_RUNTIME_LINK_KEY_ID, "runtime-key-01");
+  const persisted = await readFile(manager.manifestPath, "utf8");
+  assert.ok(!persisted.includes("fixture-secret") && !persisted.includes("test@example.test"));
+  assert.ok(!persisted.includes("ClaimedName"));
+  children[0].__exitOnSend = [0, null];
+  await manager.stopBot(created.botId);
+  verified = { ...verified, gameProfileId: "f".repeat(32) };
+  await assert.rejects(manager.startBot(created.botId), (error) => error.managerCode === "AUTH_REQUIRED");
+  assert.equal(children.length, 1);
+});
+
+test("online authentication failure allocates neither a slot nor a profile", async (context) => {
+  const { manager, cleanup } = await exitTestManager({ resolveGameIdentity: async () => {
+    throw Object.assign(new Error("AUTH_REQUIRED"), { managerCode: "AUTH_REQUIRED", httpStatus: 401 });
+  } });
+  context.after(cleanup);
+  manager.configs.clear();
+  await assert.rejects(manager.createBot({ auth: "online", accountRef: "account_a" }));
+  assert.equal(manager.configs.size, 0);
+});
+
+test("concurrent requests for the same account cannot allocate two runtime slots", async (context) => {
+  const { manager, cleanup } = await exitTestManager();
+  context.after(cleanup);
+  manager.configs.clear();
+  manager.startBot = fakeStart(manager);
+  const input = { auth: "offline", username: "Resident", serverHost: "127.0.0.1", serverPort: 25565, minecraftVersion: "auto" };
+  const results = await Promise.allSettled([manager.createBot(input), manager.createBot(input)]);
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(manager.configs.size, 1);
+});
 
 function incidentsOf(manager) {
   return [...(manager.incidents.issues ?? new Map()).values()];
@@ -943,7 +1024,7 @@ test("DELETE removes a stopped bot from the manifest and frees its slot", async 
   });
   const created = await fetch(`${base}/v1/bots`, { method: "POST", headers: authHeaders, body: createBody });
   assert.equal(created.status, 201);
-  const deleteResponse = await fetch(`${base}/v1/bots/studio-bot-01`, {
+  const deleteResponse = await fetch(`${base}/v1/bots/DeleteBot1`, {
     method: "DELETE",
     headers: authHeaders,
   });
@@ -1001,7 +1082,7 @@ test("connectHost survives create → manifest → profile JSON → reload (TCP 
 
   // 站 2：runtime profile JSON（bot-runtime 消费的那份）
   const profile = JSON.parse(
-    await readFile(path.join(runtimeRoot, "bots", "studio-bot-01", "server-profile.json"), "utf8"),
+    await readFile(path.join(runtimeRoot, "bots", "player-ConnectHost1", "server-profile.json"), "utf8"),
   );
   assert.equal(profile.host, "127.0.0.1");
   assert.equal(profile.connectHost, "127.0.0.9");

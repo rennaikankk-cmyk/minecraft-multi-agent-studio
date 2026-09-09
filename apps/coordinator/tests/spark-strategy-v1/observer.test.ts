@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { BaseRegistry, FacilityRegistry, InMemoryWorkstationRegistry } from "@minecraft-studio/skills";
+import { BaseRegistry } from '@minecraft-studio/base-management';
+import { FacilityRegistry, InMemoryWorkstationRegistry } from '@minecraft-studio/asset-policy';
 import { BotRegistry } from "../../src/bot-registry.js";
 import { BotAssignmentService } from "../../src/bot-assignment.js";
 import { RegistryFactReader } from "../../src/spark-strategy-v1/registry-facts.js";

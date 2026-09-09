@@ -4,6 +4,8 @@ import {
   createStudioManagedBot,
   fetchStudioManagerStatus,
   loadStudioManagerConfig,
+  stopStudioManagedBot,
+  restartStudioManagedBot,
   StudioManagerClientError,
 } from "../lib/studio-manager-client";
 
@@ -66,19 +68,41 @@ describe("Studio Manager client", () => {
 
   it("forwards an explicit online authentication choice", async () => {
     const fetcher = vi.fn<typeof fetch>(async (_input, init) => {
-      expect(JSON.parse(String(init?.body))).toMatchObject({ auth: "online" });
+      expect(JSON.parse(String(init?.body))).toMatchObject({ auth: "online", accountRef: "account-one" });
+      expect(JSON.parse(String(init?.body))).not.toHaveProperty("username");
       return jsonResponse({ schemaVersion: "1.0", generatedAt: NOW, bot: { ...bot(), auth: "online" } });
     });
     await expect(
       createStudioManagedBot(config(), {
         schemaVersion: "1.0",
-        username: "StudioBot1",
+        accountRef: "account-one",
         serverHost: "127.0.0.1",
         serverPort: 25565,
         minecraftVersion: "auto",
         auth: "online",
       }, fetcher),
     ).resolves.toMatchObject({ bot: { auth: "online" } });
+  });
+
+  it("stops and restarts game usernames with underscores and legacy slot IDs", async () => {
+    for (const botId of ["_Verified_Player", "StudioBot1", "studio-bot-01"]) {
+      for (const action of [stopStudioManagedBot, restartStudioManagedBot]) {
+        const fetcher = vi.fn<typeof fetch>(async (input) => {
+          expect(String(input)).toContain(`/v1/bots/${botId}/`);
+          return jsonResponse({ schemaVersion: "1.0", generatedAt: NOW, bot: { ...bot(), botId } });
+        });
+        await expect(action(config(), botId, fetcher)).resolves.toMatchObject({ bot: { botId } });
+      }
+    }
+  });
+
+  it("rejects path-like BotIDs before contacting Manager", async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    for (const botId of ["../StudioBot1", "bad/name", "StudioBot1?stop", "ab", "longer_than_16_chars"]) {
+      await expect(stopStudioManagedBot(config(), botId, fetcher)).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+      await expect(restartStudioManagedBot(config(), botId, fetcher)).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    }
+    expect(fetcher).not.toHaveBeenCalled();
   });
 });
 

@@ -174,10 +174,7 @@ export function scheduledRouterModelClient(
         finishReason: result.value.finishReason === "stop" || result.value.finishReason === "length"
           ? result.value.finishReason : "unknown",
         clientLatencyMs: Date.now() - began,
-        usage: {
-          promptTokens: result.value.usage.promptTokens,
-          completionTokens: result.value.usage.completionTokens,
-        },
+        ...(result.value.usage ? { usage: result.value.usage } : {}),
         schedulerTimings: {
           queueTimeMs: result.queueTimeMs,
           executionTimeMs: result.executionTimeMs,

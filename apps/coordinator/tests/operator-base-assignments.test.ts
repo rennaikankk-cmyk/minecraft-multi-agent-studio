@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { BaseRegistry, FacilityRegistry } from "@minecraft-studio/skills";
+import { BaseRegistry } from '@minecraft-studio/base-management';
+import { FacilityRegistry } from '@minecraft-studio/asset-policy';
 import { applyOperatorBaseAssignments } from "../src/operator-base-assignments.js";
 
 const assignment = { name: "Operator base", serverProfileId: "isolated", dimension: "minecraft:overworld",

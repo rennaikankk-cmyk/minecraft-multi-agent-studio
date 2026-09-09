@@ -29,6 +29,17 @@ const validProfile = {
 };
 
 describe("ServerProfile", () => {
+  it("accepts game username Bot IDs and enforces verified account bindings", () => {
+    const bound = { ...validProfile, botId: "_Resident_1", username: "_Resident_1", worldId: "season-1",
+      identityBinding: { mode: "game-username" } };
+    expect(serverProfileSchema.parse(bound).botId).toBe("_Resident_1");
+    expect(() => serverProfileSchema.parse({ ...bound, username: "OtherPlayer" })).toThrow(/Bound BotID/);
+    expect(() => serverProfileSchema.parse({ ...bound, auth: "online" })).toThrow(/UUID/);
+    expect(serverProfileSchema.parse({ ...bound, auth: "online", identityBinding: {
+      mode: "game-username", gameProfileId: "0123456789abcdef0123456789abcdef" } }).identityBinding?.gameProfileId).toHaveLength(32);
+    expect(() => serverProfileSchema.parse({ ...bound, worldId: "../world" })).toThrow();
+  });
+
   it("accepts an explicit loopback isolated-test profile", () => {
     expect(serverProfileSchema.parse(validProfile)).toEqual(validProfile);
   });

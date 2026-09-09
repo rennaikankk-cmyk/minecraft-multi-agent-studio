@@ -1,5 +1,6 @@
 // ---------------------------------------------------------------------------
-import { farmProductionSchema, type FarmProduction, type BasePhaseFact } from "@minecraft-studio/skills";
+import { farmProductionSchema, type FarmProduction } from '@minecraft-studio/skills';
+import { type BasePhaseFact } from '@minecraft-studio/base-management';
 // Shared State 客户端（服务端专用）
 //
 // 数据流：浏览器 → dashboard API route（本文件，token 只在 Node 侧）

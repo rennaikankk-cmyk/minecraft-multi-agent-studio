@@ -1,4 +1,4 @@
-import { identifierSchema } from "@minecraft-studio/protocol";
+import { botIdentitySchema, identifierSchema } from "@minecraft-studio/protocol";
 import { z } from "zod";
 
 const timestampSchema = z.string().datetime({ offset: true });
@@ -95,7 +95,7 @@ export type NavigationState = z.infer<typeof navigationStateSchema>;
 export const botWorldStateSchema = z
   .object({
     schemaVersion: z.literal("1.0"),
-    botId: identifierSchema,
+    botId: botIdentitySchema,
     serverProfileId: identifierSchema,
     dimension: z.string().min(1).max(128),
     version: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
@@ -222,7 +222,7 @@ export class BotWorkingMemory {
   private state: BotWorldState;
 
   constructor(options: BotWorkingMemoryOptions) {
-    const botId = identifierSchema.parse(options.botId);
+    const botId = botIdentitySchema.parse(options.botId);
     const serverProfileId = identifierSchema.parse(options.serverProfileId);
     const now = options.now ?? (() => new Date());
     this.now = now;

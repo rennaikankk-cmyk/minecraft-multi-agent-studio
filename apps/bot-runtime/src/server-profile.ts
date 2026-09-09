@@ -3,6 +3,7 @@ import { isIP } from "node:net";
 import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
+import { chatIdentityPolicySchema } from "@minecraft-studio/protocol";
 
 import { serverProfileNoHungerConfigSchema } from "./no-hunger.js";
 import { isMineflayerTestedVersion } from "./version-compatibility.js";
@@ -170,11 +171,8 @@ export const serverProfileSchema = z
       .min(1)
       .max(128)
       .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u),
-    botId: z
-      .string()
-      .min(1)
-      .max(128)
-      .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u),
+    botId: z.string().min(1).max(128)
+      .refine((value) => /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(value) || MINECRAFT_USERNAME_PATTERN.test(value)),
     purpose: serverProfilePurposeSchema,
     networkScope: z.enum(["loopback", "private-lan", "public"]),
     host: z.string().trim().min(1).max(253),
@@ -218,9 +216,18 @@ export const serverProfileSchema = z
      * 下划线）读取，找不到即拒绝启动——不静默降级成离线模式。
      */
     auth: z.enum(["offline", "online"]),
+    /** Explicit world generation; omitted legacy profiles retain unknown generation. */
+    worldId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u).optional(),
+    /** Manager binds new identities before allocating Runtime Link permissions. */
+    identityBinding: z.object({
+      mode: z.literal("game-username"),
+      gameProfileId: z.string().regex(/^[a-f0-9]{32}$/u).optional(),
+    }).strict().optional(),
     /** 缺省即启用 adaptive NoHunger；可由单服 profile 显式关闭。 */
     noHunger: serverProfileNoHungerConfigSchema.optional(),
     combat: serverProfileCombatConfigSchema.optional(),
+    /** Explicit chat authority; independent from changing combat allegiance. */
+    chatTrust: chatIdentityPolicySchema.optional(),
     /** 导航档位；缺省 safe。anarchy purpose 建议配 anarchy（也可手动选 safe）。 */
     navigation: serverProfileNavigationSchema.optional(),
     statusIntervalMs: z.number().int().min(250).max(30_000),
@@ -243,6 +250,11 @@ export const serverProfileSchema = z
   })
   .strict()
   .superRefine((profile, context) => {
+    if (profile.identityBinding && (profile.botId !== profile.username ||
+      (profile.auth === "online" && !profile.identityBinding.gameProfileId))) {
+      context.addIssue({ code: "custom", path: ["identityBinding"],
+        message: "Bound BotID must match game username; online identity requires verified profile UUID." });
+    }
     if (!hostMatchesScope(profile.host, profile.networkScope)) {
       context.addIssue({
         code: "custom",

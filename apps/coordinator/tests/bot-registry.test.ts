@@ -7,6 +7,49 @@ import {
 
 const BASE_TIME = "2026-07-20T02:00:00.000Z";
 
+describe("chat telemetry authority", () => {
+  const senderUuid = "0123456789abcdef0123456789abcdef";
+  const policy = { schemaVersion: "1.0" as const, serverProfileId: "isolated-test", worldId: null,
+    revision: 1, authMode: "offline" as const, usernames: ["Ally"], uuids: [],
+    offlineTrust: "server-player-list" as const, allowUnsignedOnline: false };
+  function chat() {
+    return { schemaVersion: "1.0", messageId: messageId(999), traceId: "trace-registry", timestamp: BASE_TIME,
+      source: { service: "bot-runtime", instanceId: "runtime-a" }, botId: "worker-01", type: "bot.chat-received.v1",
+      payload: { serverProfileId: "isolated-test", runtimeInstanceId: "runtime-a", speaker: "Ally", message: "搬来住",
+        identity: { schemaVersion: "1.0", source: "protocol-player-chat", senderUuid, playerListUsername: "Ally",
+          signatureVerified: false, channel: "public", authMode: "offline", worldId: null,
+          dimension: "minecraft:overworld", policyRevision: 1 } } };
+  }
+  it("rechecks identity, current runtime/world and message deduplication before notifying", () => {
+    const registry = new BotRegistry({ staleAfterMs: 5000, chatTrustPolicies: [policy] });
+    const now = new Date(BASE_TIME), delivered: unknown[] = [];
+    registry.ingest(status("runtime-a", 1), now);
+    registry.subscribe((_record, event) => { if (event) delivered.push(event); });
+    expect(registry.ingest(chat(), now).accepted).toBe(true);
+    expect(registry.ingest(chat(), now).reason).toBe("duplicate_message");
+    expect(delivered).toHaveLength(1);
+    for (const change of [
+      { serverProfileId: "another-server" },
+      { speaker: "Forged" },
+      { identity: { ...chat().payload.identity, worldId: "new-world" } },
+      { identity: { ...chat().payload.identity, senderUuid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", playerListUsername: "Evil" } },
+    ]) {
+      expect(registry.ingest({ ...chat(), messageId: messageId(1000), payload: { ...chat().payload, ...change } }, now).accepted).toBe(false);
+    }
+    const old = chat(); old.source.instanceId = "runtime-old"; old.payload.runtimeInstanceId = "runtime-old";
+    old.messageId = messageId(1001);
+    expect(registry.ingest(old, now).reason).toBe("retired_runtime");
+    expect(delivered).toHaveLength(1);
+  });
+  it("never dispatches legacy evidence-free chat or silently trusts a missing policy", () => {
+    const registry = new BotRegistry({ staleAfterMs: 5000 });
+    const now = new Date(BASE_TIME); registry.ingest(status("runtime-a", 1), now);
+    expect(registry.ingest(chat(), now).reason).toBe("untrusted_chat");
+    const { identity: _identity, ...payload } = chat().payload;
+    expect(registry.ingest({ ...chat(), payload }, now).accepted).toBe(false);
+  });
+});
+
 function messageId(value: number): string {
   return `00000000-0000-4000-8000-${value.toString(16).padStart(12, "0")}`;
 }

@@ -1,12 +1,12 @@
 {
   "schemaVersion": "1.0",
   "generatedFrom": "packages/skills/src/v1-manifest.ts",
-  "totalSkills": 31,
+  "totalSkills": 32,
   "maturitySummary": {
     "L0": 0,
     "L1": 0,
     "L2": 1,
-    "L3": 26,
+    "L3": 27,
     "L4": 4,
     "L5": 0
   },
@@ -1088,6 +1088,48 @@
         "Requires a loaded overworld, building materials, water access and a barrel; sustained production still needs repeated real-server evidence."
       ],
       "ownerModule": "packages/skills/src/farm-sustain.ts"
+    },
+    {
+      "skillId": "base.residence-check",
+      "schemaVersion": "1.0.0",
+      "family": "uncategorized",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "llm",
+      "runtimeCapabilities": [
+        "world.interact",
+        "world.read",
+        "bot.move",
+        "inventory.write"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "PLACE_AND_VERIFY",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "NORMAL_ACTIONS_PAUSED",
+        "TARGET_DIMENSION_MISMATCH",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [],
+      "ownerModule": "unknown"
     },
     {
       "skillId": "movement.goal",

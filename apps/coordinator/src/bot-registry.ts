@@ -1,6 +1,9 @@
 import {
   parseBotStopResult,
   parseBotTelemetryMessage,
+  verifyChatIdentity,
+  type ChatIdentityPolicy,
+  type ChatIdentityEvidence,
   type BotDisconnectedV1,
   type BotSkillCatalogV1,
   type BotStatusV1,
@@ -9,6 +12,7 @@ import {
   type BotWorldStateV1,
   type MinecraftVersionCompatibility,
 } from "@minecraft-studio/protocol";
+import { PersonalMemoryError, type PersonalMemoryStore } from "./personal-memory-store.js";
 
 export type RegistryConnectionState =
   BotStatusV1["payload"]["connectionState"];
@@ -43,7 +47,8 @@ export type TelemetryIgnoreReason =
   | "duplicate_sequence"
   | "out_of_order"
   | "retired_runtime"
-  | "older_runtime_start";
+  | "older_runtime_start"
+  | "untrusted_chat";
 
 export type TelemetryIngestResult = Readonly<{
   accepted: boolean;
@@ -55,6 +60,9 @@ export type BotRegistryChatEvent = Readonly<{
   kind: "chat";
   speaker: string;
   message: string;
+  messageId: string;
+  timestamp: string;
+  identity: ChatIdentityEvidence;
 }>;
 
 export type BotRegistryListener = (
@@ -68,6 +76,9 @@ export type CoordinatorTelemetryErrorCode =
   | "SOURCE_INSTANCE_MISMATCH"
   | "MESSAGE_FROM_FUTURE"
   | "SERVER_PROFILE_MISMATCH"
+  | "WORLD_ID_MISMATCH"
+  | "PERSONAL_MEMORY_READ_FAILED"
+  | "PERSONAL_MEMORY_WRITE_FAILED"
   | "CLOCK_INVALID";
 
 export class CoordinatorTelemetryError extends Error {
@@ -147,6 +158,8 @@ export type BotRegistryOptions = Readonly<{
   maxSeenMessageIds?: number;
   maxRetiredRuntimeIds?: number;
   now?: () => Date;
+  personalMemory?: PersonalMemoryStore;
+  chatTrustPolicies?: readonly ChatIdentityPolicy[];
 }>;
 
 export class BotRegistry {
@@ -160,7 +173,7 @@ export class BotRegistry {
   private readonly maxSeenMessageIds: number;
   private readonly maxRetiredRuntimeIds: number;
 
-  constructor(options: BotRegistryOptions) {
+  constructor(private readonly options: BotRegistryOptions) {
     this.staleAfterMs = positiveInteger(options.staleAfterMs, "staleAfterMs");
     this.maxClockSkewMs = nonnegativeInteger(
       options.maxClockSkewMs ?? 30_000,
@@ -221,7 +234,27 @@ export class BotRegistry {
           record: this.fallbackRecord(message.botId, message, receivedMs),
         };
       }
-      this.notifyChat(chatRecord, message.payload.speaker, message.payload.message);
+      if (this.seenMessageIds.has(message.messageId)) {
+        return { accepted: false, reason: "duplicate_message", record: snapshot(chatRecord) };
+      }
+      if (chatRecord.runtimeInstanceId !== message.payload.runtimeInstanceId) {
+        return { accepted: false, reason: "retired_runtime", record: snapshot(chatRecord) };
+      }
+      const identity = message.payload.identity;
+      const policy = this.options.chatTrustPolicies?.find((p) =>
+        p.serverProfileId === chatRecord.serverProfileId && p.worldId === (chatRecord.currentStatus?.personalContext?.worldId ?? null)) ?? null;
+      if (message.payload.serverProfileId !== chatRecord.serverProfileId ||
+          chatRecord.connectionState !== "online" || !identity ||
+          identity.dimension !== chatRecord.currentStatus?.position.dimension ||
+          identity.worldId !== (chatRecord.currentStatus?.personalContext?.worldId ?? null) ||
+          receivedMs - chatEnvelopeMs > this.maxClockSkewMs ||
+          !verifyChatIdentity({ serverProfileId: chatRecord.serverProfileId,
+            speaker: message.payload.speaker, evidence: identity, policy })) {
+        return { accepted: false, reason: "untrusted_chat", record: snapshot(chatRecord) };
+      }
+      this.rememberMessageId(message.messageId);
+      this.notifyChat(chatRecord, { kind: "chat", speaker: message.payload.speaker,
+        message: message.payload.message, messageId: message.messageId, timestamp: message.timestamp, identity });
       return { accepted: true, reason: "accepted", record: snapshot(chatRecord) };
     }
 
@@ -254,8 +287,6 @@ export class BotRegistry {
     ) {
       this.assertVersionConsistency(existing, message);
     }
-    this.rememberMessageId(message.messageId);
-
     const record = existing ?? this.createRecord(message, receivedMs, observedMs);
     if (!existing) this.records.set(message.botId, record);
 
@@ -292,6 +323,16 @@ export class BotRegistry {
       return this.ignored(record, "duplicate_sequence", receivedMs);
     }
 
+    // Commit private observations before acknowledging telemetry. A disk failure
+    // remains retryable, without caching the message ID as successfully ingested.
+    if (message.type === "bot.status.v1") {
+      try { this.options.personalMemory?.observeStatus(message); }
+      catch (error) {
+        if (error instanceof PersonalMemoryError) throw new CoordinatorTelemetryError(error.code, error.code);
+        throw error;
+      }
+    }
+    this.rememberMessageId(message.messageId);
     record.lastSequence = message.payload.sequence;
     record.lastObservedMs = Math.max(record.lastObservedMs, observedMs);
     record.lastObservedAt = new Date(record.lastObservedMs).toISOString();
@@ -342,6 +383,10 @@ export class BotRegistry {
     record: InternalRecord,
     message: BotTelemetryMessageV1,
   ): void {
+    if (message.type === "bot.status.v1" && record.currentStatus &&
+      (record.currentStatus.personalContext?.worldId ?? null) !== (message.payload.personalContext?.worldId ?? null)) {
+      throw new CoordinatorTelemetryError("WORLD_ID_MISMATCH", "One runtime instance cannot change its world generation identity.");
+    }
     const incomingVersion = message.type === "bot.version.v1"
       ? message.payload.compatibility
       : message.type === "bot.status.v1"
@@ -561,12 +606,11 @@ export class BotRegistry {
 
   private notifyChat(
     record: InternalRecord,
-    speaker: string,
-    message: string,
+    event: BotRegistryChatEvent,
   ): void {
     for (const listener of this.listeners) {
       try {
-        listener(snapshot(record), { kind: "chat", speaker, message });
+        listener(snapshot(record), event);
       } catch {
         // A presentation subscriber cannot break the authoritative registry.
       }

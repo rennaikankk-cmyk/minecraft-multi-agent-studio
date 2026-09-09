@@ -321,6 +321,7 @@ export function IncidentsConsole() {
           <button type="button" onClick={() => { setQuick("none"); setAppliedLayer(""); setAppliedBot(""); setAppliedServer(""); setTimeWindow("all"); }}>清除</button>
           <button type="button" onClick={() => void download(`/api/incidents/export?scope=open&format=json`, "incidents-open.json")}>Export Open (JSON)</button>
           <button type="button" onClick={() => void download(`/api/incidents/export?scope=last24h&format=zip`, "incidents-last24h.zip")}>Export Last 24h (ZIP)</button>
+          <button type="button" onClick={() => void download(`/api/diagnostics/export?from=${encodeURIComponent(new Date(Date.now() - 86_400_000).toISOString())}&to=${encodeURIComponent(new Date().toISOString())}`, "bot-diagnostics-last24h.zip")}>Export Bot Diagnostics (24h)</button>
         </div>
         {writer ? (
           <p className="hint">

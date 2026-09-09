@@ -20,6 +20,7 @@ import { packShulkerSkill, stockLevelSkill, storeSortSkill } from "../planning/s
 import { movementProfileSkill } from "../planning/movement-profile.js";
 import { farmMaintainSkill } from "../farm-maintenance.js";
 import { farmSustainSkill } from "../farm-sustain.js";
+import { residenceCheckSkill } from "./residence-check.js";
 import { baritoneProcessSkills } from "../baritone-processes.js";
 
 /**
@@ -63,6 +64,7 @@ export const builtinSkills: readonly AnySkillDefinition[] = Object.freeze([
   movementProfileSkill,
   farmMaintainSkill,
   farmSustainSkill,
+  residenceCheckSkill,
   ...baritoneProcessSkills,
 ] as readonly unknown[] as readonly AnySkillDefinition[]);
 

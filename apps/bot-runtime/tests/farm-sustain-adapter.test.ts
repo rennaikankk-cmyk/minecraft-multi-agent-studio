@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { farmSustainInputSchema, farmSustainOutputSchema, foodFarmLayout, type WorkPosition } from "@minecraft-studio/skills";
+import { farmSustainInputSchema, farmSustainOutputSchema, foodFarmLayout } from '@minecraft-studio/skills';
+import { type WorkPosition } from '@minecraft-studio/asset-policy';
 import { sustainFarm, type FoodFarmPort } from "../src/farm-sustain-adapter.js";
 
 const input = farmSustainInputSchema.parse({ serverProfileId: "isolated", dimension: "minecraft:overworld",

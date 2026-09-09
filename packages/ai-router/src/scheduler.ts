@@ -1,3 +1,6 @@
+import { botIdentitySchema } from "@minecraft-studio/protocol";
+import { AIError } from './errors.js';
+
 export const aiRequestPriorities = {
   systemCritical: 0,
   combat: 10,
@@ -145,6 +148,7 @@ export type AISchedulerSnapshot = Readonly<{
 }>;
 
 export type AIRequestSchedulerOptions = Readonly<{
+  defaultRetry?: AIRetryPolicy;
   maxConcurrency?: number;
   maxQueue?: number;
   perBotConcurrency?: number;
@@ -185,6 +189,7 @@ export class AIRequestScheduler {
   private dispatchClock = 0;
   private readonly perBotConcurrency: number;
   private readonly defaultTimeoutMs: number;
+  private readonly defaultRetry: AIRetryPolicy | undefined;
   private readonly now: () => number;
   private readonly random: () => number;
   private readonly onEvent: (event: AISchedulerEvent) => void;
@@ -197,6 +202,8 @@ export class AIRequestScheduler {
   private accepting = true;
 
   constructor(options: AIRequestSchedulerOptions = {}) {
+    if (options.defaultRetry) normalizedRetry(options.defaultRetry);
+    this.defaultRetry = options.defaultRetry;
     this.maxConcurrency = boundedInteger(
       options.maxConcurrency ?? 12,
       1,
@@ -474,7 +481,7 @@ export class AIRequestScheduler {
     this.dispatchClock += 1;
     this.lastDispatchSequenceByBot.set(entry.request.botId, this.dispatchClock);
     try {
-      const retry = normalizedRetry(entry.request.retry);
+      const retry = normalizedRetry(entry.request.retry ?? this.defaultRetry);
       for (;;) {
         if (entry.controller.signal.aborted) throw this.abortError(entry);
         entry.attempts += 1;
@@ -495,10 +502,14 @@ export class AIRequestScheduler {
           return;
         } catch (error) {
           if (entry.controller.signal.aborted) throw this.abortError(entry);
-          if (entry.attempts >= retry.maxAttempts || !retry.retryable(error)) {
+          if (entry.attempts >= retry.maxAttempts || (error instanceof AIError && !error.retryable) || !retry.retryable(error)) {
             throw error;
           }
-          const delayMs = retryDelay(retry, entry.attempts, this.random);
+          const retryAfterMs = error instanceof AIError ? error.retryAfterMs ?? 0 : 0;
+          // A provider's longer cooldown is never shortened to fit our retry
+          // policy: fail this request when the configured budget cannot honor it.
+          if (retryAfterMs > retry.maxDelayMs) throw error;
+          const delayMs = Math.max(retryAfterMs, retryDelay(retry, entry.attempts, this.random));
           this.emit('retrying', entry.request, {
             attempt: entry.attempts,
             delayMs,
@@ -709,7 +720,7 @@ function validateRequest<T>(request: AIScheduledRequest<T>, defaultTimeoutMs: nu
 }
 
 function validateIdentifier(value: string, field: string): void {
-  if (!IDENTIFIER_PATTERN.test(value)) {
+  if (!(field === 'botId' ? botIdentitySchema.safeParse(value).success : IDENTIFIER_PATTERN.test(value))) {
     throw new TypeError(`${field} is invalid.`);
   }
 }

@@ -200,7 +200,7 @@ export function createStructuredLogger(
       event,
       traceId: correlationValue(sanitized.traceId),
       taskId: correlationValue(sanitized.taskId),
-      botId: correlationValue(sanitized.botId),
+      botId: correlationValue(sanitized.botId, true),
       skillId: correlationValue(sanitized.skillId),
       modelName: correlationValue(sanitized.modelName),
       ...withoutReservedFields(sanitized),
@@ -238,7 +238,7 @@ export class InMemoryMetricRegistry implements MetricRecorder {
       if (
         !METRIC_LABEL_PATTERN.test(key) ||
         isSensitiveKey(key) ||
-        !IDENTIFIER_PATTERN.test(value)
+        !(IDENTIFIER_PATTERN.test(value) || (key === "botId" && /^[A-Za-z0-9_]{3,16}$/u.test(value)))
       ) {
         throw new TypeError("Metric label is invalid or sensitive.");
       }
@@ -347,8 +347,8 @@ function sanitizeString(value: string): string {
   return sanitized;
 }
 
-function correlationValue(value: unknown): string | null {
-  return typeof value === "string" && IDENTIFIER_PATTERN.test(value)
+function correlationValue(value: unknown, botIdentity = false): string | null {
+  return typeof value === "string" && (IDENTIFIER_PATTERN.test(value) || (botIdentity && /^[A-Za-z0-9_]{3,16}$/u.test(value)))
     ? value
     : null;
 }

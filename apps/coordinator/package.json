@@ -24,10 +24,14 @@
     "@minecraft-studio/protocol": "workspace:*",
     "@minecraft-studio/skills": "workspace:*",
     "@minecraft-studio/task-system": "workspace:*",
+    "@minecraft-studio/resource-management": "workspace:*",
     "prismarine-nbt": "2.8.0",
     "prismarine-schematic": "1.3.0",
     "ws": "8.21.1",
-    "zod": "4.4.3"
+    "zod": "4.4.3",
+    "@minecraft-studio/base-management": "workspace:*",
+    "@minecraft-studio/asset-policy": "workspace:*",
+    "@minecraft-studio/resource-management": "workspace:*"
   },
   "devDependencies": {
     "@types/ws": "8.18.1"

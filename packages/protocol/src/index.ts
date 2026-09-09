@@ -10,6 +10,13 @@ export {
   type EnvironmentSnapshot,
 } from "./environment.js";
 
+export { botPersonalContextSchema } from "./bot-messages.js";
+export {
+  botPersonalMemoryScopeSchema, botPersonalMemoryV1Schema, botPersonalMemoryResponseV1Schema,
+  type BotPersonalContext, type BotPersonalMemoryScope, type BotPersonalMemoryV1,
+  type BotPersonalMemoryResponseV1,
+} from "./personal-memory.js";
+
 export {
   studioAiProviderSchema,
   studioAiStateSchema,
@@ -116,6 +123,7 @@ export {
   botSkillCatalogEntryV1Schema,
   botSkillCatalogV1Schema,
   identifierSchema,
+  botIdentitySchema,
   l0SafetyActionKindSchema,
   l0SafetyRiskSchema,
   l0SafetyStatusSchema,
@@ -368,3 +376,4 @@ export {
   type ResourceAcquisitionMode,
   type StudioGameplayProfile,
 } from "./gameplay-policy.js";
+export * from "./chat-identity.js";

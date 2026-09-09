@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 
 import {
+  botIdentitySchema,
   identifierSchema,
   taskDispatchV1Schema,
   type TaskDispatchV1,
@@ -49,7 +50,7 @@ type SqlRow = Record<string, unknown>;
 const taskAssignmentLeaseCheckSchema = z
   .object({
     taskId: taskCreateCommandSchema.shape.taskId,
-    botId: identifierSchema,
+    botId: botIdentitySchema,
     leaseOwner: identifierSchema,
   })
   .strict();
@@ -1004,7 +1005,7 @@ export class PostgresTaskRepository {
       : taskRecordSchema.shape.status.parse(input.status);
     const botId = input.botId === null || input.botId === undefined
       ? null
-      : identifierSchema.parse(input.botId);
+      : botIdentitySchema.parse(input.botId);
     const before = input.before ?? null;
     const beforeCreatedAt = before === null ? null : iso(before.createdAt);
     const beforeTaskId = before === null

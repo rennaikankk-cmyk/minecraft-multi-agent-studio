@@ -35,7 +35,7 @@ describe("Mineflayer version compatibility", () => {
   it("reads the real supported range from the installed adapter", () => {
     expect(mineflayerVersionSupport).toMatchObject({
       oldest: "1.8.8",
-      latest: "1.21.11",
+      latest: "26.1",
     });
     expect(mineflayerVersionSupport.testedVersions).toContain("1.21.8");
     expect(isMineflayerTestedVersion("1.21.8")).toBe(true);
@@ -72,10 +72,10 @@ describe("Mineflayer version compatibility", () => {
       supportLevel: "unsupported",
     });
     expect(
-      resolvedVersionCompatibility("auto", "26.1.2", 800, "26.1"),
+      resolvedVersionCompatibility("auto", "26.1.2", 775, "26.1"),
     ).toMatchObject({
       resolvedVersion: "26.1.2",
-      protocolVersion: 800,
+      protocolVersion: 775,
       supportLevel: "compatible-untested",
     });
     expect(() =>

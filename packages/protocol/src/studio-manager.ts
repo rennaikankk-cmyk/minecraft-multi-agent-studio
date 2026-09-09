@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { identifierSchema, minecraftVersionStringSchema } from "./bot-messages.js";
+import { botIdentitySchema, identifierSchema, minecraftVersionStringSchema } from "./bot-messages.js";
 
 const timestampSchema = z.string().datetime({ offset: true });
 
@@ -55,7 +55,7 @@ export const studioMinecraftAuthSchema = z.enum(["offline", "online"]);
 
 export const studioManagedBotV1Schema = z
   .object({
-    botId: identifierSchema,
+    botId: botIdentitySchema,
     username: z
       .string()
       .min(3)
@@ -63,9 +63,13 @@ export const studioManagedBotV1Schema = z
       .regex(/^[A-Za-z0-9_]+$/u),
     serverHost: z.string().trim().min(1).max(253),
     serverPort: z.number().int().min(1).max(65_535),
+    /** World generation identifier; omitted when unknown, independent of dimension. */
+    worldId: identifierSchema.optional(),
     minecraftVersion: z.union([z.literal("auto"), minecraftVersionStringSchema]),
     /** Authentication mode; omitted by legacy clients and defaults to offline. */
     auth: studioMinecraftAuthSchema.optional(),
+    /** Authenticated Java profile UUID, normalized to lowercase compact hex. */
+    gameProfileId: z.string().regex(/^[a-f0-9]{32}$/u).optional(),
     /** TCP 目的地址覆盖（可选）；握手 hostname 恒为 serverHost。 */
     connectHost: z.string().trim().min(1).max(253).optional(),
     processState: studioManagedBotProcessStateSchema,
@@ -151,23 +155,34 @@ export const studioManagerStatusV1Schema = z
   })
   .strict();
 
-export const studioCreateBotRequestV1Schema = z
-  .object({
+const studioCreateBotFields = {
     schemaVersion: z.literal("1.0"),
-    username: z
-      .string()
-      .min(3)
-      .max(16)
-      .regex(/^[A-Za-z0-9_]+$/u),
     serverHost: z.string().trim().min(1).max(253),
     serverPort: z.number().int().min(1).max(65_535),
+    /** Explicit world generation identity; do not infer from game dimension. */
+    worldId: identifierSchema.optional(),
     minecraftVersion: z.union([z.literal("auto"), minecraftVersionStringSchema]),
-    /** Omitted by legacy clients; Manager defaults to offline. */
-    auth: studioMinecraftAuthSchema.optional(),
     /** TCP 目的地址覆盖（可选）；握手 hostname 恒为 serverHost。 */
     connectHost: z.string().trim().min(1).max(253).optional(),
-  })
-  .strict();
+};
+const studioUsernameSchema = z.string().min(3).max(16).regex(/^[A-Za-z0-9_]+$/u);
+
+export const studioCreateBotRequestV1Schema = z.union([
+  z.object({
+    ...studioCreateBotFields,
+    /** Omitted by legacy clients; Manager defaults to offline. */
+    auth: z.literal("offline").optional(),
+    username: studioUsernameSchema,
+  }).strict(),
+  z.object({
+    ...studioCreateBotFields,
+    auth: z.literal("online"),
+    /** Opaque lookup key only; never a Microsoft email, password or game name. */
+    accountRef: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u),
+    /** Legacy claimed name is accepted but never used to bind online identity. */
+    username: studioUsernameSchema.optional(),
+  }).strict(),
+]);
 
 export const studioManagedBotResponseV1Schema = z
   .object({

@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { clearAreaInputSchema, workAreaPositions, SkillFault, type WorkPosition } from "@minecraft-studio/skills";
+import { clearAreaInputSchema, SkillFault } from '@minecraft-studio/skills';
+import { workAreaPositions, type WorkPosition } from '@minecraft-studio/asset-policy';
 
 export type ClearCell = { name: string | null; safe: boolean };
 export async function clearWorkArea(input: z.infer<typeof clearAreaInputSchema>, port: {

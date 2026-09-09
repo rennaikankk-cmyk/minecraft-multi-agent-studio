@@ -3,7 +3,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { WorldAssetAuthority, WorkAreaLeaseAuthority, BaseRegistry, authorizeHarvest,
-  SharedStateClient, createSharedStateDispatcher, dispatchSharedState, InMemoryWorkstationRegistry, FacilityRegistry } from "../src/index.js";
+  SharedStateClient, createSharedStateDispatcher, dispatchSharedState, InMemoryWorkstationRegistry, FacilityRegistry,
+  AssetPolicy } from "../src/index.js";
 
 const scope = { serverProfileId: "fixture", dimension: "minecraft:overworld" };
 const position = { x: 10, y: 64, z: 10 };
@@ -16,9 +17,10 @@ describe("shared world asset authority", () => {
     try {
       const a = new WorldAssetAuthority({ persistDir: dir });
       a.record(entry); a.record({ ...entry, position: { ...position, x: 11 }, placedByBotId: "bot-b" });
-      a.record({ ...entry, purpose: "farm" });
+      a.record({ ...entry, facilityId: "living-room" });
       const restored = new WorldAssetAuthority({ persistDir: dir });
-      expect(restored.observe({ ...scope, position }).record?.purpose).toBe("farm");
+      expect(restored.observe({ ...scope, position }).record?.facilityId).toBe("living-room");
+      expect(restored.observe({ ...scope, position }).record?.purpose).toBe("structural");
       expect(restored.observe({ ...scope, position: { ...position, x: 11 } }).record?.placedByBotId).toBe("bot-b");
       expect(restored.observe({ ...scope, serverProfileId: "other", position }).record).toBeNull();
       expect(restored.observe({ ...scope, dimension: "minecraft:the_nether", position }).record).toBeNull();
@@ -47,6 +49,17 @@ describe("shared world asset authority", () => {
     expect(authorizeHarvest({ ...observation, explicitSalvageAuthorized: false })).toMatchObject({ allowed: false, code: "HARVEST_UNKNOWN_NEAR_BASE" });
     authority.record(entry);
     expect(authorizeHarvest({ ...authority.observe({ ...scope, position }), explicitSalvageAuthorized: false })).toMatchObject({ allowed: false });
+  });
+  it("fails closed for unknown ownership near a base and prevents provenance relabeling", () => {
+    const bases = new BaseRegistry();
+    bases.create({ ...scope, anchor: position, name: "base", blueprintId: "starter" });
+    const authority = new WorldAssetAuthority({ bases });
+    const unknown = { ...entry, owner: "unknown" as const, source: "unknown" as const };
+    authority.record(unknown);
+    expect(authorizeHarvest({ ...authority.observe({ ...scope, position }), explicitSalvageAuthorized: false }))
+      .toMatchObject({ allowed: false, code: "HARVEST_UNKNOWN_NEAR_BASE" });
+    expect(() => authority.record({ ...entry, owner: "external", source: "external_placed" }))
+      .toThrow("PROVENANCE_IDENTITY_IMMUTABLE");
   });
   it("isolates case and punctuation variants when both stores exist before the first write", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "studio-assets-"));
@@ -85,6 +98,42 @@ describe("shared world asset authority", () => {
     expect((await b.assets.observe({ ...scope, position })).workAllowed).toBe(false);
     expect((await a.assets.observe({ ...scope, position, leaseId: lease.leaseId })).workAllowed).toBe(true);
     await expect(b.assets.remove({ ...scope, position })).rejects.toThrow("WORK_AREA_BUSY");
+  });
+});
+
+describe("asset policy", () => {
+  const policyRecord = {
+    assetId: "machine-1", serverProfileId: "fixture", worldId: "world-a",
+    dimension: "minecraft:overworld", position: { x: 4, y: 64, z: 4 },
+    role: "container" as const, protection: "OUTPUT_ONLY" as const,
+    subjects: ["bot-a"], allowedItems: ["iron_ingot"],
+    revision: 1, version: 1, allowedActions: ["container-transfer" as const],
+  };
+  it("requires matching scope/version and allows only confirmed output withdrawal", () => {
+    const policy = new AssetPolicy();
+    policy.register(policyRecord);
+    const base = { assetId: policyRecord.assetId, serverProfileId: policyRecord.serverProfileId,
+      worldId: policyRecord.worldId, dimension: policyRecord.dimension, subject: "bot-a", action: "container-transfer" as const,
+      assetVersion: 1, policyRevision: 1, position: policyRecord.position, itemName: "iron_ingot", count: 4 };
+    expect(policy.authorize({ ...base, direction: "withdraw" })).toMatchObject({ allowed: true, reason: "authorized_output" });
+    expect(policy.authorize({ ...base, direction: "deposit" })).toMatchObject({ allowed: false, code: "ASSET_OUTPUT_ONLY" });
+    expect(policy.authorize({ ...base, assetVersion: 2 })).toMatchObject({ allowed: false, code: "ASSET_VERSION_STALE" });
+    expect(policy.authorize({ ...base, worldId: "world-b" })).toMatchObject({ allowed: false, code: "ASSET_UNKNOWN_PROTECTED" });
+  });
+  it("invalidates grants on revision replacement and revocation", () => {
+    const policy = new AssetPolicy();
+    policy.register({ ...policyRecord, protection: "PRIVATE" });
+    policy.grant({ assetId: "machine-1", subject: "bot-a", action: "use", expiresAtMs: Date.now() + 10_000, revision: 1,
+      serverProfileId: policyRecord.serverProfileId, worldId: policyRecord.worldId, dimension: policyRecord.dimension,
+      position: policyRecord.position, version: 1 });
+    const request = { assetId: policyRecord.assetId, serverProfileId: policyRecord.serverProfileId,
+      worldId: policyRecord.worldId, dimension: policyRecord.dimension, position: policyRecord.position,
+      subject: "bot-a", action: "use" as const, assetVersion: 1, policyRevision: 1 };
+    expect(policy.authorize(request)).toMatchObject({ allowed: true, reason: "owner" });
+    policy.register({ ...policyRecord, protection: "PRIVATE", revision: 2 });
+    expect(policy.authorize({ ...request, policyRevision: 2 })).toMatchObject({ allowed: false, code: "ASSET_ACTION_DENIED" });
+    expect(policy.revoke(policyRecord)).toBe(true);
+    expect(policy.authorize({ ...request, policyRevision: 3 })).toMatchObject({ allowed: false, code: "ASSET_POLICY_REVOKED" });
   });
 });
 

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { identifierSchema } from "./bot-messages.js";
+import { botIdentitySchema } from "./bot-messages.js";
 import {
   goalDispatchResultV1Schema,
   publicBotDetailV1Schema,
@@ -45,7 +45,7 @@ export const dashboardStopResponseV1Schema = z
     requestId: z.string().uuid(),
     data: z
       .object({
-        botId: identifierSchema,
+        botId: botIdentitySchema,
         traceId: z.string().uuid(),
         commandId: z.string().uuid(),
         outcome: z.enum(["completed", "rejected", "failed"]),
@@ -59,7 +59,7 @@ export const dashboardGoalRequestV1Schema = z
   .object({
     schemaVersion: z.literal("1.0"),
     requestId: z.string().uuid(),
-    botId: identifierSchema,
+    botId: botIdentitySchema,
     operatorGoal: z
       .string()
       .trim()

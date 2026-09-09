@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WorkAreaLeaseAuthority } from "@minecraft-studio/skills";
+import { WorkAreaLeaseAuthority } from '@minecraft-studio/asset-policy';
 import { withWorkAreaLease } from "../src/work-area-lease.js";
 
 const area = { serverProfileId: "fixture", dimension: "minecraft:overworld", min: { x: 0, y: 64, z: 0 }, max: { x: 1, y: 65, z: 1 } };

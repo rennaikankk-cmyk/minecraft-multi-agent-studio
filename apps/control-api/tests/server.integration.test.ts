@@ -67,6 +67,16 @@ afterEach(async () => {
 });
 
 describe("Control API HTTP and WebSocket integration", () => {
+  it("reads a Minecraft BotID starting with underscore through the real HTTP validator", async () => {
+    const { registry, baseUrl } = await startServer();
+    registry.ingest({ ...statusMessage(1), botId: "_Miner" }, new Date());
+    const response = await authenticatedFetch(`${baseUrl}/v1/bots/_Miner`, READER_TOKEN);
+    expect(response.status).toBe(200);
+    expect(JSON.stringify(await response.json())).toContain('"botId":"_Miner"');
+    const invalid = await authenticatedFetch(`${baseUrl}/v1/bots/_bad-name`, READER_TOKEN);
+    expect(invalid.status).toBe(400);
+  });
+
   it("rejects a non-loopback bind at the server boundary", () => {
     expect(
       () =>

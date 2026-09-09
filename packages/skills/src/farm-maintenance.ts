@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { skillJsonValueSchema } from "@minecraft-studio/protocol";
 import { defineSkill } from "./types.js";
 import { workAreaSchema, workPositionSchema, workScopeSchema } from "./work-area.js";
 
@@ -129,6 +130,6 @@ export const farmMaintainSkill = defineSkill({
     { id: "area.dimension-matches", failureCode: "TARGET_DIMENSION_MISMATCH", check: (i, s) => i.area.dimension === s.position?.dimension },
   ],
   execute: async (context, input) => farmMaintainOutputSchema.parse(await context.callCapability(
-    "world.interact", "farm.maintain-safe", input,
+    "world.interact", "farm.maintain-safe", skillJsonValueSchema.parse(input),
   )),
 });

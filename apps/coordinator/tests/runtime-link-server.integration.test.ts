@@ -1,5 +1,8 @@
 import { createHash, createHmac } from "node:crypto";
 import { once } from "node:events";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 import type { AppLogger } from "@minecraft-studio/observability";
 import {
@@ -45,10 +48,12 @@ const logger: AppLogger = {
 
 const servers: RuntimeLinkServer[] = [];
 const sockets: WebSocket[] = [];
+const peerDirectories: string[] = [];
 
 afterEach(async () => {
   for (const socket of sockets.splice(0)) socket.terminate();
   await Promise.all(servers.splice(0).map((server) => server.stop()));
+  for (const dir of peerDirectories.splice(0)) rmSync(dir, { recursive: true, force: true });
   vi.clearAllMocks();
 });
 
@@ -492,11 +497,158 @@ describe("Coordinator Runtime Link server", () => {
   });
 });
 
+describe("managed Runtime Link username binding over real WebSocket", () => {
+  it("preserves static external peers during managed file failure and rejects file control over them", async () => {
+    const external = { keyId: "external-key", botId: "ExternalBot", secretSha256: "b".repeat(64) };
+    const peersPath = managedPeerFile("Resident_1");
+    const { url, registry } = await startServer({ peersPath, managedKeyIds: [KEY_ID],
+      peers: [{ keyId: KEY_ID, botId: BOT_ID, secretSha256: SECRET_SHA256 }, external] });
+    const externalSocket = await authenticate(url, external.botId, external.keyId, external.secretSha256);
+    const managedSocket = await authenticate(url, "Resident_1");
+    for (const [index, body] of ["{", JSON.stringify({ schemaVersion: "1.0", peers: [external] }),
+      JSON.stringify({ schemaVersion: "1.0", peers: [{ keyId: KEY_ID, botId: "externalbot", secretSha256: SECRET_SHA256 }] })].entries()) {
+      writeFileSync(peersPath, body);
+      const ack = nextServerMessage(externalSocket);
+      externalSocket.send(JSON.stringify({ ...heartbeatMessage(index + 1), botId: external.botId }));
+      await expect(ack).resolves.toMatchObject({ payload: { accepted: true } });
+      await expect(rejectedAuthentication(url, "Resident_1")).resolves.toBe("authentication_rejected");
+      await expect(rejectedAuthentication(url, "externalbot")).resolves.toBe("authentication_rejected");
+    }
+    rmSync(peersPath);
+    // Static authentication and routing do not need a healthy managed file.
+    await authenticate(url, external.botId, external.keyId, external.secretSha256);
+    expect(registry.get(external.botId, NOW)?.lastSequence).toBe(3);
+    const closed = once(managedSocket, "close");
+    managedSocket.send(JSON.stringify({ ...heartbeatMessage(4), botId: "Resident_1" }));
+    expect(String((await closed)[1])).toBe("runtime_binding_changed");
+  });
+
+  it("cannot reactivate a fenced session when its former username is assigned again", async () => {
+    const peersPath = managedPeerFile("Resident_1");
+    const { url, registry } = await startServer({ peersPath });
+    const old = await authenticate(url, "Resident_1");
+    writeManagedPeers(peersPath, "Resident_2");
+    const closed = once(old, "close");
+    await authenticate(url, "Resident_2");
+    await closed;
+    writeManagedPeers(peersPath, "Resident_1");
+    expect(old.readyState).toBe(WebSocket.CLOSED);
+    const current = await authenticate(url, "Resident_1");
+    const ack = nextServerMessage(current);
+    current.send(JSON.stringify({ ...heartbeatMessage(1), botId: "Resident_1" }));
+    await expect(ack).resolves.toMatchObject({ payload: { accepted: true } });
+    expect(registry.get("Resident_1", NOW)?.lastSequence).toBe(1);
+  });
+
+  it("accepts a renamed username with its preauthorized slot key and ingests telemetry", async () => {
+    const peersPath = managedPeerFile("_Resident_1");
+    const { registry, url } = await startServer({ peersPath });
+    const socket = await authenticate(url, "_Resident_1");
+    const ack = nextServerMessage(socket);
+    socket.send(JSON.stringify({ ...heartbeatMessage(1), botId: "_Resident_1" }));
+    await expect(ack).resolves.toMatchObject({ payload: { accepted: true } });
+    expect(registry.get("_Resident_1", NOW)?.lastSequence).toBe(1);
+    expect(registry.get(BOT_ID, NOW)).toBeNull();
+    await expect(rejectedAuthentication(url, BOT_ID)).resolves.toBe("authentication_rejected");
+  });
+
+  it("rejects stale incoming telemetry as soon as the file reassigns the slot", async () => {
+    const peersPath = managedPeerFile("Resident_1");
+    const { registry, url } = await startServer({ peersPath });
+    const socket = await authenticate(url, "Resident_1");
+    const ack = nextServerMessage(socket);
+    socket.send(JSON.stringify({ ...heartbeatMessage(1), botId: "Resident_1" }));
+    await ack;
+    writeManagedPeers(peersPath, "Resident_2");
+    const closed = once(socket, "close");
+    socket.send(JSON.stringify({ ...heartbeatMessage(2), botId: "Resident_1" }));
+    expect(String((await closed)[1])).toBe("runtime_binding_changed");
+    expect(registry.get("Resident_1", NOW)?.lastSequence).toBe(1);
+  });
+
+  it("rejects dispatch and closes a stale session without waiting for another heartbeat", async () => {
+    const peersPath = managedPeerFile("Resident_1");
+    const { server, url } = await startServer({ peersPath });
+    const socket = await authenticate(url, "Resident_1");
+    writeManagedPeers(peersPath, "Resident_2");
+    const closed = once(socket, "close");
+    await expect(server.sendSkillInvocation({ ...skillInvocation(testUuid(950)), botId: "Resident_1" },
+      RUNTIME_ID, new AbortController().signal)).rejects.toMatchObject({ code: "RUNTIME_LINK_UNAVAILABLE" });
+    expect(String((await closed)[1])).toBe("runtime_binding_changed");
+  });
+
+  it("fences the old same-key socket and pending request when the new username authenticates", async () => {
+    const peersPath = managedPeerFile("Resident_1");
+    const { server, url } = await startServer({ peersPath });
+    const old = await authenticate(url, "Resident_1");
+    const invocation = { ...skillInvocation(testUuid(951)), botId: "Resident_1" };
+    const received = nextServerMessage(old);
+    const pending = expect(server.sendSkillInvocation(invocation, RUNTIME_ID, new AbortController().signal))
+      .rejects.toMatchObject({ code: "RUNTIME_LINK_UNAVAILABLE" });
+    await received;
+    writeManagedPeers(peersPath, "Resident_2");
+    const closed = once(old, "close");
+    const current = await authenticate(url, "Resident_2");
+    expect(String((await closed)[1])).toBe("runtime_replaced");
+    await pending;
+    const next = { ...skillInvocation(testUuid(952)), botId: "Resident_2" };
+    const delivered = nextServerMessage(current);
+    const completion = server.sendSkillInvocation(next, RUNTIME_ID, new AbortController().signal);
+    await expect(delivered).resolves.toEqual(next);
+    current.send(JSON.stringify(skillResult(next)));
+    await expect(completion).resolves.toMatchObject({ botId: "Resident_2" });
+  });
+
+  it.each(["missing", "corrupt", "tampered", "removed"] as const)("fails closed on %s bindings, including static Bot IDs", async (mode) => {
+    const peersPath = managedPeerFile("Resident_1");
+    const { server, url } = await startServer({ peersPath });
+    const socket = await authenticate(url, "Resident_1");
+    if (mode === "missing") rmSync(peersPath);
+    else if (mode === "corrupt") writeFileSync(peersPath, "{");
+    else if (mode === "removed") writeFileSync(peersPath, JSON.stringify({ schemaVersion: "1.0", peers: [] }));
+    else writeManagedPeers(peersPath, "Resident_1", "b".repeat(64));
+    await expect(rejectedAuthentication(url, "Resident_1")).resolves.toBe("authentication_rejected");
+    await expect(rejectedAuthentication(url, BOT_ID)).resolves.toBe("authentication_rejected");
+    const closed = once(socket, "close");
+    await expect(server.requestFreshStatus("Resident_1", RUNTIME_ID, 1, "trace-managed", "task-managed",
+      new AbortController().signal)).rejects.toMatchObject({ code: "RUNTIME_LINK_UNAVAILABLE" });
+    expect(String((await closed)[1])).toBe("runtime_binding_changed");
+  });
+});
+
+function managedPeerFile(botId: string): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "runtime-ws-peers-"));
+  peerDirectories.push(dir);
+  const file = path.join(dir, "peers.json");
+  writeManagedPeers(file, botId);
+  return file;
+}
+
+function writeManagedPeers(file: string, botId: string, secretSha256 = SECRET_SHA256): void {
+  writeFileSync(file, JSON.stringify({ schemaVersion: "1.0", peers: [{ keyId: KEY_ID, botId, secretSha256 }] }));
+}
+
+async function rejectedAuthentication(url: string, botId: string): Promise<string> {
+  const socket = new WebSocket(url, RUNTIME_LINK_SUBPROTOCOL);
+  sockets.push(socket);
+  const challenge = await nextServerMessage(socket) as RuntimeLinkChallengeV1;
+  const context: RuntimeLinkProofContext = { challengeMessageId: challenge.messageId,
+    coordinatorInstanceId: challenge.payload.coordinatorInstanceId, challengeNonce: challenge.payload.challengeNonce,
+    clientNonce: CLIENT_NONCE, botId, runtimeInstanceId: RUNTIME_ID, keyId: KEY_ID };
+  const closed = once(socket, "close");
+  socket.send(JSON.stringify({ schemaVersion: "1.0", messageId: testUuid(998), timestamp: NOW.toISOString(),
+    type: "runtime.link.authenticate.v1", payload: { ...context, clientProof: hmac(runtimeLinkClientProofInput(context)) } }));
+  return String((await closed)[1]);
+}
+
 async function startServer(
   overrides: Partial<{
     maxSessions: number;
     maxPendingStops: number;
     maxPendingSkills: number;
+    peersPath: string;
+    managedKeyIds: string[];
+    peers: Array<{ keyId: string; botId: string; secretSha256: string }>;
   }> = {},
 ): Promise<{
   registry: BotRegistry;
@@ -525,7 +677,7 @@ async function startServer(
   };
 }
 
-async function authenticate(url: string): Promise<WebSocket> {
+async function authenticate(url: string, botId = BOT_ID, keyId = KEY_ID, secretSha256 = SECRET_SHA256): Promise<WebSocket> {
   const socket = new WebSocket(url, RUNTIME_LINK_SUBPROTOCOL);
   sockets.push(socket);
   const challenge = (await nextServerMessage(socket)) as RuntimeLinkChallengeV1;
@@ -534,9 +686,9 @@ async function authenticate(url: string): Promise<WebSocket> {
     coordinatorInstanceId: challenge.payload.coordinatorInstanceId,
     challengeNonce: challenge.payload.challengeNonce,
     clientNonce: CLIENT_NONCE,
-    botId: BOT_ID,
+    botId,
     runtimeInstanceId: RUNTIME_ID,
-    keyId: KEY_ID,
+    keyId,
   };
   const authenticateMessageId = testUuid(300);
   const acceptedPromise = nextServerMessage(socket);
@@ -549,7 +701,7 @@ async function authenticate(url: string): Promise<WebSocket> {
         type: "runtime.link.authenticate.v1",
         payload: {
           ...context,
-          clientProof: hmac(runtimeLinkClientProofInput(context)),
+          clientProof: hmac(runtimeLinkClientProofInput(context), secretSha256),
         },
       }),
     ),
@@ -559,16 +711,16 @@ async function authenticate(url: string): Promise<WebSocket> {
     type: "runtime.link.accepted.v1",
     payload: {
       authenticateMessageId,
-      botId: BOT_ID,
+      botId,
       runtimeInstanceId: RUNTIME_ID,
-      keyId: KEY_ID,
+      keyId,
     },
   });
   if (accepted.type !== "runtime.link.accepted.v1") {
     throw new Error("Expected Runtime Link accepted message.");
   }
   expect(accepted.payload.serverProof).toBe(
-    hmac(runtimeLinkServerProofInput({ ...context, authenticateMessageId })),
+    hmac(runtimeLinkServerProofInput({ ...context, authenticateMessageId }), secretSha256),
   );
   return socket;
 }
@@ -834,8 +986,8 @@ function trackRegistryUnsubscribe(registry: BotRegistry) {
   return unsubscribe;
 }
 
-function hmac(value: string): string {
-  const key = createHash("sha256").update(SECRET, "utf8").digest();
+function hmac(value: string, secretSha256 = SECRET_SHA256): string {
+  const key = Buffer.from(secretSha256, "hex");
   return createHmac("sha256", key).update(value, "utf8").digest("base64url");
 }
 

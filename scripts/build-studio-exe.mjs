@@ -3,6 +3,7 @@ import { copyFile, mkdir, readFile, realpath, readdir, rm, stat, writeFile } fro
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { gzipSync } from "node:zlib";
+import { createRequire } from "node:module";
 
 import { build as buildWithEsbuild } from "esbuild";
 
@@ -48,6 +49,7 @@ await copyFile(
   path.join(repositoryRoot, "scripts", "studio-local-manager.mjs"),
   path.join(stagingRoot, "scripts", "studio-local-manager.mjs"),
 );
+await bundleManagedIdentity();
 await writeFile(
   path.join(stagingRoot, "package.json"),
   '{"name":"minecraft-multi-agent-studio-bundle","private":true,"type":"commonjs"}\n',
@@ -108,6 +110,28 @@ async function bundleBackend(sourceRelative, destinationRelative) {
   await buildWithEsbuild({
     entryPoints: [path.join(repositoryRoot, sourceRelative)],
     outfile,
+    absWorkingDir: repositoryRoot,
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    target: "node22",
+    sourcemap: false,
+    minify: false,
+    logLevel: "warning",
+  });
+}
+
+async function bundleManagedIdentity() {
+  const target = path.join(stagingRoot, "scripts", "lib");
+  await mkdir(target, { recursive: true });
+  // Keep the resolver as ESM because its bounded authentication worker loads the
+  // same module by import.meta.url. Authflow itself is a fixed standalone CJS
+  // bundle so extracted executables require no development node_modules.
+  await copyFile(path.join(repositoryRoot, "scripts", "lib", "managed-game-identity.mjs"), path.join(target, "managed-game-identity.mjs"));
+  const runtimeRequire = createRequire(path.join(repositoryRoot, "apps", "bot-runtime", "package.json"));
+  await buildWithEsbuild({
+    entryPoints: [runtimeRequire.resolve("prismarine-auth")],
+    outfile: path.join(target, "prismarine-auth.cjs"),
     absWorkingDir: repositoryRoot,
     bundle: true,
     platform: "node",

@@ -21,18 +21,21 @@
     "@minecraft-studio/protocol": "workspace:*",
     "@minecraft-studio/safety": "workspace:*",
     "@minecraft-studio/skills": "workspace:*",
-    "mineflayer": "4.37.1",
+    "mineflayer": "4.39.0",
     "mineflayer-collectblock": "1.6.0",
     "mineflayer-pathfinder": "2.4.5",
     "mineflayer-tool": "1.2.0",
-    "minecraft-data": "3.111.0",
+    "minecraft-data": "3.114.0",
+    "prismarine-auth": "3.1.1",
     "vec3": "0.1.10",
     "ws": "8.21.1",
     "zod": "4.4.3",
-    "@minecraft-studio/pathfinder-rs": "workspace:*"
+    "@minecraft-studio/pathfinder-rs": "workspace:*",
+    "@minecraft-studio/asset-policy": "workspace:*",
+    "@minecraft-studio/base-management": "workspace:*"
   },
   "devDependencies": {
     "@types/ws": "8.18.1",
-    "minecraft-protocol": "1.66.2"
+    "minecraft-protocol": "1.67.0"
   }
 }

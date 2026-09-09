@@ -36,8 +36,10 @@ export function StudioBotManager() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [username, setUsername] = useState("StudioBot1");
+  const [accountRef, setAccountRef] = useState("");
   const [serverHost, setServerHost] = useState("127.0.0.1");
   const [serverPort, setServerPort] = useState("25565");
+  const [worldId, setWorldId] = useState("");
   const [minecraftVersion, setMinecraftVersion] = useState("auto");
   const [auth, setAuth] = useState<"offline" | "online">("offline");
   const [submitting, setSubmitting] = useState(false);
@@ -87,9 +89,10 @@ export function StudioBotManager() {
         },
         body: JSON.stringify({
           schemaVersion: "1.0",
-          username,
+          ...(auth === "offline" ? { username } : { accountRef }),
           serverHost,
           serverPort: port,
+          ...(worldId.trim() ? { worldId: worldId.trim() } : {}),
           minecraftVersion,
           auth,
         }),
@@ -146,7 +149,17 @@ export function StudioBotManager() {
 
       <form className="botCreateForm" onSubmit={(event) => void createBot(event)}>
         <label>
-          <span>Bot 用户名</span>
+          <span>登录方式</span>
+          <select
+            value={auth}
+            onChange={(event) => setAuth(event.target.value as "offline" | "online")}
+          >
+            <option value="offline">离线登录</option>
+            <option value="online">正版在线登录</option>
+          </select>
+        </label>
+        {auth === "offline" ? <label>
+          <span>离线用户名 / BotID</span>
           <input
             value={username}
             onChange={(event) => setUsername(event.target.value)}
@@ -156,7 +169,18 @@ export function StudioBotManager() {
             required
             autoComplete="off"
           />
-        </label>
+        </label> : <label>
+          <span>已配置的正版账号引用</span>
+          <input
+            value={accountRef}
+            onChange={(event) => setAccountRef(event.target.value)}
+            maxLength={64}
+            pattern={"[A-Za-z0-9][A-Za-z0-9_\\-]*"}
+            required
+            autoComplete="off"
+            placeholder="例如 account-one"
+          />
+        </label>}
         <label>
           <span>服务器地址</span>
           <input
@@ -189,14 +213,15 @@ export function StudioBotManager() {
           />
         </label>
         <label>
-          <span>登录方式</span>
-          <select
-            value={auth}
-            onChange={(event) => setAuth(event.target.value as "offline" | "online")}
-          >
-            <option value="offline">离线登录</option>
-            <option value="online">正版在线登录</option>
-          </select>
+          <span>世界存档标识（可选）</span>
+          <input
+            value={worldId}
+            onChange={(event) => setWorldId(event.target.value)}
+            maxLength={128}
+            pattern={"[A-Za-z0-9][A-Za-z0-9._:\\-]*"}
+            autoComplete="off"
+            placeholder="未知时留空；重置存档后更换"
+          />
         </label>
         <button
           className="createBotButton"
@@ -209,9 +234,9 @@ export function StudioBotManager() {
 
       {auth === "online" ? (
         <p className="managerAuthHint">
-          在线登录需要在 Bot Runtime 环境中配置对应的 Microsoft 账号邮箱和密码。
+          验证正版账号后，自动使用真实游戏用户名作为 BotID。账号凭据由本机管理。
         </p>
-      ) : null}
+      ) : <p className="managerAuthHint">离线用户名即 BotID。每个 Bot 在各服务器的背包、出生点和个人状态单独记录。</p>}
 
       {error ? <div className="managerInlineError" role="alert">{error}</div> : null}
       {actionMessage ? <div className="managerActionResult" role="status">{actionMessage}</div> : null}

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { identifierSchema } from "./bot-messages.js";
+import { botIdentitySchema, identifierSchema } from "./bot-messages.js";
 import {
   skillIdentifierSchema,
   skillVersionSchema,
@@ -59,7 +59,7 @@ export const skillInvocationV1Schema = z
         instanceId: identifierSchema,
       })
       .strict(),
-    botId: identifierSchema,
+    botId: botIdentitySchema,
     taskId: identifierSchema,
     type: z.literal("skill.invoke.v1"),
     payload: z
@@ -133,7 +133,7 @@ export const skillCancellationV1Schema = z
         instanceId: identifierSchema,
       })
       .strict(),
-    botId: identifierSchema,
+    botId: botIdentitySchema,
     taskId: identifierSchema,
     type: z.literal("skill.cancel.v1"),
     payload: z
@@ -188,7 +188,7 @@ export const skillExecutionResultV1Schema = z
         instanceId: identifierSchema,
       })
       .strict(),
-    botId: identifierSchema,
+    botId: botIdentitySchema,
     taskId: identifierSchema,
     type: z.literal("skill.result.v1"),
     payload: z.discriminatedUnion("outcome", [

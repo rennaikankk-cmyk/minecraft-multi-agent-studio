@@ -1,4 +1,5 @@
-import { SkillFault, foodFarmLayout, foodFarmMaintenance, type FarmSustainInput, type FarmSustainOutput, type WorkPosition } from "@minecraft-studio/skills";
+import { SkillFault, foodFarmLayout, foodFarmMaintenance, type FarmSustainInput, type FarmSustainOutput } from '@minecraft-studio/skills';
+import { type WorkPosition } from '@minecraft-studio/asset-policy';
 import { maintainFarm, type FarmMaintenancePort } from "./farm-maintenance-adapter.js";
 
 export interface FoodFarmPort {

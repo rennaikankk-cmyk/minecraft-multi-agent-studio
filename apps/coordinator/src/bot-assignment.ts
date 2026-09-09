@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  botIdentitySchema,
   identifierSchema,
   skillIdentifierSchema,
   skillVersionSchema,
@@ -77,7 +78,7 @@ export const botAssignmentLeaseSchema = z
   .object({
     leaseId: z.string().uuid(),
     taskId: identifierSchema,
-    botId: identifierSchema,
+    botId: botIdentitySchema,
     runtimeInstanceId: identifierSchema,
     serverProfileId: identifierSchema,
     dimension: dimensionSchema.nullable(),

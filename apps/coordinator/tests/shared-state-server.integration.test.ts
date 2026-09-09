@@ -12,7 +12,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { SharedStateClient, SharedStateError } from "@minecraft-studio/skills";
-import { smeltingLinePattern } from "@minecraft-studio/skills";
+import { smeltingLinePattern } from '@minecraft-studio/asset-policy';
 import { SharedStateServer, loadSharedStateConfig } from "../src/shared-state-server.js";
 
 const SERVER = "integration-profile";
@@ -214,6 +214,14 @@ describe("loadSharedStateConfig", () => {
   it("rejects invalid port", () => {
     expect(() => loadSharedStateConfig({ STUDIO_SHARED_STATE_PORT: "not-a-port" })).toThrow();
     expect(() => loadSharedStateConfig({ STUDIO_SHARED_STATE_PORT: "70000" })).toThrow();
+  });
+});
+
+describe("SharedStateServer network binding", () => {
+  it("fails closed when a non-loopback host has no bearer token", async () => {
+    const server = new SharedStateServer({ host: "0.0.0.0", port: 0 });
+    await expect(server.start()).rejects.toThrow("SHARED_STATE_AUTH_REQUIRED");
+    await server.stop();
   });
 });
 

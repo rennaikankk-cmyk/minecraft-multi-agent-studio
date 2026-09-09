@@ -47,6 +47,13 @@ afterEach(() => {
 });
 
 describe('AIRequestScheduler', () => {
+  it('schedules a Minecraft username starting with underscore without relaxing request IDs', async () => {
+    const scheduler = new AIRequestScheduler({ maxConcurrency: 1 });
+    await expect(scheduler.schedule(request('request-mc', '_Miner', async () => 'ready'))).resolves.toMatchObject({ value: 'ready' });
+    expect(scheduler.cancelBot('_Miner')).toBe(0);
+    expect(() => scheduler.schedule(request('_bad-request', '_Miner', async () => 'invalid'))).toThrow();
+  });
+
   it('dispatches queued requests by priority and preserves FIFO within a priority', async () => {
     const scheduler = new AIRequestScheduler({ maxConcurrency: 1 });
     const gate = deferred<string>();

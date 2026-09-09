@@ -3,6 +3,8 @@ export { discoverModels, resolveModel, ModelSelectionError } from './model-selec
 export { AIRouter } from './router.js';
 export { OllamaAdapter } from './adapters/ollama-adapter.js';
 export { VLLMAdapter } from './adapters/vllm-adapter.js';
+export { OpenAICompatibleAdapter, compatibleChatEndpoint, parseRetryAfter } from './adapters/openai-compatible-adapter.js';
+export type { OpenAICompatibleAdapterOptions, CloudStructuredOutput } from './adapters/openai-compatible-adapter.js';
 export { ScheduledAIRouter } from './scheduled-router.js';
 export {
   AIRequestScheduler,

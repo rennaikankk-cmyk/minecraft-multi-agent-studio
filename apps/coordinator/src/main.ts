@@ -8,6 +8,8 @@ import {
   AISchedulerError,
   ModelSelectionError,
   OllamaAdapter,
+  OpenAICompatibleAdapter,
+  AIError,
   resolveModel,
   ScheduledAIRouter,
   VLLMAdapter,
@@ -23,6 +25,10 @@ import {
 } from "@minecraft-studio/task-system";
 
 import { BotRegistry } from "./bot-registry.js";
+import { FilePersonalMemoryStore } from "./personal-memory-store.js";
+import { loadChatTrustPolicies } from "./chat-trust-config.js";
+import { InvitationChatRouter } from "./invitation-chat.js";
+import { InvitationMigrationService } from "./invitation-service.js";
 import { RegistryFactReader } from "./spark-strategy-v1/registry-facts.js";
 import { TeamProposalObserver, teamObserverEnabled } from "./spark-strategy-v1/observer.js";
 import { scheduledRouterModelClient } from "./spark-strategy-v1/model-client.js";
@@ -39,8 +45,9 @@ import {
 } from "./control-link-config.js";
 import { ControlLinkServer } from "./control-link-server.js";
 import { SharedStateServer, loadSharedStateConfig } from "./shared-state-server.js";
-import { InMemoryWorkstationRegistry, BaseRegistry, FacilityRegistry, DurableStateStore, PostgresFacilityLeaseAuthority,
-  durableSnapshotFrom, registriesFromDurableSnapshot } from "@minecraft-studio/skills";
+import { InMemoryWorkstationRegistry, FacilityRegistry } from '@minecraft-studio/asset-policy';
+import { BaseRegistry, DurableStateStore, durableSnapshotFrom, registriesFromDurableSnapshot, InvitationStore } from '@minecraft-studio/base-management';
+import { PostgresFacilityLeaseAuthority } from '@minecraft-studio/skills';
 import {
   RuntimeLinkConfigError,
   loadRuntimeLinkConfig,
@@ -114,6 +121,9 @@ async function main(): Promise<void> {
   const planJournalStore = new FilePlanJournalStore({ dir: journalDir });
   const baseStateStore = new DurableStateStore(process.env.STUDIO_SHARED_STATE_PERSIST_PATH?.trim() ||
     path.join("runtime-data", "shared-state.json"));
+  const invitationStore = new InvitationStore(process.env.STUDIO_INVITATIONS_PATH?.trim() ||
+    path.join("runtime-data", "invitations.json"));
+  invitationStore.load();
   const baseSnapshot = baseStateStore.load();
   if (baseSnapshot) {
     const restored = registriesFromDurableSnapshot(baseSnapshot);
@@ -129,13 +139,38 @@ async function main(): Promise<void> {
     persistBaseState();
     logger.info("coordinator_operator_bases_assigned", { count });
   }
+  const personalMemory = new FilePersonalMemoryStore(process.env.STUDIO_PERSONAL_MEMORY_DIR?.trim() ||
+    path.join("runtime-data", "personal-memory"));
+  logger.info("coordinator_personal_memory_started", { durability: personalMemory.durability, freshness: "historical" });
   const registry = new BotRegistry({
     staleAfterMs: runtimeConfig.botStaleAfterMs,
+    personalMemory,
+    chatTrustPolicies: loadChatTrustPolicies(process.env.STUDIO_CHAT_TRUST_PATH),
   });
+  const invitationChat = new InvitationChatRouter({ store: invitationStore, records: () => registry.list(),
+    currentHome: (botId, scope) => baseRegistry.forMember(botId, scope.serverProfileId, scope.dimension, scope.worldId)?.id ?? null });
+  let invitationMigrationService: InvitationMigrationService | null = null;
   // 聊天指挥扇入：director 构造完成后才存在，用闭包变量转接。
   let chatGoalHandler: ((botId: string, speaker: string, message: string) => boolean) | null = null;
   registry.subscribe((record, event) => {
     if (event?.kind === "chat") {
+      // Parse trusted invitations before free-text handling. This keeps raw
+      // coordinates in the durable, access-controlled business record rather
+      // than exposing them to an AI prompt or replacing a migration with chat.
+      const invitation = invitationChat.handle(record, event);
+      if (invitation.handled) {
+        logger.info("coordinator_base_invitation_recorded", {
+          botId: record.botId, invitationId: invitation.invitation?.invitationId,
+          migrationId: invitation.invitation?.migrationId, status: invitation.reason,
+        });
+        if (invitation.invitation?.status === "accepted") {
+          void invitationMigrationService?.execute(invitation.invitation.invitationId).catch((error) =>
+            logger.warn("coordinator_base_invitation_migration_blocked", {
+              invitationId: invitation.invitation?.invitationId, reason: error instanceof Error ? error.message : "migration_failed",
+            }));
+        }
+        return;
+      }
       chatGoalHandler?.(record.botId, event.speaker, event.message);
     }
   });
@@ -156,6 +191,8 @@ async function main(): Promise<void> {
     port: runtimeConfig.port,
     instanceId,
     peers: runtimeConfig.peers,
+    ...(runtimeConfig.peersPath ? { peersPath: runtimeConfig.peersPath } : {}),
+    ...(runtimeConfig.managedKeyIds !== undefined ? { managedKeyIds: runtimeConfig.managedKeyIds } : {}),
     registry,
     logger,
   });
@@ -198,7 +235,7 @@ async function main(): Promise<void> {
   let autonomousDirector: AutonomousDirector | null = null;
   // —— Spark 模型选择（统一规则，启动时执行；绝不 models[0] 静默选择）——
   let resolvedAIModel: string | null = localAIConfig.model;
-  if (localAIConfig.enabled && localAIConfig.baseUrl) {
+  if (localAIConfig.enabled && localAIConfig.baseUrl && localAIConfig.provider !== "openai-compatible") {
     try {
       const selection = await resolveModel({
         baseUrl: localAIConfig.baseUrl,
@@ -226,7 +263,12 @@ async function main(): Promise<void> {
   if (localAIConfig.enabled && localAIConfig.baseUrl && resolvedAIModel) {
     aiRouter = new AIRouter();
     aiRouter.register(
-      localAIConfig.provider === "ollama"
+      localAIConfig.provider === "openai-compatible"
+        ? new OpenAICompatibleAdapter({ baseUrl: localAIConfig.baseUrl, model: resolvedAIModel,
+            apiKey: localAIConfig.apiKey!,
+            ...(localAIConfig.structuredOutput ? { structuredOutput: localAIConfig.structuredOutput } : {}),
+            ...(localAIConfig.maxOutputTokens === undefined ? {} : { maxOutputTokens: localAIConfig.maxOutputTokens }) })
+        : localAIConfig.provider === "ollama"
         ? new OllamaAdapter(localAIConfig.baseUrl, resolvedAIModel)
         : new VLLMAdapter(
             localAIConfig.baseUrl,
@@ -239,6 +281,13 @@ async function main(): Promise<void> {
       maxQueue: localAIConfig.maxQueue,
       perBotConcurrency: localAIConfig.perBotConcurrency,
       defaultTimeoutMs: localAIConfig.requestTimeoutMs,
+      defaultRetry: {
+        maxAttempts: localAIConfig.maxAttempts ?? 2,
+        baseDelayMs: 500,
+        maxDelayMs: 30_000,
+        jitterRatio: 0.2,
+        retryable: (error: unknown) => error instanceof AIError && error.retryable,
+      },
       onEvent: (event) => {
         logger.info("coordinator_ai_request", {
           requestId: event.requestId,
@@ -297,10 +346,13 @@ async function main(): Promise<void> {
   const explorationJournal = new ExplorationJournal(process.env.STUDIO_EXPLORATION_CACHE_PATH?.trim() || path.join("runtime-data", "exploration-cache.json"));
   await explorationJournal.initialize();
   logger.info("exploration_cache_loaded", explorationJournal.health());
+  // Task execution persistence is required by deterministic goals as well as
+  // model backed planning. Construct it once before either planner branch so
+  // a restart cannot silently fall back to an in-memory execution record.
+  const taskPersistence = await createTaskStateMachine();
+  taskPool = taskPersistence.pool;
+  const taskStateMachine = taskPersistence.stateMachine;
   if (localAIConfig.enabled && localAIConfig.baseUrl && resolvedAIModel) {
-    const taskPersistence = await createTaskStateMachine();
-    taskPool = taskPersistence.pool;
-    const taskStateMachine = taskPersistence.stateMachine;
     localPlanner = new CoordinatorLocalPlanner({
       ai: aiScheduledRouter!,
       registry,
@@ -321,7 +373,7 @@ async function main(): Promise<void> {
       transport: runtimeServer,
       coordinatorInstanceId: instanceId,
       workstationRegistry,
-      planJournalStore, baseRegistry, facilityRegistry, persistBaseState, explorationJournal,
+      planJournalStore, baseRegistry, facilityRegistry, persistBaseState, explorationJournal, taskStateMachine,
       logger,
     });
   } else {
@@ -342,13 +394,14 @@ async function main(): Promise<void> {
       transport: runtimeServer,
       coordinatorInstanceId: instanceId,
       workstationRegistry,
-      planJournalStore, baseRegistry, facilityRegistry, persistBaseState, explorationJournal,
+      planJournalStore, baseRegistry, facilityRegistry, persistBaseState, explorationJournal, taskStateMachine,
       logger,
     });
     logger.warn("coordinator_planner_deterministic_only", {
       detail: "Local AI is not configured; model fallback will reject with AI_UNAVAILABLE.",
     });
   }
+  invitationMigrationService = new InvitationMigrationService({ store: invitationStore, planner: localPlanner, registry });
   if (autonomousConfig.enabled) {
     autonomousDirector = new AutonomousDirector({
       baseRegistry, facilityRegistry, planJournalStore, persistBaseState,
@@ -505,6 +558,7 @@ async function main(): Promise<void> {
         bases: baseRegistry,
         facilities: facilityRegistry,
         persistState: persistBaseState,
+        personalMemory,
         provenanceDir: path.join(process.cwd(), "runtime-data", "provenance"),
         host: sharedStateConfig.host,
         port: sharedStateConfig.port,

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { chatIdentityEvidenceSchema } from "./chat-identity.js";
 
 import {
   skillIdentifierSchema,
@@ -10,6 +11,13 @@ export const identifierSchema = z
   .min(1)
   .max(128)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u);
+
+/** Bot identities also admit valid Minecraft usernames starting with underscores.
+ * Other identifiers retain their existing stricter rules. */
+export const botIdentitySchema = z.union([
+  identifierSchema,
+  z.string().regex(/^[A-Za-z0-9_]{3,16}$/u),
+]);
 
 const timestampSchema = z.string().datetime({ offset: true });
 const sequenceSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -909,8 +917,25 @@ const botMessageEnvelopeShape = {
   traceId: identifierSchema,
   timestamp: timestampSchema,
   source: botMessageSourceSchema,
-  botId: identifierSchema,
+  botId: botIdentitySchema,
 };
+
+/** A login/spawn position is never evidence that a personal respawn point was set. */
+export const botPersonalContextSchema = z.object({
+  /** Operator-assigned world generation; null means reset detection is unavailable. */
+  worldId: identifierSchema.nullable(),
+  worldSpawn: z.object({
+    position: botPositionSchema,
+    observedAt: timestampSchema,
+    source: z.literal("server_spawn_packet"),
+  }).strict().nullable(),
+  verifiedRespawn: z.object({
+    position: botPositionSchema,
+    observedAt: timestampSchema,
+    kind: z.enum(["bed", "respawn_anchor"]),
+    source: z.literal("server_confirmation"),
+  }).strict().nullable(),
+}).strict();
 
 export const botStatusV1Schema = z
   .object({
@@ -944,6 +969,7 @@ export const botStatusV1Schema = z
         // Authenticated Runtime-to-Coordinator fact used by deterministic goal
         // planning. Public bot projections deliberately omit this field.
         inventory: botInventorySchema.optional(),
+        personalContext: botPersonalContextSchema.optional(),
         /** 最近一次死亡的事实（坐标/维度/时间），供死亡点回收决策消费。 */
         lastDeath: z
           .object({
@@ -983,7 +1009,16 @@ export const botStatusV1Schema = z
       })
       .strict(),
   })
-  .strict();
+  .strict()
+  .superRefine((message, context) => {
+    for (const key of ["worldSpawn", "verifiedRespawn"] as const) {
+      const fact = message.payload.personalContext?.[key];
+      if (fact && Date.parse(fact.observedAt) > Date.parse(message.payload.observedAt)) {
+        context.addIssue({ code: "custom", path: ["payload", "personalContext", key, "observedAt"],
+          message: "A spawn observation cannot occur after the reporting snapshot." });
+      }
+    }
+  });
 
 /** 游戏内聊天上行：白名单玩家对 bot 说的话（指挥通道）。 */
 export const botChatReceivedV1Schema = z
@@ -994,8 +1029,9 @@ export const botChatReceivedV1Schema = z
       .object({
         serverProfileId: identifierSchema,
         runtimeInstanceId: identifierSchema,
-        /** 说话玩家名（已过白名单）。 */
+        /** Display field; authorization requires identity evidence. */
         speaker: z.string().min(1).max(32),
+        identity: chatIdentityEvidenceSchema.optional(),
         /** 原文（截断到 512）。 */
         message: z.string().min(1).max(512),
       })

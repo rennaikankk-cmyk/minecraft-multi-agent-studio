@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import {
-  identifierSchema,
+  botIdentitySchema,
   taskStatusSchema,
 } from "./bot-messages.js";
 
@@ -38,7 +38,7 @@ export const taskHistoryListQueryV1Schema = z
       .max(CONTROL_LINK_MAX_TASK_HISTORY_ITEMS),
     cursor: taskHistoryCursorSchema.nullable(),
     status: taskStatusSchema.nullable(),
-    botId: identifierSchema.nullable(),
+    botId: botIdentitySchema.nullable(),
   })
   .strict();
 
@@ -50,7 +50,7 @@ export const publicTaskSummaryV1Schema = z
     status: taskStatusSchema,
     priority: z.number().int().min(0).max(100),
     riskLevel: taskRiskLevelSchema,
-    botId: identifierSchema.nullable(),
+    botId: botIdentitySchema.nullable(),
     failureReason: reasonCodeSchema.nullable(),
     createdAt: timestampSchema,
     updatedAt: timestampSchema,

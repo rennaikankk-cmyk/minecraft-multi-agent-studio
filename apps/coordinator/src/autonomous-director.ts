@@ -6,8 +6,9 @@ import {
   identifierSchema,
   type PublicBotDetailV1,
 } from "@minecraft-studio/protocol";
-import { scanBlocksOutputSchema, siteAssessOutputSchema, plannedBlueprintAnchor, farmMaintainInputSchema, farmSustainInputSchema, cropRules, readFarmProduction, registerCropProduction, registerFoodProduction, farmProductionReady,
-  recordFarmProduction, type FacilityRegistry, type BaseRegistry } from "@minecraft-studio/skills";
+import { scanBlocksOutputSchema, siteAssessOutputSchema, farmMaintainInputSchema, farmSustainInputSchema, cropRules, readFarmProduction, registerCropProduction, registerFoodProduction, farmProductionReady, recordFarmProduction } from '@minecraft-studio/skills';
+import { plannedBlueprintAnchor, type BaseRegistry } from '@minecraft-studio/base-management';
+import { type FacilityRegistry } from '@minecraft-studio/asset-policy';
 import type { FacilityLease, FacilityLeaseAuthority } from "@minecraft-studio/skills";
 import type { PlanJournalStore } from "./plan-journal.js";
 import { ExplorationJournal } from "./exploration-journal.js";

@@ -1,7 +1,8 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
 import { setTimeout as delay } from "node:timers/promises";
-import { cropRules, SkillFault, withinWorkArea, type FarmCell, type FarmMaintainInput, type WorkPosition } from "@minecraft-studio/skills";
+import { cropRules, SkillFault, type FarmCell, type FarmMaintainInput } from '@minecraft-studio/skills';
+import { withinWorkArea, type WorkPosition } from '@minecraft-studio/asset-policy';
 import type { FarmMaintenancePort } from "./farm-maintenance-adapter.js";
 
 const vector = (p: WorkPosition) => new Vec3(p.x, p.y, p.z);

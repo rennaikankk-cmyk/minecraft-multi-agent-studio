@@ -1,0 +1,2014 @@
+{
+  "schemaVersion": 2,
+  "measuredAt": "2026-09-08T17:50:35.904Z",
+  "git": {
+    "commit": "8749529cd2eb042a20b68106d306206c4754ab4c",
+    "branch": "codex/v2-domain-modules",
+    "dirty": true
+  },
+  "environment": {
+    "node": "v24.19.0",
+    "rust": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "platform": "win32",
+    "release": "10.0.26200",
+    "arch": "x64",
+    "cpuModel": "Intel(R) Core(TM) Ultra 9 285H",
+    "logicalCpus": 16,
+    "totalMemoryBytes": 33777500160,
+    "minecraftDataVersion": "1.21.11",
+    "minecraftProtocol": 774,
+    "minecraftServer": "NOT_STARTED",
+    "mineflayer": "4.39.0",
+    "minecraftData": "3.114.0",
+    "nativeAddonSha256": "09229efd4bbf078451fa95fe8109c2b48314bd2ad6421c11b7da67701cd6107e"
+  },
+  "classification": "SYNTHETIC; real built Rust N-API + existing Worker + WorldSyncAdapter + Prismarine chunks; no Minecraft or model connections",
+  "preset": {
+    "bots": [
+      1,
+      5,
+      10
+    ],
+    "rounds": 100,
+    "roundPauseMs": 10,
+    "chunksPerSession": 9,
+    "sectionsPerChunk": 24,
+    "query": {
+      "x": 24,
+      "y": 6,
+      "z": 24,
+      "radius": 20,
+      "count": 8,
+      "selectors": 2097168,
+      "matching": "union",
+      "maxVisits": 131072,
+      "maxMs": 10
+    },
+    "pathVolume": [
+      48,
+      8,
+      48
+    ],
+    "geometryVolume": [
+      48,
+      16,
+      48
+    ],
+    "geometryMaxVoxels": 1048576,
+    "geometryMaxRegions": 256,
+    "geometryMaxVisits": 2097152,
+    "geometryComputeMaxMs": 20,
+    "geometryQueueDepth": 16,
+    "geometryMaxQueuedInputBytes": 16777216,
+    "nativeQueryQueueCapacity": 64,
+    "snapshotRetention": "No external native snapshot handle; geometry input released on reply",
+    "declaredSteadyBudgetsMs": {
+      "eventLoopP99": 25,
+      "eventLoopMax": 50,
+      "geometryEndToEndP99": 50,
+      "syncAckP99": 50
+    }
+  },
+  "limitations": [
+    "1/5/10 are logical synthetic sessions sharing the existing native Worker, not real bots or separate Runtime processes.",
+    "No Minecraft network, task scheduler, inventory logistics, external API, physicsTick or actual L0 timing is measured.",
+    "TS connected components are bounding-box/coverage candidates; doors, stairs, ownership and facility semantics are not inferred.",
+    "Native worker queue delay, FFI conversion and result delivery are not separately exposed; residual values include all of them and are not pure queue measurements.",
+    "Native approxBytes is estimated payload/index storage, not allocator/native peak allocation. RSS is process-wide and sampled every 5ms.",
+    "Public native API retains snapshots only inside synchronous queries; long-lived COW retention and native allocator peaks are NOT_VERIFIED.",
+    "Spatial native results are checked against a TS oracle on identical fixture points. No Rust room algorithm exists, so TS/Rust room parity and any Rust-room speedup are NOT_VERIFIED."
+  ],
+  "measurements": [
+    {
+      "botCount": 1,
+      "classification": "SYNTHETIC_LOGICAL_SESSIONS_ONE_PROCESS",
+      "rounds": 100,
+      "chunksPerSession": 9,
+      "startup": {
+        "totalMs": 61.6653,
+        "importMs": 25.57740000000001,
+        "eventLoopDelayMs": {
+          "samples": 23,
+          "p50": 1.220607,
+          "p95": 8.404991,
+          "p99": 9.314303,
+          "max": 9.314303
+        },
+        "syntheticFiveMsTimerDriftMs": {
+          "samples": 9,
+          "p50": 0.6519000000000688,
+          "p95": 5.6865999999999985,
+          "p99": 5.6865999999999985,
+          "max": 5.6865999999999985
+        },
+        "sampledPeakRssBytes": 215420928
+      },
+      "steady": {
+        "durationMs": 1783.7169000000001,
+        "eventLoopDelayMs": {
+          "samples": 311,
+          "p50": 4.395007,
+          "p95": 15.523839,
+          "p99": 16.302079,
+          "max": 17.776639
+        },
+        "syntheticFiveMsTimerDriftMs": {
+          "samples": 157,
+          "p50": 4.360099999999875,
+          "p95": 11.693899999999985,
+          "p99": 12.68139999999994,
+          "max": 14.139099999999871
+        },
+        "sampledPeakRssBytes": 230473728
+      },
+      "cpu": {
+        "userMs": 453,
+        "systemMs": 109,
+        "totalWallMs": 1887.6299999999999
+      },
+      "memory": {
+        "processRssBeforeBytes": 193802240,
+        "processRssAfterBytes": 228945920,
+        "nativeMirrorPayloadEstimateBefore": [
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          }
+        ],
+        "nativeMirrorPayloadEstimateAfterUpdates": [
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          }
+        ],
+        "nativeAfterUnload": [
+          {
+            "chunksLoaded": 0,
+            "sectionsData": 0,
+            "sectionsOther": 0,
+            "paletteEntries": 0,
+            "indexEntries": 0,
+            "approxBytes": 237368
+          }
+        ],
+        "nativeApproxBytesIsEstimate": true,
+        "retainedGeometryInputs": {
+          "pending": 0,
+          "peakPending": 1,
+          "retainedInputBytes": 0,
+          "peakRetainedInputBytes": 36864,
+          "queueDepth": 16
+        },
+        "externallyRetainedNativeSnapshots": "NOT_EXPOSED_BY_PUBLIC_API"
+      },
+      "timingMs": {
+        "geometryInputCopyMs": {
+          "samples": 100,
+          "p50": 0.01209999999991851,
+          "p95": 0.04320000000006985,
+          "p99": 0.04970000000002983,
+          "max": 0.05039999999985412
+        },
+        "pathEndToEndMs": {
+          "samples": 100,
+          "p50": 0.315900000000056,
+          "p95": 0.4796000000001186,
+          "p99": 0.5417999999999665,
+          "max": 0.5878999999999905
+        },
+        "pathNativeComputeMs": {
+          "samples": 100,
+          "p50": 0.062299999999999994,
+          "p95": 0.1444,
+          "p99": 0.1594,
+          "max": 0.1636
+        },
+        "pathTransportQueueAndDeliveryResidualMs": {
+          "samples": 100,
+          "p50": 0.24359999999993634,
+          "p95": 0.3623000000001186,
+          "p99": 0.41119999999986684,
+          "max": 0.46999999999999054
+        },
+        "queryResultMergeMs": {
+          "samples": 100,
+          "p50": 0.010600000000067666,
+          "p95": 0.0364999999999327,
+          "p99": 0.0524000000000342,
+          "max": 0.05529999999998836
+        },
+        "queryEndToEndMs": {
+          "samples": 100,
+          "p50": 0.31739999999990687,
+          "p95": 0.47870000000011714,
+          "p99": 0.6000999999999976,
+          "max": 1.0307999999999993
+        },
+        "queryNativeComputeMs": {
+          "samples": 100,
+          "p50": 0.0133,
+          "p95": 0.0174,
+          "p99": 0.0196,
+          "max": 0.0269
+        },
+        "querySnapshotBuildMs": {
+          "samples": 100,
+          "p50": 0.0011,
+          "p95": 0.0015999999999999999,
+          "p99": 0.0017000000000000001,
+          "max": 0.0024
+        },
+        "queryTransportQueueAndDeliveryResidualMs": {
+          "samples": 100,
+          "p50": 0.3023999999999069,
+          "p95": 0.46390000000011716,
+          "p99": 0.5821999999999976,
+          "max": 1.0243999999999993
+        },
+        "updateToQueryVisibilityMs": {
+          "samples": 100,
+          "p50": 0.501399999999876,
+          "p95": 0.7839000000000169,
+          "p99": 0.9243000000000166,
+          "max": 1.5203000000000202
+        },
+        "geometryEndToEndMs": {
+          "samples": 100,
+          "p50": 1.169499999999971,
+          "p95": 1.4592999999999847,
+          "p99": 2.2463000000000193,
+          "max": 2.733600000000024
+        },
+        "geometryComputeMs": {
+          "samples": 100,
+          "p50": 1.0217999999999847,
+          "p95": 1.2613999999999805,
+          "p99": 2.066599999999994,
+          "max": 2.3378000000000156
+        },
+        "geometryDeliveryAndQueueMs": {
+          "samples": 100,
+          "p50": 0.0709,
+          "p95": 0.1458,
+          "p99": 0.2028,
+          "max": 0.2199
+        },
+        "geometryResultDeliveryMs": {
+          "samples": 100,
+          "p50": 0.0666,
+          "p95": 0.1133,
+          "p99": 0.1272,
+          "max": 0.1434
+        },
+        "geometryPostMessageMs": {
+          "samples": 100,
+          "p50": 0.01710000000002765,
+          "p95": 0.03449999999997999,
+          "p99": 0.06340000000000146,
+          "max": 0.12419999999997344
+        },
+        "geometryResultMergeMs": {
+          "samples": 100,
+          "p50": 0.003499999999803549,
+          "p95": 0.0072999999999865395,
+          "p99": 0.023199999999974352,
+          "max": 0.03160000000002583
+        }
+      },
+      "syncImportAndHandshakeSpansMs": {
+        "world_sync.registry_handshake": {
+          "samples": 1,
+          "p50": 0.5837999999999965,
+          "p95": 0.5837999999999965,
+          "p99": 0.5837999999999965,
+          "max": 0.5837999999999965
+        },
+        "world_sync.extract_column": {
+          "samples": 9,
+          "p50": 0.9851999999999634,
+          "p95": 2.697900000000004,
+          "p99": 2.697900000000004,
+          "max": 2.697900000000004
+        },
+        "world_sync.extract_max_slice": {
+          "samples": 9,
+          "p50": 0.9728999999999814,
+          "p95": 2.6825000000000045,
+          "p99": 2.6825000000000045,
+          "max": 2.6825000000000045
+        },
+        "world_sync.enqueue": {
+          "samples": 234,
+          "p50": 0,
+          "p95": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "world_sync.post_message": {
+          "samples": 234,
+          "p50": 0.0027999999999792635,
+          "p95": 0.010600000000067666,
+          "p99": 0.023800000000051114,
+          "max": 0.03309999999999036
+        },
+        "world_sync.ack_rtt": {
+          "samples": 234,
+          "p50": 1.1655000000000655,
+          "p95": 2.9881000000000313,
+          "p99": 3.420900000000074,
+          "max": 3.4251999999999043
+        }
+      },
+      "syncSteadySpansMs": {
+        "world_sync.registry_handshake": {
+          "samples": 0,
+          "p50": null,
+          "p95": null,
+          "p99": null,
+          "max": null
+        },
+        "world_sync.extract_column": {
+          "samples": 0,
+          "p50": null,
+          "p95": null,
+          "p99": null,
+          "max": null
+        },
+        "world_sync.extract_max_slice": {
+          "samples": 0,
+          "p50": null,
+          "p95": null,
+          "p99": null,
+          "max": null
+        },
+        "world_sync.enqueue": {
+          "samples": 100,
+          "p50": 0,
+          "p95": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "world_sync.post_message": {
+          "samples": 100,
+          "p50": 0.028299999999944703,
+          "p95": 0.05819999999994252,
+          "p99": 0.08460000000013679,
+          "max": 0.10829999999987194
+        },
+        "world_sync.ack_rtt": {
+          "samples": 100,
+          "p50": 0.1937000000000353,
+          "p95": 0.30989999999997053,
+          "p99": 0.35989999999992506,
+          "max": 0.37849999999980355
+        }
+      },
+      "metrics": [
+        {
+          "state": "ready",
+          "sent": 334,
+          "acked": 334,
+          "applied": 334,
+          "duplicates": 0,
+          "stale": 0,
+          "conflicts": 0,
+          "gaps": 0,
+          "resets": 1,
+          "desyncs": 0,
+          "skippedUpdates": 0,
+          "droppedUpdates": 0,
+          "queueDepthMax": 99,
+          "inFlightBytesMax": 263168,
+          "sourceEventsObserved": 100,
+          "sourceEventsCoalesced": 0,
+          "extractSliceOverruns": 0,
+          "queuedExtractions": 0,
+          "queueDepth": 0,
+          "inFlightMessages": 0,
+          "inFlightBytes": 0,
+          "ackRttP50Ms": 0.7477000000000089,
+          "ackRttP95Ms": 1.741899999999987,
+          "ackRttMaxMs": 1.907000000000039,
+          "lastTransportSequence": 336
+        }
+      ],
+      "health": [
+        {
+          "desynced": false,
+          "stopped": false,
+          "loadedChunks": 9,
+          "pendingImports": 0,
+          "queuedUpdates": 0,
+          "registryReady": true,
+          "registryRevision": 1,
+          "lastTransportSequence": 336,
+          "replayWindowLen": 336,
+          "replayWindowFloor": 1,
+          "mirrorGeneration": 112,
+          "skippedUpdatesTotal": 0
+        }
+      ],
+      "budgetChecks": {
+        "steadyEventLoopP99Under25Ms": true,
+        "steadyEventLoopMaxUnder50Ms": true,
+        "geometryEndToEndP99Under50Ms": true,
+        "syncAckP99Under50Ms": true
+      }
+    },
+    {
+      "botCount": 5,
+      "classification": "SYNTHETIC_LOGICAL_SESSIONS_ONE_PROCESS",
+      "rounds": 100,
+      "chunksPerSession": 9,
+      "startup": {
+        "totalMs": 134.9139,
+        "importMs": 83.37069999999994,
+        "eventLoopDelayMs": {
+          "samples": 66,
+          "p50": 1.031679,
+          "p95": 5.877759,
+          "p99": 6.123519,
+          "max": 8.593407
+        },
+        "syntheticFiveMsTimerDriftMs": {
+          "samples": 22,
+          "p50": 0.15699999999969805,
+          "p95": 3.607300000000123,
+          "p99": 3.680399999999736,
+          "max": 3.680399999999736
+        },
+        "sampledPeakRssBytes": 308895744
+      },
+      "steady": {
+        "durationMs": 1823.0943000000002,
+        "eventLoopDelayMs": {
+          "samples": 595,
+          "p50": 0.974335,
+          "p95": 12.771327,
+          "p99": 15.777791,
+          "max": 16.465919
+        },
+        "syntheticFiveMsTimerDriftMs": {
+          "samples": 181,
+          "p50": 3.768699999999626,
+          "p95": 12.336099999999988,
+          "p99": 15.117899999999736,
+          "max": 15.49270000000024
+        },
+        "sampledPeakRssBytes": 318672896
+      },
+      "cpu": {
+        "userMs": 750,
+        "systemMs": 31,
+        "totalWallMs": 1968.5019000000002
+      },
+      "memory": {
+        "processRssBeforeBytes": 229040128,
+        "processRssAfterBytes": 305954816,
+        "nativeMirrorPayloadEstimateBefore": [
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          }
+        ],
+        "nativeMirrorPayloadEstimateAfterUpdates": [
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          }
+        ],
+        "nativeAfterUnload": [
+          {
+            "chunksLoaded": 0,
+            "sectionsData": 0,
+            "sectionsOther": 0,
+            "paletteEntries": 0,
+            "indexEntries": 0,
+            "approxBytes": 237368
+          },
+          {
+            "chunksLoaded": 0,
+            "sectionsData": 0,
+            "sectionsOther": 0,
+            "paletteEntries": 0,
+            "indexEntries": 0,
+            "approxBytes": 237368
+          },
+          {
+            "chunksLoaded": 0,
+            "sectionsData": 0,
+            "sectionsOther": 0,
+            "paletteEntries": 0,
+            "indexEntries": 0,
+            "approxBytes": 237368
+          },
+          {
+            "chunksLoaded": 0,
+            "sectionsData": 0,
+            "sectionsOther": 0,
+            "paletteEntries": 0,
+            "indexEntries": 0,
+            "approxBytes": 237368
+          },
+          {
+            "chunksLoaded": 0,
+            "sectionsData": 0,
+            "sectionsOther": 0,
+            "paletteEntries": 0,
+            "indexEntries": 0,
+            "approxBytes": 237368
+          }
+        ],
+        "nativeApproxBytesIsEstimate": true,
+        "retainedGeometryInputs": {
+          "pending": 0,
+          "peakPending": 5,
+          "retainedInputBytes": 0,
+          "peakRetainedInputBytes": 184320,
+          "queueDepth": 16
+        },
+        "externallyRetainedNativeSnapshots": "NOT_EXPOSED_BY_PUBLIC_API"
+      },
+      "timingMs": {
+        "geometryInputCopyMs": {
+          "samples": 500,
+          "p50": 0.004399999999805004,
+          "p95": 0.024900000000343425,
+          "p99": 0.04440000000022337,
+          "max": 0.05709999999999127
+        },
+        "pathEndToEndMs": {
+          "samples": 500,
+          "p50": 0.3680999999996857,
+          "p95": 0.5124999999998181,
+          "p99": 0.5991000000003623,
+          "max": 0.7421000000003914
+        },
+        "pathNativeComputeMs": {
+          "samples": 500,
+          "p50": 0.0242,
+          "p95": 0.0976,
+          "p99": 0.1391,
+          "max": 0.1555
+        },
+        "pathTransportQueueAndDeliveryResidualMs": {
+          "samples": 500,
+          "p50": 0.33529999999966387,
+          "p95": 0.4863999999999629,
+          "p99": 0.5746000000003624,
+          "max": 0.7217000000003915
+        },
+        "queryResultMergeMs": {
+          "samples": 500,
+          "p50": 0.0030999999999039574,
+          "p95": 0.009299999999711872,
+          "p99": 0.012499999999818101,
+          "max": 0.04929999999967549
+        },
+        "queryEndToEndMs": {
+          "samples": 500,
+          "p50": 0.5455999999999221,
+          "p95": 0.7256999999999607,
+          "p99": 0.8613000000000284,
+          "max": 0.9835999999995693
+        },
+        "queryNativeComputeMs": {
+          "samples": 500,
+          "p50": 0.011399999999999999,
+          "p95": 0.0176,
+          "p99": 0.022099999999999998,
+          "max": 0.0292
+        },
+        "querySnapshotBuildMs": {
+          "samples": 500,
+          "p50": 0.0006,
+          "p95": 0.0013,
+          "p99": 0.0015999999999999999,
+          "max": 0.0024
+        },
+        "queryTransportQueueAndDeliveryResidualMs": {
+          "samples": 500,
+          "p50": 0.5322999999998188,
+          "p95": 0.7103999999999061,
+          "p99": 0.8501999999996754,
+          "max": 0.9735999999995693
+        },
+        "updateToQueryVisibilityMs": {
+          "samples": 500,
+          "p50": 0.7061000000003332,
+          "p95": 0.8910999999998239,
+          "p99": 0.9959999999996398,
+          "max": 1.0767000000005282
+        },
+        "geometryEndToEndMs": {
+          "samples": 500,
+          "p50": 2.782300000000305,
+          "p95": 4.323499999999967,
+          "p99": 4.751800000000003,
+          "max": 5.254100000000108
+        },
+        "geometryComputeMs": {
+          "samples": 500,
+          "p50": 0.8007999999999811,
+          "p95": 1.077900000000227,
+          "p99": 1.2379000000000815,
+          "max": 1.7268000000003667
+        },
+        "geometryDeliveryAndQueueMs": {
+          "samples": 500,
+          "p50": 1.9436,
+          "p95": 3.5712,
+          "p99": 3.987,
+          "max": 4.5167
+        },
+        "geometryResultDeliveryMs": {
+          "samples": 500,
+          "p50": 0.0275,
+          "p95": 0.0658,
+          "p99": 0.0978,
+          "max": 1.23
+        },
+        "geometryPostMessageMs": {
+          "samples": 500,
+          "p50": 0.0039999999999054126,
+          "p95": 0.019499999999879947,
+          "p99": 0.026600000000144064,
+          "max": 0.06449999999949796
+        },
+        "geometryResultMergeMs": {
+          "samples": 500,
+          "p50": 0.0008000000002539309,
+          "p95": 0.003400000000056025,
+          "p99": 0.006799999999657302,
+          "max": 0.025300000000243017
+        }
+      },
+      "syncImportAndHandshakeSpansMs": {
+        "world_sync.registry_handshake": {
+          "samples": 5,
+          "p50": 0.4659999999998945,
+          "p95": 0.5895000000000437,
+          "p99": 0.5895000000000437,
+          "max": 0.5895000000000437
+        },
+        "world_sync.extract_column": {
+          "samples": 45,
+          "p50": 0.7076000000001841,
+          "p95": 0.8218000000001666,
+          "p99": 0.9212000000002263,
+          "max": 0.9212000000002263
+        },
+        "world_sync.extract_max_slice": {
+          "samples": 45,
+          "p50": 0.7065000000002328,
+          "p95": 0.8157000000001062,
+          "p99": 0.9108000000001084,
+          "max": 0.9108000000001084
+        },
+        "world_sync.enqueue": {
+          "samples": 1170,
+          "p50": 0,
+          "p95": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "world_sync.post_message": {
+          "samples": 1170,
+          "p50": 0.002199999999902502,
+          "p95": 0.005200000000058935,
+          "p99": 0.009700000000066211,
+          "max": 0.030900000000201544
+        },
+        "world_sync.ack_rtt": {
+          "samples": 1170,
+          "p50": 4.856900000000223,
+          "p95": 7.572900000000118,
+          "p99": 8.4054000000001,
+          "max": 8.522800000000188
+        }
+      },
+      "syncSteadySpansMs": {
+        "world_sync.registry_handshake": {
+          "samples": 0,
+          "p50": null,
+          "p95": null,
+          "p99": null,
+          "max": null
+        },
+        "world_sync.extract_column": {
+          "samples": 0,
+          "p50": null,
+          "p95": null,
+          "p99": null,
+          "max": null
+        },
+        "world_sync.extract_max_slice": {
+          "samples": 0,
+          "p50": null,
+          "p95": null,
+          "p99": null,
+          "max": null
+        },
+        "world_sync.enqueue": {
+          "samples": 500,
+          "p50": 0,
+          "p95": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "world_sync.post_message": {
+          "samples": 500,
+          "p50": 0.002900000000408909,
+          "p95": 0.03360000000020591,
+          "p99": 0.04369999999926222,
+          "max": 0.10519999999996799
+        },
+        "world_sync.ack_rtt": {
+          "samples": 500,
+          "p50": 0.3192000000003645,
+          "p95": 0.4612000000001899,
+          "p99": 0.540400000000318,
+          "max": 0.6703000000002248
+        }
+      },
+      "metrics": [
+        {
+          "state": "ready",
+          "sent": 334,
+          "acked": 334,
+          "applied": 334,
+          "duplicates": 0,
+          "stale": 0,
+          "conflicts": 0,
+          "gaps": 0,
+          "resets": 1,
+          "desyncs": 0,
+          "skippedUpdates": 0,
+          "droppedUpdates": 0,
+          "queueDepthMax": 122,
+          "inFlightBytesMax": 263168,
+          "sourceEventsObserved": 100,
+          "sourceEventsCoalesced": 0,
+          "extractSliceOverruns": 0,
+          "queuedExtractions": 0,
+          "queueDepth": 0,
+          "inFlightMessages": 0,
+          "inFlightBytes": 0,
+          "ackRttP50Ms": 3.497599999999693,
+          "ackRttP95Ms": 7.00189999999975,
+          "ackRttMaxMs": 7.315900000000056,
+          "lastTransportSequence": 336
+        },
+        {
+          "state": "ready",
+          "sent": 334,
+          "acked": 334,
+          "applied": 334,
+          "duplicates": 0,
+          "stale": 0,
+          "conflicts": 0,
+          "gaps": 0,
+          "resets": 1,
+          "desyncs": 0,
+          "skippedUpdates": 0,
+          "droppedUpdates": 0,
+          "queueDepthMax": 122,
+          "inFlightBytesMax": 263168,
+          "sourceEventsObserved": 100,
+          "sourceEventsCoalesced": 0,
+          "extractSliceOverruns": 0,
+          "queuedExtractions": 0,
+          "queueDepth": 0,
+          "inFlightMessages": 0,
+          "inFlightBytes": 0,
+          "ackRttP50Ms": 3.952700000000277,
+          "ackRttP95Ms": 6.9538000000002285,
+          "ackRttMaxMs": 7.041399999999612,
+          "lastTransportSequence": 336
+        },
+        {
+          "state": "ready",
+          "sent": 334,
+          "acked": 334,
+          "applied": 334,
+          "duplicates": 0,
+          "stale": 0,
+          "conflicts": 0,
+          "gaps": 0,
+          "resets": 1,
+          "desyncs": 0,
+          "skippedUpdates": 0,
+          "droppedUpdates": 0,
+          "queueDepthMax": 128,
+          "inFlightBytesMax": 263168,
+          "sourceEventsObserved": 100,
+          "sourceEventsCoalesced": 0,
+          "extractSliceOverruns": 0,
+          "queuedExtractions": 0,
+          "queueDepth": 0,
+          "inFlightMessages": 0,
+          "inFlightBytes": 0,
+          "ackRttP50Ms": 4.354800000000068,
+          "ackRttP95Ms": 7.052200000000084,
+          "ackRttMaxMs": 7.847600000000057,
+          "lastTransportSequence": 336
+        },
+        {
+          "state": "ready",
+          "sent": 334,
+          "acked": 334,
+          "applied": 334,
+          "duplicates": 0,
+          "stale": 0,
+          "conflicts": 0,
+          "gaps": 0,
+          "resets": 1,
+          "desyncs": 0,
+          "skippedUpdates": 0,
+          "droppedUpdates": 0,
+          "queueDepthMax": 128,
+          "inFlightBytesMax": 263168,
+          "sourceEventsObserved": 100,
+          "sourceEventsCoalesced": 0,
+          "extractSliceOverruns": 0,
+          "queuedExtractions": 0,
+          "queueDepth": 0,
+          "inFlightMessages": 0,
+          "inFlightBytes": 0,
+          "ackRttP50Ms": 3.9106000000001586,
+          "ackRttP95Ms": 7.058599999999842,
+          "ackRttMaxMs": 7.8465000000001055,
+          "lastTransportSequence": 336
+        },
+        {
+          "state": "ready",
+          "sent": 334,
+          "acked": 334,
+          "applied": 334,
+          "duplicates": 0,
+          "stale": 0,
+          "conflicts": 0,
+          "gaps": 0,
+          "resets": 1,
+          "desyncs": 0,
+          "skippedUpdates": 0,
+          "droppedUpdates": 0,
+          "queueDepthMax": 128,
+          "inFlightBytesMax": 263168,
+          "sourceEventsObserved": 100,
+          "sourceEventsCoalesced": 0,
+          "extractSliceOverruns": 0,
+          "queuedExtractions": 0,
+          "queueDepth": 0,
+          "inFlightMessages": 0,
+          "inFlightBytes": 0,
+          "ackRttP50Ms": 3.236699999999928,
+          "ackRttP95Ms": 7.0219999999999345,
+          "ackRttMaxMs": 7.208100000000286,
+          "lastTransportSequence": 336
+        }
+      ],
+      "health": [
+        {
+          "desynced": false,
+          "stopped": false,
+          "loadedChunks": 9,
+          "pendingImports": 0,
+          "queuedUpdates": 0,
+          "registryReady": true,
+          "registryRevision": 1,
+          "lastTransportSequence": 336,
+          "replayWindowLen": 336,
+          "replayWindowFloor": 1,
+          "mirrorGeneration": 112,
+          "skippedUpdatesTotal": 0
+        },
+        {
+          "desynced": false,
+          "stopped": false,
+          "loadedChunks": 9,
+          "pendingImports": 0,
+          "queuedUpdates": 0,
+          "registryReady": true,
+          "registryRevision": 1,
+          "lastTransportSequence": 336,
+          "replayWindowLen": 336,
+          "replayWindowFloor": 1,
+          "mirrorGeneration": 112,
+          "skippedUpdatesTotal": 0
+        },
+        {
+          "desynced": false,
+          "stopped": false,
+          "loadedChunks": 9,
+          "pendingImports": 0,
+          "queuedUpdates": 0,
+          "registryReady": true,
+          "registryRevision": 1,
+          "lastTransportSequence": 336,
+          "replayWindowLen": 336,
+          "replayWindowFloor": 1,
+          "mirrorGeneration": 112,
+          "skippedUpdatesTotal": 0
+        },
+        {
+          "desynced": false,
+          "stopped": false,
+          "loadedChunks": 9,
+          "pendingImports": 0,
+          "queuedUpdates": 0,
+          "registryReady": true,
+          "registryRevision": 1,
+          "lastTransportSequence": 336,
+          "replayWindowLen": 336,
+          "replayWindowFloor": 1,
+          "mirrorGeneration": 112,
+          "skippedUpdatesTotal": 0
+        },
+        {
+          "desynced": false,
+          "stopped": false,
+          "loadedChunks": 9,
+          "pendingImports": 0,
+          "queuedUpdates": 0,
+          "registryReady": true,
+          "registryRevision": 1,
+          "lastTransportSequence": 336,
+          "replayWindowLen": 336,
+          "replayWindowFloor": 1,
+          "mirrorGeneration": 112,
+          "skippedUpdatesTotal": 0
+        }
+      ],
+      "budgetChecks": {
+        "steadyEventLoopP99Under25Ms": true,
+        "steadyEventLoopMaxUnder50Ms": true,
+        "geometryEndToEndP99Under50Ms": true,
+        "syncAckP99Under50Ms": true
+      }
+    },
+    {
+      "botCount": 10,
+      "classification": "SYNTHETIC_LOGICAL_SESSIONS_ONE_PROCESS",
+      "rounds": 100,
+      "chunksPerSession": 9,
+      "startup": {
+        "totalMs": 243.3175999999994,
+        "importMs": 161.90689999999995,
+        "eventLoopDelayMs": {
+          "samples": 127,
+          "p50": 1.017343,
+          "p95": 7.782399,
+          "p99": 8.454143,
+          "max": 12.214271
+        },
+        "syntheticFiveMsTimerDriftMs": {
+          "samples": 38,
+          "p50": 0.42290000000048167,
+          "p95": 3.4945999999999913,
+          "p99": 10.207500000000437,
+          "max": 10.207500000000437
+        },
+        "sampledPeakRssBytes": 357064704
+      },
+      "steady": {
+        "durationMs": 2546.6116999999995,
+        "eventLoopDelayMs": {
+          "samples": 998,
+          "p50": 1.049599,
+          "p95": 10.715135,
+          "p99": 16.474111,
+          "max": 24.018943
+        },
+        "syntheticFiveMsTimerDriftMs": {
+          "samples": 278,
+          "p50": 3.7151999999996406,
+          "p95": 12.840500000000247,
+          "p99": 14.897699999999531,
+          "max": 19.39220000000023
+        },
+        "sampledPeakRssBytes": 346947584
+      },
+      "cpu": {
+        "userMs": 1469,
+        "systemMs": 94,
+        "totalWallMs": 2803.083699999999
+      },
+      "memory": {
+        "processRssBeforeBytes": 305958912,
+        "processRssAfterBytes": 318869504,
+        "nativeMirrorPayloadEstimateBefore": [
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          }
+        ],
+        "nativeMirrorPayloadEstimateAfterUpdates": [
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          },
+          {
+            "chunksLoaded": 9,
+            "sectionsData": 216,
+            "sectionsOther": 0,
+            "paletteEntries": 432,
+            "indexEntries": 432,
+            "approxBytes": 2024192
+          }
+        ],
+        "nativeAfterUnload": [
+          {
+            "chunksLoaded": 0,
+            "sectionsData": 0,
+            "sectionsOther": 0,
+            "paletteEntries": 0,
+            "indexEntries": 0,
+            "approxBytes": 237368
+          },
+          {
+            "chunksLoaded": 0,
+            "sectionsData": 0,
+            "sectionsOther": 0,
+            "paletteEntries": 0,
+            "indexEntries": 0,
+            "approxBytes": 237368
+          },
+          {
+            "chunksLoaded": 0,
+            "sectionsData": 0,
+            "sectionsOther": 0,
+            "paletteEntries": 0,
+            "indexEntries": 0,
+            "approxBytes": 237368
+          },
+          {
+            "chunksLoaded": 0,
+            "sectionsData": 0,
+            "sectionsOther": 0,
+            "paletteEntries": 0,
+            "indexEntries": 0,
+            "approxBytes": 237368
+          },
+          {
+            "chunksLoaded": 0,
+            "sectionsData": 0,
+            "sectionsOther": 0,
+            "paletteEntries": 0,
+            "indexEntries": 0,
+            "approxBytes": 237368
+          },
+          {
+            "chunksLoaded": 0,
+            "sectionsData": 0,
+            "sectionsOther": 0,
+            "paletteEntries": 0,
+            "indexEntries": 0,
+            "approxBytes": 237368
+          },
+          {
+            "chunksLoaded": 0,
+            "sectionsData": 0,
+            "sectionsOther": 0,
+            "paletteEntries": 0,
+            "indexEntries": 0,
+            "approxBytes": 237368
+          },
+          {
+            "chunksLoaded": 0,
+            "sectionsData": 0,
+            "sectionsOther": 0,
+            "paletteEntries": 0,
+            "indexEntries": 0,
+            "approxBytes": 237368
+          },
+          {
+            "chunksLoaded": 0,
+            "sectionsData": 0,
+            "sectionsOther": 0,
+            "paletteEntries": 0,
+            "indexEntries": 0,
+            "approxBytes": 237368
+          },
+          {
+            "chunksLoaded": 0,
+            "sectionsData": 0,
+            "sectionsOther": 0,
+            "paletteEntries": 0,
+            "indexEntries": 0,
+            "approxBytes": 237368
+          }
+        ],
+        "nativeApproxBytesIsEstimate": true,
+        "retainedGeometryInputs": {
+          "pending": 0,
+          "peakPending": 10,
+          "retainedInputBytes": 0,
+          "peakRetainedInputBytes": 368640,
+          "queueDepth": 16
+        },
+        "externallyRetainedNativeSnapshots": "NOT_EXPOSED_BY_PUBLIC_API"
+      },
+      "timingMs": {
+        "geometryInputCopyMs": {
+          "samples": 1000,
+          "p50": 0.004199999999400461,
+          "p95": 0.020399999999426655,
+          "p99": 0.039399999999659485,
+          "max": 0.060399999999390275
+        },
+        "pathEndToEndMs": {
+          "samples": 1000,
+          "p50": 0.5117000000000189,
+          "p95": 0.7640000000001237,
+          "p99": 0.8605999999999767,
+          "max": 0.9817999999995664
+        },
+        "pathNativeComputeMs": {
+          "samples": 1000,
+          "p50": 0.0206,
+          "p95": 0.0632,
+          "p99": 0.0914,
+          "max": 0.1871
+        },
+        "pathTransportQueueAndDeliveryResidualMs": {
+          "samples": 1000,
+          "p50": 0.4840000000002241,
+          "p95": 0.7458000000000218,
+          "p99": 0.8391999999994602,
+          "max": 0.9640999999995663
+        },
+        "geometryEndToEndMs": {
+          "samples": 1000,
+          "p50": 4.633499999999913,
+          "p95": 7.526100000000042,
+          "p99": 7.858000000000175,
+          "max": 8.544100000000071
+        },
+        "geometryComputeMs": {
+          "samples": 1000,
+          "p50": 0.7019000000000233,
+          "p95": 1.0143000000007305,
+          "p99": 1.1787999999996828,
+          "max": 1.6729000000004817
+        },
+        "geometryDeliveryAndQueueMs": {
+          "samples": 1000,
+          "p50": 3.9404,
+          "p95": 6.8164,
+          "p99": 7.1512,
+          "max": 7.7455
+        },
+        "geometryResultDeliveryMs": {
+          "samples": 1000,
+          "p50": 0.0224,
+          "p95": 0.073,
+          "p99": 0.1742,
+          "max": 1.1095
+        },
+        "geometryPostMessageMs": {
+          "samples": 1000,
+          "p50": 0.0031999999991967343,
+          "p95": 0.018799999999828287,
+          "p99": 0.02250000000003638,
+          "max": 0.06939999999940483
+        },
+        "geometryResultMergeMs": {
+          "samples": 1000,
+          "p50": 0.0003999999998995918,
+          "p95": 0.0024000000003070454,
+          "p99": 0.0036000000000058208,
+          "max": 0.04539999999997235
+        },
+        "queryResultMergeMs": {
+          "samples": 1000,
+          "p50": 0.0020999999997002305,
+          "p95": 0.006399999999302963,
+          "p99": 0.009699999999611464,
+          "max": 0.05410000000028958
+        },
+        "queryEndToEndMs": {
+          "samples": 1000,
+          "p50": 0.9048999999995431,
+          "p95": 1.1711000000004788,
+          "p99": 1.2943999999997686,
+          "max": 2.7806999999993423
+        },
+        "queryNativeComputeMs": {
+          "samples": 1000,
+          "p50": 0.0108,
+          "p95": 0.0183,
+          "p99": 0.0257,
+          "max": 0.0336
+        },
+        "querySnapshotBuildMs": {
+          "samples": 1000,
+          "p50": 0.0006,
+          "p95": 0.0014,
+          "p99": 0.0018,
+          "max": 0.0029000000000000002
+        },
+        "queryTransportQueueAndDeliveryResidualMs": {
+          "samples": 1000,
+          "p50": 0.8934999999995415,
+          "p95": 1.1596000000001718,
+          "p99": 1.2850999999997688,
+          "max": 2.7708999999993424
+        },
+        "updateToQueryVisibilityMs": {
+          "samples": 1000,
+          "p50": 1.0850999999993292,
+          "p95": 1.3163999999997031,
+          "p99": 1.4283999999997832,
+          "max": 2.8377000000000407
+        }
+      },
+      "syncImportAndHandshakeSpansMs": {
+        "world_sync.registry_handshake": {
+          "samples": 10,
+          "p50": 0.3378999999995358,
+          "p95": 0.5987000000004628,
+          "p99": 0.5987000000004628,
+          "max": 0.5987000000004628
+        },
+        "world_sync.extract_column": {
+          "samples": 90,
+          "p50": 0.6773000000002867,
+          "p95": 0.8271999999997206,
+          "p99": 0.944100000000617,
+          "max": 0.944100000000617
+        },
+        "world_sync.extract_max_slice": {
+          "samples": 90,
+          "p50": 0.6757000000006883,
+          "p95": 0.82549999999992,
+          "p99": 0.9407000000001062,
+          "max": 0.9407000000001062
+        },
+        "world_sync.enqueue": {
+          "samples": 2340,
+          "p50": 0,
+          "p95": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "world_sync.post_message": {
+          "samples": 2340,
+          "p50": 0.0020000000004074536,
+          "p95": 0.005800000000817818,
+          "p99": 0.01190000000042346,
+          "max": 0.052999999999883585
+        },
+        "world_sync.ack_rtt": {
+          "samples": 2340,
+          "p50": 9.465799999999945,
+          "p95": 15.299699999999575,
+          "p99": 15.72990000000027,
+          "max": 15.736700000000383
+        }
+      },
+      "syncSteadySpansMs": {
+        "world_sync.registry_handshake": {
+          "samples": 0,
+          "p50": null,
+          "p95": null,
+          "p99": null,
+          "max": null
+        },
+        "world_sync.extract_column": {
+          "samples": 0,
+          "p50": null,
+          "p95": null,
+          "p99": null,
+          "max": null
+        },
+        "world_sync.extract_max_slice": {
+          "samples": 0,
+          "p50": null,
+          "p95": null,
+          "p99": null,
+          "max": null
+        },
+        "world_sync.enqueue": {
+          "samples": 1000,
+          "p50": 0,
+          "p95": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "world_sync.post_message": {
+          "samples": 1000,
+          "p50": 0.002200000000811997,
+          "p95": 0.03339999999934662,
+          "p99": 0.04510000000027503,
+          "max": 0.11879999999928259
+        },
+        "world_sync.ack_rtt": {
+          "samples": 1000,
+          "p50": 0.46119999999973516,
+          "p95": 0.7023000000008324,
+          "p99": 0.795100000000275,
+          "max": 0.861800000000585
+        }
+      },
+      "metrics": [
+        {
+          "state": "ready",
+          "sent": 334,
+          "acked": 334,
+          "applied": 334,
+          "duplicates": 0,
+          "stale": 0,
+          "conflicts": 0,
+          "gaps": 0,
+          "resets": 1,
+          "desyncs": 0,
+          "skippedUpdates": 0,
+          "droppedUpdates": 0,
+          "queueDepthMax": 113,
+          "inFlightBytesMax": 263168,
+          "sourceEventsObserved": 100,
+          "sourceEventsCoalesced": 0,
+          "extractSliceOverruns": 0,
+          "queuedExtractions": 0,
+          "queueDepth": 0,
+          "inFlightMessages": 0,
+          "inFlightBytes": 0,
+          "ackRttP50Ms": 7.494499999999789,
+          "ackRttP95Ms": 13.47820000000047,
+          "ackRttMaxMs": 14.037599999999657,
+          "lastTransportSequence": 336
+        },
+        {
+          "state": "ready",
+          "sent": 334,
+          "acked": 334,
+          "applied": 334,
+          "duplicates": 0,
+          "stale": 0,
+          "conflicts": 0,
+          "gaps": 0,
+          "resets": 1,
+          "desyncs": 0,
+          "skippedUpdates": 0,
+          "droppedUpdates": 0,
+          "queueDepthMax": 122,
+          "inFlightBytesMax": 263168,
+          "sourceEventsObserved": 100,
+          "sourceEventsCoalesced": 0,
+          "extractSliceOverruns": 0,
+          "queuedExtractions": 0,
+          "queueDepth": 0,
+          "inFlightMessages": 0,
+          "inFlightBytes": 0,
+          "ackRttP50Ms": 7.493900000000394,
+          "ackRttP95Ms": 13.760800000000017,
+          "ackRttMaxMs": 13.985400000000482,
+          "lastTransportSequence": 336
+        },
+        {
+          "state": "ready",
+          "sent": 334,
+          "acked": 334,
+          "applied": 334,
+          "duplicates": 0,
+          "stale": 0,
+          "conflicts": 0,
+          "gaps": 0,
+          "resets": 1,
+          "desyncs": 0,
+          "skippedUpdates": 0,
+          "droppedUpdates": 0,
+          "queueDepthMax": 124,
+          "inFlightBytesMax": 263168,
+          "sourceEventsObserved": 100,
+          "sourceEventsCoalesced": 0,
+          "extractSliceOverruns": 0,
+          "queuedExtractions": 0,
+          "queueDepth": 0,
+          "inFlightMessages": 0,
+          "inFlightBytes": 0,
+          "ackRttP50Ms": 7.920199999999568,
+          "ackRttP95Ms": 13.624399999999696,
+          "ackRttMaxMs": 14.736299999999574,
+          "lastTransportSequence": 336
+        },
+        {
+          "state": "ready",
+          "sent": 334,
+          "acked": 334,
+          "applied": 334,
+          "duplicates": 0,
+          "stale": 0,
+          "conflicts": 0,
+          "gaps": 0,
+          "resets": 1,
+          "desyncs": 0,
+          "skippedUpdates": 0,
+          "droppedUpdates": 0,
+          "queueDepthMax": 128,
+          "inFlightBytesMax": 263168,
+          "sourceEventsObserved": 100,
+          "sourceEventsCoalesced": 0,
+          "extractSliceOverruns": 0,
+          "queuedExtractions": 0,
+          "queueDepth": 0,
+          "inFlightMessages": 0,
+          "inFlightBytes": 0,
+          "ackRttP50Ms": 8.050599999999577,
+          "ackRttP95Ms": 13.581000000000131,
+          "ackRttMaxMs": 14.740299999999479,
+          "lastTransportSequence": 336
+        },
+        {
+          "state": "ready",
+          "sent": 334,
+          "acked": 334,
+          "applied": 334,
+          "duplicates": 0,
+          "stale": 0,
+          "conflicts": 0,
+          "gaps": 0,
+          "resets": 1,
+          "desyncs": 0,
+          "skippedUpdates": 0,
+          "droppedUpdates": 0,
+          "queueDepthMax": 128,
+          "inFlightBytesMax": 263168,
+          "sourceEventsObserved": 100,
+          "sourceEventsCoalesced": 0,
+          "extractSliceOverruns": 0,
+          "queuedExtractions": 0,
+          "queueDepth": 0,
+          "inFlightMessages": 0,
+          "inFlightBytes": 0,
+          "ackRttP50Ms": 8.44800000000032,
+          "ackRttP95Ms": 13.500299999999697,
+          "ackRttMaxMs": 14.743099999999686,
+          "lastTransportSequence": 336
+        },
+        {
+          "state": "ready",
+          "sent": 334,
+          "acked": 334,
+          "applied": 334,
+          "duplicates": 0,
+          "stale": 0,
+          "conflicts": 0,
+          "gaps": 0,
+          "resets": 1,
+          "desyncs": 0,
+          "skippedUpdates": 0,
+          "droppedUpdates": 0,
+          "queueDepthMax": 128,
+          "inFlightBytesMax": 263168,
+          "sourceEventsObserved": 100,
+          "sourceEventsCoalesced": 0,
+          "extractSliceOverruns": 0,
+          "queuedExtractions": 0,
+          "queueDepth": 0,
+          "inFlightMessages": 0,
+          "inFlightBytes": 0,
+          "ackRttP50Ms": 8.808100000000195,
+          "ackRttP95Ms": 13.484400000000278,
+          "ackRttMaxMs": 14.744199999999182,
+          "lastTransportSequence": 336
+        },
+        {
+          "state": "ready",
+          "sent": 334,
+          "acked": 334,
+          "applied": 334,
+          "duplicates": 0,
+          "stale": 0,
+          "conflicts": 0,
+          "gaps": 0,
+          "resets": 1,
+          "desyncs": 0,
+          "skippedUpdates": 0,
+          "droppedUpdates": 0,
+          "queueDepthMax": 128,
+          "inFlightBytesMax": 263168,
+          "sourceEventsObserved": 100,
+          "sourceEventsCoalesced": 0,
+          "extractSliceOverruns": 0,
+          "queuedExtractions": 0,
+          "queueDepth": 0,
+          "inFlightMessages": 0,
+          "inFlightBytes": 0,
+          "ackRttP50Ms": 8.64180000000033,
+          "ackRttP95Ms": 13.480999999999767,
+          "ackRttMaxMs": 14.7462000000005,
+          "lastTransportSequence": 336
+        },
+        {
+          "state": "ready",
+          "sent": 334,
+          "acked": 334,
+          "applied": 334,
+          "duplicates": 0,
+          "stale": 0,
+          "conflicts": 0,
+          "gaps": 0,
+          "resets": 1,
+          "desyncs": 0,
+          "skippedUpdates": 0,
+          "droppedUpdates": 0,
+          "queueDepthMax": 128,
+          "inFlightBytesMax": 263168,
+          "sourceEventsObserved": 100,
+          "sourceEventsCoalesced": 0,
+          "extractSliceOverruns": 0,
+          "queuedExtractions": 0,
+          "queueDepth": 0,
+          "inFlightMessages": 0,
+          "inFlightBytes": 0,
+          "ackRttP50Ms": 8.357899999999972,
+          "ackRttP95Ms": 13.506500000000415,
+          "ackRttMaxMs": 14.746799999999894,
+          "lastTransportSequence": 336
+        },
+        {
+          "state": "ready",
+          "sent": 334,
+          "acked": 334,
+          "applied": 334,
+          "duplicates": 0,
+          "stale": 0,
+          "conflicts": 0,
+          "gaps": 0,
+          "resets": 1,
+          "desyncs": 0,
+          "skippedUpdates": 0,
+          "droppedUpdates": 0,
+          "queueDepthMax": 128,
+          "inFlightBytesMax": 263168,
+          "sourceEventsObserved": 100,
+          "sourceEventsCoalesced": 0,
+          "extractSliceOverruns": 0,
+          "queuedExtractions": 0,
+          "queueDepth": 0,
+          "inFlightMessages": 0,
+          "inFlightBytes": 0,
+          "ackRttP50Ms": 7.780800000000454,
+          "ackRttP95Ms": 13.507400000000416,
+          "ackRttMaxMs": 13.714600000000246,
+          "lastTransportSequence": 336
+        },
+        {
+          "state": "ready",
+          "sent": 334,
+          "acked": 334,
+          "applied": 334,
+          "duplicates": 0,
+          "stale": 0,
+          "conflicts": 0,
+          "gaps": 0,
+          "resets": 1,
+          "desyncs": 0,
+          "skippedUpdates": 0,
+          "droppedUpdates": 0,
+          "queueDepthMax": 128,
+          "inFlightBytesMax": 263168,
+          "sourceEventsObserved": 100,
+          "sourceEventsCoalesced": 0,
+          "extractSliceOverruns": 0,
+          "queuedExtractions": 0,
+          "queueDepth": 0,
+          "inFlightMessages": 0,
+          "inFlightBytes": 0,
+          "ackRttP50Ms": 7.257099999999809,
+          "ackRttP95Ms": 13.794100000000071,
+          "ackRttMaxMs": 14.090100000000348,
+          "lastTransportSequence": 336
+        }
+      ],
+      "health": [
+        {
+          "desynced": false,
+          "stopped": false,
+          "loadedChunks": 9,
+          "pendingImports": 0,
+          "queuedUpdates": 0,
+          "registryReady": true,
+          "registryRevision": 1,
+          "lastTransportSequence": 336,
+          "replayWindowLen": 336,
+          "replayWindowFloor": 1,
+          "mirrorGeneration": 112,
+          "skippedUpdatesTotal": 0
+        },
+        {
+          "desynced": false,
+          "stopped": false,
+          "loadedChunks": 9,
+          "pendingImports": 0,
+          "queuedUpdates": 0,
+          "registryReady": true,
+          "registryRevision": 1,
+          "lastTransportSequence": 336,
+          "replayWindowLen": 336,
+          "replayWindowFloor": 1,
+          "mirrorGeneration": 112,
+          "skippedUpdatesTotal": 0
+        },
+        {
+          "desynced": false,
+          "stopped": false,
+          "loadedChunks": 9,
+          "pendingImports": 0,
+          "queuedUpdates": 0,
+          "registryReady": true,
+          "registryRevision": 1,
+          "lastTransportSequence": 336,
+          "replayWindowLen": 336,
+          "replayWindowFloor": 1,
+          "mirrorGeneration": 112,
+          "skippedUpdatesTotal": 0
+        },
+        {
+          "desynced": false,
+          "stopped": false,
+          "loadedChunks": 9,
+          "pendingImports": 0,
+          "queuedUpdates": 0,
+          "registryReady": true,
+          "registryRevision": 1,
+          "lastTransportSequence": 336,
+          "replayWindowLen": 336,
+          "replayWindowFloor": 1,
+          "mirrorGeneration": 112,
+          "skippedUpdatesTotal": 0
+        },
+        {
+          "desynced": false,
+          "stopped": false,
+          "loadedChunks": 9,
+          "pendingImports": 0,
+          "queuedUpdates": 0,
+          "registryReady": true,
+          "registryRevision": 1,
+          "lastTransportSequence": 336,
+          "replayWindowLen": 336,
+          "replayWindowFloor": 1,
+          "mirrorGeneration": 112,
+          "skippedUpdatesTotal": 0
+        },
+        {
+          "desynced": false,
+          "stopped": false,
+          "loadedChunks": 9,
+          "pendingImports": 0,
+          "queuedUpdates": 0,
+          "registryReady": true,
+          "registryRevision": 1,
+          "lastTransportSequence": 336,
+          "replayWindowLen": 336,
+          "replayWindowFloor": 1,
+          "mirrorGeneration": 112,
+          "skippedUpdatesTotal": 0
+        },
+        {
+          "desynced": false,
+          "stopped": false,
+          "loadedChunks": 9,
+          "pendingImports": 0,
+          "queuedUpdates": 0,
+          "registryReady": true,
+          "registryRevision": 1,
+          "lastTransportSequence": 336,
+          "replayWindowLen": 336,
+          "replayWindowFloor": 1,
+          "mirrorGeneration": 112,
+          "skippedUpdatesTotal": 0
+        },
+        {
+          "desynced": false,
+          "stopped": false,
+          "loadedChunks": 9,
+          "pendingImports": 0,
+          "queuedUpdates": 0,
+          "registryReady": true,
+          "registryRevision": 1,
+          "lastTransportSequence": 336,
+          "replayWindowLen": 336,
+          "replayWindowFloor": 1,
+          "mirrorGeneration": 112,
+          "skippedUpdatesTotal": 0
+        },
+        {
+          "desynced": false,
+          "stopped": false,
+          "loadedChunks": 9,
+          "pendingImports": 0,
+          "queuedUpdates": 0,
+          "registryReady": true,
+          "registryRevision": 1,
+          "lastTransportSequence": 336,
+          "replayWindowLen": 336,
+          "replayWindowFloor": 1,
+          "mirrorGeneration": 112,
+          "skippedUpdatesTotal": 0
+        },
+        {
+          "desynced": false,
+          "stopped": false,
+          "loadedChunks": 9,
+          "pendingImports": 0,
+          "queuedUpdates": 0,
+          "registryReady": true,
+          "registryRevision": 1,
+          "lastTransportSequence": 336,
+          "replayWindowLen": 336,
+          "replayWindowFloor": 1,
+          "mirrorGeneration": 112,
+          "skippedUpdatesTotal": 0
+        }
+      ],
+      "budgetChecks": {
+        "steadyEventLoopP99Under25Ms": true,
+        "steadyEventLoopMaxUnder50Ms": true,
+        "geometryEndToEndP99Under50Ms": true,
+        "syncAckP99Under50Ms": true
+      }
+    }
+  ],
+  "nativeBoundaryChecks": {
+    "status": "PASS",
+    "unknown": "incomplete",
+    "invalid": "REJECTED_AT_FFI",
+    "visitBudget": "budgetExceeded",
+    "queueRequests": 80,
+    "queueAccepted": 64,
+    "queueRejected": 16,
+    "reset": "resetApplied",
+    "staleEpoch": "scopeMismatch",
+    "controlProbeBehindSaturatedQueueMs": 2.0406000000002678,
+    "controlStopIdleAckMs": 0.0543999999999869,
+    "workerTerminateMs": 2.108999999999469,
+    "workerRecreatedWithEmptyMirror": true,
+    "runningNativeCancellation": "NOT_SUPPORTED_BY_PUBLIC_API; internal maxNodes/maxVisits/maxMs bound compute. Termination is whole-Worker teardown, not a per-query cancellation measurement."
+  },
+  "geometryBoundaryChecks": {
+    "status": "PASS",
+    "cancelled": {
+      "status": "cancelled",
+      "visits": 62336,
+      "computeMs": 1.8204999999998108,
+      "cancellationToReplyMs": 0.13720000000012078,
+      "method": "SharedArrayBuffer cancellation observed inside running computation at <=128 visits/checkpoint"
+    },
+    "visitBudget": {
+      "status": "budgetExceeded",
+      "visits": 128
+    },
+    "queueRequests": 20,
+    "queueAccepted": 16,
+    "queueRejected": 4,
+    "metricsAfter": {
+      "pending": 0,
+      "peakPending": 16,
+      "retainedInputBytes": 0,
+      "peakRetainedInputBytes": 1048576,
+      "queueDepth": 16
+    }
+  },
+  "status": "MEASURED_CORRECTNESS_PASS",
+  "decision": "Bounded TS Worker met declared synthetic 1/5-session steady budgets. Do not add or enable Rust room analysis based on this workload; profile real survey/L0 integration first.",
+  "cleanup": {
+    "adapterStopFailures": 0,
+    "nativeAliveSessions": 0,
+    "geometry": {
+      "pending": 0,
+      "peakPending": 16,
+      "retainedInputBytes": 0,
+      "peakRetainedInputBytes": 1048576,
+      "queueDepth": 16
+    },
+    "workersTerminated": true
+  }
+}

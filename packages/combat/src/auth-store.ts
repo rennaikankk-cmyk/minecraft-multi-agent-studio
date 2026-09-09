@@ -49,7 +49,10 @@ export class AuthCredentialStore {
 
   private filePath(): string {
     // botId 已经过校验（identifier 模式），但防御性消毒文件名。
-    const safe = this.botId.replace(/[^A-Za-z0-9_-]/gu, "_");
+    const sanitized = this.botId.replace(/[^A-Za-z0-9_-]/gu, "_");
+    // Valid Minecraft names can be Windows devices; keep ordinary legacy paths.
+    const safe = /^(?:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])$/iu.test(sanitized)
+      ? `player-${sanitized}` : sanitized;
     return path.join(this.dir, `${safe}.json`);
   }
 
@@ -59,7 +62,7 @@ export class AuthCredentialStore {
     try {
       const raw = readFileSync(this.filePath(), "utf8");
       const parsed = JSON.parse(raw) as StoreFile;
-      if (parsed.schemaVersion === "1.0" && Array.isArray(parsed.credentials)) {
+      if (parsed.schemaVersion === "1.0" && parsed.botId === this.botId && Array.isArray(parsed.credentials)) {
         this.cache.set(this.botId, parsed.credentials);
         return [...parsed.credentials];
       }

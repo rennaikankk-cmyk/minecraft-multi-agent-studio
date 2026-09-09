@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { identifierSchema, skillJsonValueSchema } from "@minecraft-studio/protocol";
+import { botIdentitySchema, identifierSchema, skillJsonValueSchema } from "@minecraft-studio/protocol";
 import { z } from "zod";
 
 /**
@@ -72,7 +72,7 @@ export const taskExecutionRecordSchema = z
   .object({
     schemaVersion: z.literal("1.0"),
     taskId: identifierSchema,
-    botId: identifierSchema,
+    botId: botIdentitySchema,
     goal: z.string().trim().min(1).max(2_000),
     /** IDs are persisted, while these names mirror the execution contract. */
     parentTask: identifierSchema.nullable(),
@@ -116,7 +116,7 @@ export type TaskExecutionRecord = z.infer<typeof taskExecutionRecordSchema>;
 export const taskExecutionCreateInputSchema = z
   .object({
     taskId: identifierSchema,
-    botId: identifierSchema,
+    botId: botIdentitySchema,
     goal: z.string().trim().min(1).max(2_000),
     parentTask: identifierSchema.nullable().optional(),
     maxRecoveryCount: z.number().int().nonnegative().max(1_000).optional(),

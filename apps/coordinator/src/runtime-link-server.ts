@@ -41,7 +41,7 @@ import {
   CoordinatorTelemetryError,
   type BotRegistryRecord,
 } from "./bot-registry.js";
-import type { RuntimeLinkPeerConfig } from "./runtime-link-config.js";
+import { readManagedRuntimeLinkPeers, resolveManagedRuntimeLinkKeyIds, type RuntimeLinkPeerConfig } from "./runtime-link-config.js";
 import type { StopCommandTransport } from "./stop-controller.js";
 
 const HANDSHAKE_TIMEOUT_MS = 5_000;
@@ -59,6 +59,8 @@ export type RuntimeLinkServerOptions = Readonly<{
   port: number;
   instanceId: string;
   peers: readonly RuntimeLinkPeerConfig[];
+  peersPath?: string;
+  managedKeyIds?: readonly string[];
   registry: BotRegistry;
   logger: AppLogger;
   now?: () => Date;
@@ -132,8 +134,10 @@ export class RuntimeLinkServer implements StopCommandTransport {
   private readonly randomId: () => string;
   private readonly randomNonce: () => string;
   private readonly peers = new Map<string, RuntimeLinkPeerConfig>();
+  private readonly managedKeyIds: ReadonlySet<string>;
   private readonly sessions = new Set<RuntimeSession>();
   private readonly activeSessions = new Map<string, RuntimeSession>();
+  private readonly activeKeys = new Map<string, RuntimeSession>();
   private readonly pendingStops = new Map<string, PendingStop>();
   private readonly pendingSkills = new Map<string, PendingSkill>();
   private readonly pendingFreshStatuses = new Set<PendingFreshStatus>();
@@ -167,7 +171,7 @@ export class RuntimeLinkServer implements StopCommandTransport {
     for (const peer of options.peers) {
       if (
         !IDENTIFIER_PATTERN.test(peer.keyId) ||
-        !IDENTIFIER_PATTERN.test(peer.botId) ||
+        !(IDENTIFIER_PATTERN.test(peer.botId) || /^[A-Za-z0-9_]{3,16}$/u.test(peer.botId)) ||
         !SHA256_PATTERN.test(peer.secretSha256) ||
         this.peers.has(peer.keyId) ||
         botIds.has(peer.botId) ||
@@ -175,11 +179,12 @@ export class RuntimeLinkServer implements StopCommandTransport {
       ) {
         throw new TypeError("Runtime Link peer configuration is invalid or duplicated.");
       }
-      this.peers.set(peer.keyId, peer);
+      this.peers.set(peer.keyId, { ...peer });
       botIds.add(peer.botId);
       secretHashes.add(peer.secretSha256);
     }
 
+    this.managedKeyIds = resolveManagedRuntimeLinkKeyIds(options.managedKeyIds, new Set(this.peers.keys()), options.peersPath);
     this.now = options.now ?? (() => new Date());
     this.randomId = options.randomId ?? randomUUID;
     this.randomNonce =
@@ -288,6 +293,7 @@ export class RuntimeLinkServer implements StopCommandTransport {
     await Promise.allSettled(sessionClosures);
     this.sessions.clear();
     this.activeSessions.clear();
+    this.activeKeys.clear();
 
     await Promise.all([
       new Promise<void>((resolve) => this.webSocketServer.close(() => resolve())),
@@ -318,7 +324,7 @@ export class RuntimeLinkServer implements StopCommandTransport {
     const session = this.activeSessions.get(command.botId);
     if (
       !session ||
-      !session.authenticated ||
+      !this.sessionBindingIsCurrent(session) ||
       session.socket.readyState !== WebSocket.OPEN ||
       command.payload.expectedRuntimeInstanceId !== session.runtimeInstanceId
     ) {
@@ -400,7 +406,7 @@ export class RuntimeLinkServer implements StopCommandTransport {
     const session = this.activeSessions.get(invocation.botId);
     if (
       !session ||
-      !session.authenticated ||
+      !this.sessionBindingIsCurrent(session) ||
       session.socket.readyState !== WebSocket.OPEN ||
       session.runtimeInstanceId !== expectedRuntimeInstanceId
     ) {
@@ -496,7 +502,7 @@ export class RuntimeLinkServer implements StopCommandTransport {
     const session = this.activeSessions.get(botId);
     if (
       !session ||
-      !session.authenticated ||
+      !this.sessionBindingIsCurrent(session) ||
       session.socket.readyState !== WebSocket.OPEN ||
       session.runtimeInstanceId !== expectedRuntimeInstanceId
     ) {
@@ -661,6 +667,8 @@ export class RuntimeLinkServer implements StopCommandTransport {
   }
 
   private handleFrame(session: RuntimeSession, raw: string): void {
+    if (!this.sessions.has(session) || session.socket.readyState !== WebSocket.OPEN) return;
+    if (session.authenticated && !this.sessionBindingIsCurrent(session)) return;
     let message: RuntimeLinkClientMessageV1;
     try {
       message = parseRuntimeLinkClientMessage(JSON.parse(raw) as unknown);
@@ -700,7 +708,7 @@ export class RuntimeLinkServer implements StopCommandTransport {
     session: RuntimeSession,
     message: RuntimeLinkAuthenticateV1,
   ): void {
-    const peer = this.peers.get(message.payload.keyId);
+    const peer = this.resolvePeer(message.payload.keyId);
     const context: RuntimeLinkProofContext = {
       challengeMessageId: message.payload.challengeMessageId,
       coordinatorInstanceId: message.payload.coordinatorInstanceId,
@@ -959,16 +967,46 @@ export class RuntimeLinkServer implements StopCommandTransport {
 
   private activateSession(session: RuntimeSession): void {
     const botId = session.botId;
-    if (!botId) return;
-    const previous = this.activeSessions.get(botId);
-    if (previous === session) return;
+    if (!botId || !session.keyId) return;
+    const previousSessions = new Set([this.activeSessions.get(botId), this.activeKeys.get(session.keyId)]);
+    for (const previous of previousSessions) {
+      if (previous && previous !== session) {
+        // Fence synchronously: frames already queued by the replaced socket
+        // must not reactivate it while the WebSocket close handshake runs.
+        this.removeSession(previous);
+        previous.socket.close(1012, "runtime_replaced");
+      }
+    }
     this.activeSessions.set(botId, session);
-    if (previous) previous.socket.close(1012, "runtime_replaced");
+    this.activeKeys.set(session.keyId, session);
+  }
+
+  private resolvePeer(keyId: string): RuntimeLinkPeerConfig | undefined {
+    if (!this.managedKeyIds.has(keyId)) return this.peers.get(keyId);
+    if (this.options.peersPath === undefined) return undefined;
+    try {
+      return readManagedRuntimeLinkPeers(this.options.peersPath, this.peers, this.managedKeyIds).get(keyId);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Check on every incoming frame and every command; leases cannot freeze identity. */
+  private sessionBindingIsCurrent(session: RuntimeSession): boolean {
+    if (!session.authenticated || !session.keyId || !this.sessions.has(session)) return false;
+    const peer = this.resolvePeer(session.keyId);
+    if (peer && peer.botId === session.botId && this.activeKeys.get(session.keyId) === session &&
+      this.activeSessions.get(peer.botId) === session) return true;
+    this.removeSession(session);
+    session.socket.close(1008, "runtime_binding_changed");
+    return false;
   }
 
   private removeSession(session: RuntimeSession): void {
     clearTimeout(session.handshakeTimer);
     this.sessions.delete(session);
+    session.authenticated = false;
+    if (session.keyId && this.activeKeys.get(session.keyId) === session) this.activeKeys.delete(session.keyId);
     if (session.botId && this.activeSessions.get(session.botId) === session) {
       this.activeSessions.delete(session.botId);
     }
@@ -1010,6 +1048,7 @@ export class RuntimeLinkServer implements StopCommandTransport {
     record: BotRegistryRecord,
   ): boolean {
     return (
+      this.sessionBindingIsCurrent(pending.session) &&
       record.botId === pending.botId &&
       record.runtimeInstanceId === pending.expectedRuntimeInstanceId &&
       record.currentStatus !== null &&
@@ -1040,6 +1079,7 @@ export class RuntimeLinkServer implements StopCommandTransport {
     pending: PendingSkill,
     reason: "caller_cancelled" | "coordinator_shutdown",
   ): void {
+    if (!this.sessionBindingIsCurrent(pending.session)) return;
     const timestamp = validNow(this.now());
     const cancellation = skillCancellationV1Schema.parse({
       schemaVersion: "1.0",

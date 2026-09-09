@@ -1,4 +1,5 @@
-import { SkillFault, WORK_AREA_LEASE_TTL_MS, type WorkArea, type WorkAreaLeasePort, type WorkAreaProof } from "@minecraft-studio/skills";
+import { SkillFault } from '@minecraft-studio/skills';
+import { WORK_AREA_LEASE_TTL_MS, type WorkArea, type WorkAreaLeasePort, type WorkAreaProof } from '@minecraft-studio/asset-policy';
 
 export async function withWorkAreaLease<T>(port: WorkAreaLeasePort, area: WorkArea, owner: string,
   signal: AbortSignal, work: (leaseId: string, signal: AbortSignal, assertCurrent: () => Promise<void>) => Promise<T>): Promise<T> {

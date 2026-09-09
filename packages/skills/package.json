@@ -19,7 +19,10 @@
   },
   "dependencies": {
     "@minecraft-studio/protocol": "workspace:*",
-    "zod": "4.4.3"
+    "zod": "4.4.3",
+    "@minecraft-studio/asset-policy": "workspace:*",
+    "@minecraft-studio/base-management": "workspace:*",
+    "@minecraft-studio/resource-management": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "26.1.1",

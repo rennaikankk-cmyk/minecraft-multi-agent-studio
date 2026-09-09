@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { identifierSchema } from "./bot-messages.js";
+import { botIdentitySchema, identifierSchema } from "./bot-messages.js";
 
 export const SUPERVISOR_IPC_MAX_PAYLOAD_BYTES = 128 * 1_024;
 export const SUPERVISOR_IPC_MAX_BOTS_PER_PROCESS = 3;
@@ -26,7 +26,7 @@ export const supervisorDeploymentTierSchema = z.enum([
 
 export const supervisorBotAssignmentV1Schema = z
   .object({
-    botId: identifierSchema,
+    botId: botIdentitySchema,
     profilePath: boundedTextSchema,
     profileSha256: sha256Schema,
     deploymentTier: supervisorDeploymentTierSchema,
@@ -135,7 +135,7 @@ export const supervisorIpcLifecycleV1Schema = z
         childPid: z.number().int().positive(),
         sequence: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
         state: supervisorChildLifecycleStateSchema,
-        botIds: z.array(identifierSchema).min(1).max(SUPERVISOR_IPC_MAX_BOTS_PER_PROCESS),
+        botIds: z.array(botIdentitySchema).min(1).max(SUPERVISOR_IPC_MAX_BOTS_PER_PROCESS),
         code: z.string().min(1).max(128).optional(),
         proof: nonceOrProofSchema,
       })

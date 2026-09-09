@@ -5,6 +5,7 @@ import {
   botPositionSchema,
   botStatusV1Schema,
   combatRuntimeStatusV1Schema,
+  botIdentitySchema,
   identifierSchema,
   l0SafetyStatusSchema,
   minecraftVersionCompatibilitySchema,
@@ -140,7 +141,7 @@ export function goalResultSummaryFromOutput(
 const goalDispatchNoopV1Schema = z
   .object({
     action: z.literal("noop"),
-    botId: identifierSchema,
+    botId: botIdentitySchema,
     taskId: identifierSchema,
     reasonCode: reasonCodeSchema,
     ai: goalAiTimingSchema,
@@ -149,7 +150,7 @@ const goalDispatchNoopV1Schema = z
 
 const goalSkillResultCommonShape = {
   action: z.literal("skill_result"),
-  botId: identifierSchema,
+  botId: botIdentitySchema,
   taskId: identifierSchema,
   reasonCode: reasonCodeSchema,
   skillId: skillIdentifierSchema,
@@ -235,7 +236,7 @@ const goalSkillResultV1Schema = z.discriminatedUnion("outcome", [
 const goalDispatchWaitingV1Schema = z
   .object({
     action: z.literal("waiting_for_bot"),
-    botId: identifierSchema,
+    botId: botIdentitySchema,
     taskId: identifierSchema,
     reasonCode: z.literal("GOAL_WAITING_FOR_BOT"),
     /** 等待截止（epoch ms）= 提交时间 + 提交方 timeoutMs；到期诚实终态。 */
@@ -264,7 +265,7 @@ export const submitGoalHttpRequestV1Schema = z
   .object({
     schemaVersion: z.literal("1.0"),
     requestId: z.string().uuid(),
-    botId: identifierSchema,
+    botId: botIdentitySchema,
     operatorGoal: goalTextSchema,
     timeoutMs: z.number().int().min(1_000).max(120_000),
   })
@@ -280,7 +281,7 @@ export const submitGoalHttpResponseV1Schema = z
 
 export const publicBotSummaryV1Schema = z
   .object({
-    botId: identifierSchema,
+    botId: botIdentitySchema,
     connectionState: botConnectionStateSchema,
     lastMessageAt: timestampSchema,
     lastHeartbeatAt: timestampSchema.nullable(),
@@ -455,7 +456,7 @@ export const stopBotHttpResponseV1Schema = z
     requestId: z.string().uuid(),
     data: z
       .object({
-        botId: identifierSchema,
+        botId: botIdentitySchema,
         traceId: z.string().uuid(),
         commandId: z.string().uuid(),
         outcome: z.enum(["completed", "rejected", "failed"]),
@@ -490,7 +491,7 @@ export type GoalDispatchResultV1 =
   | z.infer<typeof goalDispatchNoopV1Schema>
   | {
       action: "skill_result";
-      botId: z.infer<typeof identifierSchema>;
+      botId: z.infer<typeof botIdentitySchema>;
       taskId: z.infer<typeof identifierSchema>;
       reasonCode: z.infer<typeof reasonCodeSchema>;
       skillId: z.infer<typeof skillIdentifierSchema>;

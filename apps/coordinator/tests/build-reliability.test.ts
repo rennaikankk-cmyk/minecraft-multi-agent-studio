@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { BaseRegistry, buildBlueprintSkill } from "@minecraft-studio/skills";
+import { BaseRegistry } from '@minecraft-studio/base-management';
+import { buildBlueprintSkill } from '@minecraft-studio/skills';
 import { InMemoryPlanJournalStore } from "../src/plan-journal.js";
 import { beginBuildBatch, finishBuildBatch, worksetMaterialDeficit } from "../src/build-journal.js";
 

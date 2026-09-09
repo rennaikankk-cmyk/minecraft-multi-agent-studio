@@ -111,6 +111,11 @@ export class AICircuitBreaker {
     }
   }
 
+  /** Caller cancellation is not evidence of provider failure or recovery. */
+  recordCancellation(): void {
+    if (this.state === "half-open") this.halfOpenProbes = Math.max(0, this.halfOpenProbes - 1);
+  }
+
   recordFailure(reason: string): void {
     const now = this.options.now();
     const previousFailureAt = this.lastFailureAt;

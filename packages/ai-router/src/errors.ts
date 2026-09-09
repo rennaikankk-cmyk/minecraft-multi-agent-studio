@@ -14,6 +14,8 @@ export type AIErrorCode =
   | "AI_CONFIG_INVALID"
   | "AI_NO_PROVIDER"
   | "AI_OUTPUT_INVALID"
+  | "AI_AUTH_FAILED"
+  | "AI_RATE_LIMITED"
   | "AI_PROVIDER_FAILED"
   | "AI_PROVIDER_TIMEOUT"
   | "AI_PROVIDER_UNAVAILABLE";
@@ -22,6 +24,8 @@ export class AIError extends Error {
   readonly code: AIErrorCode;
   readonly retryable: boolean;
   readonly provider?: string;
+  readonly retryAfterMs?: number;
+  readonly statusCode?: number;
 
   constructor(
     code: AIErrorCode,
@@ -30,6 +34,8 @@ export class AIError extends Error {
       retryable?: boolean;
       provider?: string;
       cause?: unknown;
+      retryAfterMs?: number;
+      statusCode?: number;
     }> = {},
   ) {
     super(
@@ -40,6 +46,8 @@ export class AIError extends Error {
     this.code = code;
     this.retryable = options.retryable ?? false;
     if (options.provider !== undefined) this.provider = options.provider;
+    if (options.retryAfterMs !== undefined) this.retryAfterMs = options.retryAfterMs;
+    if (options.statusCode !== undefined) this.statusCode = options.statusCode;
   }
 }
 
