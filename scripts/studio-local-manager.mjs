@@ -870,7 +870,11 @@ export class StudioLocalManager {
         commit: GIT_METADATA.commit, redactSecrets, redactText: safeExportText });
       response.statusCode = 200; response.setHeader("Content-Type", "application/zip");
       response.setHeader("Content-Disposition", `attachment; filename="bot-diagnostics-${new Date().toISOString().replace(/[:.]/gu, "-")}.zip"`); response.end(result.zip);
-    } catch (error) { this.writeError(response, 400, error instanceof Error ? error.message : "DIAGNOSTIC_EXPORT_FAILED", "诊断包生成失败。"); }
+    } catch (error) {
+      // Do not expose filesystem paths, parser details or redaction internals
+      // through the authenticated export endpoint. Keep diagnostics in logs.
+      this.writeError(response, 400, "DIAGNOSTIC_EXPORT_FAILED", "诊断包生成失败。");
+    }
   }
 
   async handleIncidentExport(request, response, url, singleIncidentId = null) {
