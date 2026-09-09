@@ -26,11 +26,17 @@
 - 自相矛盾的证据组合**拒绝装载**，例如"真实服跑过但运行时没接线"。
 - 只有四道闸全绿才允许对外称"已验证"（`evidenceSupportsVerifiedClaim`）。
 
-当前注册表包含 31 个技能；新增 Baritone 对应能力保持 **Partial**，仍缺 `isolated-server-scenarios` 与 `cross-version-matrix` 两道环境闸。`stock.levels` 保持 **Experimental**，证据以 `skill-status.ts` 与场景账本为准。
+当前注册表包含 32 个技能；新增 Baritone 对应能力保持 **Partial**，仍缺 `isolated-server-scenarios` 与 `cross-version-matrix` 两道环境闸。`stock.levels` 保持 **Experimental**，证据以 `skill-status.ts` 与场景账本为准。
 真实隔离服六类场景与 1.21.8 跨版本矩阵一次没跑过。这与编译产物里的
 `verification=unverified` 是同一个事实的两种表述（AGENTS.md §8：无隔离测试服时不得声称联机测试通过）。
 
-## `base.residence-check@1.0.0`\r\n\r\n- 状态：**Partial**\r\n- 进度契约：`PLACE_AND_VERIFY`\r\n- 说明：检查并验证个人床复活点与 BotID 告示牌回读。\r\n\r\n## `farm.sustain@1.0.0`
+## `base.residence-check@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 进度契约：`PLACE_AND_VERIFY`
+- 说明：检查并验证个人床复活点与 BotID 告示牌回读。
+
+## `farm.sustain@1.0.0`
 
 - 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
 - 权限：`world.interact`、`bot.move`、`container.write`；操作 `farm.sustain-safe`；超时 120 秒。
@@ -41,7 +47,7 @@
 
 - Skill ID 后的 SemVer 表示技能输入、输出和行为契约，不表示 Minecraft 服务器版本。
 - 每个 Skill 另有有序 `compatibility.variants`。Runtime 只使用连接后真实协商出的版本/协议，以及当前 registry 的 feature、物品、方块、实体和显式服务端能力探针解析变体；不以 `minVersion/maxVersion` 一刀切。
-- 当前目录中的 31 个 Skill 声明能力变体；只有证据中的 `runtime-wiring=true` 条目可由 Runtime 执行，其余条目保持 `Experimental`。实际装备、目标资源和世界观测仍须经适配器校验；`verification=unverified` 不代表实机已验证。
+- 当前目录中的 32 个 Skill 声明能力变体；只有证据中的 `runtime-wiring=true` 条目可由 Runtime 执行，其余条目保持 `Experimental`。实际装备、目标资源和世界观测仍须经适配器校验；`verification=unverified` 不代表实机已验证。
 - 新版本特色 Skill 必须声明它实际依赖的 feature/资源；如果还依赖服务器插件、数据包或规则，则必须等待显式探针。能力为 `unknown` 时 fail-closed，不从版本号猜测。
 - `collect.block`、`craft.item`、`world.place-block` 和 `container.transfer` 当前仍接收目标版本 registry 的原生资源名。兼容变体可以表达旧/新 ID 的替代顺序，但规划器使用的语义资源别名尚未接入。
 
@@ -496,4 +502,3 @@
 - 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
 - 权限：策略只读
 - 约束：`SAFE` 默认关闭跑酷；`PARKOUR` 仅隔离测试服且必须同时通过 sprint/jump、空中移动和坠落限制，所有数值仍标记未实测。
-
