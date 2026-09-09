@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { buildZip } from "./zip-writer.mjs";
 
 const MAX_BYTES = 2 * 1024 * 1024;
+const MAX_LINE_BYTES = 64 * 1024;
+const MAX_EVENTS = 5000;
 const iso = (v) => typeof v === "string" && !Number.isNaN(Date.parse(v)) ? v : null;
-const inWindow = (event, from, to) => { const at = iso(event?.timestamp ?? event?.at ?? event?.observedAt ?? event?.lastSeenAt); return at !== null && at >= from && at < to; };
+const inWindow = (event, from, to) => { const at = iso(event?.timestamp ?? event?.at ?? event?.observedAt ?? event?.lastSeenAt); return at !== null && Date.parse(at) >= Date.parse(from) && Date.parse(at) < Date.parse(to); };
 const hash = (s) => createHash("sha256").update(s).digest("hex");
 const redact = (value, redactSecrets) => redactSecrets(value);
 
@@ -15,19 +17,25 @@ export async function buildDiagnosticBundle(options) {
   const botIds = new Set((options.botIds ?? []).filter((id) => /^[A-Za-z0-9_]{3,16}$/u.test(id)));
   const events = [], logs = [], omitted = [];
   for (const source of options.logFiles ?? []) {
+    try { const metadata = await stat(source.path); if (metadata.size > MAX_BYTES) { omitted.push({ source: source.name, reason: "source_too_large" }); continue; } } catch { omitted.push({ source: source.name, reason: "unreadable" }); continue; }
     let raw; try { raw = await readFile(source.path, "utf8"); } catch { omitted.push({ source: source.name, reason: "unreadable" }); continue; }
     for (const line of raw.split(/\r?\n/u)) {
-      if (!line.trim() || line.length > MAX_BYTES) { if (line.length > MAX_BYTES) omitted.push({ source: source.name, reason: "line_too_large" }); continue; }
+      if (!line.trim() || line.length > MAX_LINE_BYTES) { if (line.length > MAX_LINE_BYTES) omitted.push({ source: source.name, reason: "line_too_large" }); continue; }
       let event; try { event = JSON.parse(line); } catch { omitted.push({ source: source.name, reason: "invalid_json_line" }); continue; }
       if (!inWindow(event, from, to)) continue;
-      if (botIds.size && event.botId && !botIds.has(event.botId)) continue;
-      const safe = redact(event, options.redactSecrets);
-      if (safe) { events.push({ ...safe, _source: source.name }); logs.push({ source: source.name, value: safe }); }
+      const sourceBotId = String(source.name ?? "").replace(/^bot-/, "").replace(/\.log$/u, "");
+      if (event.botId && event.botId !== sourceBotId) { omitted.push({ source: source.name, reason: "bot_scope_mismatch" }); continue; }
+      if (botIds.size && !botIds.has(event.botId ?? sourceBotId)) continue;
+      const safe = redact({ ...event, ...(event.botId ? {} : { botId: sourceBotId }) }, options.redactSecrets);
+      if (safe) {
+        if (events.length >= MAX_EVENTS) { omitted.push({ source: source.name, reason: "event_limit" }); break; }
+        events.push({ ...safe, _source: source.name }); logs.push({ source: source.name, value: safe });
+      }
     }
   }
   const incidents = [];
   for (const issue of options.incidents?.listIssues?.() ?? []) {
-    const occurrences = (options.incidents.listOccurrences(issue.incidentId) ?? []).filter((o) => inWindow(o, from, to) && (!botIds.size || (o.botId ? botIds.has(o.botId) : issue.affectedBotIds?.some((id) => botIds.has(id)))));
+    const occurrences = (options.incidents.listOccurrences(issue.incidentId) ?? []).filter((o) => inWindow(o, from, to) && (!botIds.size || (typeof o.botId === "string" && botIds.has(o.botId))));
     if (occurrences.length) incidents.push({ issue: redact(issue, options.redactSecrets), occurrences: redact(occurrences, options.redactSecrets) });
   }
   events.sort((a, b) => String(a.timestamp ?? a.at ?? "").localeCompare(String(b.timestamp ?? b.at ?? "")));
