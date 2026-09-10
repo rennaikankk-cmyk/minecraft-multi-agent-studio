@@ -78,7 +78,7 @@ test("tasks page shows no fabricated task data", async ({ page }) => {
   await page.goto("/tasks");
   await expect(page.getByTestId("goal-console")).toBeVisible();
   await expect(page.getByText("尚未提交目标。")).toBeVisible();
-  await expect(page.locator(".botCard")).toHaveCount(0);
+  await expect(page.locator("[data-testid^=\"bot-card-\"]")).toHaveCount(0);
 });
 
 test("tasks page renders a real goal result and preserves failed styling", async ({ page }) => {

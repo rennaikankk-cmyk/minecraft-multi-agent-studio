@@ -546,20 +546,25 @@ describe("Coordinator Control Link server", () => {
 
   it("trims terminal goal history before any still-running goal", async () => {
     const { server } = await startServer();
+    // 2026-09-10 拆分：tracked 状态的所有者是 ControlLinkTaskProjection
+    // （server.taskProjection）；行为不变——终态条目先于运行中被裁剪。
     const internals = server as unknown as {
-      trackedGoals: Map<string, { status: string }>;
-      trimTrackedGoals(): void;
+      taskProjection: {
+        trackedGoals: Map<string, { status: string }>;
+        trimTrackedGoals(): void;
+      };
     };
-    internals.trackedGoals.set("running-goal", { status: "running" });
+    const projection = internals.taskProjection;
+    projection.trackedGoals.set("running-goal", { status: "running" });
     for (let index = 0; index < 1_000; index += 1) {
-      internals.trackedGoals.set(`terminal-${index}`, { status: "completed" });
+      projection.trackedGoals.set(`terminal-${index}`, { status: "completed" });
     }
 
-    internals.trimTrackedGoals();
+    projection.trimTrackedGoals();
 
-    expect(internals.trackedGoals.size).toBe(1_000);
-    expect(internals.trackedGoals.has("running-goal")).toBe(true);
-    expect(internals.trackedGoals.has("terminal-0")).toBe(false);
+    expect(projection.trackedGoals.size).toBe(1_000);
+    expect(projection.trackedGoals.has("running-goal")).toBe(true);
+    expect(projection.trackedGoals.has("terminal-0")).toBe(false);
   });
 
   it("executes an authenticated goal through the guarded planner", async () => {

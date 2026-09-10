@@ -74,20 +74,36 @@ import {
   type TaskHistoryReader,
 } from "./task-history-reader.js";
 import type { AutonomousTaskSource } from "./autonomous-director.js";
+import {
+  COMPLETED_GOAL_TTL_MS,
+  GOAL_RECOVERY_INTERVAL_MS,
+  goalFingerprint,
+  goalTaskActive,
+  goalTaskStatus,
+  MAX_RESPONDERS_PER_GOAL,
+  MAX_RESPONDERS_PER_STOP,
+  selectCurrentTask,
+  sleepMs,
+  STOP_GRACE_PERIOD_MS,
+  STOP_TIMEOUT_MS,
+  stopFingerprint,
+  type CompletedGoal,
+  type ControlSession,
+  type GoalResponder,
+  type PendingGoal,
+  type PendingStop,
+  type PublicCurrentTask,
+  type StopResponder,
+  type TrackedGoalTask,
+  type WaitingGoalEntry,
+} from "./control-link-goal-domain.js";
+import { ControlLinkTaskProjection } from "./control-link-task-projection.js";
 
 const HANDSHAKE_TIMEOUT_MS = 5_000;
 const MAX_CLOCK_SKEW_MS = 30_000;
-const STOP_TIMEOUT_MS = 15_000;
-const STOP_GRACE_PERIOD_MS = 5_000;
 const MAX_SOCKET_BUFFERED_BYTES = 256 * 1_024;
-const MAX_RESPONDERS_PER_STOP = 4;
-const MAX_RESPONDERS_PER_GOAL = 4;
-const COMPLETED_GOAL_TTL_MS = 5 * 60_000;
 // Round 6.6 停车场上限（bounded；溢出 = BACKPRESSURE 诚实拒绝）。
 const WAITING_GOALS_PER_BOT_MAX = 8;
-const MAX_COMPLETED_GOALS = 512;
-const MAX_TRACKED_GOALS = 1_000;
-const GOAL_RECOVERY_INTERVAL_MS = 5_000;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 
@@ -120,76 +136,6 @@ export type ControlLinkServerOptions = Readonly<{
   pingIntervalMs?: number;
 }>;
 
-type ControlSession = {
-  socket: WebSocket;
-  challengeMessageId: string;
-  challengeNonce: string;
-  handshakeTimer: ReturnType<typeof setTimeout>;
-  client: ControlLinkClientConfig | null;
-  controlApiInstanceId: string | null;
-  authenticated: boolean;
-  closing: boolean;
-  snapshotting: boolean;
-  ready: boolean;
-  alive: boolean;
-  snapshotBaseSequence: number;
-  pendingEvents: ControlLinkStateUpsertV1[];
-};
-
-type StopResponder = {
-  session: ControlSession;
-  requestMessageId: string;
-};
-
-type PendingStop = {
-  fingerprint: string;
-  request: ControlLinkStopRequestV1;
-  responders: Map<string, StopResponder>;
-};
-
-type GoalResponder = {
-  session: ControlSession;
-  requestMessageId: string;
-};
-
-type PendingGoal = {
-  fingerprint: string;
-  request: ControlLinkGoalRequestV1;
-  responders: Map<string, GoalResponder>;
-  controller: AbortController;
-  execution: Promise<void> | null;
-};
-
-type WaitingGoalEntry = {
-  pending: PendingGoal;
-  lease: GoalExecutionLease;
-  /** 停车死线（epoch ms）= park 时刻 + 剩余 timeout；到期诚实终态。 */
-  deadlineMs: number;
-  deadlineTimer: ReturnType<typeof setTimeout>;
-};
-
-type CompletedGoal = Readonly<{
-  fingerprint: string;
-  expiresAtMs: number;
-}> &
-  (
-    | Readonly<{ result: GoalDispatchResultV1; errorCode?: never }>
-    | Readonly<{ result: null; errorCode: ControlLinkGoalErrorCode }>
-  );
-
-type PublicCurrentTask = NonNullable<PublicBotDetailV1["currentTask"]>;
-
-type TrackedGoalTask = PublicCurrentTask & {
-  operationId: string;
-  botId: string;
-  order: number;
-  expiresAtMs: number | null;
-  baselineRuntimeTask: Readonly<{
-    taskId: string;
-    startedAt: string | null;
-  }> | null;
-};
-
 export class ControlLinkServer {
   private readonly now: () => Date;
   private readonly randomId: () => string;
@@ -200,8 +146,12 @@ export class ControlLinkServer {
   private readonly pendingStops = new Map<string, PendingStop>();
   private readonly pendingGoals = new Map<string, PendingGoal>();
   private readonly pendingTaskReads = new Set<symbol>();
-  private readonly completedGoals = new Map<string, CompletedGoal>();
-  private readonly trackedGoals = new Map<string, TrackedGoalTask>();
+  /** 持久任务投影域（tracked/completed goal 状态的唯一所有者）。 */
+  private readonly taskProjection = new ControlLinkTaskProjection({
+    onTaskStateChanged: (botId: string, now: Date): void => {
+      this.publishBotTaskState(botId, now);
+    },
+  });
   /**
    * Round 6.6 注册屏障：bot 未 goal-ready 时 parked 的 goal（FIFO per bot）。
    * store lease 已持有（task 已持久化为 running + timeoutMs 死线）；就绪翻沿
@@ -222,7 +172,6 @@ export class ControlLinkServer {
   private readonly pingIntervalMs: number;
   private readonly unsubscribeAutonomous: () => void;
   private streamSequence = 0;
-  private trackedGoalOrder = 0;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private goalRecoveryTimer: ReturnType<typeof setInterval> | null = null;
   private goalRefreshInFlight: Promise<void> | null = null;
@@ -454,8 +403,7 @@ export class ControlLinkServer {
     await this.goalRefreshInFlight;
     this.pendingGoals.clear();
     this.pendingTaskReads.clear();
-    this.completedGoals.clear();
-    this.trackedGoals.clear();
+    this.taskProjection.clear();
     const closures = [...this.sessions].map((session) => {
       this.revokeSession(session);
       return closeWebSocket(session.socket);
@@ -1213,7 +1161,7 @@ export class ControlLinkServer {
     const fingerprint = goalFingerprint(request);
     const now = validNow(this.now());
     this.pruneCompletedGoals(now.getTime());
-    const completed = this.completedGoals.get(operationId);
+    const completed = this.taskProjection.completedGoal(operationId);
     if (completed) {
       if (completed.fingerprint !== fingerprint) {
         this.sendGoalFailure(session, request, "GOAL_ID_CONFLICT");
@@ -1971,77 +1919,18 @@ export class ControlLinkServer {
   }
 
   private rememberCompletedGoal(operationId: string, completed: CompletedGoal): void {
-    this.completedGoals.delete(operationId);
-    this.completedGoals.set(operationId, completed);
-    while (this.completedGoals.size > MAX_COMPLETED_GOALS) {
-      const oldest = this.completedGoals.keys().next().value as string | undefined;
-      if (!oldest) break;
-      this.completedGoals.delete(oldest);
-    }
+    this.taskProjection.rememberCompletedGoal(operationId, completed);
   }
 
   private pruneCompletedGoals(nowMs: number): void {
-    for (const [operationId, completed] of this.completedGoals) {
-      if (completed.expiresAtMs <= nowMs) this.completedGoals.delete(operationId);
-    }
+    this.taskProjection.pruneCompletedGoals(nowMs);
   }
 
   private applyGoalSnapshots(
     snapshots: readonly GoalLifecycleSnapshot[],
     now: Date,
   ): void {
-    const nowMs = now.getTime();
-    for (const state of snapshots) {
-      const active = goalTaskActive(state.status);
-      const expiresAtMs = active
-        ? null
-        : Date.parse(state.updatedAt) + COMPLETED_GOAL_TTL_MS;
-      if (expiresAtMs !== null && expiresAtMs <= nowMs) {
-        this.trackedGoals.delete(state.operationId);
-        continue;
-      }
-      const existing = this.trackedGoals.get(state.operationId);
-      const runtimeTask = this.options.registry.get(state.botId, now)
-        ?.currentStatus?.currentTask ?? null;
-      if (!existing) this.trackedGoalOrder += 1;
-      const tracked: TrackedGoalTask = {
-        operationId: state.operationId,
-        taskId: state.taskId,
-        botId: state.botId,
-        title: state.title,
-        status: state.status,
-        startedAt: state.startedAt,
-        order: existing?.order ?? this.trackedGoalOrder,
-        expiresAtMs,
-        baselineRuntimeTask:
-          existing?.baselineRuntimeTask ??
-          (runtimeTask
-            ? { taskId: runtimeTask.taskId, startedAt: runtimeTask.startedAt }
-            : null),
-      };
-      this.trackedGoals.set(state.operationId, tracked);
-      if (!active && (state.result !== null || state.errorCode !== null)) {
-        this.rememberCompletedGoal(state.operationId, {
-          fingerprint: state.fingerprint,
-          ...(state.result !== null
-            ? { result: state.result }
-            : {
-                result: null,
-                errorCode: state.errorCode ?? "CONTROL_LINK_INTERNAL_ERROR",
-              }),
-          expiresAtMs: expiresAtMs ?? nowMs + COMPLETED_GOAL_TTL_MS,
-        });
-      }
-      if (
-        !existing ||
-        existing.status !== tracked.status ||
-        existing.startedAt !== tracked.startedAt ||
-        existing.title !== tracked.title
-      ) {
-        this.publishBotTaskState(state.botId, now);
-      }
-    }
-    this.trimTrackedGoals();
+    this.taskProjection.applyGoalSnapshots(snapshots, now, this.options.registry);
   }
 
   private refreshPersistedGoals(): Promise<void> {
@@ -2080,12 +1969,11 @@ export class ControlLinkServer {
     now: Date,
   ): void {
     const persisted = new Set(snapshots.map(({ operationId }) => operationId));
-    for (const [operationId, tracked] of this.trackedGoals) {
-      if (persisted.has(operationId) || this.pendingGoals.has(operationId)) {
-        continue;
-      }
-      this.trackedGoals.delete(operationId);
-      this.publishBotTaskState(tracked.botId, now);
+    for (const removed of this.taskProjection.removeMissing(
+      persisted,
+      (operationId) => this.pendingGoals.has(operationId),
+    )) {
+      this.publishBotTaskState(removed.botId, now);
     }
   }
 
@@ -2134,42 +2022,13 @@ export class ControlLinkServer {
   }
 
   private currentTrackedGoal(botId: string): TrackedGoalTask | null {
-    let selected: TrackedGoalTask | null = null;
-    for (const tracked of this.trackedGoals.values()) {
-      if (tracked.botId !== botId) continue;
-      if (!selected) {
-        selected = tracked;
-        continue;
-      }
-      const trackedActive = goalTaskActive(tracked.status);
-      const selectedActive = goalTaskActive(selected.status);
-      if (
-        (trackedActive && !selectedActive) ||
-        (trackedActive === selectedActive && tracked.order > selected.order)
-      ) {
-        selected = tracked;
-      }
-    }
-    return selected;
+    return this.taskProjection.currentTrackedGoal(botId);
   }
 
   private pruneTrackedGoals(nowMs: number): void {
-    for (const [operationId, tracked] of this.trackedGoals) {
-      if (tracked.expiresAtMs !== null && tracked.expiresAtMs <= nowMs) {
-        this.trackedGoals.delete(operationId);
-      }
-    }
+    this.taskProjection.pruneTrackedGoals(nowMs);
   }
 
-  private trimTrackedGoals(): void {
-    while (this.trackedGoals.size > MAX_TRACKED_GOALS) {
-      const oldestTerminal = [...this.trackedGoals.entries()].find(
-        ([, tracked]) => !goalTaskActive(tracked.status),
-      )?.[0];
-      if (!oldestTerminal) break;
-      this.trackedGoals.delete(oldestTerminal);
-    }
-  }
 
   private sendGoalSuccess(
     responder: GoalResponder,
@@ -2482,55 +2341,9 @@ function plannerDiagnostics(
   return { plannerCode: null };
 }
 
-function goalTaskStatus(
-  result: GoalDispatchResultV1,
-): PublicCurrentTask["status"] {
-  if (result.action === "noop") return "failed";
-  if (result.outcome === "completed") return "completed";
-  if (result.outcome === "cancelled") return "cancelled";
-  if (result.outcome === "timed_out") return "expired";
-  return "failed";
-}
 
-function goalFingerprint(request: ControlLinkGoalRequestV1): string {
-  return durableGoalFingerprint(request);
-}
 
-function goalTaskActive(status: PublicCurrentTask["status"]): boolean {
-  return (
-    status === "queued" ||
-    status === "assigned" ||
-    status === "running" ||
-    status === "blocked" ||
-    status === "waiting" ||
-    status === "paused"
-  );
-}
 
-function sleepMs(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
-function selectCurrentTask(
-  ...candidates: readonly (PublicCurrentTask | null)[]
-): PublicCurrentTask | null {
-  return (
-    candidates.find(
-      (candidate) => candidate !== null && goalTaskActive(candidate.status),
-    ) ??
-    candidates.find((candidate) => candidate !== null) ??
-    null
-  );
-}
 
-function stopFingerprint(request: ControlLinkStopRequestV1): string {
-  return JSON.stringify({
-    coordinatorInstanceId: request.payload.coordinatorInstanceId,
-    clientId: request.payload.clientId,
-    controlApiInstanceId: request.payload.controlApiInstanceId,
-    operationId: request.payload.operationId,
-    botId: request.payload.botId,
-    actorId: request.payload.actorId,
-  });
-}
 
