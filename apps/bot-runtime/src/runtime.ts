@@ -347,6 +347,9 @@ export class SingleBotRuntime {
   private stopping = false;
   private heartbeatTimer: TimerHandle | null = null;
   private statusTimer: TimerHandle | null = null;
+  /** anti-idle：无规则服防挂机踢（45s 节拍；仅闲时触发小角度视线偏转）。 */
+  private antiIdleTimer: TimerHandle | null = null;
+  private lastActivityMonotonic = 0;
   private deferredStatusTimer: TimerHandle | null = null;
   private reconnectTimer: TimerHandle | null = null;
   private lastStatusAt = 0;
@@ -1084,6 +1087,7 @@ export class SingleBotRuntime {
     });
     this.clearTimer("reconnect");
     this.clearTimer("status");
+    this.clearTimer("antiIdle");
     this.clearTimer("deferredStatus");
 
     const activeClient = this.client;
@@ -1379,6 +1383,7 @@ export class SingleBotRuntime {
     this.client = null;
     this.clearTimer("heartbeat");
     this.clearTimer("status");
+    this.clearTimer("antiIdle");
     this.clearTimer("deferredStatus");
     this.state = "offline";
     this.emitDisconnected(info);
@@ -1600,16 +1605,54 @@ export class SingleBotRuntime {
 
   private startStatusTimer(generation: number): void {
     this.clearTimer("status");
+    this.clearTimer("antiIdle");
     this.statusTimer = setInterval(
       () => this.emitStatus(generation),
       this.profile.statusIntervalMs,
     );
+    this.startAntiIdleTimer(generation);
+  }
+
+  /**
+   * 无规则服防挂机：服务器踢"完全无输入"的客户端。空闲（无技能、无 L0 干预、
+   * 60s 无任何活动）时每 45s 做一次 ±5° 视线偏转——位移为零、不碰方块，
+   * 与真实玩家的微操作不可区分。仅 anarchy purpose 启用（章程 §6）；
+   * STRICT 服不引入任何额外输入（反作弊零暴露原则）。
+   */
+  private startAntiIdleTimer(generation: number): void {
+    this.clearTimer("antiIdle");
+    if (this.profile.purpose !== "anarchy") return;
+    this.antiIdleTimer = setInterval(
+      () => {
+        if (generation !== this.generation || this.state !== "online" || !this.client) return;
+        if (this.activeSkillControllers.size > 0) return;
+        if (this.safetyStatus.normalTasksPaused) return;
+        const idleMs = this.monotonicNow() - this.lastActivityMonotonic;
+        if (idleMs < 60_000) return;
+        const look = this.client as unknown as {
+          look?: (yaw: number, pitch: number, force?: boolean) => Promise<void>;
+        };
+        const jitter = (Math.random() - 0.5) * (Math.PI / 18);
+        const angled = this.client as unknown as { yaw?: number; pitch?: number };
+        const yaw = typeof angled.yaw === "number" ? angled.yaw : 0;
+        const pitch = typeof angled.pitch === "number" ? angled.pitch : 0;
+        if (typeof look.look === "function") {
+          void look
+            .look(yaw + jitter, Math.max(-1.2, Math.min(1.2, pitch + jitter)))
+            .catch(() => undefined);
+          this.lastActivityMonotonic = this.monotonicNow();
+        }
+      },
+      45_000,
+    );
+    this.antiIdleTimer.unref?.();
   }
 
   private emitStatus(generation: number, evaluateSafety = true): void {
     if (generation !== this.generation || this.state !== "online" || !this.client) {
       return;
     }
+    this.lastActivityMonotonic = this.monotonicNow();
     this.clearTimer("deferredStatus");
 
     // Phase 4 诊断门（no_telemetry）：跳过序列化+发送；安全评估在
@@ -3248,9 +3291,14 @@ export class SingleBotRuntime {
   }
 
   private clearTimer(
-    timer: "heartbeat" | "status" | "deferredStatus" | "reconnect",
+    timer: "heartbeat" | "status" | "deferredStatus" | "reconnect" | "antiIdle",
   ): void {
-    const key = `${timer}Timer` as const;
+    const key = `${timer}Timer` as
+      | "heartbeatTimer"
+      | "statusTimer"
+      | "deferredStatusTimer"
+      | "reconnectTimer"
+      | "antiIdleTimer";
     const handle = this[key];
     if (handle) {
       clearTimeout(handle);

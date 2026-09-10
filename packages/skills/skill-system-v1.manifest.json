@@ -1,12 +1,12 @@
 {
   "schemaVersion": "1.0",
   "generatedFrom": "packages/skills/src/v1-manifest.ts",
-  "totalSkills": 32,
+  "totalSkills": 35,
   "maturitySummary": {
     "L0": 0,
     "L1": 0,
     "L2": 1,
-    "L3": 27,
+    "L3": 30,
     "L4": 4,
     "L5": 0
   },
@@ -585,6 +585,139 @@
         "A returned call with an unmet food target remains pending at the task layer."
       ],
       "ownerModule": "packages/skills/src/builtin/secure-food.ts"
+    },
+    {
+      "skillId": "animal.breed",
+      "schemaVersion": "1.0.0",
+      "family": "uncategorized",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "llm",
+      "runtimeCapabilities": [
+        "world.interact",
+        "inventory.write"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "INVENTORY_CHANGE",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "REOBSERVE_THEN_RETRY",
+        "ACQUIRE_RESOURCES_THEN_RETRY",
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "BREED_FOOD_INCOMPATIBLE",
+        "ENTITY_NOT_FOUND",
+        "INVENTORY_COUNT_UNKNOWN",
+        "INVENTORY_INSUFFICIENT_ITEMS",
+        "NORMAL_ACTIONS_PAUSED",
+        "TARGET_DIMENSION_MISMATCH",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [],
+      "ownerModule": "unknown"
+    },
+    {
+      "skillId": "fluid.place",
+      "schemaVersion": "1.0.0",
+      "family": "uncategorized",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "llm",
+      "runtimeCapabilities": [
+        "world.interact"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "PLACE_AND_VERIFY",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "REOBSERVE_THEN_RETRY",
+        "MOVE_CLOSER_THEN_RETRY",
+        "ACQUIRE_RESOURCES_THEN_RETRY",
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "FLUID_BUCKET_MISSING",
+        "INVENTORY_COUNT_UNKNOWN",
+        "NORMAL_ACTIONS_PAUSED",
+        "TARGET_DIMENSION_MISMATCH",
+        "TARGET_OUT_OF_REACH",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [],
+      "ownerModule": "unknown"
+    },
+    {
+      "skillId": "inventory.drop",
+      "schemaVersion": "1.0.0",
+      "family": "uncategorized",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "llm",
+      "runtimeCapabilities": [
+        "inventory.write"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "INVENTORY_CHANGE",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "REOBSERVE_THEN_RETRY",
+        "ACQUIRE_RESOURCES_THEN_RETRY",
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "INVENTORY_COUNT_UNKNOWN",
+        "INVENTORY_INSUFFICIENT_ITEMS",
+        "NORMAL_ACTIONS_PAUSED",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [],
+      "ownerModule": "unknown"
     },
     {
       "skillId": "trade.villager",

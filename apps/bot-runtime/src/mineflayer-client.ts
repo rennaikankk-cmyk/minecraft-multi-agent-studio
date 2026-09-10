@@ -33,7 +33,7 @@ import type {
   L0SafetyAction,
   L0SafetyActionResult,
 } from "@minecraft-studio/safety";
-import { armorEquipCapabilityInputSchema, armorEquipCapabilityOutputSchema, armorSnapshotCapabilityInputSchema, armorSnapshotCapabilityOutputSchema, ACTION_FAMILIES, collectBlockCapabilityInputSchema, collectBlockCapabilityOutputSchema, containerTransferCapabilityInputSchema, containerTransferCapabilityOutputSchema, craftItemCapabilityInputSchema, craftItemCapabilityOutputSchema, inventorySnapshotCapabilityInputSchema, inventorySnapshotCapabilityOutputSchema, placeBlockCapabilityInputSchema, placeBlockCapabilityOutputSchema, smeltItemCapabilityInputSchema, smeltItemCapabilityOutputSchema, MOVEMENT_PRIORITIES, MovementController, ServerBehaviorObserver, farmMaintainInputSchema, farmMaintainOutputSchema, farmSustainInputSchema, farmSustainOutputSchema, foodFarmLayout, foodFarmMaintenance, cropRules, navigationGoalInputSchema, navigationGoalOutputSchema, followEntityInputSchema, followEntityOutputSchema, getToBlockInputSchema, getToBlockOutputSchema, exploreInputSchema, exploreOutputSchema, clearAreaInputSchema, clearAreaOutputSchema, elytraInputSchema, elytraOutputSchema, type MovementLease, SAFE_PATH_MAX_DISTANCE, SkillFault, SkillRefusal, ActionLockError, ActionLockManager, type ActionLockKind, resolveMovementProfile, type ServerPolicyLimits, safeMovementGotoCapabilityInputSchema, safeMovementGotoCapabilityOutputSchema, travelRouteCapabilityInputSchema, tradeVillagerCapabilityInputSchema, tradeVillagerCapabilityOutputSchema, ALL_EDIBLE_ITEMS, scanBlocksCapabilityInputSchema, scanBlocksCapabilityOutputSchema, secureFoodCapabilityInputSchema, secureFoodCapabilityOutputSchema, siteObserveCapabilityInputSchema, siteObserveCapabilityOutputSchema, shelterDigCapabilityInputSchema, shelterDigCapabilityOutputSchema, mineBranchCapabilityInputSchema, mineBranchCapabilityOutputSchema, mineVeinCapabilityInputSchema, mineVeinCapabilityOutputSchema, buildBlueprintCapabilityInputSchema, buildBlueprintCapabilityOutputSchema, blueprintSchema, blueprintWorksetObservationSchema, orderBlueprintCells, SharedStateClient, type MaybeAsyncWorkstationRegistryPort, type BehaviorSignalEvent, type FamilyWindowStats, type SkillCapabilityRequest, type SkillCompatibilityEnvironment, type SkillResourceKind } from '@minecraft-studio/skills';
+import { armorEquipCapabilityInputSchema, armorEquipCapabilityOutputSchema, armorSnapshotCapabilityInputSchema, armorSnapshotCapabilityOutputSchema, ACTION_FAMILIES, collectBlockCapabilityInputSchema, collectBlockCapabilityOutputSchema, containerTransferCapabilityInputSchema, containerTransferCapabilityOutputSchema, craftItemCapabilityInputSchema, craftItemCapabilityOutputSchema, inventorySnapshotCapabilityInputSchema, inventorySnapshotCapabilityOutputSchema, placeBlockCapabilityInputSchema, placeBlockCapabilityOutputSchema, smeltItemCapabilityInputSchema, smeltItemCapabilityOutputSchema, MOVEMENT_PRIORITIES, MovementController, ServerBehaviorObserver, farmMaintainInputSchema, farmMaintainOutputSchema, farmSustainInputSchema, farmSustainOutputSchema, foodFarmLayout, foodFarmMaintenance, cropRules, navigationGoalInputSchema, navigationGoalOutputSchema, followEntityInputSchema, followEntityOutputSchema, getToBlockInputSchema, getToBlockOutputSchema, exploreInputSchema, exploreOutputSchema, clearAreaInputSchema, clearAreaOutputSchema, elytraInputSchema, elytraOutputSchema, type MovementLease, SAFE_PATH_MAX_DISTANCE, SkillFault, SkillRefusal, ActionLockError, ActionLockManager, type ActionLockKind, resolveMovementProfile, type ServerPolicyLimits, safeMovementGotoCapabilityInputSchema, safeMovementGotoCapabilityOutputSchema, travelRouteCapabilityInputSchema, tradeVillagerCapabilityInputSchema, tradeVillagerCapabilityOutputSchema, ALL_EDIBLE_ITEMS, scanBlocksCapabilityInputSchema, scanBlocksCapabilityOutputSchema, secureFoodCapabilityInputSchema, secureFoodCapabilityOutputSchema, siteObserveCapabilityInputSchema, siteObserveCapabilityOutputSchema, shelterDigCapabilityInputSchema, shelterDigCapabilityOutputSchema, mineBranchCapabilityInputSchema, mineBranchCapabilityOutputSchema, mineVeinCapabilityInputSchema, mineVeinCapabilityOutputSchema, buildBlueprintCapabilityInputSchema, buildBlueprintCapabilityOutputSchema, blueprintSchema, blueprintWorksetObservationSchema, orderBlueprintCells, SharedStateClient, type MaybeAsyncWorkstationRegistryPort, type BehaviorSignalEvent, type FamilyWindowStats, type SkillCapabilityRequest, type SkillCompatibilityEnvironment, type SkillResourceKind, animalBreedCapabilityInputSchema, animalBreedCapabilityOutputSchema, fluidPlaceCapabilityInputSchema, fluidPlaceCapabilityOutputSchema, inventoryDropCapabilityInputSchema, inventoryDropCapabilityOutputSchema } from '@minecraft-studio/skills';
 import { authorizeHarvest, withinWorkArea, workScopeSchema, type WorkPosition, type WorkArea, type WorkstationType } from '@minecraft-studio/asset-policy';
 import type {
   CombatActionAcknowledgement,
@@ -1763,6 +1763,24 @@ export class MineflayerBotClient implements BotClient {
       );
     }
     if (
+      request.capability === "inventory.write" &&
+      request.operation === "inventory.drop-safe"
+    ) {
+      return this.withActionLocks(request, ["inventory"], () => this.invokeInventoryDrop(request));
+    }
+    if (
+      request.capability === "world.interact" &&
+      request.operation === "fluid.place-safe"
+    ) {
+      return this.withActionLocks(request, ["blockInteraction", "inventory"], () => this.invokeFluidPlace(request));
+    }
+    if (
+      request.capability === "world.interact" &&
+      request.operation === "animal.breed-safe"
+    ) {
+      return this.withActionLocks(request, ["inventory"], () => this.invokeAnimalBreed(request));
+    }
+    if (
       request.capability === "world.interact" &&
       request.operation === "trade.villager-safe"
     ) {
@@ -2171,6 +2189,141 @@ export class MineflayerBotClient implements BotClient {
       }
     }
     throw new SkillFault("MINE_BACKFILL_FAILED");
+  }
+
+  /** inventory.drop：脚下丢弃指定数量物品（对账回执）。 */
+  private async invokeInventoryDrop(request: SkillCapabilityRequest): Promise<unknown> {
+    const input = inventoryDropCapabilityInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    const countItem = (name: string) =>
+      this.bot.inventory.items().filter((item) => item.name === name).reduce((sum, item) => sum + item.count, 0);
+    const held = countItem(input.data.itemName);
+    const signal = this.activeProcessSignal!;
+    const botToss = this.bot as Bot & {
+      toss?: (itemType: string, metadata: null, count: number) => Promise<void>;
+    };
+    if (typeof botToss.toss !== "function") throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE");
+    let dropped = 0;
+    for (const item of this.bot.inventory.items()) {
+      if (signal.aborted) break;
+      if (item.name !== input.data.itemName) continue;
+      if (dropped >= input.data.count) break;
+      const remaining = Math.min(item.count, input.data.count - dropped);
+      await botToss.toss(item.name, null, remaining);
+      dropped += remaining;
+    }
+    // 服务器回执对账：短暂等待物品栏同步后复点。
+    await new Promise<void>((resolve) => setTimeout(resolve, 400));
+    if (signal.aborted) throw new SkillFault("SKILL_ABORTED");
+    const remainingCount = countItem(input.data.itemName);
+    if (dropped < input.data.count && remainingCount > input.data.keepReserve) {
+      throw new SkillFault("INVENTORY_DROP_NOT_SETTLED");
+    }
+    return inventoryDropCapabilityOutputSchema.parse({
+      dropped: true,
+      itemName: input.data.itemName,
+      count: dropped,
+      remainingCount,
+    });
+  }
+
+  /** fluid.place：桶倾倒/吸取（lookAt + activateItem，同 farm 供水原语）。 */
+  private async invokeFluidPlace(request: SkillCapabilityRequest): Promise<unknown> {
+    const input = fluidPlaceCapabilityInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    this.assertDimensionMatch(input.data.dimension);
+    const signal = this.activeProcessSignal!;
+    const equipItem = async (name: string) => {
+      const item = this.bot.inventory.items().find((candidate) => candidate.name === name);
+      if (!item) throw new SkillFault("FLUID_BUCKET_MISSING");
+      await this.bot.equip(item, "hand");
+    };
+    const readBack = (x: number, y: number, z: number) => {
+      const block = this.bot.blockAt(new Vec3(x, y, z));
+      return block?.name ?? "unknown";
+    };
+    if (input.data.mode === "place") {
+      const { referenceBlock, face, itemName } = input.data;
+      const target = { x: referenceBlock.x + face.x, y: referenceBlock.y + face.y, z: referenceBlock.z + face.z };
+      const occupant = readBack(target.x, target.y, target.z);
+      if (!["air", "cave_air", "void_air", "water", "lava"].includes(occupant)) {
+        throw new SkillFault("PLACE_TARGET_OCCUPIED");
+      }
+      await equipItem(itemName);
+      // 服务器 item raycast：注视参照面中点再激活（与 farm 供水同一语义）。
+      await this.bot.lookAt(new Vec3(referenceBlock.x + 0.5 + face.x * 0.5, referenceBlock.y + 0.5 + face.y * 0.5, referenceBlock.z + 0.5 + face.z * 0.5), true);
+      this.bot.activateItem();
+      await new Promise<void>((resolve) => setTimeout(resolve, 350));
+      if (signal.aborted) throw new SkillFault("SKILL_ABORTED");
+      const resultingBlockName = readBack(target.x, target.y, target.z);
+      if (!["water", "lava", "flowing_water", "flowing_lava"].includes(resultingBlockName)) {
+        throw new SkillFault("FLUID_PLACE_NOT_CONFIRMED");
+      }
+      return fluidPlaceCapabilityOutputSchema.parse({
+        succeeded: true, mode: "place", resultingBlockName,
+        position: { x: target.x, y: target.y, z: target.z },
+      });
+    }
+    // scoop
+    const { target } = input.data;
+    const sourceBlock = this.bot.blockAt(new Vec3(target.x, target.y, target.z));
+    if (!sourceBlock || !["water", "lava"].includes(sourceBlock.name)) {
+      throw new SkillFault("FLUID_TARGET_NOT_SOURCE");
+    }
+    await equipItem("bucket");
+    await this.bot.lookAt(new Vec3(target.x + 0.5, target.y + 0.5, target.z + 0.5), true);
+    this.bot.activateItem();
+    await new Promise<void>((resolve) => setTimeout(resolve, 350));
+    if (signal.aborted) throw new SkillFault("SKILL_ABORTED");
+    const resultingBlockName = readBack(target.x, target.y, target.z);
+    if (resultingBlockName === sourceBlock.name) {
+      throw new SkillFault("FLUID_SCOOP_NOT_CONFIRMED");
+    }
+    return fluidPlaceCapabilityOutputSchema.parse({
+      succeeded: true, mode: "scoop", resultingBlockName,
+      position: { x: target.x, y: target.y, z: target.z },
+    });
+  }
+
+  /** animal.breed：对两只实体各喂一份（useOn + 物品消耗对账）。 */
+  private async invokeAnimalBreed(request: SkillCapabilityRequest): Promise<unknown> {
+    const input = animalBreedCapabilityInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    this.assertDimensionMatch(input.data.dimension);
+    const signal = this.activeProcessSignal!;
+    const findEntity = (uuid: string) =>
+      (Object.values(this.bot.entities ?? {}) as Array<{ uuid?: string; id?: number; name?: string; position?: Vec3; isValid?: boolean }>)
+        .find((entity) => entity.uuid === uuid && entity.isValid !== false) ?? null;
+    const first = findEntity(input.data.firstEntityUuid);
+    const second = findEntity(input.data.secondEntityUuid);
+    if (!first || !second) throw new SkillFault("ENTITY_NOT_FOUND");
+    const botWithUse = this.bot as Bot & { useOn?: (entity: unknown) => Promise<void> };
+    if (typeof botWithUse.useOn !== "function") throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE");
+    const countFood = () =>
+      this.bot.inventory.items().filter((item) => item.name === input.data.foodItem).reduce((sum, item) => sum + item.count, 0);
+    const foodBefore = countFood();
+    if (foodBefore < 2) throw new SkillFault("INVENTORY_INSUFFICIENT_ITEMS");
+    const foodStack = this.bot.inventory.items().find((item) => item.name === input.data.foodItem);
+    if (!foodStack) throw new SkillFault("INVENTORY_INSUFFICIENT_ITEMS");
+    await this.bot.equip(foodStack, "hand");
+    for (const entity of [first, second]) {
+      const distance = this.bot.entity.position.distanceTo(entity.position!);
+      if (!Number.isFinite(distance) || distance > 3.5) throw new SkillFault("ENTITY_OUT_OF_REACH");
+      await this.bot.lookAt(entity.position!.offset(0, 0.5, 0), true);
+      await botWithUse.useOn(entity);
+      if (signal.aborted) throw new SkillFault("SKILL_ABORTED");
+      await new Promise<void>((resolve) => setTimeout(resolve, 250));
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 400));
+    const consumed = foodBefore - countFood();
+    if (consumed < 2) throw new SkillFault("ENTITY_INTERACT_NOT_SETTLED");
+    return animalBreedCapabilityOutputSchema.parse({
+      bred: true, animal: input.data.animal, fedEntities: 2,
+      consumedCount: consumed, offspringObserved: false,
+    });
   }
 
   private async invokeTradeVillager(request: SkillCapabilityRequest): Promise<unknown> {

@@ -26,7 +26,7 @@
 - 自相矛盾的证据组合**拒绝装载**，例如"真实服跑过但运行时没接线"。
 - 只有四道闸全绿才允许对外称"已验证"（`evidenceSupportsVerifiedClaim`）。
 
-当前注册表包含 32 个技能；新增 Baritone 对应能力保持 **Partial**，仍缺 `isolated-server-scenarios` 与 `cross-version-matrix` 两道环境闸。`stock.levels` 保持 **Experimental**，证据以 `skill-status.ts` 与场景账本为准。
+当前注册表包含 35 个技能；新增 Baritone 对应能力保持 **Partial**，仍缺 `isolated-server-scenarios` 与 `cross-version-matrix` 两道环境闸。`stock.levels` 保持 **Experimental**，证据以 `skill-status.ts` 与场景账本为准。
 真实隔离服六类场景与 1.21.8 跨版本矩阵一次没跑过。这与编译产物里的
 `verification=unverified` 是同一个事实的两种表述（AGENTS.md §8：无隔离测试服时不得声称联机测试通过）。
 
@@ -47,7 +47,7 @@
 
 - Skill ID 后的 SemVer 表示技能输入、输出和行为契约，不表示 Minecraft 服务器版本。
 - 每个 Skill 另有有序 `compatibility.variants`。Runtime 只使用连接后真实协商出的版本/协议，以及当前 registry 的 feature、物品、方块、实体和显式服务端能力探针解析变体；不以 `minVersion/maxVersion` 一刀切。
-- 当前目录中的 32 个 Skill 声明能力变体；只有证据中的 `runtime-wiring=true` 条目可由 Runtime 执行，其余条目保持 `Experimental`。实际装备、目标资源和世界观测仍须经适配器校验；`verification=unverified` 不代表实机已验证。
+- 当前目录中的 35 个 Skill 声明能力变体；只有证据中的 `runtime-wiring=true` 条目可由 Runtime 执行，其余条目保持 `Experimental`。实际装备、目标资源和世界观测仍须经适配器校验；`verification=unverified` 不代表实机已验证。
 - 新版本特色 Skill 必须声明它实际依赖的 feature/资源；如果还依赖服务器插件、数据包或规则，则必须等待显式探针。能力为 `unknown` 时 fail-closed，不从版本号猜测。
 - `collect.block`、`craft.item`、`world.place-block` 和 `container.transfer` 当前仍接收目标版本 registry 的原生资源名。兼容变体可以表达旧/新 ID 的替代顺序，但规划器使用的语义资源别名尚未接入。
 
@@ -502,3 +502,23 @@
 - 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
 - 权限：策略只读
 - 约束：`SAFE` 默认关闭跑酷；`PARKOUR` 仅隔离测试服且必须同时通过 sprint/jump、空中移动和坠落限制，所有数值仍标记未实测。
+## `inventory.drop@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`inventory.write`；操作 `inventory.drop-safe`；脚下丢弃指定数量物品并做服务器回执对账。
+- 背包满（INVENTORY_FULL）时卸载低价值物品、多 Bot 物资交接、清垃圾。只在脚下丢弃，不做投掷弹道。
+- 前置要求物品计数已知（快照缺失时 INVENTORY_COUNT_UNKNOWN fail-closed）；重复执行不会多丢（数量对账）。
+
+## `fluid.place@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`world.interact`；操作 `fluid.place-safe`；桶倾倒（water_bucket/lava_bucket → 参照面邻格）或吸取（空桶 → 液体源方块）。
+- 灭火自救、刷石机岩浆补给、清理误放流体；farm.sustain 的供水原语开放为原子能力。放置/吸取后读回方块验证。
+- 倾倒非幂等（重复倒 = 多桶消耗 + 流体扩散）；吸取只认 source（流动水不可吸，FLUID_TARGET_NOT_SOURCE）。
+
+## `animal.breed@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`world.interact` + `inventory.write`；操作 `animal.breed-safe`；对两只同类成年实体各喂一份饲料（useOn + 物品消耗对账）。
+- 牛羊肉/皮革/羽毛的可持续来源——农场之后食物安全的第二层保险。物种-饲料矩阵数据驱动（BREED_FOOD_BY_ANIMAL）。
+- 爱心粒子不可观测：验证用物品消耗 ≥2 + 双实体在场（offspringObserved 如实为 false，不伪造出生判定）。

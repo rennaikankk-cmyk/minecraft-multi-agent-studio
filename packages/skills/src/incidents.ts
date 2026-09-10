@@ -107,6 +107,18 @@ export const FAILURE_CODES = [
   "COMBAT_OBSERVATION_UNAVAILABLE",
   "ELYTRA_ISOLATED_VALIDATION_REQUIRED",
   "INVENTORY_FULL",
+  "INVENTORY_INSUFFICIENT_ITEMS",
+  "INVENTORY_COUNT_UNKNOWN",
+  "INVENTORY_DROP_NOT_SETTLED",
+  "FLUID_BUCKET_MISSING",
+  "FLUID_PLACE_NOT_CONFIRMED",
+  "FLUID_SCOOP_NOT_CONFIRMED",
+  "FLUID_TARGET_NOT_SOURCE",
+  "BREED_FOOD_INCOMPATIBLE",
+  "ENTITY_INTERACT_NOT_SETTLED",
+  "ENTITY_OUT_OF_REACH",
+  "ENTITY_NOT_FOUND",
+  "SKILL_ABORTED",
   "CRAFTING_TABLE_OUT_OF_REACH",
   "TARGET_OUT_OF_REACH",
   "CONTAINER_OUT_OF_REACH",
@@ -140,6 +152,8 @@ export const FAILURE_CODE_ALIASES: Readonly<Record<string, FailureCode>> = {
   BLUEPRINT_STEP_BLOCKED: "BUILD_WRONG_BLOCK",
   // 放置能力对实心/占用目标的诚实拒绝（server truth）——Build 家族稳定语义
   PLACE_TARGET_OCCUPIED: "BUILD_PLACEMENT_REJECTED",
+  FLUID_PLACE_NOT_CONFIRMED: "BUILD_PLACEMENT_REJECTED",
+  FLUID_SCOOP_NOT_CONFIRMED: "BUILD_PLACEMENT_REJECTED",
   // Round 7 兼容层：evidence 优先，不臆断反作弊
   SERVER_POSITION_CORRECTION: "UNKNOWN_FAILURE",
   SERVER_ACTION_REJECTED: "UNKNOWN_FAILURE",
@@ -427,6 +441,7 @@ export function classifyIncident(input: ClassifyInput): Classification {
     case "SKILL_RECOVERY_EXHAUSTED":
     case "INVENTORY_REQUIRED_ITEM_MISSING":
     case "INVENTORY_STATE_MISMATCH":
+    case "INVENTORY_DROP_NOT_SETTLED":
       matched.push(`failureCode=${input.failureCode}`);
       return { suspectedLayer: "SKILL", ruleId: "R-SKILL-1", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "low", matchedEvidence: matched };
     // Skill System v1 前置拒绝码：正常运行中的拒绝不是故障；只有它们罕见地出现在
@@ -437,6 +452,7 @@ export function classifyIncident(input: ClassifyInput): Classification {
     case "COMBAT_DRIVER_UNAVAILABLE":
     case "COMBAT_OBSERVATION_UNAVAILABLE":
     case "MINE_LAVA_ADJACENT":
+    case "SKILL_ABORTED":
     case "POLICY_ROUTE_SEGMENT_LIMIT":
     case "POLICY_STRAIGHT_DOWN_FORBIDDEN":
     case "POLICY_PARKOUR_FORBIDDEN":
@@ -453,6 +469,12 @@ export function classifyIncident(input: ClassifyInput): Classification {
     case "ALL_SORT_TARGETS_OUT_OF_REACH":
     case "BLUEPRINT_ANCHOR_INVALID":
     case "INVENTORY_FULL":
+    case "INVENTORY_INSUFFICIENT_ITEMS":
+    case "INVENTORY_COUNT_UNKNOWN":
+    case "FLUID_BUCKET_MISSING":
+    case "FLUID_TARGET_NOT_SOURCE":
+    case "BREED_FOOD_INCOMPATIBLE":
+    case "ENTITY_INTERACT_NOT_SETTLED":
       matched.push(`failureCode=${input.failureCode}`);
       return { suspectedLayer: "WORLD_STATE", ruleId: "R-PRECOND-WORLD-1", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "medium", matchedEvidence: matched };
     case "RETREAT_IN_PROGRESS":

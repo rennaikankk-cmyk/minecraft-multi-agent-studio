@@ -117,6 +117,29 @@ export {
   secureFoodStateSchema,
 } from "./builtin/secure-food.js";
 export {
+  animalBreedCapabilityInputSchema,
+  animalBreedCapabilityOutputSchema,
+  animalBreedInputSchema,
+  animalBreedOutputSchema,
+  animalBreedSkill,
+  BREED_FOOD_BY_ANIMAL,
+  breedFoodAccepted,
+} from "./builtin/animal-breed.js";
+export {
+  fluidPlaceCapabilityInputSchema,
+  fluidPlaceCapabilityOutputSchema,
+  fluidPlaceInputSchema,
+  fluidPlaceOutputSchema,
+  fluidPlaceSkill,
+} from "./builtin/fluid-place.js";
+export {
+  inventoryDropCapabilityInputSchema,
+  inventoryDropCapabilityOutputSchema,
+  inventoryDropInputSchema,
+  inventoryDropOutputSchema,
+  inventoryDropSkill,
+} from "./builtin/inventory-drop.js";
+export {
   blockCenterDistance,
   blockWithinPolicyReach,
   type BlockCoordinate,
