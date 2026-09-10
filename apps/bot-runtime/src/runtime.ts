@@ -75,6 +75,27 @@ import {
   combatStanceCapabilityOutputSchema,
 } from "@minecraft-studio/skills";
 import { z } from "zod";
+import {
+  ANARCHY_COMBAT_REACTION_MAX_DURATION_MS,
+  ANARCHY_COMBAT_REACTION_MAX_STEPS,
+  ANARCHY_COMBAT_REACTION_TICK_MS,
+  COMBAT_REACTION_MAX_DURATION_MS,
+  COMBAT_REACTION_MAX_STEPS,
+  COMBAT_REACTION_TERMINAL_REASONS,
+  COMBAT_REACTION_TICK_MS,
+  combatIntentForRequest,
+  combatReactionShouldStop,
+  syntheticCombatReceipt,
+  type CombatIntent,
+  type CombatReactionOutcome,
+} from "./runtime-combat-reaction.js";
+import {
+  normalizeKickReason,
+  sanitizeServerText,
+  skillFaultIncidentType,
+  statusFailureReason,
+} from "./runtime-failure-classification.js";
+export { normalizeKickReason, sanitizeServerText };
 
 import {
   GoalExecutor,
@@ -137,36 +158,6 @@ type ActiveCoordinatorTask = Readonly<{
   order: number;
 }>;
 
-const COMBAT_REACTION_MAX_STEPS = 32;
-const COMBAT_REACTION_MAX_DURATION_MS = 8_000;
-const COMBAT_REACTION_TICK_MS = 100;
-// 无规则档：反击循环贴近 tick 节奏（50ms），封顶拉长——对面是外挂，
-// 8 秒的窗口不够打出一场完整的遭遇战。
-const ANARCHY_COMBAT_REACTION_MAX_STEPS = 200;
-const ANARCHY_COMBAT_REACTION_MAX_DURATION_MS = 30_000;
-const ANARCHY_COMBAT_REACTION_TICK_MS = 50;
-const COMBAT_REACTION_TERMINAL_REASONS = new Set([
-  "COMBAT_NO_HOSTILE_TARGET",
-  "COMBAT_NO_USABLE_WEAPON",
-  "COMBAT_NO_TOTEM_AVAILABLE",
-  "COMBAT_HEALTH_BELOW_ENGAGE_FLOOR",
-  "COMBAT_TOTEM_RESERVE_INSUFFICIENT",
-  "COMBAT_OUTNUMBERED",
-  "COMBAT_GEAR_OUTCLASSED",
-  "COMBAT_OBSERVATION_UNAVAILABLE",
-  "COMBAT_TARGET_OBSERVATION_STALE",
-  "COMBAT_HAZARD_OBSERVATION_UNAVAILABLE",
-  "COMBAT_MOVEMENT_BLOCKED_BY_HAZARD",
-  "COMBAT_MOVEMENT_NOT_REQUIRED",
-  "COMBAT_REFLEX_NOT_CLEARED",
-  "COMBAT_ACTION_EXECUTION_FAILED",
-  "COMBAT_EXECUTION_ACK_INVALID",
-  "COMBAT_TARGET_NOT_FOUND",
-  "COMBAT_WEAPON_NOT_IN_INVENTORY",
-  "COMBAT_TOTEM_NOT_IN_INVENTORY",
-]);
-
-type CombatReactionOutcome = "completed" | "cancelled" | "failed";
 
 export type RuntimeDependencies = {
   createClient: BotClientFactory;
@@ -3268,111 +3259,15 @@ export class SingleBotRuntime {
   }
 }
 
-function combatReactionShouldStop(
-  receipt: CombatDriverReceipt,
-  anarchy = false,
-): boolean {
-  // 无规则档：撤退是走位不是缴械——RETREAT_MOVE 之后继续打，
-  // 只有终态理由（没有目标/没有武器）才结束整场。
-  if (receipt.actual.action === "RETREAT" && !anarchy) return true;
-  if (receipt.actual.primitiveAction !== "NONE") return false;
-  return (
-    receipt.actual.reasonCode === null ||
-    COMBAT_REACTION_TERMINAL_REASONS.has(receipt.actual.reasonCode)
-  );
-}
-
 /**
  * A ZodError carries every issue in `message` as a JSON blob. Take the first
  * issue with its path instead, matching how ServerProfile validation reports
  * failures, and keep the result bounded for the log sink.
  */
-function statusFailureReason(cause: unknown): string {
-  if (cause instanceof z.ZodError) {
-    const issue = cause.issues[0];
-    if (!issue) return "status payload failed schema validation";
-    const path = issue.path.join(".");
-    return path.length > 0 ? `${path}: ${issue.message}` : issue.message;
-  }
-  return cause instanceof Error ? cause.message : String(cause);
-}
-
-type CombatIntent = "ENGAGE" | "DISENGAGE";
-
-function combatIntentForRequest(
-  request: Pick<SkillCapabilityRequest, "capability" | "operation">,
-): CombatIntent | null {
-  if (request.capability !== "combat.control") return null;
-  if (request.operation === "combat.engage") return "ENGAGE";
-  if (request.operation === "combat.disengage") return "DISENGAGE";
-  return null;
-}
-
-function syntheticCombatReceipt(
-  action: CombatIntent,
-  requestedAtMs: number,
-  reasonCode: string,
-): CombatDriverReceipt {
-  const safeRequestedAtMs = Number.isSafeInteger(requestedAtMs) && requestedAtMs >= 0
-    ? requestedAtMs
-    : 0;
-  const safeReasonCode = /^[A-Z][A-Z0-9_]{2,127}$/u.test(reasonCode)
-    ? reasonCode
-    : "SKILL_CAPABILITY_FAILED";
-  return {
-    requested: { action, requestedAtMs: safeRequestedAtMs },
-    actual: {
-      disposition: "dropped",
-      action: "NONE",
-      primitiveAction: "NONE",
-      executedAtMs: null,
-      reasonCode: safeReasonCode,
-      targetEntityId: null,
-    },
-  };
-}
-
 /**
  * 技能终态失败的 IncidentType 推导：根因码属于 pathfinder 家族时用
  * PATH_FAILED/UNREACHABLE（快慢两种故障在 type/fingerprint 上必须可区分），
  * 其余保持 SKILL_FAILED。
  */
-function skillFaultIncidentType(rootErrorCode: string): string {
-  if (rootErrorCode === "PATHFINDER_GOTO_FAILED" || rootErrorCode === "PATH_NO_PROGRESS") return "PATH_FAILED";
-  if (rootErrorCode === "PATH_UNREACHABLE") return "UNREACHABLE";
-  // P1-1 Build 家族稳定码：wrong-block/false-success 与不可达在 type 上可区分
-  if (rootErrorCode === "BUILD_WRONG_BLOCK" || rootErrorCode === "BUILD_MISSING_BLOCK"
-    || rootErrorCode === "BUILD_PLACEMENT_REJECTED" || rootErrorCode === "BUILD_MATERIAL_MISSING") return "PLACEMENT_FAILED";
-  if (rootErrorCode === "BUILD_VERIFY_TIMEOUT") return "VERIFY_TIMEOUT";
-  if (rootErrorCode === "BUILD_CELL_UNREACHABLE") return "UNREACHABLE";
-  if (rootErrorCode === "FACILITY_VERIFY_FAILED") return "FALSE_SUCCESS";
-  if (rootErrorCode === "FACILITY_SLOT_INVALID") return "STATE_DIVERGENCE";
-  if (rootErrorCode === "FACILITY_RESERVATION_CORRUPT") return "RESERVATION_CONFLICT";
-  return "SKILL_FAILED";
-}
-
 /** kick 原文的机器可归类摘要（证据字段；不下结论——根因仍看 A/B/C 矩阵）。 */
-export function normalizeKickReason(detail: string | undefined): string {
-  const text = (detail ?? "").toLowerCase();
-  if (text.includes("fml") || text.includes("forge")) return "forge_or_modded_server";
-  if (text.includes("outdated client")) return "outdated_client";
-  if (text.includes("outdated server")) return "outdated_server";
-  if (text.includes("banned")) return "banned";
-  if (text.includes("whitelist") || text.includes("not whitelisted")) return "whitelist";
-  if (text.includes("already connected") || text.includes("logged in from another location")) return "duplicate_session";
-  if (text.includes("captcha") || text.includes("/login") || text.includes("register")) return "auth_plugin_gate";
-  if (text.includes("timeout")) return "timeout";
-  if (text.includes("server full") || text.includes("is full")) return "server_full";
-  return detail === undefined ? "unknown" : "server_kick_unclassified";
-}
-
 /** 服务器文本安全转纯文本：去控制字符/折叠空白/限长（保留原文语义，去传输层噪音）。 */
-export function sanitizeServerText(detail: string | undefined): string {
-  if (detail === undefined) return "";
-  const flattened = detail
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u001f\u007f]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return flattened.slice(0, 2000);
-}
