@@ -92,7 +92,7 @@ describe("bounded world-memory PostgreSQL pool adapter", () => {
     const health = adapter.getHealthStatus();
     expect(health).toEqual({
       status: "degraded",
-      errorCode: "WORLD_MEMORY_POSTGRES_POOL_BACKGROUND_ERROR",
+      errorCode: "POSTGRES_POOL_BACKGROUND_ERROR",
     });
     expect(JSON.stringify(health)).not.toContain("secret");
   });
@@ -102,16 +102,16 @@ describe("bounded world-memory PostgreSQL pool adapter", () => {
     pgMock.connect.mockRejectedValueOnce(new Error("password=connection-secret"));
 
     await expect(adapter.connect()).rejects.toMatchObject({
-      code: "WORLD_MEMORY_POSTGRES_CONNECTION_UNAVAILABLE",
-      message: "PostgreSQL world memory connection is unavailable.",
+      code: "POSTGRES_CONNECTION_UNAVAILABLE",
+      message: "PostgreSQL connection is unavailable.",
     });
 
     const client = await adapter.connect();
     pgMock.client.query.mockRejectedValueOnce(new Error("password=query-secret"));
     await expect(client.query("SELECT $1::integer", [1])).rejects.toEqual(
       expect.objectContaining<PgWorldMemoryPoolAdapterError>({
-        code: "WORLD_MEMORY_POSTGRES_QUERY_FAILED",
-        message: "PostgreSQL world memory query failed.",
+        code: "POSTGRES_QUERY_FAILED",
+        message: "PostgreSQL query failed.",
       }),
     );
     expect(JSON.stringify(adapter.getHealthStatus())).not.toContain("secret");
@@ -122,8 +122,8 @@ describe("bounded world-memory PostgreSQL pool adapter", () => {
     pgMock.query.mockRejectedValueOnce(new Error("host=private.internal"));
 
     await expect(adapter.verifyConnection()).rejects.toMatchObject({
-      code: "WORLD_MEMORY_POSTGRES_READINESS_FAILED",
-      message: "PostgreSQL world memory readiness check failed.",
+      code: "POSTGRES_READINESS_FAILED",
+      message: "PostgreSQL readiness check failed.",
     });
 
     await adapter.close();

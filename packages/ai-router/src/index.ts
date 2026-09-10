@@ -1,5 +1,5 @@
 export { AICircuitBreaker, CircuitOpenError } from './circuit-breaker.js';
-export { discoverModels, resolveModel, ModelSelectionError } from './model-selection.js';
+export { discoverModels, resolveModel, selectAdvertisedModel, ModelSelectionError } from './model-selection.js';
 export { AIRouter } from './router.js';
 export { OllamaAdapter } from './adapters/ollama-adapter.js';
 export { VLLMAdapter } from './adapters/vllm-adapter.js';

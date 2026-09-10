@@ -10,6 +10,41 @@ import {
 } from "node:fs/promises";
 import { createServer } from "node:http";
 import { IncidentStore, occurrenceToMarkdown, buildRepairPrompt, safeExportText, redactSecrets } from "../packages/skills/dist/incidents.js";
+import { selectAdvertisedModel } from "../packages/ai-router/dist/model-selection.js";
+import { studioCreateBotRequestV1Schema } from "../packages/protocol/dist/studio-manager.js";
+
+// ---------------------------------------------------------------------------
+// AI 域模块化（2026-09-10）：发现/选型与供应商档案拆至 scripts/lib/manager-ai-*；
+// 网络分类与业务错误拆至 manager-net / manager-errors。公共名不变（兼容再导出）。
+// ---------------------------------------------------------------------------
+import { loopbackHost, privateHost } from "./lib/manager-net.mjs";
+import { managedError } from "./lib/manager-errors.mjs";
+import {
+  loadLocalAIKeyFile,
+  discoverLocalAI,
+  discoverLocalAIWithRetry,
+  probeAIEndpoint,
+  selectModel,
+} from "./lib/manager-ai-discovery.mjs";
+import {
+  validateAiProviderProfile,
+  maskedAiProviderProfile,
+  aiProbeProvider,
+  rewriteAiEnvironment,
+} from "./lib/manager-ai-providers.mjs";
+
+export {
+  loadLocalAIKeyFile,
+  discoverLocalAI,
+  discoverLocalAIWithRetry,
+  probeAIEndpoint,
+  selectModel,
+  validateAiProviderProfile,
+  maskedAiProviderProfile,
+  aiProbeProvider,
+  rewriteAiEnvironment,
+};
+
 import { GameplayPolicyError, resolveGameplayPolicy } from "../packages/protocol/dist/gameplay-policy.js";
 import {
   evaluateAdaptation,
@@ -44,214 +79,6 @@ import { isIP } from "node:net";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { parseEnv } from "node:util";
-
-const DEFAULT_SPARK_HOSTS = Object.freeze([
-  "192.168.100.2",
-  "dgx-spark.local",
-  "spark.local",
-  "127.0.0.1",
-]);
-// Keep the historical loopback tunnels in the discovery set as well as the
-// directly reachable Spark service ports. The endpoint probe still requires a
-// real /v1/models or /api/tags response before any service is selected.
-const DEFAULT_SPARK_PORTS = Object.freeze([
-  18100,
-  18102,
-  8000,
-  8001,
-  11434,
-  11435,
-]);
-const MAX_REQUEST_BYTES = 16 * 1024;
-const LEGACY_BOT_ID_PATTERN = /^studio-bot-([0-9]{2})$/u;
-const BOT_ID_PATTERN = /^(?:studio-bot-[0-9]{2}|[A-Za-z0-9_]{3,16})$/u;
-const USERNAME_PATTERN = /^[A-Za-z0-9_]{3,16}$/u;
-const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$/u;
-const shutdownPreload = `data:text/javascript,${encodeURIComponent(
-  "process.on('message', (message) => { if (message?.type === 'studio.shutdown') process.emit('SIGTERM'); });",
-)}`;
-
-export async function loadLocalAIKeyFile(environment, configRoot) {
-  if (environment.LOCAL_AI_API_KEY?.trim()) return environment;
-  const configuredPath = environment.LOCAL_AI_API_KEY_FILE?.trim();
-  if (!configuredPath) return environment;
-
-  const keyPath = path.isAbsolute(configuredPath)
-    ? configuredPath
-    : path.resolve(configRoot, configuredPath);
-  let values;
-  try {
-    values = parseEnv(await readFile(keyPath, "utf8"));
-  } catch (cause) {
-    const detail = cause?.code === "ENOENT" ? "does not exist" : "could not be read";
-    throw new Error(`Local AI API key file ${detail}.`);
-  }
-  const apiKey = (values.LOCAL_AI_API_KEY ?? values.VLLM_API_KEY ?? "").trim();
-  if (!apiKey || apiKey.length > 4_096) {
-    throw new Error("Local AI API key file does not contain a valid key.");
-  }
-  return { ...environment, LOCAL_AI_API_KEY: apiKey };
-}
-
-export async function discoverLocalAI(environment = process.env) {
-  const checkedAt = new Date().toISOString();
-  // AI_* 是统一新名（本地/云端/中转站），LOCAL_AI_* 为旧名兼容；AI_* 优先。
-  const rawUrl = (environment.AI_BASE_URL ?? environment.LOCAL_AI_HUB_URL)?.trim() ?? "";
-  const preferredModel = (environment.AI_MODEL ?? environment.LOCAL_AI_MODEL)?.trim() ?? "";
-  const apiKey = (environment.AI_API_KEY ?? environment.LOCAL_AI_API_KEY)?.trim() || undefined;
-  const configuredProvider = normalizedProvider(
-    environment.AI_PROVIDER ?? (environment.AI_BASE_URL ? "openai-compatible" : environment.LOCAL_AI_PROVIDER),
-  );
-  if (rawUrl) {
-    const explicit = await probeExplicitEndpoint(
-      rawUrl,
-      configuredProvider,
-      preferredModel,
-      apiKey,
-      "explicit",
-    );
-    return explicit ?? {
-      config: null,
-      status: unavailableAiStatus(
-        "explicit",
-        configuredProvider,
-        safeOrigin(rawUrl),
-        preferredModel || null,
-        checkedAt,
-        "已配置的 Local AI 地址不可用。",
-      ),
-    };
-  }
-
-  if (environment.STUDIO_SPARK_AUTO_DISCOVERY?.trim() === "0") {
-    return {
-      config: null,
-      status: {
-        state: "disabled",
-        source: "disabled",
-        provider: null,
-        baseUrl: null,
-        model: null,
-        models: [],
-        latencyMs: null,
-        lastCheckedAt: checkedAt,
-        message: "Spark 自动发现已关闭。",
-      },
-    };
-  }
-
-  const hosts = discoveryHosts(environment.STUDIO_SPARK_HOSTS);
-  const ports = discoveryPorts(environment.STUDIO_SPARK_PORTS);
-  const candidates = [];
-  for (const host of hosts) {
-    for (const port of ports) {
-      const provider = port === 11434 || port === 11435 ? "ollama" : "vllm";
-      candidates.push({
-        provider,
-        baseUrl: `http://${urlHost(host)}:${port}`,
-      });
-    }
-  }
-
-  const results = await Promise.all(
-    candidates.map(async (candidate) => {
-      const probe = await probeAIEndpoint({ ...candidate, apiKey }, 1_200);
-      return probe ? { candidate, probe } : null;
-    }),
-  );
-  for (const result of results) {
-    if (!result) continue;
-    const selection = selectModel(result.probe.models, preferredModel);
-  if (selection.error) {
-    return {
-      config: null,
-      probe: result.probe,
-      reason: selection.error,
-      status: {
-        state: "unavailable",
-        source: "explicit",
-        provider: result.candidate.provider,
-        baseUrl: result.candidate.baseUrl,
-        model: null,
-        models: selection.models ?? [],
-        latencyMs: result.probe.latencyMs ?? null,
-        lastCheckedAt: new Date().toISOString(),
-        message: selection.error,
-      },
-    };
-  }
-  const model = selection.model;
-    if (!model) continue;
-    return {
-      config: {
-        provider: result.candidate.provider,
-        baseUrl: result.candidate.baseUrl,
-        model,
-      },
-      status: {
-        state: "connected",
-        source: "discovered",
-        provider: result.candidate.provider,
-        baseUrl: result.candidate.baseUrl,
-        model,
-        models: result.probe.models,
-        latencyMs: result.probe.latencyMs,
-        lastCheckedAt: result.probe.checkedAt,
-        message: "已自动发现并连接 DGX Spark 推理服务。",
-      },
-    };
-  }
-
-  return {
-    config: null,
-    status: unavailableAiStatus(
-      "discovered",
-      null,
-      null,
-      preferredModel || null,
-      checkedAt,
-      "未在已批准的 Spark 主机和端口上发现推理服务。",
-    ),
-  };
-}
-
-/**
- * Spark is often brought up a few seconds before or after the desktop
- * launcher. Give the configured/discovered endpoint a bounded startup window
- * so a transient boot race does not permanently disable the Coordinator for
- * the whole Studio process.
- */
-export async function discoverLocalAIWithRetry(
-  environment = process.env,
-  options = {},
-) {
-  const startupWaitMs = boundedDiscoveryWait(
-    options.startupWaitMs ?? environment.STUDIO_SPARK_STARTUP_WAIT_MS,
-    15_000,
-    "STUDIO_SPARK_STARTUP_WAIT_MS",
-  );
-  const retryIntervalMs = boundedDiscoveryWait(
-    options.retryIntervalMs,
-    1_000,
-    "Spark discovery retry interval",
-  );
-  let latest = await discoverLocalAI(environment);
-  if (
-    latest.config ||
-    latest.status.state === "disabled" ||
-    startupWaitMs === 0
-  ) {
-    return latest;
-  }
-
-  const deadline = Date.now() + startupWaitMs;
-  while (Date.now() < deadline) {
-    await delay(Math.min(retryIntervalMs, deadline - Date.now()));
-    latest = await discoverLocalAI(environment);
-    if (latest.config) return latest;
-  }
-  return latest;
-}
 
 export function createLocalBotSlots(masterSecret, count = 16) {
   if (typeof masterSecret !== "string" || masterSecret.length < 32) {
@@ -453,17 +280,6 @@ export class StudioLocalManager {
     };
   }
 
-  async readRequestBody(request) {
-    const chunks = [];
-    let bytes = 0;
-    for await (const chunk of request) {
-      const buffer = Buffer.isBuffer(chunk) ? Buffer.from(chunk) : chunk;
-      bytes += buffer.length;
-      if (bytes > 256 * 1024) throw new Error("body too large");
-      chunks.push(buffer);
-    }
-    return Buffer.concat(chunks).toString("utf8");
-  }
 
   async handleRequest(request, response) {
     response.setHeader("Cache-Control", "no-store");
@@ -811,14 +627,10 @@ export class StudioLocalManager {
   }
 
   async handleIncidentReport(request, response) {
-    // Bot runtime 上报入口；token 已在上面统一校验
-    let body;
-    try {
-      body = JSON.parse(await this.readRequestBody(request));
-    } catch {
-      this.writeError(response, 400, "INVALID_REQUEST", "请求正文不是有效 JSON。");
-      return;
-    }
+    // Bot runtime 上报入口；token 已在上面统一校验。
+    // readJson 抛出的 managedError（超限 413 / 非法 JSON 400）由外层
+    // handleRequest 的 catch 统一转成响应，不再自行吞成 400。
+    const body = await readJson(request);
     // 幂等：reporterEventId 去重（spool 重放不产生重复 occurrence）
     const eventId = typeof body?.reporterEventId === "string" ? body.reporterEventId.slice(0, 64) : null;
     if (eventId) {
@@ -2168,194 +1980,37 @@ function disconnectChild(child) {
   }
 }
 
-async function probeExplicitEndpoint(rawUrl, provider, preferredModel, apiKey, source) {
-  const baseUrl = safeOrigin(rawUrl);
-  if (!baseUrl) return null;
-  const probe = await probeAIEndpoint({ provider, baseUrl, apiKey }, 2_000);
-  if (!probe) return null;
-  const selection = selectModel(probe.models, preferredModel);
-  if (selection.error) {
-    return {
-      config: null,
-      status: {
-        state: "unavailable",
-        source,
-        provider,
-        baseUrl,
-        model: null,
-        models: selection.models ?? [],
-        latencyMs: probe.latencyMs,
-        lastCheckedAt: probe.checkedAt,
-        message: selection.error,
-      },
-    };
-  }
-  const model = selection.model;
-  if (!model) return null;
-  return {
-    config: { provider, baseUrl, model },
-    status: {
-      state: "connected",
-      source,
-      provider,
-      baseUrl,
-      model,
-      models: probe.models,
-      latencyMs: probe.latencyMs,
-      lastCheckedAt: probe.checkedAt,
-      message: "已连接配置的 Local AI 服务。",
-    },
-  };
-}
-
-export async function probeAIEndpoint(candidate, timeoutMs = 1_200) {
-  const startedAt = Date.now();
-  // OpenAI 风格 base 常以 /v1 结尾（直接拼 /v1/models 会变成 /v1/v1）；
-  // GLM 开放平台则是 <base>/models。两种约定都试，第一个成功即用（尽力探测，
-  // 生成链路不依赖它）。
-  const ollama = candidate.provider === "ollama";
-  const candidates = ollama
-    ? ["/api/tags"]
-    : (() => {
-        const base = new URL(candidate.baseUrl);
-        const stripped = base.pathname.replace(/\/+$/u, "").replace(/\/v1$/u, "");
-        const first = `${base.origin}${stripped}/v1/models`;
-        const second = `${base.origin}${base.pathname.replace(/\/+$/u, "")}/models`;
-        return first === second ? [first] : [first, second];
-      })();
-  for (const endpoint of candidates) {
-    const probe = await probeJsonList(
-      endpoint,
-      candidate.apiKey,
-      ollama,
-      timeoutMs,
-    );
-    if (probe) return probe;
-  }
-  return null;
-}
-
-async function probeJsonList(endpoint, apiKey, ollama, timeoutMs) {
-  const startedAt = Date.now();
-  try {
-    const response = await fetch(endpoint, {
-      headers: {
-        Accept: "application/json",
-        ...(apiKey?.trim()
-          ? { Authorization: `Bearer ${apiKey.trim()}` }
-          : {}),
-      },
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (!response.ok) return null;
-    const input = await response.json();
-    const models = ollama
-      ? Array.isArray(input?.models)
-        ? input.models.map((entry) => entry?.name)
-        : []
-      : Array.isArray(input?.data)
-        ? input.data.map((entry) => entry?.id)
-        : [];
-    const validModels = [...new Set(models.filter(
-      (model) => typeof model === "string" && MODEL_PATTERN.test(model),
-    ))].slice(0, 64);
-    if (validModels.length === 0) return null;
-    return {
-      models: validModels,
-      latencyMs: Math.max(0, Date.now() - startedAt),
-      checkedAt: new Date().toISOString(),
-    };
-  } catch {
-    return null;
-  }
-}
-
-function boundedDiscoveryWait(raw, fallback, name) {
-  const value = raw === undefined || raw === "" ? fallback : Number(raw);
-  if (!Number.isSafeInteger(value) || value < 0 || value > 120_000) {
-    throw new Error(`${name} must be between 0 and 120000.`);
-  }
-  return value;
-}
-
-function delay(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-function discoveryHosts(raw) {
-  const values = raw?.trim()
-    ? raw.split(",").map((value) => value.trim()).filter(Boolean)
-    : DEFAULT_SPARK_HOSTS;
-  return [...new Set(values)].filter(approvedDiscoveryHost).slice(0, 16);
-}
-
-function discoveryPorts(raw) {
-  const values = raw?.trim()
-    ? raw.split(",").map((value) => Number(value.trim()))
-    : DEFAULT_SPARK_PORTS;
-  return [...new Set(values)]
-    .filter((port) => Number.isSafeInteger(port) && port >= 1 && port <= 65_535)
-    .slice(0, 16);
-}
-
-function approvedDiscoveryHost(host) {
-  return (
-    loopbackHost(host) ||
-    privateHost(host) ||
-    /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}\.)*local$/iu.test(host)
-  );
-}
 
 function validateCreateBotRequest(input) {
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
-    throw managedError("INVALID_REQUEST", "Bot 创建请求必须是对象。", 400);
+  // 结构与字段类型以 protocol 的 zod schema 为单一权威（与 dashboard 路由
+  // 消费同一 schema），杜绝 TS 侧与 manager 实际执行侧的字段漂移；
+  // manager 仅保留 schema 表达不了的安全闸：地址字符集与网络作用域。
+  const parsed = studioCreateBotRequestV1Schema.safeParse(input);
+  if (!parsed.success) {
+    throw managedError("INVALID_REQUEST", "Bot 创建请求字段无效（协议 schema 校验未通过）。", 400);
   }
-  const allowed = new Set(["schemaVersion", "username", "accountRef", "auth", "purpose", "serverHost",
-    "serverPort", "minecraftVersion", "connectHost", "worldId"]);
-  if (Object.keys(input).some((key) => !allowed.has(key))) {
-    throw managedError("INVALID_REQUEST", "Bot 创建请求包含未知或缺失字段。", 400);
-  }
-  const serverHost = String(input.serverHost ?? "").trim();
-  const minecraftVersion = String(input.minecraftVersion ?? "").trim();
-  const connectHost = input.connectHost !== undefined
-    ? String(input.connectHost).trim()
-    : undefined;
-  const auth = input.auth === undefined ? "offline" : input.auth;
-  if (
-    input.schemaVersion !== "1.0" ||
-    (auth === "offline" && (typeof input.username !== "string" || !USERNAME_PATTERN.test(input.username) || input.accountRef !== undefined)) ||
-    (auth === "online" && (typeof input.accountRef !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u.test(input.accountRef))) ||
-    (input.username !== undefined && (typeof input.username !== "string" || !USERNAME_PATTERN.test(input.username))) ||
-    (input.purpose !== undefined && input.purpose !== "anarchy") ||
-    !serverHost || serverHost.length > 253 || !/^[A-Za-z0-9.:\-]+$/u.test(serverHost) ||
-    (input.worldId !== undefined && (typeof input.worldId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(input.worldId))) ||
-    (input.purpose !== "anarchy" && !loopbackHost(serverHost) && !privateHost(serverHost) && serverHost !== "host.docker.internal") ||
-    !Number.isSafeInteger(input.serverPort) ||
-    input.serverPort < 1 ||
-    input.serverPort > 65_535 ||
-    (minecraftVersion !== "auto" && !/^[0-9]+\.[0-9]+(?:\.[0-9]+)?$/u.test(minecraftVersion)) ||
-    (connectHost !== undefined && (connectHost === "" || connectHost.length > 253 || !/^[A-Za-z0-9.:\-]+$/u.test(connectHost))) ||
-    (auth !== "offline" && auth !== "online")
-  ) {
+  const request = parsed.data;
+  const { serverHost, purpose, connectHost } = request;
+  const hostInvalid = !/^[A-Za-z0-9.:\-]+$/u.test(serverHost) ||
+    (connectHost !== undefined && !/^[A-Za-z0-9.:\-]+$/u.test(connectHost));
+  if (hostInvalid) {
     throw managedError(
       "INVALID_REQUEST",
-      input.purpose === "anarchy"
+      purpose === "anarchy"
         ? "Bot 字段无效；anarchy 真实服必须使用裸公网地址或 IP。"
         : "Bot 字段无效；服务器必须是本机或私有局域网地址。",
       400,
     );
   }
-  return {
-    ...(input.username !== undefined ? { username: input.username } : {}),
-    ...(input.accountRef !== undefined ? { accountRef: input.accountRef } : {}),
-    ...(input.worldId !== undefined ? { worldId: input.worldId } : {}),
-    serverHost,
-    serverPort: input.serverPort,
-    minecraftVersion,
-    auth,
-    ...(input.purpose === "anarchy" ? { purpose: "anarchy" } : {}),
-    ...(connectHost !== undefined ? { connectHost } : {}),
-  };
+  if (
+    purpose !== "anarchy" &&
+    !loopbackHost(serverHost) &&
+    !privateHost(serverHost) &&
+    serverHost !== "host.docker.internal"
+  ) {
+    throw managedError("INVALID_REQUEST", "Bot 字段无效；服务器必须是本机或私有局域网地址。", 400);
+  }
+  return request;
 }
 
 function validatePersistedBot(input, slots) {
@@ -2406,6 +2061,15 @@ export function managedServerProfileId(config) {
   return `server-${createHash("sha256").update(server).digest("hex").slice(0, 32)}`;
 }
 
+// 身份与请求上限常量（原与发现常量同区，拆分后归位于此）。
+const USERNAME_PATTERN = /^[A-Za-z0-9_]{3,16}$/u;
+const shutdownPreload = `data:text/javascript,${encodeURIComponent(
+  "process.on('message', (message) => { if (message?.type === 'studio.shutdown') process.emit('SIGTERM'); });",
+)}`;
+const LEGACY_BOT_ID_PATTERN = /^studio-bot-([0-9]{2})$/u;
+const BOT_ID_PATTERN = /^(?:studio-bot-[0-9]{2}|[A-Za-z0-9_]{3,16})$/u;
+const MAX_REQUEST_BYTES = 256 * 1024;
+
 async function readJson(request) {
   const declared = request.headers["content-length"];  if (declared && (!/^\d+$/u.test(declared) || Number(declared) > MAX_REQUEST_BYTES)) {
     throw managedError("INVALID_REQUEST", "请求正文过大。", 413);
@@ -2439,234 +2103,6 @@ async function atomicWrite(destination, content) {
   }
 }
 
-function normalizedProvider(value) {
-  const provider = value?.trim().toLowerCase();
-  if (provider === "ollama") return "ollama";
-  if (provider === "openai-compatible" || provider === "openai" || provider === "cloud") return "openai-compatible";
-  return "vllm";
-}
-
-// ---------------------------------------------------------------------------
-// AI provider profiles：校验 / 脱敏 / .env.local 重写（纯函数，供单测直接使用）
-// ---------------------------------------------------------------------------
-const AI_PROVIDER_TYPES = new Set(["local-vllm", "local-ollama", "openai-compatible"]);
-const AI_PROFILE_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$/u;
-const LOOPBACK_HOST_PATTERN = /^(localhost|127(?:\.\d{1,3}){3}|\[::1\])$/iu;
-/** 激活时由 Studio 托管的键：重写前整体清除，避免新旧两套（AI_* / LOCAL_AI_*）混用。 */
-const AI_ENV_MANAGED_KEYS = new Set([
-  "AI_PROVIDER", "AI_BASE_URL", "AI_MODEL", "AI_API_KEY", "AI_API_KEY_ENV",
-  "AI_STRUCTURED_OUTPUT", "AI_MAX_OUTPUT_TOKENS", "AI_MAX_ATTEMPTS",
-  "LOCAL_AI_PROVIDER", "LOCAL_AI_HUB_URL", "LOCAL_AI_MODEL", "LOCAL_AI_API_KEY",
-]);
-
-export function validateAiProviderProfile(input, { requireCloudKey = true } = {}) {
-  if (!input || typeof input !== "object") {
-    throw managedError("INVALID_REQUEST", "AI provider 档案格式无效。", 400);
-  }
-  const name = String(input.name ?? "").trim();
-  if (name.length < 1 || name.length > 64 || /[\r\n]/u.test(name)) {
-    throw managedError("INVALID_REQUEST", "AI provider 名称无效（1-64 字符，不含换行）。", 400);
-  }
-  const type = String(input.type ?? "").trim();
-  if (!AI_PROVIDER_TYPES.has(type)) {
-    throw managedError("INVALID_REQUEST", "AI provider 类型必须是 local-vllm / local-ollama / openai-compatible。", 400);
-  }
-  const cloud = type === "openai-compatible";
-  const rawBaseUrl = String(input.baseUrl ?? "").trim();
-  let url;
-  try {
-    url = new URL(rawBaseUrl);
-  } catch {
-    throw managedError("INVALID_REQUEST", "AI provider baseUrl 无效。", 400);
-  }
-  if (!["http:", "https:"].includes(url.protocol) || !url.hostname || url.username || url.password || url.search || url.hash) {
-    throw managedError("INVALID_REQUEST", "baseUrl 必须是显式 HTTP(S) 地址，不带凭据或查询串。", 400);
-  }
-  let baseUrl;
-  if (cloud) {
-    if (url.protocol !== "https:" && !LOOPBACK_HOST_PATTERN.test(url.hostname)) {
-      throw managedError("INVALID_REQUEST", "云端/中转地址必须 HTTPS（本机回环 HTTP 仅用于受控测试）。", 400);
-    }
-    baseUrl = rawBaseUrl.replace(/\/+$/u, "");
-  } else {
-    if (!url.port) throw managedError("INVALID_REQUEST", "本地推理地址必须带显式端口。", 400);
-    if (url.pathname !== "/" && url.pathname !== "") {
-      throw managedError("INVALID_REQUEST", "本地推理地址不能带路径。", 400);
-    }
-    baseUrl = url.origin;
-  }
-  const model = String(input.model ?? "").trim();
-  if (cloud && !AI_PROFILE_MODEL_PATTERN.test(model)) {
-    throw managedError("INVALID_REQUEST", "云端/中转 API 必须显式填写模型 ID（该类端点不依赖模型发现）。", 400);
-  }
-  if (!cloud && model && !AI_PROFILE_MODEL_PATTERN.test(model)) {
-    throw managedError("INVALID_REQUEST", "AI provider 模型 ID 无效。", 400);
-  }
-  const apiKey = String(input.apiKey ?? "").trim();
-  if (cloud && requireCloudKey && !apiKey) {
-    throw managedError("INVALID_REQUEST", "云端/中转 API 必须提供 API Key。", 400);
-  }
-  if (apiKey && (apiKey.length > 4_096 || /[\r\n]/u.test(apiKey))) {
-    throw managedError("INVALID_REQUEST", "API Key 无效（过长或含换行）。", 400);
-  }
-  const structuredOutput = String(input.structuredOutput ?? "none").trim() || "none";
-  if (!["none", "json_object", "json_schema", "tool"].includes(structuredOutput)) {
-    throw managedError("INVALID_REQUEST", "structuredOutput 必须是 none / json_object / json_schema / tool。", 400);
-  }
-  if (!cloud && structuredOutput !== "none") {
-    throw managedError("INVALID_REQUEST", "structuredOutput 仅适用于 openai-compatible 供应商。", 400);
-  }
-  const id = input.id === undefined || input.id === null || String(input.id).trim() === ""
-    ? null
-    : String(input.id).trim();
-  if (id !== null && !/^aip-[0-9a-f]{4,32}$/u.test(id)) {
-    throw managedError("INVALID_REQUEST", "AI provider 档案 ID 无效。", 400);
-  }
-  return {
-    id,
-    name,
-    type,
-    baseUrl,
-    model: model || null,
-    apiKey: apiKey || null,
-    structuredOutput: cloud ? structuredOutput : "none",
-  };
-}
-
-export function maskedAiProviderProfile(profile) {
-  return {
-    id: profile.id,
-    name: profile.name,
-    type: profile.type,
-    baseUrl: profile.baseUrl,
-    model: profile.model,
-    hasApiKey: Boolean(profile.apiKey),
-    structuredOutput: profile.structuredOutput ?? "none",
-    createdAt: profile.createdAt ?? null,
-    updatedAt: profile.updatedAt ?? null,
-  };
-}
-
-export function aiProbeProvider(profileType) {
-  if (profileType === "local-ollama") return "ollama";
-  if (profileType === "openai-compatible") return "openai-compatible";
-  return "vllm";
-}
-
-/** 保留无关行，清掉全部托管键，追加新档案的配置块（util.parseEnv 兼容的双引号转义）。 */
-export function rewriteAiEnvironment(previous, profile) {
-  const kept = previous.split(/\r?\n/u).filter((line) => {
-    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/u);
-    return !match || !AI_ENV_MANAGED_KEYS.has(match[1]);
-  });
-  while (kept.length > 0 && kept[kept.length - 1].trim() === "") kept.pop();
-  const block = [
-    "# --- AI provider: managed by Studio（模型与 API 页激活写入；手改会被下次激活覆盖） ---",
-    ...(profile.type === "openai-compatible"
-      ? [
-          `AI_PROVIDER=${quoteEnvValue("openai-compatible")}`,
-          `AI_BASE_URL=${quoteEnvValue(profile.baseUrl)}`,
-          `AI_MODEL=${quoteEnvValue(profile.model ?? "")}`,
-          ...(profile.apiKey ? [`AI_API_KEY=${quoteEnvValue(profile.apiKey)}`] : []),
-          ...(profile.structuredOutput && profile.structuredOutput !== "none"
-            ? [`AI_STRUCTURED_OUTPUT=${quoteEnvValue(profile.structuredOutput)}`]
-            : []),
-        ]
-      : [
-          `LOCAL_AI_PROVIDER=${quoteEnvValue(profile.type === "local-ollama" ? "ollama" : "vllm")}`,
-          `LOCAL_AI_HUB_URL=${quoteEnvValue(profile.baseUrl)}`,
-          ...(profile.model ? [`LOCAL_AI_MODEL=${quoteEnvValue(profile.model)}`] : []),
-        ]),
-  ];
-  return `${[...kept, ...(kept.length > 0 ? [""] : []), ...block, ""].join("\n")}`;
-}
-
-function quoteEnvValue(value) {
-  return `"${String(value).replace(/\\/gu, "\\\\").replace(/"/gu, '\\"')}"`;
-}
-
-/**
- * 模型选择（fail closed，禁止 fallback models[0]）：
- *  - preferred 明确配置且存在 → 使用之
- *  - preferred 配置但不存在 → MODEL_NOT_AVAILABLE（fail closed）
- *  - 未配置且恰好一个模型 → 自动使用当前模型
- *  - 未配置且多个模型 → MODEL_SELECTION_REQUIRED（要求用户选择）
- *  - 未配置且零个 → MODEL_NOT_AVAILABLE
- * 返回 { model } 或 { error: "MODEL_NOT_AVAILABLE" | "MODEL_SELECTION_REQUIRED", models }。
- */
-function selectModel(models, preferred) {
-  if (preferred) {
-    if (models.includes(preferred)) return { model: preferred };
-    return { error: "MODEL_NOT_AVAILABLE", models };
-  }
-  if (models.length === 1) return { model: models[0] };
-  if (models.length === 0) return { error: "MODEL_NOT_AVAILABLE", models };
-  return { error: "MODEL_SELECTION_REQUIRED", models };
-}
-
-function safeOrigin(value) {
-  try {
-    const url = new URL(value);
-    if (
-      url.protocol !== "http:" &&
-      url.protocol !== "https:"
-    ) return null;
-    if (
-      !url.hostname ||
-      !url.port ||
-      url.username ||
-      url.password ||
-      url.search ||
-      url.hash ||
-      (url.pathname !== "/" && url.pathname !== "")
-    ) return null;
-    return url.origin;
-  } catch {
-    return null;
-  }
-}
-
-function unavailableAiStatus(source, provider, baseUrl, model, checkedAt, message) {
-  return {
-    state: "unavailable",
-    source,
-    provider,
-    baseUrl,
-    model,
-    models: [],
-    latencyMs: null,
-    lastCheckedAt: checkedAt,
-    message,
-  };
-}
-
-function loopbackHost(host) {
-  const normalized = host.toLowerCase();
-  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
-}
-
-function privateHost(host) {
-  const version = isIP(host);
-  if (version === 4) {
-    const octets = host.split(".").map(Number);
-    return (
-      octets[0] === 10 ||
-      (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
-      (octets[0] === 192 && octets[1] === 168) ||
-      (octets[0] === 169 && octets[1] === 254)
-    );
-  }
-  if (version === 6) {
-    const normalized = host.toLowerCase();
-    return normalized.startsWith("fc") || normalized.startsWith("fd") || /^fe[89ab]/u.test(normalized);
-  }
-  return false;
-}
-
-function urlHost(host) {
-  return isIP(host) === 6 ? `[${host}]` : host;
-}
-
 function authorized(header, expected) {
   if (typeof header !== "string" || !header.startsWith("Bearer ")) return false;
   const actual = Buffer.from(header.slice(7), "utf8");
@@ -2685,12 +2121,6 @@ function safeRequestUrl(value) {
   }
 }
 
-function managedError(code, message, status) {
-  const error = new Error(message);
-  error.managerCode = code;
-  error.httpStatus = status;
-  return error;
-}
 
 function managerError(cause) {
   if (

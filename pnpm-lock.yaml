@@ -346,6 +346,25 @@ importers:
 
   packages/cpu-resource-manager: {}
 
+  packages/db-pool:
+    dependencies:
+      pg:
+        specifier: 8.22.0
+        version: 8.22.0
+    devDependencies:
+      '@types/node':
+        specifier: 26.1.1
+        version: 26.1.1
+      '@types/pg':
+        specifier: 8.20.0
+        version: 8.20.0
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+      vitest:
+        specifier: 4.1.10
+        version: 4.1.10(@types/node@26.1.1)(vite@8.1.5(@types/node@26.1.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.12))
+
   packages/domain-management:
     dependencies:
       '@minecraft-studio/asset-policy':
@@ -459,6 +478,9 @@ importers:
 
   packages/task-system:
     dependencies:
+      '@minecraft-studio/db-pool':
+        specifier: workspace:*
+        version: link:../db-pool
       '@minecraft-studio/protocol':
         specifier: workspace:*
         version: link:../protocol
@@ -487,6 +509,9 @@ importers:
 
   packages/world-memory:
     dependencies:
+      '@minecraft-studio/db-pool':
+        specifier: workspace:*
+        version: link:../db-pool
       pg:
         specifier: 8.22.0
         version: 8.22.0

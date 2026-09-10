@@ -136,8 +136,23 @@ for (const log of WOOD_LOG_ITEMS) {
     recipe({ itemName: planks, kind: "craft", yield: 4, inputs: [need(log, 1)] }),
   );
 }
-// stick/crafting_table 使用 oak_planks（Graph 单产出约束下的规范选择）。
-// TODO: Graph 支持多配方产出同一物品后，改为任意木板可合成。
+
+/**
+ * 木板等价类：vanilla 配方里任意树种木板可互换（stick/chest/bed 等）。
+ * 图保持"单物品单产出"约束，配方的输入沿用 oak_planks 规范名；
+ * 等价替换（手里是桦木原木也能规划木棍）由 GoalPlanner 的虚拟库存
+ * 在规划层执行 —— 见 PlanState 的 have/take/ensure。
+ */
+export const PLANK_FAMILY_ITEMS: readonly string[] = Object.freeze(
+  WOOD_LOG_ITEMS.map((log) => log.replace("_log", "_planks")),
+);
+const PLANK_FAMILY_SET = new Set(PLANK_FAMILY_ITEMS);
+export function isPlankFamilyItem(itemName: string): boolean {
+  return PLANK_FAMILY_SET.has(itemName);
+}
+
+// stick/crafting_table 及下游配方使用 oak_planks 规范名（Graph 单产出约束下的
+// 规范选择）；等价类消费见 PLANK_FAMILY_ITEMS。
 woodFamilyRecipes.push(
   recipe({ itemName: "stick", kind: "craft", yield: 4, inputs: [need("oak_planks", 2)] }),
   recipe({ itemName: "crafting_table", kind: "craft", inputs: [need("oak_planks", 4)] }),

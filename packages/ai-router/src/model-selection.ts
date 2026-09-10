@@ -91,6 +91,42 @@ export async function discoverModels(options: DiscoverModelsOptions): Promise<re
 }
 
 /**
+ * 纯选型规则（单点权威；scripts/studio-local-manager.mjs 的发现流程
+ * 也消费它）。刻意不做任何"取第一个"的静默回退：多模型歧义必须
+ * fail closed，由操作员显式配置模型。
+ */
+export type AdvertisedModelSelection = Readonly<
+  | { model: string; selection: "configured" | "single-auto" }
+  | {
+      error:
+        | "AI_CONFIGURED_MODEL_NOT_FOUND"
+        | "AI_MODEL_DISCOVERY_FAILED"
+        | "AI_MODEL_AMBIGUOUS";
+      models: readonly string[];
+    }
+>;
+
+export function selectAdvertisedModel(
+  models: readonly string[],
+  configuredModel: string | null | undefined,
+): AdvertisedModelSelection {
+  const configured = configuredModel?.trim() ?? "";
+  if (configured) {
+    if (!models.includes(configured)) {
+      return { error: "AI_CONFIGURED_MODEL_NOT_FOUND", models };
+    }
+    return { model: configured, selection: "configured" };
+  }
+  if (models.length === 0) {
+    return { error: "AI_MODEL_DISCOVERY_FAILED", models };
+  }
+  if (models.length > 1) {
+    return { error: "AI_MODEL_AMBIGUOUS", models };
+  }
+  return { model: models[0]!, selection: "single-auto" };
+}
+
+/**
  * 按统一规则选择模型。刻意不做任何"取第一个"的静默回退：
  * 多模型歧义必须 fail closed，由操作员显式配置 LOCAL_AI_MODEL。
  */

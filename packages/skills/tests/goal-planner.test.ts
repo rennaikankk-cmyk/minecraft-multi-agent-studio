@@ -454,3 +454,30 @@ describe("GoalPlanner failure reporting", () => {
     });
   });
 });
+
+describe("plank family equivalence", () => {
+  it("plans sticks from a birch-only inventory without oak logs", () => {
+    const steps = planned(plan([{ itemName: "stick", count: 4 }], { birch_log: 2 }));
+    // 缺口谱系选择：手里有桦木原木 → 直接 craft birch_planks，不再要求 oak 链路
+    const birchPlanks = firstIndexOf(steps, "birch_planks");
+    expect(birchPlanks).toBeGreaterThanOrEqual(0);
+    const stick = firstIndexOf(steps, "stick");
+    expect(stick).toBeGreaterThan(birchPlanks);
+    expect(steps.some((step) => step.itemName === "oak_planks")).toBe(false);
+  });
+
+  it("keeps the canonical oak lineage when no logs are in stock", () => {
+    const steps = planned(plan([{ itemName: "stick", count: 4 }], {}));
+    expect(steps.some((step) => step.itemName === "oak_planks")).toBe(true);
+  });
+
+  it("counts spruce planks already in stock toward an oak_planks requirement", () => {
+    const steps = planned(
+      plan([{ itemName: "crafting_table", count: 1 }], { spruce_planks: 4 }),
+    );
+    // 已有 4 云杉木板 → 无需再产出 oak_planks，也无需采集（crafting_table
+    // 本身仍是一条 craft 步骤，工作站按需放置）。
+    expect(steps.some((step) => step.itemName === "oak_planks")).toBe(false);
+    expect(steps.some((step) => step.kind === "mine")).toBe(false);
+  });
+});

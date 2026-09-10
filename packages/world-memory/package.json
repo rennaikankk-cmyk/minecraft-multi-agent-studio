@@ -18,6 +18,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@minecraft-studio/db-pool": "workspace:*",
     "pg": "8.22.0",
     "zod": "4.4.3"
   },

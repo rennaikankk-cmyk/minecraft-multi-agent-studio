@@ -1,5 +1,7 @@
 import {
+  isPlankFamilyItem,
   pickaxeForTier,
+  PLANK_FAMILY_ITEMS,
   ResourceGraph,
   tierRank,
   tierSatisfies,
@@ -204,14 +206,35 @@ class PlanState {
   }
 
   private have(itemName: string): number {
+    // 木板等价类：任意树种木板可互换（vanilla 配方语义）。规划层的虚拟
+    // 库存按整类计数，修复"只有白桦原木的 bot 无法规划木棍"。
+    if (isPlankFamilyItem(itemName)) {
+      return PLANK_FAMILY_ITEMS.reduce(
+        (sum, name) => sum + (this.stock.get(name) ?? 0),
+        0,
+      );
+    }
     return this.stock.get(itemName) ?? 0;
   }
 
   private add(itemName: string, count: number): void {
-    this.stock.set(itemName, this.have(itemName) + count);
+    this.stock.set(itemName, (this.stock.get(itemName) ?? 0) + count);
   }
 
   private take(itemName: string, count: number): void {
+    if (isPlankFamilyItem(itemName)) {
+      // 跨树种扣减（FIFO：先扣已有的具体物种，保持 consumes 记录规范名）。
+      let remaining = count;
+      for (const name of PLANK_FAMILY_ITEMS) {
+        const held = this.stock.get(name) ?? 0;
+        if (held <= 0) continue;
+        const used = Math.min(held, remaining);
+        this.stock.set(name, held - used);
+        remaining -= used;
+        if (remaining <= 0) return;
+      }
+      return;
+    }
     this.stock.set(itemName, Math.max(0, this.have(itemName) - count));
   }
 
@@ -240,6 +263,18 @@ class PlanState {
     }
     const shortfall = count - this.have(itemName);
     if (shortfall <= 0) return;
+
+    // 木板等价类的谱系选择：缺口优先用"手里已有原木"的树种补（无任何原木时
+    // 保持回落 oak 的既有输出稳定性）。
+    if (isPlankFamilyItem(itemName)) {
+      const species = PLANK_FAMILY_ITEMS.find(
+        (name) => (this.stock.get(name.replace("_planks", "_log")) ?? 0) > 0,
+      );
+      if (species !== undefined && species !== itemName) {
+        this.ensure(species, count, forGoal, depth);
+        return;
+      }
+    }
 
     const entry = this.graph.recipeFor(itemName);
     if (entry === null) {
