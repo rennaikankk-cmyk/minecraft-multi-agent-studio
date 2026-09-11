@@ -4129,6 +4129,47 @@ function deterministicSkillDecision(
       reasonCode: "DETERMINISTIC_BLUEPRINT_ROW",
     };
   }
+  if (parsed.kind === "build-portal-frame") {
+    const blueprintVersion = advertisedVersion("build.blueprint");
+    if (blueprintVersion === null) return null;
+    // 确定性门框 cells：4 宽 5 高 = 左右柱各 5 + 顶横档 2 + 底横档 2。
+    // 放置顺序：两柱自下而上（ref=同柱下一块，face up），顶横档接左柱顶
+    // （ref=左邻，face=宽度轴），底横档 ref=下方支撑（塔顶平台）。
+    const w = parsed.direction === "+x" ? { x: 1, y: 0, z: 0 } : { x: 0, y: 0, z: 1 };
+    const cells: Array<{ offset: { x: number; y: number; z: number }; itemName: string; blockClass: "structural"; order: number; referenceOffset: { x: number; y: number; z: number }; face: { x: number; y: number; z: number } }> = [];
+    for (const column of [0, 3]) {
+      for (let y = 0; y < 5; y++) {
+        cells.push({
+          offset: { x: w.x * column, y, z: w.z * column },
+          itemName: "obsidian",
+          blockClass: "structural",
+          order: column === 0 ? y * 8 : 40 + y * 8,
+          referenceOffset: { x: 0, y: -1, z: 0 },
+          face: { x: 0, y: 1, z: 0 },
+        });
+      }
+    }
+    cells.push({ offset: { x: w.x * 1, y: 4, z: w.z * 1 }, itemName: "obsidian", blockClass: "structural", order: 90, referenceOffset: { x: -w.x, y: 0, z: -w.z }, face: w });
+    cells.push({ offset: { x: w.x * 2, y: 4, z: w.z * 2 }, itemName: "obsidian", blockClass: "structural", order: 95, referenceOffset: { x: -w.x, y: 0, z: -w.z }, face: w });
+    cells.push({ offset: { x: w.x * 1, y: 0, z: w.z * 1 }, itemName: "obsidian", blockClass: "structural", order: 100, referenceOffset: { x: 0, y: -1, z: 0 }, face: { x: 0, y: 1, z: 0 } });
+    cells.push({ offset: { x: w.x * 2, y: 0, z: w.z * 2 }, itemName: "obsidian", blockClass: "structural", order: 105, referenceOffset: { x: 0, y: -1, z: 0 }, face: { x: 0, y: 1, z: 0 } });
+    return {
+      action: "invoke_skill",
+      botId: request.botId,
+      taskId: request.taskId,
+      skillId: "build.blueprint",
+      skillVersion: blueprintVersion,
+      input: {
+        blueprint: {
+          anchor: parsed.anchor,
+          dimension,
+          serverProfileId: TRUSTED_SERVER_PROFILE_PLACEHOLDER,
+          cells,
+        },
+      },
+      reasonCode: "DETERMINISTIC_PORTAL_FRAME",
+    };
+  }
   const skillVersion = advertisedVersion("shelter.dig");
   if (skillVersion === null) return null;
   return {

@@ -112,7 +112,7 @@
     },
     {
       "skillId": "inventory.equip-armor",
-      "schemaVersion": "1.0.0",
+      "schemaVersion": "1.1.0",
       "family": "logistics",
       "status": "Partial",
       "maturityLevel": "L3",

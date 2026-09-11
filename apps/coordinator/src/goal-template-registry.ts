@@ -18,7 +18,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
-import { parseBlueprintGoal, type DeterministicGoal } from "./deterministic-goals.js";
+import { parseBlueprintGoal, parsePortalFrameGoal, type DeterministicGoal } from "./deterministic-goals.js";
 
 // ---------------------------------------------------------------------------
 // 解析注册表
@@ -35,6 +35,12 @@ const entries: GoalTemplateEntry[] = [
     // Round 6.5 蓝图行模板原样迁入（J1-large 8/8 的回归主体）。
     templateId: "blueprint-row",
     parse: parseBlueprintGoal,
+  },
+  {
+    // 地狱门框（高空门法）：4 宽 5 高黑曜石门框，锚点=左柱底格。
+    // 与蓝图行同纪律：受控枚举方向，锚点逐字来自 goal，零模型转写。
+    templateId: "portal-frame",
+    parse: parsePortalFrameGoal,
   },
 ];
 

@@ -23,7 +23,7 @@ const invocation = {
   payload: {
     invocationId: "22222222-2222-4222-8222-222222222222",
     skillId: "inventory.equip-armor",
-    skillVersion: "1.0.0",
+    skillVersion: "1.1.0",
     expiresAt: "2026-08-08T10:01:00.000Z",
     input: { serverProfileId: SERVER },
     authorization: {
@@ -121,7 +121,7 @@ describe("decideSlot (re-authored ranking, pure)", () => {
   });
 });
 
-describe("inventory.equip-armor@1.0.0", () => {
+describe("inventory.equip-armor@1.1.0", () => {
   it("equips only slots that improve and reports per-slot telemetry", async () => {
     const adapter = vi.fn(async (request: { operation: string; input: unknown }) => {
       if (request.operation === "armor.snapshot") {
@@ -227,5 +227,49 @@ describe("inventory.equip-armor@1.0.0", () => {
     });
     expect(result.payload.errorCode).toBe("TARGET_SERVER_PROFILE_MISMATCH");
     expect(run.invoke).not.toHaveBeenCalled();
+  });
+});
+
+describe("inventory.equip-armor single-piece input (nether golden boots)", () => {
+  it("equips only the named piece and reports honest four-slot telemetry", async () => {
+    const calls: Array<{ operation: string; input: unknown }> = [];
+    const context = {
+      callCapability: async (_capability: string, operation: string, input: unknown) => {
+        calls.push({ operation, input });
+        if (operation === "armor.snapshot") {
+          return {
+            serverProfileId: "profile-a",
+            slots: [
+              { slot: "head", equipped: null, candidates: [] },
+              { slot: "torso", equipped: null, candidates: [] },
+              { slot: "legs", equipped: null, candidates: [] },
+              { slot: "feet", equipped: null, candidates: ["golden_boots", "iron_boots"] },
+            ],
+          };
+        }
+        return { equipped: true, slot: "feet", itemName: "golden_boots" };
+      },
+    };
+    const state = { online: true, normalActionsAllowed: true, serverProfileId: "profile-a" };
+    const result = await equipArmorSkill.execute(context as never, {
+      serverProfileId: "profile-a",
+      slot: "feet",
+      itemName: "golden_boots",
+    }, state as never);
+    const equipCalls = calls.filter((call) => call.operation === "armor.equip");
+    expect(equipCalls).toHaveLength(1);
+    expect((equipCalls[0]!.input as { itemName: string }).itemName).toBe("golden_boots");
+    expect(result.changedCount).toBe(1);
+    const feet = result.slots.find((slot) => slot.slot === "feet");
+    expect(feet).toMatchObject({ after: "golden_boots", action: "equipped" });
+    // 未指定的槽如实保持不动。
+    expect(result.slots.filter((slot) => slot.action === "kept")).toHaveLength(3);
+  });
+
+  it("rejects slot without itemName (must be given together)", () => {
+    const parsed = equipArmorSkill.inputSchema.safeParse({ serverProfileId: "p", slot: "feet" });
+    expect(parsed.success).toBe(false);
+    expect(equipArmorSkill.inputSchema.safeParse({ serverProfileId: "p", slot: "feet", itemName: "golden_boots" }).success).toBe(true);
+    expect(equipArmorSkill.inputSchema.safeParse({ serverProfileId: "p" }).success).toBe(true);
   });
 });

@@ -73,8 +73,12 @@ export const equipArmorInputSchema = z
     // the ServerProfile it was authorized against, and refuses to run if the bot
     // is connected to a different profile.
     serverProfileId: identifierSchema,
+    // 可选单件指定（如地狱行前金靴 golden_boots+feet）：指定时只装备该件，
+    // 不做四槽自动最优（最优会跳过低防御的金靴——但猪灵只认金不认防御）。
+    slot: armorSlotSchema.optional(),
+    itemName: armorItemNameSchema.optional(),
   })
-  .strict();
+  .strict().refine((v) => (v.slot === undefined) === (v.itemName === undefined), { message: "slot and itemName must be given together" });
 
 export const equipArmorStateSchema = z
   .object({
@@ -178,7 +182,7 @@ export function decideSlot(slot: {
 
 export const equipArmorSkill = defineSkill({
   id: "inventory.equip-armor",
-  version: "1.0.0",
+  version: "1.1.0",
   progressContract: "INVENTORY_CHANGE",
   inputSchema: equipArmorInputSchema,
   outputSchema: equipArmorOutputSchema,
@@ -231,6 +235,49 @@ export const equipArmorSkill = defineSkill({
       throw new Error("TARGET_SERVER_PROFILE_MISMATCH");
     }
 
+    // 单件指定（地狱金靴场景）：只装备该件，其余槽如实保持（不做最优替换——
+    // 最优会跳过低防御金靴，但猪灵只认金装）。输出仍是完整四槽遥测。
+    if (input.slot !== undefined && input.itemName !== undefined) {
+      const snapshot: ArmorSnapshotOutput = armorSnapshotCapabilityOutputSchema.parse(snapshotRaw);
+      const slotState = snapshot.slots.find((entry) => entry.slot === input.slot) ?? {
+        slot: input.slot, equipped: null, candidates: [],
+      };
+      const before = slotState.equipped;
+      let after = before;
+      let action: "equipped" | "kept" | "none-available" = "kept";
+      if (before === input.itemName) {
+        action = "kept";
+      } else if (slotState.candidates.includes(input.itemName) || before !== null) {
+        armorEquipCapabilityOutputSchema.parse(await context.callCapability(
+          "inventory.write",
+          "armor.equip",
+          armorEquipCapabilityInputSchema.parse({
+            serverProfileId: input.serverProfileId,
+            slot: input.slot,
+            itemName: input.itemName,
+          }),
+        ));
+        after = input.itemName;
+        action = "equipped";
+      } else {
+        action = "none-available";
+      }
+      const outcomes = snapshot.slots.map((entry) => ({
+        slot: entry.slot,
+        before: entry.equipped,
+        after: entry.slot === input.slot ? after : entry.equipped,
+        action: entry.slot === input.slot ? action : "kept",
+        beforeScore: armorScore(entry.equipped),
+        afterScore: entry.slot === input.slot ? armorScore(after) : armorScore(entry.equipped),
+      }));
+      return equipArmorOutputSchema.parse({
+        slots: outcomes,
+        changedCount: action === "equipped" ? 1 : 0,
+        capabilityCallCount: 2,
+        totalScoreBefore: snapshot.slots.reduce((sum, entry) => sum + armorScore(entry.equipped), 0),
+        totalScoreAfter: outcomes.reduce((sum, entry) => sum + entry.afterScore, 0),
+      });
+    }
     let capabilityCallCount = 1;
     const outcomes: z.infer<typeof slotOutcomeSchema>[] = [];
 

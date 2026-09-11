@@ -100,6 +100,30 @@ export type ParsedStanceGoal = Readonly<{
  * 模板让蓝图结构由协调器确定性构造——每格坐标、参考面、朝向全部来自受控语法，
  * 与 movement/scan 模板同一纪律：物品名只接受 registry 命名，数量小整数有界。
  */
+/** 地狱门框模板（高空门法，D2 注册表条目）：4 宽 5 高黑曜石门框。 */
+export type ParsedPortalFrameGoal = Readonly<{
+  kind: "build-portal-frame";
+  anchor: { x: number; y: number; z: number };
+  /** 门框宽度轴：+x = 门沿 x 展开（面朝 z）；+z 同理。 */
+  direction: "+x" | "+z";
+}>;
+
+/** 模板："地狱门框：锚点 x={ax} y={ay} z={az}，朝 {+x|+z}"（锚点=左柱底格）。 */
+export function parsePortalFrameGoal(operatorGoal: string): ParsedPortalFrameGoal | null {
+  if (!/地狱门框/.test(operatorGoal)) return null;
+  const anchorMatch = /锚点\s*x\s*[:=]?\s*(-?\d+)\s*y\s*[:=]?\s*(-?\d+)\s*z\s*[:=]?\s*(-?\d+)/u.exec(operatorGoal);
+  if (anchorMatch === null) return null;
+  const directionMatch = /朝\s*([+-][xz])/u.exec(operatorGoal);
+  if (directionMatch === null) return null;
+  const direction = directionMatch[1]!;
+  if (direction !== "+x" && direction !== "+z") return null;
+  return {
+    kind: "build-portal-frame",
+    anchor: { x: Number(anchorMatch[1]!), y: Number(anchorMatch[2]!), z: Number(anchorMatch[3]!) },
+    direction,
+  };
+}
+
 export type ParsedBlueprintGoal = Readonly<{
   kind: "build-blueprint-row";
   anchor: Readonly<{ x: number; y: number; z: number }>;
@@ -172,6 +196,7 @@ export type DeterministicGoal =
   | ParsedShelterGoal
   | ParsedEquipGoal
   | ParsedStanceGoal
+  | ParsedPortalFrameGoal
   | ParsedBlueprintGoal
   | ParsedBlueprintFileGoal;
 

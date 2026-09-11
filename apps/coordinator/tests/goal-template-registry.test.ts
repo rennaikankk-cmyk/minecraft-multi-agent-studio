@@ -76,3 +76,22 @@ describe("FileGoalTemplateProposalStore", () => {
     expect(new FileGoalTemplateProposalStore(dir).list("proposed")).toHaveLength(0);
   });
 });
+
+describe("portal-frame template (nether roof portal trick)", () => {
+  it("parses the canonical goal and dispatches deterministically", () => {
+    const goal = "地狱门框：锚点 x=10 y=122 z=-5，朝 +x";
+    const parsed = parseViaGoalTemplateRegistry(goal);
+    expect(parsed).toMatchObject({
+      kind: "build-portal-frame",
+      anchor: { x: 10, y: 122, z: -5 },
+      direction: "+x",
+    });
+    expect(parseDeterministicGoal(goal, [])).toMatchObject({ kind: "build-portal-frame" });
+  });
+  it("rejects uncontrolled directions", () => {
+    expect(parseViaGoalTemplateRegistry("地狱门框：锚点 x=10 y=122 z=-5，朝 -y")).toBeNull();
+  });
+  it("is registered in the template registry", () => {
+    expect(registeredGoalTemplateIds()).toContain("portal-frame");
+  });
+});

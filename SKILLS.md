@@ -139,10 +139,10 @@
 已过闸门：技能 Schema、授权、范围与前置条件离线单测；Runtime 能力调用与 L0 阻断测试。
 未过闸门：真实隔离服路径场景、跨版本矩阵。
 
-## `inventory.equip-armor@1.0.0`
+## `inventory.equip-armor@1.1.0`
 
 - 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
-- 权限：`inventory.read` + `inventory.write`
+- 权限：`inventory.read` + `inventory.write`；v1.1.0 起支持可选 slot+itemName 单件指定（地狱行前金靴：自动最优会跳过低防御金靴，但猪灵只认金装）——不指定时保持四槽自动最优原语义
 - 风险：R1
 - 适配器操作：`armor.snapshot`（读）/ `armor.equip`（写单件）
 - 超时：8 秒
@@ -534,7 +534,7 @@
 
 - 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
 - 权限：`bot.move`；操作 `movement.pillar-safe`；柱子搭法垂直上升（跳起+脚下放方块）到目标 y。
-- 赶路链第 3 原子：进地狱后上到基岩顶层（y≈127）。头顶 bedrock 是诚实终态（bedrockBlocked=true），缺口换列由上层编排，不在单技能里硬造。
+- 赶路链第 3 原子（通用柱子搭法）：高空门法下在主世界搭塔到 y=122（让门框对准地狱侧基岩层实心区，引擎会把出口门顶上基岩顶）；也可用于任意垂直爬升。头顶 bedrock 是诚实终态（bedrockBlocked=true）。
 - 幂等（已放柱格是事实进展）；材料耗尽 ASCEND_BLOCKS_EXHAUSTED 可恢复。
 
 ## `travel.bridge@1.0.0`

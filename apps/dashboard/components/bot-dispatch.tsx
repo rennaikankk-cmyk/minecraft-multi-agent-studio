@@ -22,9 +22,12 @@ interface NetherStep {
 }
 
 const NETHER_MATERIALS = [
-  { name: "obsidian", count: 20, note: "两道 4×5 门框（去程+回程）" },
+  { name: "obsidian", count: 20, note: "两道 4×5 门框（高空门+回程）" },
   { name: "flint_and_steel", count: 1, note: "点燃两道门（铁锭+燧石可合成）" },
-  { name: "cobblestone（或任意铺路方块）", count: 64, note: "柱子上升+顶面铺路" },
+  { name: "golden_boots", count: 1, note: "猪灵只认金装——进地狱必穿" },
+  { name: "cobblestone（铺路）", count: 64, note: "基岩顶面高速路" },
+  { name: "cobblestone（搭塔）", count: 80, note: "主世界搭塔到 y=122（高空门法）" },
+  { name: "食物", count: 0, note: "全自带——不依赖地狱内获取" },
 ];
 
 export function BotDispatchPanel() {
@@ -60,20 +63,61 @@ export function BotDispatchPanel() {
 
   const coordinateOk = /^-?\d{1,9}$/u.test(x.trim()) && /^-?\d{1,4}$/u.test(y.trim()) && /^-?\d{1,9}$/u.test(z.trim());
 
-  // 地狱赶路分步序列：主世界坐标 → 地狱坐标（/8）。每步一个 goal，逐步推进。
+  // 地狱赶路分步序列（高空门法）：主世界 y≈122 塔顶造门 → 地狱侧对应点在
+  // 基岩层实心区 → 引擎向上搜索把门生成在基岩顶（y≥128）→ 顶面铺路（路径
+  // 不落在下界地形上，不暴露基地）→ 回程门 → 主世界 goto。
   const netherSteps = useMemo<NetherStep[]>(() => {
     const tx = Number(x.trim() || "0");
     const tz = Number(z.trim() || "0");
+    const ty = y.trim() || "64";
     const nx = Math.floor(tx / 8);
     const nz = Math.floor(tz / 8);
     return [
-      { label: "① 备料", goal: null, note: `核对材料：${NETHER_MATERIALS.map((m) => `${m.name}×${m.count}`).join("、")}（背包自备；缺项先采集/合成）` },
-      { label: "② 造出发门框", goal: `施工蓝图行：锚点 x=0 y=64 z=0，沿 +x 放置 10 个 obsidian，每批最多 10 格，从第 0 格开始`, note: "锚点请按 bot 当前位置改写（10 格门框竖排后手动补成型；或直接人工摆门后跳过此步）" },
-      { label: "③ 点燃", goal: `用打火石点燃坐标 x=0 y=64 z=0 的地狱门内格`, note: "goal 里的门内坐标按实际门框填写" },
-      { label: "④ 穿门进地狱", goal: `走进坐标 x=0 y=64 z=0 的地狱门并确认到达 minecraft:the_nether`, note: "同上，坐标按实际门填写" },
-      { label: "⑤ 上升到顶层", goal: `在 minecraft:the_nether 用 cobblestone 搭柱上升到 y=126`, note: "travel.ascend（基岩阻塞会如实报告，需换列重试）" },
-      { label: "⑥ 顶层铺路赶路", goal: `在 minecraft:the_nether 顶面用 cobblestone 向 x=${nx} z=${nz} 搭路前进最多 128 格`, note: "travel.bridge（主世界目标/8 = 地狱坐标；距离>128 分多次）" },
-      { label: "⑦ 造返回门+回家", goal: null, note: `重复②③④（门框 10 块+点燃+穿门）后，goal：移动到坐标 x=${tx} y=${y.trim() || 64} z=${tz}`, note2: "" },
+      {
+        label: "① 备料+行规",
+        goal: null,
+        note: `材料：obsidian×20（两道门）、flint_and_steel、铺路方块×64、搭塔方块（约 122−当前y 格 cobblestone）、golden_boots、食物自备。行规常识：进地狱必须穿金靴（猪灵只认金装）；不打猪灵/僵尸猪灵（僵尸猪灵群体仇恨）；不在猪灵面前开箱或挖金矿；食物全自带（不依赖地狱内获取）。`,
+      },
+      {
+        label: "② 穿金靴",
+        goal: "穿上 golden_boots 护甲（feet 槽）",
+        note: "inventory.equip-armor 指定单件（v1.1.0）——自动最优会跳过低防御金靴，所以显式指定。",
+      },
+      {
+        label: "③ 搭塔上 y=122",
+        goal: `在 minecraft:overworld 用 cobblestone 搭柱上升到 y=122`,
+        note: "travel.ascend 柱子搭法。y=122 让门框落在地狱侧基岩层区间（123-127 实心），引擎找不到落点会把门顶上基岩顶。",
+      },
+      {
+        label: "④ 塔顶造门框",
+        goal: `地狱门框：锚点 x=（塔顶旁一格） y=122 z=（塔顶旁一格），朝 +x`,
+        note: "确定性模板（零模型转写，10 格黑曜门框）。锚点=塔顶平台上左柱底格位置，提交前按 bot 实际塔顶坐标改写。",
+      },
+      {
+        label: "⑤ 点燃",
+        goal: `用打火石点燃坐标 x=（门内） y=123 z=（门内） 的地狱门`,
+        note: "travel.portal-ignite；门内格=锚点 x+1、y+1（点燃读回 nether_portal 才算成）。",
+      },
+      {
+        label: "⑥ 穿门上基岩顶",
+        goal: `走进坐标 x=（门内） y=123 z=（门内） 的地狱门并确认到达 minecraft:the_nether`,
+        note: "travel.portal-use。引擎在高空门法下把出口门生成在基岩顶（y≥128）——完成后核对 bot 落点 y>127；若落在下层说明门高度不够，回③加高塔重试。",
+      },
+      {
+        label: "⑦ 顶面铺路赶路",
+        goal: `在 minecraft:the_nether 顶面用 cobblestone 向 x=${nx} z=${nz} 搭路前进最多 128 格`,
+        note: `travel.bridge sneak 防坠。地狱目标=主世界÷8（x=${nx} z=${nz}）；单次上限 128 格，远距离分多次执行。顶面赶路不留地面痕迹。`,
+      },
+      {
+        label: "⑧ 回程门",
+        goal: null,
+        note: `在顶面目标点重复③④⑤（平台不需要，直接门框模板锚点取 y=128 地面）→点燃→穿回主世界。`,
+      },
+      {
+        label: "⑨ 回主世界目标",
+        goal: `移动到坐标 x=${tx} y=${ty} z=${tz}`,
+        note: "确定性移动模板收尾。",
+      },
     ] as NetherStep[];
   }, [x, y, z]);
 
