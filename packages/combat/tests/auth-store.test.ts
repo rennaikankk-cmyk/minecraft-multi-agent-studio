@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { existsSync, mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -11,6 +11,14 @@ import {
   attachServerAuth,
   type ServerAuthConfig,
 } from "../src/server-auth.js";
+
+/**
+ * F-C1 之后，凭据落盘要走真实权限收紧 + 回读校验；Windows 上这一步必须启动
+ * PowerShell 收紧并复核 ACL（约 1s/次，见 win-acl-restrict.ps1）。这些用例原本
+ * 按「纯文件写入」的耗时设 5s 默认超时，改造后需要显式放宽——放宽的是测试
+ * 超时，不是安全校验。
+ */
+const PERSIST_TIMEOUT_MS = 30_000;
 
 let tempDir: string;
 
@@ -46,7 +54,7 @@ describe("AuthCredentialStore", () => {
       expect(new AuthCredentialStore(botId, tempDir).find("example.test", 25565)?.password).toBe(`fixture-${botId}`);
       expect(new AuthCredentialStore(botId, tempDir).find("example.test", 25566)).toBeNull();
     }
-  });
+  }, PERSIST_TIMEOUT_MS);
 
   it("generates a password on first use and persists after registration", () => {
     const store = new AuthCredentialStore("studio-bot-01", tempDir);
@@ -62,7 +70,7 @@ describe("AuthCredentialStore", () => {
     const second = store.getOrCreate("example.com", 25565);
     expect(second.isNew).toBe(false);
     expect(second.password).toBe(first.password);
-  });
+  }, PERSIST_TIMEOUT_MS);
 
   it("isolates credentials per server (same bot, different servers)", () => {
     const store = new AuthCredentialStore("studio-bot-01", tempDir);
@@ -70,21 +78,21 @@ describe("AuthCredentialStore", () => {
     store.persist("server-b.com", 25565, "passB");
     expect(store.find("server-a.com", 25565)?.password).toBe("passA");
     expect(store.find("server-b.com", 25565)?.password).toBe("passB");
-  });
+  }, PERSIST_TIMEOUT_MS);
 
   it("survives store recreation (file persistence)", () => {
     const store1 = new AuthCredentialStore("studio-bot-01", tempDir);
     store1.persist("example.com", 25565, "persisted-pw");
     const store2 = new AuthCredentialStore("studio-bot-01", tempDir);
     expect(store2.find("example.com", 25565)?.password).toBe("persisted-pw");
-  });
+  }, PERSIST_TIMEOUT_MS);
 
   it("forget removes the credential", () => {
     const store = new AuthCredentialStore("studio-bot-01", tempDir);
     store.persist("example.com", 25565, "to-delete");
     store.forget("example.com", 25565);
     expect(store.find("example.com", 25565)).toBeNull();
-  });
+  }, PERSIST_TIMEOUT_MS);
 
   it("writes the credential file with tight permissions", () => {
     const store = new AuthCredentialStore("studio-bot-01", tempDir);
@@ -94,7 +102,12 @@ describe("AuthCredentialStore", () => {
     const raw = JSON.parse(readFileSync(file, "utf8"));
     expect(raw.schemaVersion).toBe("1.0");
     expect(raw.credentials[0].password).toBe("secret");
-  });
+    // F-C1：真实权限收紧（POSIX 回读权限位；Windows 走 ACL，见
+    // tests/auth-store-at-rest.test.ts 的 ACL 快照断言）
+    if (process.platform !== "win32") {
+      expect(statSync(file).mode & 0o077).toBe(0);
+    }
+  }, PERSIST_TIMEOUT_MS);
 });
 
 describe("generatePassword", () => {
@@ -136,7 +149,7 @@ describe("attachServerAuth with store (full-auto flow)", () => {
     bot.emit("message", "Successfully registered!");
     // Password persisted
     expect(store.find("example.com", 25565)?.password).toBe(password);
-  });
+  }, PERSIST_TIMEOUT_MS);
 
   it("logs in with the stored password on the next join", () => {
     const bot = fakeBot();
@@ -145,7 +158,7 @@ describe("attachServerAuth with store (full-auto flow)", () => {
     attachServerAuth(bot as never, storeConfig(store));
     bot.emit("message", "Welcome back! /login <password>");
     expect(bot.chat).toHaveBeenCalledWith("/login known-password");
-  });
+  }, PERSIST_TIMEOUT_MS);
 
   it("forgets the stored credential on wrong password (desync recovery)", () => {
     const bot = fakeBot();
@@ -156,5 +169,5 @@ describe("attachServerAuth with store (full-auto flow)", () => {
     bot.emit("message", "Wrong password!");
     // Stored credential deleted so next join can re-register
     expect(store.find("example.com", 25565)).toBeNull();
-  });
+  }, PERSIST_TIMEOUT_MS);
 });
