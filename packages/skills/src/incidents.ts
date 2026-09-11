@@ -115,6 +115,19 @@ export const FAILURE_CODES = [
   "FLUID_SCOOP_NOT_CONFIRMED",
   "FLUID_TARGET_NOT_SOURCE",
   "BREED_FOOD_INCOMPATIBLE",
+  "PORTAL_IGNITE_NO_FLINT",
+  "PORTAL_IGNITE_FRAME_INVALID",
+  "PORTAL_IGNITE_NOT_CONFIRMED",
+  "PORTAL_ENTER_FAILED",
+  "PORTAL_TRANSPORT_TIMEOUT",
+  "ASCEND_BLOCKS_EXHAUSTED",
+  "ASCEND_JUMP_FAILED",
+  "ASCEND_TARGET_BELOW",
+  "ASCEND_TRANSIENT",
+  "BRIDGE_BLOCKS_EXHAUSTED",
+  "BRIDGE_PATH_BLOCKED",
+  "BRIDGE_FELL",
+  "BRIDGE_TRANSIENT",
   "ENTITY_INTERACT_NOT_SETTLED",
   "ENTITY_OUT_OF_REACH",
   "ENTITY_NOT_FOUND",
@@ -473,10 +486,23 @@ export function classifyIncident(input: ClassifyInput): Classification {
     case "INVENTORY_COUNT_UNKNOWN":
     case "FLUID_BUCKET_MISSING":
     case "FLUID_TARGET_NOT_SOURCE":
+    case "PORTAL_IGNITE_NO_FLINT":
+    case "PORTAL_IGNITE_FRAME_INVALID":
+    case "ASCEND_BLOCKS_EXHAUSTED":
+    case "ASCEND_TARGET_BELOW":
+    case "BRIDGE_BLOCKS_EXHAUSTED":
     case "BREED_FOOD_INCOMPATIBLE":
     case "ENTITY_INTERACT_NOT_SETTLED":
       matched.push(`failureCode=${input.failureCode}`);
       return { suspectedLayer: "WORLD_STATE", ruleId: "R-PRECOND-WORLD-1", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "medium", matchedEvidence: matched };
+    case "PORTAL_IGNITE_NOT_CONFIRMED":
+    case "PORTAL_ENTER_FAILED":
+    case "PORTAL_TRANSPORT_TIMEOUT":
+    case "ASCEND_JUMP_FAILED":
+    case "ASCEND_TRANSIENT":
+    case "BRIDGE_PATH_BLOCKED":
+    case "BRIDGE_FELL":
+    case "BRIDGE_TRANSIENT":
     case "RETREAT_IN_PROGRESS":
       matched.push(`failureCode=${input.failureCode}`);
       return { suspectedLayer: "RUNTIME", ruleId: "R-PRECOND-SAFETY-1", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "medium", matchedEvidence: matched };

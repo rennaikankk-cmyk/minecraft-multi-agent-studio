@@ -318,6 +318,13 @@ export {
   builtinSkillStatusCatalog,
 } from "./builtin/catalog.js";
 export {
+  portalIgniteSkill, portalUseSkill, ascendSkill, bridgeSkill,
+  portalIgniteInputSchema, portalIgniteOutputSchema,
+  portalUseInputSchema, portalUseOutputSchema,
+  ascendInputSchema, ascendOutputSchema,
+  bridgeInputSchema, bridgeOutputSchema,
+} from "./builtin/nether-travel.js";
+export {
   buildSkillStatusCatalog,
   deriveSkillStatus,
   evidenceIssuesFor,

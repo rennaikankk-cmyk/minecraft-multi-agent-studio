@@ -49,6 +49,18 @@ export const releaseEvidenceSchema = z.discriminatedUnion("kind", [
     atMs: z.number().int().nonnegative(),
   }).strict(),
   z.object({
+    /** 真实服执行信号（无隔离服形态）：成功 invocation 的服务器侧验证。 */
+    kind: z.literal("live-run"),
+    serverProfileId: z.string().min(1).max(128),
+    passed: z.boolean(),
+    checks: z.array(z.object({
+      label: z.string().min(1).max(128),
+      passed: z.boolean(),
+    }).strict()).max(64),
+    failures: z.array(z.string().max(300)).max(32),
+    atMs: z.number().int().nonnegative(),
+  }).strict(),
+  z.object({
     kind: z.literal("operator-decision"),
     operator: z.string().min(1).max(128),
     decision: z.enum(["promote-canary", "promote-active", "revoke"]),
@@ -96,9 +108,16 @@ export class SkillReleaseError extends Error {
 export class SkillReleasePipeline {
   private readonly records = new Map<string, SkillReleaseRecord>();
   private readonly now: () => number;
+  /**
+   * sandbox_auto 档（STUDIO_SKILL_DEV_MODE=sandbox_auto 时 coordinator 注入
+   * true）：验收通过后自动连升到 canary（真实服在用即灰度），active 仍留
+   * operator。默认 false：verified 停车、canary/active 都人审。
+   */
+  private readonly autoPromoteToCanary: boolean;
 
-  constructor(options: { now?: () => number } = {}) {
+  constructor(options: { now?: () => number; autoPromoteToCanary?: boolean } = {}) {
     this.now = options.now ?? (() => Date.now());
+    this.autoPromoteToCanary = options.autoPromoteToCanary ?? false;
   }
 
   /** 管线入口：gap bundle 导出即建 draft。 */
@@ -137,11 +156,37 @@ export class SkillReleasePipeline {
     const record = this.require(releaseId);
     const atMs = this.now();
     const run = releaseEvidenceSchema.parse({ ...evidence, kind: "fixture-run", atMs }) as Extract<ReleaseEvidence, { kind: "fixture-run" }>;
+    return this.applyVerificationRun(record, run);
+  }
+
+  /** 无隔离服形态：真实服执行信号同样可推进 verified（用户显式开通的通道）。 */
+  recordLiveRun(releaseId: string, evidence: Omit<Extract<ReleaseEvidence, { kind: "live-run" }>, "kind" | "atMs">): SkillReleaseRecord {
+    const record = this.require(releaseId);
+    const atMs = this.now();
+    const run = releaseEvidenceSchema.parse({ ...evidence, kind: "live-run", atMs }) as Extract<ReleaseEvidence, { kind: "live-run" }>;
+    return this.applyVerificationRun(record, run);
+  }
+
+  private applyVerificationRun(
+    record: SkillReleaseRecord,
+    run: Extract<ReleaseEvidence, { kind: "fixture-run" }> | Extract<ReleaseEvidence, { kind: "live-run" }>,
+  ): SkillReleaseRecord {
     const updated = this.appendEvidence(record, run);
-    this.records.set(releaseId, updated);
+    this.records.set(record.releaseId, updated);
     if (record.status !== "sandboxed") return updated; // 非验收期证据只记录
     if (!run.passed) return updated; // 失败的 run 保留证据但不推进
-    return this.transition(releaseId, "verified");
+    const verified = this.transition(record.releaseId, "verified");
+    // sandbox_auto：验收通过自动连升 canary（在真实服使用即灰度）。
+    if (this.autoPromoteToCanary && verified.status === "verified") {
+      return this.transitionWithEvidence(record.releaseId, "canary", releaseEvidenceSchema.parse({
+        kind: "operator-decision",
+        operator: "sandbox-auto",
+        decision: "promote-canary",
+        note: "auto-promoted by STUDIO_SKILL_DEV_MODE=sandbox_auto after a passing verification run",
+        atMs: this.now(),
+      }));
+    }
+    return verified;
   }
 
   /** verified→canary→active：每步都必须有 operator-decision 证据。 */
@@ -181,9 +226,10 @@ export class SkillReleasePipeline {
       throw new SkillReleaseError("RELEASE_OPERATOR_APPROVAL_REQUIRED");
     }
     if (to === "verified") {
-      const hasPassingFixtureRun = record.evidence.some((item) => item.kind === "fixture-run" && item.passed)
-        || (evidence?.kind === "fixture-run" && evidence.passed);
-      if (!hasPassingFixtureRun) throw new SkillReleaseError("RELEASE_EVIDENCE_REQUIRED");
+      const hasPassingRun = record.evidence.some(
+        (item) => (item.kind === "fixture-run" || item.kind === "live-run") && item.passed,
+      ) || ((evidence?.kind === "fixture-run" && evidence.passed) || (evidence?.kind === "live-run" && evidence.passed));
+      if (!hasPassingRun) throw new SkillReleaseError("RELEASE_EVIDENCE_REQUIRED");
     }
     if (to === "sandboxed") {
       const hasBundle = record.evidence.some((item) => item.kind === "bundle-exported");
@@ -217,11 +263,15 @@ export class SkillReleasePipeline {
 // ---------------------------------------------------------------------------
 
 export class FileSkillReleaseStore {
-  readonly pipeline = new SkillReleasePipeline();
+  readonly pipeline: SkillReleasePipeline;
 
-  constructor(private readonly dir: string) {
+  constructor(dir: string, pipelineOptions: ConstructorParameters<typeof SkillReleasePipeline>[0] = {}) {
+    this.pipeline = new SkillReleasePipeline(pipelineOptions);
+    this.dir = dir;
     this.initialize();
   }
+
+  private readonly dir: string;
 
   /** 便捷入口：draft 建立后立即落盘。 */
   createDraftRelease(input: Parameters<SkillReleasePipeline["createDraftRelease"]>[0]): SkillReleaseRecord {

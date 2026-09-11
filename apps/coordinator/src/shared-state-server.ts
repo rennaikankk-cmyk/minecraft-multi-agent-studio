@@ -56,6 +56,8 @@ export interface SharedStateServerOptions {
     list(): ReadonlyArray<Record<string, unknown>>;
     createDraftFromGap(input: Readonly<{ gapFingerprint: string; skillId?: string }>): Readonly<{ ok: boolean; error?: string; releaseId?: string; implementationPrompt?: string }>;
     operatorDecision(input: Readonly<{ releaseId: string; decision: "promote-canary" | "promote-active" | "revoke"; operator: string; note?: string }>): Readonly<{ ok: boolean; error?: string; status?: string }>;
+    /** 无隔离服形态：手动记录真实服执行信号（自动钩之外的补充通道）。 */
+    recordLiveRun?(input: Readonly<{ releaseId: string; passed: boolean; label?: string }>): Readonly<{ ok: boolean; error?: string; status?: string }>;
   };
   /** 定时落盘间隔；默认 60s；<=0 表示只在 stop 时落盘。 */
   readonly persistIntervalMs?: number;
@@ -228,7 +230,7 @@ export class SharedStateServer {
           this.writeJson(response, 503, { ok: false, error: "skill_releases_unavailable" });
           return;
         }
-        const body = await this.readBody(request) as { action?: unknown; gapFingerprint?: unknown; skillId?: unknown; releaseId?: unknown; decision?: unknown; operator?: unknown; note?: unknown };
+        const body = await this.readBody(request) as { action?: unknown; gapFingerprint?: unknown; skillId?: unknown; releaseId?: unknown; decision?: unknown; operator?: unknown; note?: unknown; passed?: unknown; label?: unknown };
         if (body.action === "create-draft") {
           if (typeof body.gapFingerprint !== "string" || !/^[a-f0-9]{16,64}$/u.test(body.gapFingerprint)) {
             this.writeJson(response, 400, { ok: false, error: "invalid_gap_fingerprint" });
@@ -239,6 +241,23 @@ export class SharedStateServer {
             ...(typeof body.skillId === "string" && body.skillId.length > 0 ? { skillId: body.skillId } : {}),
           });
           this.writeJson(response, result.ok ? 201 : 409, result);
+          return;
+        }
+        if (body.action === "record-live-run") {
+          if (typeof body.releaseId !== "string" || typeof body.passed !== "boolean") {
+            this.writeJson(response, 400, { ok: false, error: "invalid_request" });
+            return;
+          }
+          if (!this.options.skillReleases.recordLiveRun) {
+            this.writeJson(response, 501, { ok: false, error: "live_run_unsupported" });
+            return;
+          }
+          const result = this.options.skillReleases.recordLiveRun({
+            releaseId: body.releaseId,
+            passed: body.passed,
+            ...(typeof body.label === "string" ? { label: body.label.slice(0, 128) } : {}),
+          });
+          this.writeJson(response, result.ok ? 200 : 409, result);
           return;
         }
         if (body.action === "operator-decision") {

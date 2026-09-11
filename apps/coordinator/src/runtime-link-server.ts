@@ -83,6 +83,8 @@ export type RuntimeLinkServerOptions = Readonly<{
   maxSessions?: number;
   maxPendingStops?: number;
   maxPendingSkills?: number;
+  /** D3 live 证据钩：每次匹配成功的 skill result 调用（异常由本类兜住）。 */
+  onSkillResult?: (result: SkillExecutionResultV1) => void;
 }>;
 
 export type RuntimeLinkTransportErrorCode =
@@ -964,6 +966,16 @@ export class RuntimeLinkServer implements StopCommandTransport {
     this.pendingSkills.delete(result.payload.invocationId);
     pending.removeAbortListener();
     pending.resolve(result);
+    // D3 live 证据钩（可选）：真实服 skill 执行结果流。消费方自行兜异常。
+    if (this.options.onSkillResult) {
+      try {
+        this.options.onSkillResult(result);
+      } catch (error) {
+        safeLog(this.options.logger, "warn", "coordinator_runtime_link_result_hook_failed", {
+          detail: error instanceof Error ? error.message.slice(0, 200) : String(error),
+        });
+      }
+    }
   }
 
   private matchesSession(

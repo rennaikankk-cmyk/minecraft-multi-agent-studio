@@ -218,6 +218,22 @@ const EVIDENCE: Readonly<Record<string, SkillEvidence>> = Object.freeze({
     offlineTests: true, runtimeWiring: true,
     isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
   },
+  "travel.portal-ignite": {
+    offlineTests: true, runtimeWiring: true,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
+  "travel.portal-use": {
+    offlineTests: true, runtimeWiring: true,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
+  "travel.ascend": {
+    offlineTests: true, runtimeWiring: true,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
+  "travel.bridge": {
+    offlineTests: true, runtimeWiring: true,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
   "animal.breed": {
     offlineTests: true, runtimeWiring: true,
     isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],

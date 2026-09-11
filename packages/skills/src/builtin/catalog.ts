@@ -12,6 +12,7 @@ import { scanBlocksSkill } from "./scan-blocks.js";
 import { secureFoodSkill } from "./secure-food.js";
 import { animalBreedSkill } from "./animal-breed.js";
 import { fluidPlaceSkill } from "./fluid-place.js";
+import { portalIgniteSkill, portalUseSkill, ascendSkill, bridgeSkill } from "./nether-travel.js";
 import { inventoryDropSkill } from "./inventory-drop.js";
 import { smeltItemSkill } from "./smelt-item.js";
 import { travelRouteSkill } from "./travel-route.js";
@@ -57,6 +58,10 @@ export const builtinSkills: readonly AnySkillDefinition[] = Object.freeze([
   secureFoodSkill,
   animalBreedSkill,
   fluidPlaceSkill,
+  portalIgniteSkill,
+  portalUseSkill,
+  ascendSkill,
+  bridgeSkill,
   inventoryDropSkill,
   tradeVillagerSkill,
   mineBranchSkill,

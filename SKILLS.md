@@ -26,7 +26,7 @@
 - 自相矛盾的证据组合**拒绝装载**，例如"真实服跑过但运行时没接线"。
 - 只有四道闸全绿才允许对外称"已验证"（`evidenceSupportsVerifiedClaim`）。
 
-当前注册表包含 35 个技能；新增 Baritone 对应能力保持 **Partial**，仍缺 `isolated-server-scenarios` 与 `cross-version-matrix` 两道环境闸。`stock.levels` 保持 **Experimental**，证据以 `skill-status.ts` 与场景账本为准。
+当前注册表包含 39 个技能；新增 Baritone 对应能力保持 **Partial**，仍缺 `isolated-server-scenarios` 与 `cross-version-matrix` 两道环境闸。`stock.levels` 保持 **Experimental**，证据以 `skill-status.ts` 与场景账本为准。
 真实隔离服六类场景与 1.21.8 跨版本矩阵一次没跑过。这与编译产物里的
 `verification=unverified` 是同一个事实的两种表述（AGENTS.md §8：无隔离测试服时不得声称联机测试通过）。
 
@@ -47,7 +47,7 @@
 
 - Skill ID 后的 SemVer 表示技能输入、输出和行为契约，不表示 Minecraft 服务器版本。
 - 每个 Skill 另有有序 `compatibility.variants`。Runtime 只使用连接后真实协商出的版本/协议，以及当前 registry 的 feature、物品、方块、实体和显式服务端能力探针解析变体；不以 `minVersion/maxVersion` 一刀切。
-- 当前目录中的 35 个 Skill 声明能力变体；只有证据中的 `runtime-wiring=true` 条目可由 Runtime 执行，其余条目保持 `Experimental`。实际装备、目标资源和世界观测仍须经适配器校验；`verification=unverified` 不代表实机已验证。
+- 当前目录中的 39 个 Skill 声明能力变体；只有证据中的 `runtime-wiring=true` 条目可由 Runtime 执行，其余条目保持 `Experimental`。实际装备、目标资源和世界观测仍须经适配器校验；`verification=unverified` 不代表实机已验证。
 - 新版本特色 Skill 必须声明它实际依赖的 feature/资源；如果还依赖服务器插件、数据包或规则，则必须等待显式探针。能力为 `unknown` 时 fail-closed，不从版本号猜测。
 - `collect.block`、`craft.item`、`world.place-block` 和 `container.transfer` 当前仍接收目标版本 registry 的原生资源名。兼容变体可以表达旧/新 ID 的替代顺序，但规划器使用的语义资源别名尚未接入。
 
@@ -515,6 +515,34 @@
 - 权限：`world.interact`；操作 `fluid.place-safe`；桶倾倒（water_bucket/lava_bucket → 参照面邻格）或吸取（空桶 → 液体源方块）。
 - 灭火自救、刷石机岩浆补给、清理误放流体；farm.sustain 的供水原语开放为原子能力。放置/吸取后读回方块验证。
 - 倾倒非幂等（重复倒 = 多桶消耗 + 流体扩散）；吸取只认 source（流动水不可吸，FLUID_TARGET_NOT_SOURCE）。
+
+## `travel.portal-ignite@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`world.interact`；操作 `portal.ignite-safe`；手持 flint_and_steel 右键门框底横档点燃地狱门。
+- 地狱顶层赶路链第 1 原子（anarchy 1:8 距离比高速移动）。门框由 build.blueprint（10 格黑曜石）建造、打火石由 craft.item 合成——本技能只管"点"。
+- 点燃后读回门内格为 nether_portal 才算成功（PORTAL_IGNITE_NOT_CONFIRMED 防伪）；门框/打火石缺失是前置失败不入 incident 噪音。
+
+## `travel.portal-use@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`bot.move`；操作 `portal.use-safe`；走进门内格并轮询 bot.game.dimension 直到等于期望维度（服务器权威传送）。
+- 赶路链第 2 原子。15s 传送超时诚实失败（PORTAL_TRANSPORT_TIMEOUT）；成功输出新维度与落点坐标。
+- 站立等待期间可被 L0 打断（SKILL_CANCELLED 语义不变）。
+
+## `travel.ascend@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`bot.move`；操作 `movement.pillar-safe`；柱子搭法垂直上升（跳起+脚下放方块）到目标 y。
+- 赶路链第 3 原子：进地狱后上到基岩顶层（y≈127）。头顶 bedrock 是诚实终态（bedrockBlocked=true），缺口换列由上层编排，不在单技能里硬造。
+- 幂等（已放柱格是事实进展）；材料耗尽 ASCEND_BLOCKS_EXHAUSTED 可恢复。
+
+## `travel.bridge@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`bot.move`；操作 `movement.bridge-safe`；sneak 逐格搭路前进（脚下支撑块的行进方向面放一块+前进一步）。
+- 赶路链第 4 原子：基岩顶面铺高速路。落差>2 判 BRIDGE_FELL（防坠保护）；前方阻挡 BRIDGE_PATH_BLOCKED 交上层改道。
+- 幂等（已铺格子是事实进展）；每 8 步复核材料。
 
 ## `animal.breed@1.0.0`
 

@@ -33,7 +33,7 @@ import type {
   L0SafetyAction,
   L0SafetyActionResult,
 } from "@minecraft-studio/safety";
-import { armorEquipCapabilityInputSchema, armorEquipCapabilityOutputSchema, armorSnapshotCapabilityInputSchema, armorSnapshotCapabilityOutputSchema, ACTION_FAMILIES, collectBlockCapabilityInputSchema, collectBlockCapabilityOutputSchema, containerTransferCapabilityInputSchema, containerTransferCapabilityOutputSchema, craftItemCapabilityInputSchema, craftItemCapabilityOutputSchema, inventorySnapshotCapabilityInputSchema, inventorySnapshotCapabilityOutputSchema, placeBlockCapabilityInputSchema, placeBlockCapabilityOutputSchema, smeltItemCapabilityInputSchema, smeltItemCapabilityOutputSchema, MOVEMENT_PRIORITIES, MovementController, ServerBehaviorObserver, farmMaintainInputSchema, farmMaintainOutputSchema, farmSustainInputSchema, farmSustainOutputSchema, foodFarmLayout, foodFarmMaintenance, cropRules, navigationGoalInputSchema, navigationGoalOutputSchema, followEntityInputSchema, followEntityOutputSchema, getToBlockInputSchema, getToBlockOutputSchema, exploreInputSchema, exploreOutputSchema, clearAreaInputSchema, clearAreaOutputSchema, elytraInputSchema, elytraOutputSchema, type MovementLease, SAFE_PATH_MAX_DISTANCE, SkillFault, SkillRefusal, ActionLockError, ActionLockManager, type ActionLockKind, resolveMovementProfile, type ServerPolicyLimits, safeMovementGotoCapabilityInputSchema, safeMovementGotoCapabilityOutputSchema, travelRouteCapabilityInputSchema, tradeVillagerCapabilityInputSchema, tradeVillagerCapabilityOutputSchema, ALL_EDIBLE_ITEMS, scanBlocksCapabilityInputSchema, scanBlocksCapabilityOutputSchema, secureFoodCapabilityInputSchema, secureFoodCapabilityOutputSchema, siteObserveCapabilityInputSchema, siteObserveCapabilityOutputSchema, shelterDigCapabilityInputSchema, shelterDigCapabilityOutputSchema, mineBranchCapabilityInputSchema, mineBranchCapabilityOutputSchema, mineVeinCapabilityInputSchema, mineVeinCapabilityOutputSchema, buildBlueprintCapabilityInputSchema, buildBlueprintCapabilityOutputSchema, blueprintSchema, blueprintWorksetObservationSchema, orderBlueprintCells, SharedStateClient, type MaybeAsyncWorkstationRegistryPort, type BehaviorSignalEvent, type FamilyWindowStats, type SkillCapabilityRequest, type SkillCompatibilityEnvironment, type SkillResourceKind, animalBreedCapabilityInputSchema, animalBreedCapabilityOutputSchema, fluidPlaceCapabilityInputSchema, fluidPlaceCapabilityOutputSchema, inventoryDropCapabilityInputSchema, inventoryDropCapabilityOutputSchema } from '@minecraft-studio/skills';
+import { armorEquipCapabilityInputSchema, armorEquipCapabilityOutputSchema, armorSnapshotCapabilityInputSchema, armorSnapshotCapabilityOutputSchema, ACTION_FAMILIES, collectBlockCapabilityInputSchema, collectBlockCapabilityOutputSchema, containerTransferCapabilityInputSchema, containerTransferCapabilityOutputSchema, craftItemCapabilityInputSchema, craftItemCapabilityOutputSchema, inventorySnapshotCapabilityInputSchema, inventorySnapshotCapabilityOutputSchema, placeBlockCapabilityInputSchema, placeBlockCapabilityOutputSchema, smeltItemCapabilityInputSchema, smeltItemCapabilityOutputSchema, MOVEMENT_PRIORITIES, MovementController, ServerBehaviorObserver, farmMaintainInputSchema, farmMaintainOutputSchema, farmSustainInputSchema, farmSustainOutputSchema, foodFarmLayout, foodFarmMaintenance, cropRules, navigationGoalInputSchema, navigationGoalOutputSchema, followEntityInputSchema, followEntityOutputSchema, getToBlockInputSchema, getToBlockOutputSchema, exploreInputSchema, exploreOutputSchema, clearAreaInputSchema, clearAreaOutputSchema, elytraInputSchema, elytraOutputSchema, type MovementLease, SAFE_PATH_MAX_DISTANCE, SkillFault, SkillRefusal, ActionLockError, ActionLockManager, type ActionLockKind, resolveMovementProfile, type ServerPolicyLimits, safeMovementGotoCapabilityInputSchema, safeMovementGotoCapabilityOutputSchema, travelRouteCapabilityInputSchema, tradeVillagerCapabilityInputSchema, tradeVillagerCapabilityOutputSchema, ALL_EDIBLE_ITEMS, scanBlocksCapabilityInputSchema, scanBlocksCapabilityOutputSchema, secureFoodCapabilityInputSchema, secureFoodCapabilityOutputSchema, siteObserveCapabilityInputSchema, siteObserveCapabilityOutputSchema, shelterDigCapabilityInputSchema, shelterDigCapabilityOutputSchema, mineBranchCapabilityInputSchema, mineBranchCapabilityOutputSchema, mineVeinCapabilityInputSchema, mineVeinCapabilityOutputSchema, buildBlueprintCapabilityInputSchema, buildBlueprintCapabilityOutputSchema, blueprintSchema, blueprintWorksetObservationSchema, orderBlueprintCells, SharedStateClient, type MaybeAsyncWorkstationRegistryPort, type BehaviorSignalEvent, type FamilyWindowStats, type SkillCapabilityRequest, type SkillCompatibilityEnvironment, type SkillResourceKind, animalBreedCapabilityInputSchema, animalBreedCapabilityOutputSchema, fluidPlaceCapabilityInputSchema, fluidPlaceCapabilityOutputSchema, inventoryDropCapabilityInputSchema, inventoryDropCapabilityOutputSchema, portalIgniteInputSchema, portalIgniteOutputSchema, portalUseInputSchema, portalUseOutputSchema, ascendInputSchema, ascendOutputSchema, bridgeInputSchema, bridgeOutputSchema } from '@minecraft-studio/skills';
 import { authorizeHarvest, withinWorkArea, workScopeSchema, type WorkPosition, type WorkArea, type WorkstationType } from '@minecraft-studio/asset-policy';
 import type {
   CombatActionAcknowledgement,
@@ -1776,6 +1776,30 @@ export class MineflayerBotClient implements BotClient {
     }
     if (
       request.capability === "world.interact" &&
+      request.operation === "portal.ignite-safe"
+    ) {
+      return this.withActionLocks(request, ["blockInteraction", "inventory"], () => this.invokePortalIgnite(request));
+    }
+    if (
+      request.capability === "bot.move" &&
+      request.operation === "portal.use-safe"
+    ) {
+      return this.withActionLocks(request, ["movement"], () => this.invokePortalUse(request));
+    }
+    if (
+      request.capability === "bot.move" &&
+      request.operation === "movement.pillar-safe"
+    ) {
+      return this.withActionLocks(request, ["movement", "blockInteraction", "inventory"], () => this.invokePillarAscend(request));
+    }
+    if (
+      request.capability === "bot.move" &&
+      request.operation === "movement.bridge-safe"
+    ) {
+      return this.withActionLocks(request, ["movement", "blockInteraction", "inventory"], () => this.invokeBridgeAdvance(request));
+    }
+    if (
+      request.capability === "world.interact" &&
       request.operation === "animal.breed-safe"
     ) {
       return this.withActionLocks(request, ["inventory"], () => this.invokeAnimalBreed(request));
@@ -2287,6 +2311,204 @@ export class MineflayerBotClient implements BotClient {
     });
   }
 
+  /**
+   * travel.portal-ignite：手持打火石点燃门框（地狱顶层赶路链第 1 原子）。
+   * 点燃目标 = 门内空间最底格下方的门框底横档；读回门内格变 nether_portal。
+   */
+  private async invokePortalIgnite(request: SkillCapabilityRequest): Promise<unknown> {
+    const input = portalIgniteInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    this.assertDimensionMatch(input.data.dimension);
+    const signal = this.activeProcessSignal!;
+    const flint = this.bot.inventory.items().find((item) => item.name === "flint_and_steel");
+    if (!flint) throw new SkillFault("PORTAL_IGNITE_NO_FLINT");
+    const { interiorPosition } = input.data;
+    const frameBottom = this.bot.blockAt(new Vec3(interiorPosition.x, interiorPosition.y - 1, interiorPosition.z));
+    if (!frameBottom || frameBottom.name !== "obsidian") {
+      throw new SkillFault("PORTAL_IGNITE_FRAME_INVALID");
+    }
+    await this.bot.equip(flint, "hand");
+    await this.bot.lookAt(new Vec3(interiorPosition.x + 0.5, interiorPosition.y - 1 + 0.5, interiorPosition.z + 0.5), true);
+    this.bot.activateBlock(frameBottom);
+    await new Promise<void>((resolve) => setTimeout(resolve, 500));
+    if (signal.aborted) throw new SkillFault("SKILL_ABORTED");
+    const portalBlock = this.bot.blockAt(new Vec3(interiorPosition.x, interiorPosition.y, interiorPosition.z));
+    if (portalBlock?.name !== "nether_portal") {
+      throw new SkillFault("PORTAL_IGNITE_NOT_CONFIRMED");
+    }
+    return portalIgniteOutputSchema.parse({
+      ignited: true,
+      portalBlockName: "nether_portal",
+      position: interiorPosition,
+    });
+  }
+
+  /**
+   * travel.portal-use：走入门内并等待维度切换（第 2 原子）。
+   * 传送是服务器权威：轮询 bot.game.dimension 直到等于期望维度。
+   */
+  private async invokePortalUse(request: SkillCapabilityRequest): Promise<unknown> {
+    const input = portalUseInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    this.assertDimensionMatch(input.data.dimension);
+    const signal = this.activeProcessSignal!;
+    const { interiorPosition, expectedDimension } = input.data;
+    const movements = configureNavigationMovements(new Movements(this.bot), this.bot, this.anarchyNavigation);
+    this.bot.pathfinder.setMovements(movements);
+    this.bot.pathfinder.tickTimeout = MINE_PATH_TICK_TIMEOUT_MS;
+    const stopOnAbort = () => this.stopPathfinder();
+    signal.addEventListener("abort", stopOnAbort, { once: true });
+    try {
+      if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      await this.bot.pathfinder.goto(new goals.GoalNear(interiorPosition.x, interiorPosition.y, interiorPosition.z, 0));
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+        const current = normalizeDimension(String(this.bot.game?.dimension ?? ""));
+        if (current === expectedDimension) {
+          const position = this.bot.entity?.position;
+          if (!position) throw new SkillFault("PORTAL_ENTER_FAILED");
+          return portalUseOutputSchema.parse({
+            transported: true,
+            dimension: current,
+            position: { x: position.x, y: position.y, z: position.z },
+          });
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 500));
+      }
+      throw new SkillFault("PORTAL_TRANSPORT_TIMEOUT");
+    } catch (error) {
+      if (signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      if (error instanceof SkillFault) throw error;
+      throw new SkillFault("PORTAL_ENTER_FAILED");
+    } finally {
+      signal.removeEventListener("abort", stopOnAbort);
+    }
+  }
+
+  /**
+   * travel.ascend：柱子搭法垂直上升（第 3 原子）。跳起后向脚下放方块，逐格
+   * 上升；头顶基岩是诚实终态（bedrockBlocked），由上层换列重试。
+   */
+  private async invokePillarAscend(request: SkillCapabilityRequest): Promise<unknown> {
+    const input = ascendInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    this.assertDimensionMatch(input.data.dimension);
+    const signal = this.activeProcessSignal!;
+    const item = this.bot.inventory.items().find((candidate) => candidate.name === input.data.itemName);
+    if (!item || item.count < 1) throw new SkillFault("ASCEND_BLOCKS_EXHAUSTED");
+    await this.bot.equip(item, "hand");
+    let blocksUsed = 0;
+    try {
+      for (let step = 0; step < 256; step++) {
+        if (signal.aborted) throw new SkillFault("SKILL_ABORTED");
+        const entity = this.bot.entity;
+        if (!entity) throw new SkillFault("ASCEND_JUMP_FAILED");
+        const feetY = Math.floor(entity.position.y);
+        if (feetY >= input.data.targetY) {
+          return ascendOutputSchema.parse({ succeeded: true, bedrockBlocked: false, finalY: feetY });
+        }
+        const headroom = this.bot.blockAt(new Vec3(entity.position.x, feetY + 2, entity.position.z));
+        if (headroom?.name === "bedrock") {
+          return ascendOutputSchema.parse({ succeeded: true, bedrockBlocked: true, finalY: feetY });
+        }
+        if (!this.bot.inventory.items().some((candidate) => candidate.name === input.data.itemName && candidate.count > 0)) {
+          throw new SkillFault("ASCEND_BLOCKS_EXHAUSTED");
+        }
+        // 跳到最高点，在脚下位置放置（reference=当前脚下实心方块，face=up）。
+        this.bot.setControlState("jump", true);
+        await new Promise<void>((resolve) => setTimeout(resolve, 320));
+        const jumpEntity = this.bot.entity;
+        if (!jumpEntity) throw new SkillFault("ASCEND_JUMP_FAILED");
+        const support = this.bot.blockAt(new Vec3(jumpEntity.position.x, Math.floor(jumpEntity.position.y) - 1, jumpEntity.position.z));
+        if (!support || support.name === "air" || support.name === "cave_air") {
+          this.bot.setControlState("jump", false);
+          throw new SkillFault("ASCEND_TRANSIENT");
+        }
+        try {
+          await this.bot.placeBlock(support, new Vec3(0, 1, 0));
+          blocksUsed++;
+        } finally {
+          this.bot.setControlState("jump", false);
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 220));
+      }
+      const entity = this.bot.entity;
+      return ascendOutputSchema.parse({
+        succeeded: true,
+        bedrockBlocked: false,
+        finalY: entity ? Math.floor(entity.position.y) : 0,
+      });
+    } finally {
+      this.bot.clearControlStates();
+    }
+  }
+
+  /**
+   * travel.bridge：sneak 逐格搭路水平前进（第 4 原子）。每步：在脚下支撑块
+   * 的行进方向面放一块（前下方格），再前进一步。落差 >2 判 BRIDGE_FELL。
+   */
+  private async invokeBridgeAdvance(request: SkillCapabilityRequest): Promise<unknown> {
+    const input = bridgeInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    this.assertDimensionMatch(input.data.dimension);
+    const signal = this.activeProcessSignal!;
+    const startY = this.bot.entity?.position.y ?? 0;
+    const equipItem = async () => {
+      const item = this.bot.inventory.items().find((candidate) => candidate.name === input.data.itemName && candidate.count > 0);
+      if (!item) throw new SkillFault("BRIDGE_BLOCKS_EXHAUSTED");
+      await this.bot.equip(item, "hand");
+    };
+    await equipItem();
+    let stepsPlaced = 0;
+    this.bot.setControlState("sneak", true);
+    try {
+      for (let step = 0; step < input.data.maxSteps; step++) {
+        if (signal.aborted) throw new SkillFault("SKILL_ABORTED");
+        const entity = this.bot.entity;
+        if (!entity) throw new SkillFault("BRIDGE_TRANSIENT");
+        const dx = input.data.target.x - entity.position.x;
+        const dz = input.data.target.z - entity.position.z;
+        if (Math.abs(dx) < 1.5 && Math.abs(dz) < 1.5) {
+          return bridgeOutputSchema.parse({
+            succeeded: true,
+            stepsPlaced,
+            position: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
+          });
+        }
+        if (entity.position.y < startY - 2.5) throw new SkillFault("BRIDGE_FELL");
+        // 行进主轴（|dx| vs |dz| 取大者），放前下方格：reference=脚下支撑块。
+        const feetX = Math.floor(entity.position.x);
+        const feetY = Math.floor(entity.position.y);
+        const feetZ = Math.floor(entity.position.z);
+        const dirX = Math.abs(dx) >= Math.abs(dz) ? Math.sign(dx) : 0;
+        const dirZ = dirX === 0 ? Math.sign(dz) : 0;
+        const ahead = this.bot.blockAt(new Vec3(feetX + dirX, feetY, feetZ + dirZ));
+        if (ahead && ahead.boundingBox !== "empty") throw new SkillFault("BRIDGE_PATH_BLOCKED");
+        const support = this.bot.blockAt(new Vec3(feetX, feetY - 1, feetZ));
+        if (!support || support.name === "air") throw new SkillFault("BRIDGE_TRANSIENT");
+        await this.bot.placeBlock(support, new Vec3(dirX, 0, dirZ));
+        stepsPlaced++;
+        if (stepsPlaced % 8 === 0) await equipItem();
+        this.bot.setControlState("forward", true);
+        await new Promise<void>((resolve) => setTimeout(resolve, 450));
+        this.bot.setControlState("forward", false);
+        await new Promise<void>((resolve) => setTimeout(resolve, 150));
+      }
+      const entity = this.bot.entity;
+      return bridgeOutputSchema.parse({
+        succeeded: true,
+        stepsPlaced,
+        position: entity ? { x: entity.position.x, y: entity.position.y, z: entity.position.z } : { x: 0, y: 0, z: 0 },
+      });
+    } finally {
+      this.bot.clearControlStates();
+    }
+  }
   /** animal.breed：对两只实体各喂一份（useOn + 物品消耗对账）。 */
   private async invokeAnimalBreed(request: SkillCapabilityRequest): Promise<unknown> {
     const input = animalBreedCapabilityInputSchema.safeParse(request.input);

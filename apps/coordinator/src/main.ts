@@ -197,6 +197,8 @@ async function main(): Promise<void> {
       });
     },
   });
+  // D3 live 证据钩的闭包转接：release store 在 runtimeServer 之后构造。
+  let liveReleaseStore: FileSkillReleaseStore | null = null;
   const runtimeServer = new RuntimeLinkServer({
     host: runtimeConfig.host,
     port: runtimeConfig.port,
@@ -206,6 +208,31 @@ async function main(): Promise<void> {
     ...(runtimeConfig.managedKeyIds !== undefined ? { managedKeyIds: runtimeConfig.managedKeyIds } : {}),
     registry,
     logger,
+    onSkillResult: (result) => {
+      const store = liveReleaseStore;
+      if (store === null || result.payload.outcome !== "completed") return;
+      const release = store.pipeline.list().find(
+        (candidate) => candidate.skillId === result.payload.skillId &&
+          (candidate.status === "sandboxed" || candidate.status === "canary"),
+      );
+      if (release === undefined) return;
+      try {
+        // canary 期成功只补证据（≤8 条防刷盘）；sandboxed 期成功可推进 verified。
+        if (release.status === "canary" && release.evidence.length >= 8) return;
+        store.pipeline.recordLiveRun(release.releaseId, {
+          serverProfileId: "live",
+          passed: true,
+          checks: [{ label: `skill ${result.payload.skillId} completed on live server`, passed: true }],
+          failures: [],
+        });
+        store.persist(release.releaseId);
+        logger.info("coordinator_skill_release_live_run", {
+          releaseId: release.releaseId, skillId: release.skillId, status: store.pipeline.get(release.releaseId)?.status ?? release.status,
+        });
+      } catch {
+        // 证据钩绝不影响 skill result 派发路径。
+      }
+    },
   });
   const stopController = new StopController({
     instanceId,
@@ -414,9 +441,22 @@ async function main(): Promise<void> {
     catalogSize: builtinSkills.length,
     note: "evidence-gated: catalog-dependent kinds require a named skill",
   });
-  // Phase D3：release lifecycle 运行时（verified 停车、canary/active 人审）。
+  // Phase D3：release lifecycle 运行时。sandbox_auto 档（用户显式开通）下
+  // 验收通过自动连升 canary——bot 边玩边进化，无需隔离服与人工批次。
+  const skillDevMode = process.env.STUDIO_SKILL_DEV_MODE?.trim() === "sandbox_auto" ? "sandbox_auto" : "export_only";
   const skillReleaseStore = new FileSkillReleaseStore(
-    process.env.STUDIO_SKILL_RELEASE_DIR?.trim() || path.join("runtime-data", "skill-releases"));
+    process.env.STUDIO_SKILL_RELEASE_DIR?.trim() || path.join("runtime-data", "skill-releases"),
+    { autoPromoteToCanary: skillDevMode === "sandbox_auto" },
+  );
+  liveReleaseStore = skillReleaseStore;
+  logger.info("coordinator_skill_release_started", {
+    devMode: skillDevMode,
+    autoPromoteToCanary: skillDevMode === "sandbox_auto",
+    liveEvidence: "runtime-link skill results",
+    note: skillDevMode === "sandbox_auto"
+      ? "verification runs auto-promote to canary; active still requires an operator"
+      : "verified parking; canary/active require operator decisions",
+  });
   const skillReleases = {
     list: () => skillReleaseStore.list() as ReadonlyArray<Record<string, unknown>>,
     createDraftFromGap: (input: Readonly<{ gapFingerprint: string; skillId?: string }>) => {
@@ -448,6 +488,20 @@ async function main(): Promise<void> {
         return { ok: true as const, status: updated.status };
       } catch (error) {
         return { ok: false as const, error: error instanceof Error ? error.message : "decision_failed" };
+      }
+    },
+    recordLiveRun: (input: Readonly<{ releaseId: string; passed: boolean; label?: string }>) => {
+      try {
+        const updated = skillReleaseStore.pipeline.recordLiveRun(input.releaseId, {
+          serverProfileId: "live",
+          passed: input.passed,
+          checks: [{ label: input.label ?? "manual live-run record", passed: input.passed }],
+          failures: input.passed ? [] : [input.label ?? "manual live-run failure record"],
+        });
+        skillReleaseStore.persist(input.releaseId);
+        return { ok: true as const, status: updated.status };
+      } catch (error) {
+        return { ok: false as const, error: error instanceof Error ? error.message : "live_run_failed" };
       }
     },
   };
