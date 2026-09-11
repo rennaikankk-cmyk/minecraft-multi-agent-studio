@@ -117,6 +117,7 @@ const PRESETS: readonly {
     key: "deepseek",
     label: "DeepSeek",
     form: { type: "openai-compatible", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat" },
+    note: "V4.1 Flash 的模型名是 deepseek-flash（2026-09-10 起）；deepseek-chat 仍指向当前对话模型",
   },
   {
     key: "relay",
@@ -323,12 +324,17 @@ export default function ModelsPage() {
                   {status.models.length > 0 ? (
                     <div className="flex flex-wrap gap-1.5">
                       {status.models.map((model) => (
-                        <span
+                        <button
                           key={model}
-                          className="data-mono rounded-[5px] border border-border-subtle bg-elevated px-2 py-0.5 text-[11px]"
+                          type="button"
+                          title="点击填入表单的模型字段"
+                          onClick={() => setForm(form
+                            ? { ...form, model }
+                            : { ...EMPTY_FORM, baseUrl: status.baseUrl ?? "", model })}
+                          className="data-mono rounded-[5px] border border-border-subtle bg-elevated px-2 py-0.5 text-[11px] transition-colors hover:border-accent hover:text-accent"
                         >
                           {model}
-                        </span>
+                        </button>
                       ))}
                     </div>
                   ) : null}
@@ -557,7 +563,7 @@ export default function ModelsPage() {
                       <Input
                         value={form.model}
                         className="data-mono"
-                        placeholder={form.type === "openai-compatible" ? "如 glm-4.7 / deepseek-chat" : "留空 = 自动发现"}
+                        placeholder={form.type === "openai-compatible" ? "如 deepseek-flash / glm-4.7 / deepseek-chat" : "留空 = 自动发现"}
                         onChange={(event) => setForm({ ...form, model: event.target.value })}
                       />
                     </Field>
