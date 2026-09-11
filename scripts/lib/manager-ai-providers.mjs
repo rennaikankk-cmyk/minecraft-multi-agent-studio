@@ -48,8 +48,10 @@ export function validateAiProviderProfile(input, { requireCloudKey = true } = {}
     baseUrl = url.origin;
   }
   const model = String(input.model ?? "").trim();
-  if (cloud && !AI_PROFILE_MODEL_PATTERN.test(model)) {
-    throw managedError("INVALID_REQUEST", "云端/中转 API 必须显式填写模型 ID（该类端点不依赖模型发现）。", 400);
+  // 云端 model 可留空：激活时按 API key 自动探测 /v1/models 并按优先级
+  // 选定（探测失败且未手填时激活被拒——绝不写一个假模型名进 env）。
+  if (model && !AI_PROFILE_MODEL_PATTERN.test(model)) {
+    throw managedError("INVALID_REQUEST", "AI provider 模型 ID 无效。", 400);
   }
   if (!cloud && model && !AI_PROFILE_MODEL_PATTERN.test(model)) {
     throw managedError("INVALID_REQUEST", "AI provider 模型 ID 无效。", 400);
@@ -148,3 +150,25 @@ function quoteEnvValue(value) {
  */
 // 纯选型规则单点权威在 ai-router（selectAdvertisedModel）；此处保留 manager
 // 侧错误码别名（测试与调用方沿用 MODEL_NOT_AVAILABLE / MODEL_SELECTION_REQUIRED）。
+
+/**
+ * 探测结果 → 自动选定模型：优先级表精确匹配（数据驱动，新模型加表即可），
+ * 无匹配取列表第一个。空列表返回 null（调用方拒绝激活）。
+ */
+const PREFERRED_MODEL_ORDER = [
+  "deepseek-flash",
+  "deepseek-chat",
+  "deepseek-v4-pro",
+  "deepseek-reasoner",
+  "glm-4.7",
+  "glm-4.6",
+];
+
+export function selectModelAutomatically(models) {
+  const list = Array.isArray(models) ? models.filter((m) => typeof m === "string" && m.length > 0) : [];
+  if (list.length === 0) return null;
+  for (const preferred of PREFERRED_MODEL_ORDER) {
+    if (list.includes(preferred)) return preferred;
+  }
+  return list[0];
+}

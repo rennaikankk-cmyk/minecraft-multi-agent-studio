@@ -31,6 +31,7 @@ import {
   maskedAiProviderProfile,
   aiProbeProvider,
   rewriteAiEnvironment,
+  selectModelAutomatically,
 } from "./lib/manager-ai-providers.mjs";
 
 export {
@@ -1830,8 +1831,32 @@ export class StudioLocalManager {
   }
 
   async activateAiProvider(id) {
-    const profile = this.aiProviderStore.profiles.find((existing) => existing.id === id);
+    let profile = this.aiProviderStore.profiles.find((existing) => existing.id === id);
+    let autoSelected = false;
     if (!profile) throw managedError("NOT_FOUND", "AI provider 档案不存在。", 404);
+    // 模型留空（云端）：先按 key 探测 /v1/models，按优先级自动选定并回写
+    // 档案；探测失败且未手填 → 拒绝激活（绝不写假模型名进 env）。
+    if (!profile.model) {
+      const preProbe = await probeAIEndpoint({
+        provider: aiProbeProvider(profile.type),
+        baseUrl: profile.baseUrl,
+        apiKey: profile.apiKey ?? undefined,
+      }, 6_000);
+      const selected = preProbe ? selectModelAutomatically(preProbe.models) : null;
+      if (selected === null) {
+        throw managedError(
+          "INVALID_REQUEST",
+          "模型未填写且自动探测未取得模型列表（key/网络问题）。请手填模型 ID 后重试。",
+          400,
+        );
+      }
+      profile = { ...profile, model: selected, updatedAt: new Date().toISOString() };
+      autoSelected = true;
+      this.aiProviderStore.profiles = this.aiProviderStore.profiles.map(
+        (existing) => (existing.id === id ? profile : existing),
+      );
+      await this.persistAiProviderStore();
+    }
     const target = this.aiEnvironmentFile();
     const previous = await readFile(target, "utf8").catch((cause) => {
       if (cause?.code === "ENOENT") return "";
@@ -1857,7 +1882,7 @@ export class StudioLocalManager {
         models: probe.models,
         latencyMs: probe.latencyMs,
         lastCheckedAt: probe.checkedAt,
-        message: `已激活「${profile.name}」；重启 Studio 后新配置对协调器全面生效。`,
+        message: `已激活「${profile.name}」${autoSelected ? `（模型 ${profile.model} · 自动选定）` : ""}；重启 Studio 后新配置对协调器全面生效。`,
       };
     } else {
       this.aiStatus = {

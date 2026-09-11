@@ -1133,6 +1133,7 @@ test("exit classification metadata reaches the public Bot payload", async () => 
 // ---------------------------------------------------------------------------
 import {
   validateAiProviderProfile,
+  selectModelAutomatically,
   rewriteAiEnvironment,
 } from "./studio-local-manager.mjs";
 
@@ -1365,4 +1366,19 @@ test("discovers AI_BASE_URL cloud config with bearer-authenticated model probe",
   assert.equal(discovered.config.provider, "openai-compatible");
   assert.equal(discovered.status.state, "connected");
   assert.deepEqual(discovered.status.models, ["glm-4.7"]);
+});
+
+test("cloud model may be left empty for activation-time auto-selection", () => {
+  const empty = validateAiProviderProfile({
+    name: "DeepSeek Auto",
+    type: "openai-compatible",
+    baseUrl: "https://api.deepseek.com",
+    model: "",
+    apiKey: "sk-test",
+  });
+  assert.equal(empty.model, null);
+  // selectModelAutomatically：优先级表精确匹配优先于列表顺序。
+  assert.equal(selectModelAutomatically(["deepseek-v4-pro", "deepseek-flash"]), "deepseek-flash");
+  assert.equal(selectModelAutomatically(["some-relay-model"]), "some-relay-model");
+  assert.equal(selectModelAutomatically([]), null);
 });

@@ -117,8 +117,8 @@ const PRESETS: readonly {
   {
     key: "deepseek",
     label: "DeepSeek",
-    form: { type: "openai-compatible", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat" },
-    note: "V4.1 Flash 的模型名是 deepseek-flash（2026-09-10 起）；deepseek-chat 仍指向当前对话模型",
+    form: { type: "openai-compatible", baseUrl: "https://api.deepseek.com", model: "" },
+    note: "模型留空=激活时自动探测选定（优先 deepseek-flash）；官方 base_url 不带 /v1",
   },
   {
     key: "relay",
@@ -561,14 +561,14 @@ export default function ModelsPage() {
                       label="模型"
                       hint={
                         form.type === "openai-compatible"
-                          ? "必填：云端/中转端点不依赖模型发现"
+                          ? "可留空：激活时按 API key 自动探测 /v1/models 并按优先级自动选定（deepseek-flash 优先）；探测失败才需要手填"
                           : "可留空：启动时经 /v1/models 按统一规则发现"
                       }
                     >
                       <Input
                         value={form.model}
                         className="data-mono"
-                        placeholder={form.type === "openai-compatible" ? "如 deepseek-flash / glm-4.7 / deepseek-chat" : "留空 = 自动发现"}
+                        placeholder={form.type === "openai-compatible" ? "留空 = 激活时自动选定；或手填如 deepseek-flash" : "留空 = 自动发现"}
                         onChange={(event) => setForm({ ...form, model: event.target.value })}
                       />
                     </Field>
