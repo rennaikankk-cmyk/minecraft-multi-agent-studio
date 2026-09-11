@@ -831,7 +831,11 @@ export class CoordinatorLocalPlanner {
     // §确定性快速路径：目标本身是协调器模板或唯一物品采集时，决策可以
     // 被推导出来，不需要一次模型往返。解析器只认固定模板与"动词+唯一
     // 可达物品"，任何含糊形态返回 null 照旧走模型分支；派发路径与模型
-    // 分支完全同一条（grounding、安全等待、任务迁移一个不少）。
+    // 分支同一条（安全等待、任务迁移、可信 ServerProfile 注入一个不少），
+    // 但**有意跳过** assertGroundedSensitiveInput：确定性分支的输入是由本
+    // 解析器从 operatorGoal 本身构造出来的，坐标/维度必然"字面存在于目标中"，
+    // 该断言防的是模型凭空编造，对这里恒真。其余校验（advertised schema、
+    // waitForSafetyClear、injectTrustedServerProfile 后的再校验）仍然全跑。
     const deterministic = this.deterministicDecisionFor(
       rawOperatorGoal,
       plannedItemNames,
