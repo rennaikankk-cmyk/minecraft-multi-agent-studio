@@ -1,5 +1,9 @@
 # 生产落地缺口检查报告
 
+> **⚠ 陈旧快照警告（2026-09-11 追记）**：本报告是 **2026-08-26** 的快照，距今已久。
+> 其 **P0/P1 条目绝大多数已在此后解决**（见文末「修订（2026-09-11）」），下文若干处已与当前
+> 代码库**明确不符**。行号与结论**只对 2026-08-26 有效**，引用前必须对照 HEAD 重新核实。
+
 生成日期：2026-08-26
 
 ## 本报告的可信度分层
@@ -78,7 +82,7 @@ Coordinator 的投递编排另外硬性要求 `studio_test_` schema 与 loopback
 
 ## 技能层：框架成熟度高于玩法覆盖度
 
-21 个技能全部从 `packages/skills/src/builtin/catalog.ts` 单一清单注册，能力契约、前置条件、超时、读回校验都按 fail-closed 写实。这一层的工程质量没有问题。
+39 个技能全部从 `packages/skills/src/builtin/catalog.ts` 单一清单注册，能力契约、前置条件、超时、读回校验都按 fail-closed 写实。这一层的工程质量没有问题。
 
 「空手到自持」这条链在熔炉之后断掉，三处真实空洞：
 
@@ -124,3 +128,29 @@ Coordinator 的投递编排另外硬性要求 `studio_test_` schema 与 loopback
 6. 食物链与 `mine` 的真实现 —— 玩法层大块工作，可与 4、5 并行。
 
 TLS、Dashboard 身份、容器化、指标导出都属于「离开这台机器才需要」。现在做等于提前付账，除非部署形态马上要变。
+
+## 修订（2026-09-11）
+
+以下逐条对照 HEAD `5fc643f`（476 次提交）重核，只记与本报告原文**相反**或已失效的结论。
+
+**1. 「`mine.branch` / `mine.vein` 是无条件抛 `MINE_RUNTIME_NOT_WIRED` 的壳」——FALSE。**
+该错误码在源码中已**零出现**（`git grep MINE_RUNTIME_NOT_WIRED` 只命中本文件第 87 行自身，即死字符串只靠本文档残留）。两者都是真实现：规划器 `packages/skills/src/planning/mine-planner.ts:187,207`（`planBranchMine` / `planVeinMine`，有界步数与邻接推进），运行时 `apps/bot-runtime/src/mineflayer-client.ts:2027-2108`。
+
+**2. task-worker「生产模式下不可达」的四条断言——四条全部 FALSE。**
+- `apps/task-worker/src/config.ts:74-75`：已批准 `production` purpose + `coordinator-goal` handler profile。
+- `scripts/start-studio.mjs:169-183`：启动流程已拉起 task-worker（`productionTaskDelivery` 分支）。
+- `apps/coordinator/src/goal-lifecycle-store.ts:228`：Coordinator 已调用 `repository.submitTask`。
+- `apps/task-worker/src/coordinator-goal-handler.ts:93`：存在生产处理器注册入口（`registry.register(createCoordinatorGoalHandler(...))`）。
+
+**3. `scopedPoolConfig` ReferenceError——FIXED。**
+`let scopedPoolConfig: PoolConfig;` 现位于 `packages/task-system/tests/real-infrastructure.integration.test.ts:372`，已在 `describe` 作用域内声明。**子断言仍为 TRUE**：`packages/task-system/tsconfig.json` 的 `include` 仍只有 `src/**/*.ts`，`pnpm typecheck` 依旧看不到 tests 目录。
+
+**4. 「没有健康检查端点」——STALE。**
+`/v1/incidents/health` 已存在，路由位于 `scripts/studio-local-manager.mjs:304`。
+
+**5. 食物「在 resource-graph 与技能清单里零代码」——FALSE。**
+已全部注册：`farm.maintain`、`farm.sustain`、`food.secure`、`animal.breed`、`smelt.item`（`packages/skills/src/builtin/catalog.ts:57,58,59,76,77`）。
+
+**6. 技能总数 21——FALSE。**
+真实数量为 **39**（`packages/skills/src/builtin/catalog.ts:45-78` 共 33 个 id，加 `packages/skills/src/baritone-processes.ts:104` 的 6 个）；正文已就地更正。
+

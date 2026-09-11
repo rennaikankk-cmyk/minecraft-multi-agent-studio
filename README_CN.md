@@ -250,10 +250,10 @@ Benchmark。DGX Spark 的 ARM64 双簇不会被猜测为 Intel P/E Core，而会
 多版本 Skill 策略：
 
 - Skill 的 SemVer 是执行契约版本，不等于 Minecraft 版本。每个定义另带有序兼容变体；Runtime 使用连接后真实协商出的 `minecraftVersion`、`protocolVersion`、`majorVersion` 和 registry/feature 能力选择第一个满足条件的变体。
-- 当前 21 个已注册 Skill 声明为 `portable` 通用变体，因此不会仅因版本号不同被禁用；“可用性”和“实机验证状态”分开上报，它们在跨版本真实场景矩阵完成前仍标记为 `unverified`。
+- 当前 39 个已注册 Skill 声明为 `portable` 通用变体，因此不会仅因版本号不同被禁用；“可用性”和“实机验证状态”分开上报，它们在跨版本真实场景矩阵完成前仍标记为 `unverified`。
 - 新版本特色 Skill 应声明所需 feature、物品/方块/实体及必要的服务端能力。缺少资源时标记 `unavailable`；服务端能力尚未经过显式探针时标记 `unknown` 并拒绝执行，不按版本号猜测。
 - 当前通用输入仍使用目标版本 registry 的原生名称，例如旧版本和新版本的原木 ID 可能不同。兼容层已经支持有序资源变体，但面向规划器的跨版本语义资源别名仍是下一模块。
-- 回环协议夹具已验证 `minecraftVersion: "auto"` 能分别协商 1.8.8、1.12.2、1.16.5 和 1.21.11，并得到对应协议号；该测试不连接外部服务器，也不等于 21 个 Skill 已在四个版本真实执行。
+- 回环协议夹具已验证 `minecraftVersion: "auto"` 能分别协商 1.8.8、1.12.2、1.16.5 和 1.21.11，并得到对应协议号；该测试不连接外部服务器，也不等于 39 个 Skill 已在四个版本真实执行。
 
 ## 真实联机验收
 
@@ -273,7 +273,7 @@ pnpm prepare:minecraft
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-isolated-minecraft-test.ps1
 ```
 
-脚本仅绑定 `127.0.0.1:25565`，验证两个真实 Bot、21 个内建技能各一个成功场景、正常停止、服务端断开和有限重连，完成后自动关闭本次启动的服务。只有实际运行通过才能登记证据；脚本或测试代码存在本身不会把技能从 `unverified` 升级。服务器文件、世界、日志和本地 ServerProfile 均不会提交到版本库。
+脚本仅绑定 `127.0.0.1:25565`，验证两个真实 Bot、39 个内建技能各一个成功场景、正常停止、服务端断开和有限重连，完成后自动关闭本次启动的服务。只有实际运行通过才能登记证据；脚本或测试代码存在本身不会把技能从 `unverified` 升级。服务器文件、世界、日志和本地 ServerProfile 均不会提交到版本库。
 
 ## Coordinator 当前边界
 
@@ -437,7 +437,7 @@ Dashboard 的 Bot 卡片显示真实 L0 状态。旧 Runtime 未上报该字段�
 
 ## Pathfinder 确定性技能
 
-当前已注册的 21 个确定性 Skill 见 [`SKILLS.md`](SKILLS.md)。其中 `movement.goto@1.0.0` 的目标必须与 Bot 当前 ServerProfile 和维度一致，距离最多 64 格，半径 1～4 格，超时 20 秒。L0 暂停、Runtime 停止、断线或取消会停止寻路。
+当前已注册的 39 个确定性 Skill 见 [`SKILLS.md`](SKILLS.md)。其中 `movement.goto@1.0.0` 的目标必须与 Bot 当前 ServerProfile 和维度一致，距离最多 64 格，半径 1～4 格，超时 20 秒。L0 暂停、Runtime 停止、断线或取消会停止寻路。
 
 该技能已通过离线测试，但尚未在真实隔离服运行路径场景和跨版本矩阵，因此不能视为实机寻路验收完成。
 
@@ -445,9 +445,9 @@ Dashboard 的 Bot 卡片显示真实 L0 状态。旧 Runtime 未上报该字段�
 
 `@minecraft-studio/task-system` 提供任务 Schema、状态机、重试预算、创建幂等、操作重放、租约、参数化 PostgreSQL 仓库、`pg` 连接适配器、BullMQ 队列和 Worker。迁移文件位于 `packages/task-system/migrations`，不会由普通启动命令自动执行。
 
-Coordinator 可把 `/v1/goals` 的完整生命周期写入 PostgreSQL，并通过已认证的 Control Link 向 Control API 提供受 `task.read` 保护的分页列表与详情。Dashboard 的任务页从该读路径恢复刷新前的历史；列表只返回任务摘要，详情只额外返回经授权的 operator goal，不返回 `target`、原始输入、证据或任意结果对象。未配置数据库、连接失败或 schema 未应用到 `0006_task_execution_fsm.sql` 时，历史明确显示不可用；开启 Local AI 目标执行却没有配置永久事实源时，Coordinator 拒绝启动。
+Coordinator 可把 `/v1/goals` 的完整生命周期写入 PostgreSQL，并通过已认证的 Control Link 向 Control API 提供受 `task.read` 保护的分页列表与详情。Dashboard 的任务页从该读路径恢复刷新前的历史；列表只返回任务摘要，详情只额外返回经授权的 operator goal，不返回 `target`、原始输入、证据或任意结果对象。未配置数据库、连接失败或 schema 未应用到 `0008_composite_tasks.sql` 时，历史明确显示不可用；开启 Local AI 目标执行却没有配置永久事实源时，Coordinator 拒绝启动。
 
-启用前由人工或受控迁移流程依次应用 `0001` 至 `0006`，然后配置：
+启用前由人工或受控迁移流程依次应用 `0001` 至 `0008`（含 `0007_facility_leases.sql`、`0008_composite_tasks.sql`），然后配置：
 
 ```dotenv
 COORDINATOR_TASK_POSTGRES_URL=postgresql://<user>:<password>@<approved-host>:5432/<database>
@@ -471,7 +471,7 @@ $env:TASK_INFRA_TEST_NAMESPACE='studio_test_local_unique01'
 pnpm test:task-infra
 ```
 
-三个变量缺少任意一个时命令会失败，不会静默跳过。测试会构建并启动独立 `task-worker` 子进程，但强制注入 `TASK_WORKER_PURPOSE=isolated-test` 与 `TASK_WORKER_HANDLER_PROFILE=isolated-acceptance`，不会连接 Minecraft。GitHub Actions 使用固定摘要的临时 PostgreSQL/Redis 服务完成同一组测试；2026-08-14 运行 `31793333384` 的 20 项真实基础设施场景全部通过，包括跨 Worker 与独立进程取消。当前新增的 digest 场景仍需下一次 CI 运行确认；该边界不代表当前机器的生产基础设施在线，Minecraft 生产处理器和正式部署审批仍保持未接入状态。
+三个变量缺少任意一个时命令会失败，不会静默跳过。测试会构建并启动独立 `task-worker` 子进程，但强制注入 `TASK_WORKER_PURPOSE=isolated-test` 与 `TASK_WORKER_HANDLER_PROFILE=isolated-acceptance`，不会连接 Minecraft。GitHub Actions 使用固定摘要的临时 PostgreSQL/Redis 服务完成同一组测试；2026-08-14 运行 `31793333384` 的 20 项真实基础设施场景全部通过，包括跨 Worker 与独立进程取消。此后 2026-08-27 本地运行 `studio_test_20260827_real03` 在临时 PostgreSQL/Redis 上 28/28 通过（含此前待确认的 digest 场景，见 `CHANGELOG.md:22`）；该边界不代表当前机器的生产基础设施在线，Minecraft 生产处理器和正式部署审批仍保持未接入状态。
 
 ## 安全说明
 

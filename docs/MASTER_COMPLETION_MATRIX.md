@@ -1,5 +1,10 @@
 # MASTER_COMPLETION_MATRIX（唯一权威完成矩阵）
 
+> **⚠ 陈旧快照警告（2026-09-11 追记）**：本矩阵是 **2026-09-03（commit 19da988）** 的快照，
+> 而 HEAD 已推进到 **5fc643f（2026-09-11，476 次提交）**。下述行状态**只对 19da988 快照提交有效**。
+> **2026-09-03 之后新增的行**已就地修订；**任何仍标 `NOT STARTED` 且位于 2026-09-03 分界线
+> 之前（未标注修订日期）的行，在据此制定计划前必须对照 HEAD 重新核实。**
+
 > 建立于 2026-09-03（commit 19da988 之后）。本矩阵**唯一**且**只增不减**：所有原始任务
 > （PRODUCTION_GAP_ANALYSIS 七域 + 各轮 Master Round 的 Phase 1-9 / L / S / N / R /
 > G 系列 + 四模型赛马 + 生产验收门禁）全部纳入。状态只允许：
@@ -90,32 +95,34 @@
 | D3-2 | world.scan 差分+爆炸监听 | NOT STARTED | — |
 | D3-3 | provenance.diff 损耗 vs 破坏 | NOT STARTED | — |
 | D3-4 | evacuate.valuables 组合 Skill | NOT STARTED | — |
-| D3-5 | base.abandon 状态转换 | NOT STARTED | — |
+| D3-5 | base.abandon 状态转换 | IMPLEMENTED / UNWIRED（2026-09-11 重核：原记录 NOT STARTED 已失效） | `packages/base-management/src/base-registry.ts:278-280 markAbandoned` + 终态转移表 `:55-59`（abandoned: []）+ 测试 `packages/skills/tests/base-registry.test.ts:176`；**仍无生产消费方、无 skill id**，故不满足 DONE 判据 |
 | D3-6 | base.relocate 组合 | NOT STARTED | — |
-| D3-7 | FacilityLifecycleState + ABANDONED/SALVAGEABLE | NOT STARTED（14 态状态机已有，两态未加） | — |
+| D3-7 | FacilityLifecycleState + ABANDONED/SALVAGEABLE | PARTIAL（2026-09-11 重核：`ABANDONED` 已有，仅缺 `SALVAGEABLE`） | `packages/asset-policy/src/facility-platform.ts:56` 14 态状态机含 `abandoned`；转移表 `:78`（`abandoned: []` 终态）；终态测试 `packages/skills/tests/facility-platform.test.ts:48-50`（"abandoned 是终态"）。`SALVAGEABLE` 仍缺失 |
 | D3-8 | Provenance 生产接入 bot.dig 边界 | **PARTIAL→DONE(核心)**：store 活化+持久化+place 写入+dig 清除+salvage 通道（bf95cd6，此前恒 null 死代码）；**nearOwnBase=Base registry 未接**（单一 seam，恒 false） | bf95cd6；持久化单测×3 |
-| D4-1..6 | portal.locate/build、坐标换算、nether.route、烈焰/疣、end.enter、维度切换恢复 | NOT STARTED | — |
-| D5-1..6 | asset.ledger/reserve/产出率回填/audit/claim | NOT STARTED | — |
-| D6-1..8 | Dashboard 运维八项（暂停自治按钮/公平调度显示/单 bot 隔离/一键停/计划视图/Spark 页/备份/部署管道） | NOT STARTED（Spark 页已有只读状态；操作类未建） | — |
-| D7-1..9 | Skill 改进闭环九项（gap 生产接线/持久化/bundle 管道/worktree/sandbox/自动回归/canary 运行时/staged rollout） | NOT STARTED（域模型+44 测试已有=Phase 7 基础） | b354c8c |
+| D4-1..6 | portal.locate/build、坐标换算、nether.route、烈焰/疣、end.enter、维度切换恢复 | PARTIAL（2026-09-11 重核：4 个 travel 技能已注册+坐标换算已实现；4 个 id 仍缺） | `packages/skills/src/builtin/catalog.ts:61-64` 注册 `travel.portal-ignite` / `travel.portal-use` / `travel.ascend` / `travel.bridge`（定义 `packages/skills/src/builtin/nether-travel.ts:84,129,169,215`）；坐标换算已实现并导出 `packages/skills/src/nether-coords.ts:53,65`。**仍真缺**：`portal.build`、`portal.locate`、`nether.route`、`end.enter`（全仓不存在这些 id） |
+| D5-1..6 | asset.ledger/reserve/产出率回填/audit/claim | IMPLEMENTED / UNWIRED（2026-09-11 重核：领域真实存在，但未接入生产进程） | `packages/resource-management/src/resource-management.ts:29,261`（`ResourceLedger` / `DurableResourceLedger`）、`apps/coordinator/src/resource-service.ts:31`、回填接线 `apps/coordinator/src/autonomous-director.ts:675,680,722`。**`new CoordinatorResourceService` 只出现在测试**（`apps/coordinator/tests/resource-service.test.ts:16,75`），未出现在 `apps/coordinator/src/main.ts`；Control API 零 resource 路由 |
+| D6-1..8 | Dashboard 运维八项（暂停自治按钮/公平调度显示/单 bot 隔离/一键停/计划视图/Spark 页/备份/部署管道） | PARTIAL（2026-09-11 重核：页面与一键重启已有；自治暂停仍为 env-only） | Dashboard 现有 **17 个页面**（含 `models`、`skills`、`gaps`、`bases`、`runtime`、`ai-spark`）；一键重启已实现：`scripts/studio-local-manager.mjs:538`（`POST /v1/studio/restart`）+ `apps/dashboard/app/api/studio/restart/route.ts`。**自治暂停仍只能走环境变量**：`apps/coordinator/src/autonomous-config.ts:27` |
+| D7-1..9 | Skill 改进闭环九项（gap 生产接线/持久化/bundle 管道/worktree/sandbox/自动回归/canary 运行时/staged rollout） | PARTIAL（2026-09-11 重核：D1-D4 of 9 已交付并接线生产） | D1–D4：`apps/coordinator/src/main.ts:428-440`（`FileSkillGapStore` + `createSkillGapRecorder`），挂到 `onTaskAborted`（`:579,:602`），`GET /skill-gaps` 于 `apps/coordinator/src/shared-state-server.ts:207`，Dashboard `apps/dashboard/app/gaps/page.tsx` + `apps/dashboard/app/api/studio/skill-gaps/route.ts`。提交 `be0171e, 73dad67, 96570ec, ed0edae`。D5–D9 未交付 |
 | IRON-FARM | 刷铁机 multi-phase commissioning | NOT STARTED（研究 memo+平台模型已有） | docs/research/IRON_FARM_MEMO.md |
-| SCHEMATIC | .schem parser 接入 | NOT STARTED（格式研究已有） | docs/research/SCHEMATIC_FORMATS.md |
+| SCHEMATIC | .schem parser 接入 | IMPLEMENTED / UNVERIFIED（2026-09-11 重核：真实解析器+CLI+4 测试已有，无真实 MC E2E） | `apps/coordinator/src/schematic-import.ts` 有界解析器（gunzip + `prismarine-nbt`，版本/palette/体积校验，稳定错误码 `SCHEMATIC_FORMAT_UNSUPPORTED` / `SCHEMATIC_PALETTE_VERSION_MISMATCH` / `SCHEMATIC_VOLUME_EXCEEDED`）；CLI `scripts/import-schematic.mjs`；测试 `apps/coordinator/tests/schematic-import.test.ts`（4 项）。格式研究 `docs/research/SCHEMATIC_FORMATS.md` |
 | PVP-PILOT | PvP 交火 pilot | **FAILED（首测）**（P1 基建全证、交火未达成 honest-FAIL） | ff7b900 |
-| FLUID-PLACE | fluid.place 能力（桶） | NOT STARTED | — |
-| FARM-TILL | farm.till/plant/harvest | NOT STARTED（蓝图 DSL+研究已有） | — |
+| FLUID-PLACE | fluid.place 能力（桶） | IMPLEMENTED / UNVERIFIED（2026-09-11 重核：技能+运行时读回已实现） | `packages/skills/src/builtin/fluid-place.ts:118`；注册 `packages/skills/src/builtin/catalog.ts:60`；运行时处理器 `apps/bot-runtime/src/mineflayer-client.ts:2255-2284`（读回方块 + `FLUID_PLACE_NOT_CONFIRMED` 防伪）；文档 `SKILLS.md:512-517`；2026-09-10 落地（`5614448`） |
+| FARM-TILL | farm.till/plant/harvest | IMPLEMENTED / UNVERIFIED（2026-09-11 重核：till/harvest/plant/bonemeal 真实且读回校验） | `apps/bot-runtime/src/farm-mineflayer-port.ts:54,73,82,93`；适配器 `apps/bot-runtime/src/farm-maintenance-adapter.ts:39,73-93`；对外暴露为 `farm.maintain`（`packages/skills/src/farm-maintenance.ts:120`） |
 | ENTITY-LT | entity.locate/claim/transport | NOT STARTED | — |
+| REFLEX-PROBE | §0.6.3 反射级时序放行门的**跨进程证据来源**（放行门可满足性） | **WIRING-PENDING**（2026-09-11 重核）：判定逻辑本身正确且 fail-closed，但生产中没有**任何**路径能放行 | 已修部分：`packages/combat/src/chain-sequencer.ts` 的 `chainRequiresClearance` 原写作 `steps.slice(1).some(...)`，静默跳过第 0 步，而 `apps/bot-runtime/src/combat-driver.ts` 只提交单步链 ⇒ `requiresClearance` 恒为 false、`assertClearance` 永不执行（门禁形同虚设）；已修为 `steps.some(...)` 并把"哪些交互类属反射级"改为**显式** `reflexGatedClasses`（默认仅 `"use"`；`attack` 的节奏与 i-frame 时机归 WeaponManager，§0.6.3 将"武器管理"定为战术级 ≤200ms，不得按反射预算判定），配 3 条测试（含 `slice(1)` 回归守卫）。**未接线部分**：`apps/bot-runtime/src/combat-reflex-probe.ts:82` 硬编码 `underRepresentativeLoad: false`（文件头自述"代表性负载需跨进程证据，单 runtime 不自证"），而 `packages/combat/src/reflex-clearance.ts:87-89` 要求其为 true 才放行；全仓库置 true 的仅 4 个测试文件。**这是章程 §0.6.3 的设计意图而非缺陷**（未过探针不得上真实对抗），但后果须明确：`TotemManager`/`CrystalEngine`/`PacketMineController` 三处反射级门禁在生产中恒拒 ⇒ **水晶放置与挖包硬阻塞**，图腾补位只在 anarchy 档走显式旁路（`combat-driver.ts:638-643`）。放行门**本身可满足**：`resolveCombatReflexProbe` 接受 `dependencies.combatReflexProbe` 注入的静态 report，缺口在于 `apps/bot-runtime/src/runtime-host.ts:61` 永远只装配进程内探针。 | 接线项：在 `runtime-host.ts` 接入跨进程负载关联源（M3 里程碑）；在那之前反射级模块保持不可用 |
 
 ## E. 生产验收门禁（本轮新增框架，执行于 C/D 完成后）
 
 | ID | 任务 | 状态 |
 |---|---|---|
-| F-1 | 绝对 SLO 清单+测量（质量闭环/调度/资源三族） | NOT STARTED（清单已固化于 PRODUCTION_SLO_REPORT.md 框架） |
+| F-1 | 绝对 SLO 清单+测量（质量闭环/调度/资源三族） | NOT STARTED（**更正**：本行此前称"清单已固化于 `PRODUCTION_SLO_REPORT.md` 框架"，但该文件**从未存在于 git 历史**（全仓库仅此一处引用它）。SLO 清单实际尚未成文，需先建立该文档或就地内联清单） |
 | F-2 | 20 项全栈故障注入（每项 11 条验证点） | NOT STARTED（L3/L4 已天然覆盖 2 项） |
 | F-3 | durable 状态机崩溃一致性演练（每个转换窗口 kill） | NOT STARTED（单测层 DONE=L-D3） |
 | F-4 | 备份/恢复演练（15 类资产+RPO/RTO） | NOT STARTED |
 | F-5 | 运维控制面验收（16 项） | NOT STARTED |
 | F-6 | Release Manifest+回滚验证 | NOT STARTED |
 | F-7 | 生产成熟度分级判定 | 当前实际等级：**ISOLATED_INTEGRATION_READY 未达**（L7 FAILED）→ **NOT READY** |
+| F-8 | `apps/studio-shell` 编译完整性（此前不被任何 CI 工作流或 pnpm 门禁覆盖） | **PARTIAL**（2026-09-11 首次实测：修复 2 个真实编译错误 + 补齐缺失图标；剩余前置为 Windows 专属构建产物）。详见证据列 | 首次实测发现并修复：(1) `apps/studio-shell/icons/` **目录完全不存在**，tauri-build 生成 Windows 资源文件时直接失败 → 已提交占位图标集（`icon.ico` 16/32/48/256、`icon.png` 512、32/128/128@2x，**占位非品牌，待替换**）；(2) **两处真实 Rust 编译错误** `E0716 temporary value dropped while borrowed`，`apps/studio-shell/src/main.rs:178` 与 `:269`（`app.state::<Backend>().0.lock()` 借用了语句结束即释放的临时 `State`）→ 改为先 `let` 绑定 / 独立作用域；(3) `package.metadata does not exist` 经查**不是错误**，是 `tauri-winres-0.3.6/src/helpers.rs:33` 的 `println!` 诊断，无需修。修复后 `cargo check --manifest-path apps/studio-shell/Cargo.toml` **exit 0**。**唯一剩余前置**：`tauri.conf.json` 的 `bundle.resources` 要求 `MinecraftMultiAgentStudioBackend.exe` 在**编译期**存在（精确路径 → `resource path ... doesn't exist`；glob → `glob pattern ... didn't match any files`），而该文件仅在 Windows 由 `pnpm build:exe` 产出、且 `src/main.rs:203-209` 运行时会从 shell 同级目录加载它（故不能从配置删除）⇒ Linux runner 上结构性无法执行 `cargo check`。已由 `scripts/check-studio-shell.mjs` 条件执行：资源在则跑真实检查，缺失则打印醒目 SKIPPED，**不伪造通过**。 |
 
 ---
 
@@ -127,7 +134,20 @@
 
 **Production Classification = NOT READY**。最近一次达成级别：无（L1-L8 从未全绿）。
 
+---
+
+> 以下为 2026-09-11 修订区（对照 HEAD `5fc643f` 重新核实的行）。
+
 ## 变更日志
 
 - 2026-09-03 建立；从 PRODUCTION_GAP_ANALYSIS.md + git 全史（ff7b900…19da988）+
   本日实测恢复全部原始项。
+- 2026-09-11 陈旧性修订：补入快照警告横幅；对照 HEAD `5fc643f` 重核 D3-5/D3-7/D4-1..6/
+  D5-1..6/D6-1..8/D7-1..9/FLUID-PLACE/FARM-TILL/SCHEMATIC 共 9 行（原快照冻结于 19da988，
+  落后约 40 次提交），按"代码接线 + 单测已有、真实 Minecraft E2E 证据缺失"如实记为
+  `IMPLEMENTED / UNVERIFIED` / `PARTIAL` / `IMPLEMENTED / UNWIRED`，未升级为 `DONE`。
+- 2026-09-11 新增 F-8（`apps/studio-shell` 编译完整性）：该组件此前不被任何 CI 工作流或根
+  pnpm 门禁覆盖。本次首次实测，修复两处真实 Rust 编译错误（`main.rs:178`/`:269` E0716）并补齐
+  缺失的图标集；同时澄清 `package.metadata does not exist` 是 tauri-winres 的诊断输出而非错误。
+  剩余前置（Windows 专属 bundle 资源在编译期被强制要求）已在 `task-infrastructure-integration.yml`
+  的门禁步骤注释中完整定性。
