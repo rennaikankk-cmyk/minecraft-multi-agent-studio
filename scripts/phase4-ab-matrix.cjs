@@ -3,11 +3,27 @@
 // 组：A0(基线)/B0(无遥测)/B1(跳世界快照)/C0(静景)/C1(实体批量)/A2(shadow rust)
 // A1/A3（rust 开）需 studio 级 env——由外部重启切换，本脚本只跑 rust-off 代际。
 // 每组：设置门/场景 → 预热一窗(35s) → 采集 3 窗(95s) → 落盘 JSON。
+//
+// F-C3：本脚本**不再经 shell**。原实现在 `execSync(...)` 里拼
+// `curl -H "Authorization: Bearer ${TOKEN}"`，令牌进入命令行字符串，是 CWE-78
+// 形状（SECURITY.md §2 要求 execFile + shell: false）。现在：
+//   - start-bot 走 Node 内建 fetch，令牌只作为请求头，永不进命令行；
+//   - rcon 走 execFileSync（argv 数组，shell: false）；
+//   - 同步等待用 Atomics.wait，不再 ping 出子进程。
 const fs = require("node:fs");
 const path = require("node:path");
-const { execSync } = require("node:child_process");
+const { execFileSync } = require("node:child_process");
 
-const ROOT = path.resolve(__dirname, "..");
+/**
+ * 仓库根目录 = 本脚本所在目录的上一级（脚本固定住在 scripts/，不随 cwd 变化）。
+ * 可用 STUDIO_WORKSPACE_ROOT 显式覆盖（诊断/夹具用）。
+ */
+function workspaceRoot() {
+  if (process.env.STUDIO_WORKSPACE_ROOT) return path.resolve(process.env.STUDIO_WORKSPACE_ROOT);
+  return path.resolve(__dirname, "..");
+}
+
+const ROOT = workspaceRoot();
 const GATE = path.join(ROOT, "runtime-data", "perf-ab.json");
 const OUT = path.join(ROOT, "runtime-data", "phase4-results");
 const LOG = path.join(ROOT, "runtime-data", "logs", "bot-studio-bot-02.log");
@@ -17,18 +33,55 @@ const TOKEN = JSON.parse(
 fs.mkdirSync(OUT, { recursive: true });
 
 const TOKEN_X = TOKEN;
+/** 同步等待：Atomics.wait 阻塞本线程，不再依赖 `ping -n` 子进程。 */
+const sleepSync = (ms) => {
+  const requested = Math.max(0, Math.floor(ms));
+  const buffer = new Int32Array(new SharedArrayBuffer(4));
+  let remaining = requested;
+  while (remaining > 0) {
+    const slice = Math.min(remaining, 1_000);
+    Atomics.wait(buffer, 0, 0, slice);
+    remaining -= slice;
+  }
+};
+/**
+ * 经内建 fetch 触发 start-bot：令牌只出现在请求头里，绝不进 argv/命令行。
+ * 失败信息只保留稳定类别（HTTP 状态或异常名），不回显响应体/地址。
+ */
+async function postJson(url, token, headers, timeoutMs = 8_000) {
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, ...headers },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return { ok: response.ok, status: response.status };
+  } catch (error) {
+    return { ok: false, error: error && error.name ? error.name : "request_failed" };
+  }
+}
 const ensureBotOnline = () => {
+  // 注：本函数当前是死代码（原实现同样如此，矩阵主体从未调用它）。保留是为了
+  // 不改变脚本结构；start-bot 的调用方式已改成 shell-free 的内建 fetch。
   try {
     const list = rcon("list");
     if (!list.includes("StudioWatch01")) {
-      execSync(`curl -s -m 8 -X POST -H "Authorization: Bearer ${TOKEN_X}" -H "x-studio-action: start-bot" http://127.0.0.1:3230/v1/bots/studio-bot-02/start >nul 2>&1`, { shell: "cmd.exe" });
+      // 诊断动作：失败不阻塞矩阵（原实现把 curl 的 stderr 丢进 >nul 2>&1）。
+      void postJson(
+        "http://127.0.0.1:3230/v1/bots/studio-bot-02/start",
+        TOKEN_X,
+        { "x-studio-action": "start-bot" },
+      );
       sleepSync(12000);
     }
   } catch {}
 };
-const sleepSync = (ms) => execSync(`ping -n ${Math.floor(ms/1000)+1} 127.0.0.1 >nul`, { shell: "cmd.exe" });
+/** rcon：argv 数组 + shell: false（docker 与命令都不经过 shell 解析）。 */
 const rcon = (cmd) =>
-  execSync(`docker exec studio-local-test-mc rcon-cli -- ${cmd}`, { encoding: "utf8" }).trim();
+  execFileSync("docker", ["exec", "studio-local-test-mc", "rcon-cli", "--", cmd], {
+    encoding: "utf8",
+    shell: false,
+  }).trim();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const setGate = (mode) => fs.writeFileSync(GATE, JSON.stringify({ mode }));
 const readNewWindows = (sinceByteOffset, label) => {
