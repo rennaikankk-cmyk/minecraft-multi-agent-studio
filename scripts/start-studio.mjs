@@ -48,6 +48,17 @@ async function stopSessionLocalTestServer() {
 process.once("SIGINT", () => void stopAll("SIGINT"));
 process.once("SIGTERM", () => void stopAll("SIGTERM"));
 
+let instanceId = `studio-session-${Date.now().toString(36)}`;
+let localTestServerObserved = "not_started";
+let localTestServerError = null;
+let restartInFlight = false;
+
+/**
+ * 启动整套 Studio 服务（coordinator/control-api/manager/bots/dashboard）。
+ * 可重入：restart 端点触发 stopAll 后再次调用，.env/.env.local 与 AI 发现
+ * 全部重新读取（provider 激活的 restartRequired 语义就落在这一层）。
+ */
+async function startStudioServices({ restartCycle = false } = {}) {
 const environmentFileValues = {
   ...(await loadEnvironmentFile(path.join(configRoot, ".env"))),
   ...(await loadEnvironmentFile(path.join(configRoot, ".env.local"))),
@@ -61,9 +72,6 @@ const cliModeArg = (() => {
   if (modeFlagIndex !== -1 && process.argv[modeFlagIndex + 1]) return process.argv[modeFlagIndex + 1];
   return undefined;
 })();
-const instanceId = `studio-session-${Date.now().toString(36)}`;
-let localTestServerObserved = "not_started";
-let localTestServerError = null;
 const startupPlan = resolveStudioStartupPlan({
   ...(cliModeArg === undefined ? {} : { cliMode: cliModeArg }),
   env: { ...environmentFileValues, ...process.env },
@@ -197,6 +205,8 @@ try {
     environment,
     runtimeLinkPort,
     packagedMode,
+    // 整组重启回调（/v1/studio/restart）：响应已写回后再异步执行。
+    onStudioRestart: (reason) => restartStudio(reason),
   });
   await studioManager.start();
 
@@ -279,7 +289,7 @@ try {
       process.stdout.write(`Local Minecraft Server: Observed FAILED/DEGRADED — ${localTestServerError}\n`);
     }
   }
-  if (packagedMode && hostEnvironment.STUDIO_OPEN_BROWSER?.trim() !== "0") {
+  if (packagedMode && !restartCycle && hostEnvironment.STUDIO_OPEN_BROWSER?.trim() !== "0") {
     openDashboardInBrowser(dashboardUrl);
   }
   process.stdout.write(
@@ -306,6 +316,62 @@ try {
   process.stderr.write(`${boundedError(cause)}\n`);
   await stopAll("startup_failure");
   process.exitCode = 1;
+  throw cause;
+}
+if (restartCycle) {
+  process.stdout.write("[studio] Restart cycle complete; services are back online.\n");
+}
+}
+
+// 首次启动：失败保留原行为（打印 + exitCode=1，进程不硬退）。
+await startStudioServices().catch(() => {
+  /* 错误信息与 stopAll 已在函数内处理；这里只吞掉顶层 rejection。 */
+});
+
+/**
+ * 整组重启（manager /v1/studio/restart 触发）：优雅停全部服务（bots 走
+ * manager.stop 的会话清理）→ 复位启动态 → 端口释放等待 → 重新走完整启动
+ * 序列（重读 .env/.env.local 与 AI 发现）。只在重启请求时循环；意外退出
+ * 的全停语义不变。
+ */
+async function restartStudio(reason) {
+  if (restartInFlight) {
+    process.stdout.write(`[studio] Restart already in flight; ignored (${reason}).\n`);
+    return;
+  }
+  if (stopping) {
+    process.stdout.write(`[studio] Shutdown already in progress; restart ignored (${reason}).\n`);
+    return;
+  }
+  restartInFlight = true;
+  try {
+    process.stdout.write(`[studio] Restart requested (${reason}); stopping services...\n`);
+    await stopSessionLocalTestServer();
+    await stopAll("studio_restart");
+    // 端口释放（Windows TIME_WAIT/进程退出异步）：有界重试后再起。
+    let lastError = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      stopping = false;
+      stopPromise = null;
+      localTestServerObserved = "not_started";
+      localTestServerError = null;
+      instanceId = `studio-session-${Date.now().toString(36)}`;
+      await delay(attempt === 1 ? 1_500 : 3_000);
+      try {
+        await startStudioServices({ restartCycle: true });
+        return;
+      } catch (cause) {
+        lastError = cause;
+        process.stdout.write(`[studio] Restart attempt ${attempt}/3 failed: ${boundedError(cause)}\n`);
+      }
+    }
+    throw lastError ?? new Error("restart failed");
+  } catch (cause) {
+    process.stderr.write(`[studio] Restart failed: ${boundedError(cause)}\n`);
+    process.exitCode = 1;
+  } finally {
+    restartInFlight = false;
+  }
 }
 
 function startService(name, relativeEntry, args, env, cwd = repositoryRoot) {

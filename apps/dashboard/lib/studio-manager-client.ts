@@ -411,3 +411,18 @@ export async function deleteAiProvider(
     fetchImplementation,
   );
 }
+
+/** 整组重启 Studio 服务（start-studio 注入的回调；202=已受理）。 */
+export async function restartStudioServices(
+  config: StudioManagerConfig,
+  fetchImplementation: typeof fetch = fetch,
+): Promise<{ accepted: boolean }> {
+  const value = await requestJson(
+    config,
+    "/v1/studio/restart",
+    { method: "POST" },
+    fetchImplementation,
+  );
+  const restart = (value as { restart?: { status?: string } } | null)?.restart;
+  return { accepted: restart?.status === "accepted" };
+}

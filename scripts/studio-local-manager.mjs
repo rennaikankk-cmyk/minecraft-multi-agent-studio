@@ -485,6 +485,33 @@ export class StudioLocalManager {
         this.writeJson(response, 200, this.status());
         return;
       }
+      if (request.method === "POST" && url.pathname === "/v1/studio/restart") {
+        // 整组重启（AI provider 激活后的 restartRequired 落地端点）。回调由
+        // start-studio 注入：先写回 202，再异步执行 stopAll + 重新启动序列。
+        if (typeof this.options.onStudioRestart !== "function") {
+          this.writeError(response, 501, "STUDIO_RESTART_UNAVAILABLE", "当前进程形态不支持整组重启（需经 start-studio.mjs 启动）。");
+          return;
+        }
+        if (this.stopping) {
+          this.writeError(response, 409, "STUDIO_STOPPING", "Studio 正在停机，无法重启。");
+          return;
+        }
+        const requestedBy = "studio-dashboard";
+        this.writeJson(response, 202, {
+          schemaVersion: "1.0",
+          generatedAt: new Date().toISOString(),
+          restart: { status: "accepted", requestedBy },
+          note: "Services will restart in place; dashboard 连接会短暂中断后自动恢复。",
+        });
+        setTimeout(() => {
+          try {
+            this.options.onStudioRestart(`api:${requestedBy}`);
+          } catch (error) {
+            process.stderr.write(`studio restart dispatch failed: ${error instanceof Error ? error.message : error}\n`);
+          }
+        }, 250);
+        return;
+      }
       if (request.method === "POST" && url.pathname === "/v1/bots") {
         const input = validateCreateBotRequest(await readJson(request));
         const bot = await this.createBot(input);

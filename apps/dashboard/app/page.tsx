@@ -53,9 +53,38 @@ interface OverviewData {
   failed: string | null;
 }
 
+const DISMISSED_STORAGE_KEY = "studio-dismissed-action-required";
+
 export default function OverviewPage() {
   const [data, setData] = useState<OverviewData | null>(null);
   const [loaded, setLoaded] = useState(false);
+  // Action Required 逐条忽略（仅本地视角：不影响 incidents 控制台本身）。
+  const [dismissedIds, setDismissedIds] = useState<string[]>([]);
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(DISMISSED_STORAGE_KEY);
+      const parsed = raw === null ? [] : JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.every((id) => typeof id === "string")) {
+        setDismissedIds(parsed);
+      }
+    } catch {
+      // 损坏键按空处理。
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(DISMISSED_STORAGE_KEY, JSON.stringify(dismissedIds));
+    } catch {
+      // 写不进（隐私模式等）就只保留会话内状态。
+    }
+  }, [dismissedIds]);
+
+  const dismissedSet = new Set(dismissedIds);
+  const recentCritical = data?.incidents?.recentCritical ?? [];
+  const visibleCritical = recentCritical.filter((issue) => !dismissedSet.has(issue.incidentId));
+  const dismissedCount = recentCritical.length - visibleCritical.length;
 
   const refresh = useCallback(async () => {
     try {
@@ -273,14 +302,32 @@ export default function OverviewPage() {
       {/* Row 3 —— 近期活动 / 待处理 */}
       <div className="grid gap-4 lg:grid-cols-2">
         <Card>
-          <CardHeader><CardTitle className="flex items-center gap-2"><AlertTriangle className="size-4 text-warning" />Action Required</CardTitle></CardHeader>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <AlertTriangle className="size-4 text-warning" />Action Required
+              {dismissedCount > 0 ? (
+                <button
+                  type="button"
+                  className="ml-auto text-[11px] text-subtle-foreground underline-offset-2 hover:underline"
+                  onClick={() => setDismissedIds([])}
+                  data-testid="action-required-restore"
+                >
+                  已忽略 {dismissedCount}（点击恢复）
+                </button>
+              ) : null}
+            </CardTitle>
+          </CardHeader>
           <CardContent>
-            {(data?.incidents?.recentCritical?.length ?? 0) === 0 ? (
-              <p className="py-3 text-center text-xs text-subtle-foreground">没有 Critical / 高频重复 Issue 需要处理</p>
+            {(visibleCritical.length) === 0 ? (
+              <p className="py-3 text-center text-xs text-subtle-foreground">
+                {dismissedCount > 0 && (data?.incidents?.recentCritical?.length ?? 0) > 0
+                  ? "全部条目已忽略（点上方恢复）"
+                  : "没有 Critical / 高频重复 Issue 需要处理"}
+              </p>
             ) : (
               <ul className="space-y-1">
-                {(data?.incidents?.recentCritical ?? []).map((issue) => (
-                  <li key={issue.incidentId}>
+                {visibleCritical.map((issue) => (
+                  <li key={issue.incidentId} className="group relative">
                     <Link href={`/incidents?focus=${issue.incidentId}`} className="flex items-center justify-between gap-2 rounded-[5px] px-2 py-1.5 anim-120 hover:bg-hover">
                       <span className="flex min-w-0 items-center gap-2">
                         <Badge tone="failed">{issue.incidentId}</Badge>
@@ -291,6 +338,16 @@ export default function OverviewPage() {
                         <span>{issue.layer}</span>
                       </span>
                     </Link>
+                    <button
+                      type="button"
+                      title="忽略此条（新出现的问题不受影响）"
+                      aria-label={`忽略 ${issue.incidentId}`}
+                      className="absolute right-1 top-1/2 hidden -translate-y-1/2 rounded px-1 text-xs text-subtle-foreground hover:text-foreground group-hover:block"
+                      onClick={() => setDismissedIds((ids) => [...ids, issue.incidentId])}
+                      data-testid={`action-required-dismiss-${issue.incidentId}`}
+                    >
+                      ✕
+                    </button>
                   </li>
                 ))}
               </ul>

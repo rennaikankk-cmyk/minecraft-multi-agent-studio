@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { ThemeSwitcher } from "@/components/theme-switcher";
+import { StudioRestartButton } from "@/components/studio-restart-button";
 import {Badge, Card, CardContent, CardHeader, CardTitle, KeyValueRow, Skeleton, UiEmptyState , PageHeader } from "@/components/ui/primitives";
 
 interface GameplayPolicyView {
@@ -46,7 +47,7 @@ export default function SettingsPage() {
 
   return (
     <main>
-      <PageHeader eyebrow="SYSTEM · SETTINGS" title="Settings"></PageHeader>
+      <PageHeader eyebrow="SYSTEM · SETTINGS" title="Settings" actions={<StudioRestartButton />}></PageHeader>
 
       <Card className="mb-4">
         <CardHeader><CardTitle>Gameplay Policy（产品定位 · 单一事实源）</CardTitle></CardHeader>

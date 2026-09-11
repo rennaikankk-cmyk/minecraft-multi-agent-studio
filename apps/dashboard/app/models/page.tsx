@@ -34,6 +34,7 @@ import {
   UiErrorState,
 } from "@/components/ui/primitives";
 import { SparkStatusBadge } from "@/components/ui/spark-status";
+import { StudioRestartButton } from "@/components/studio-restart-button";
 
 interface AiStatusView {
   state: "connected" | "degraded" | "unavailable" | "misconfigured" | "disabled" | string;
@@ -227,7 +228,7 @@ export default function ModelsPage() {
         }
         setNotice({
           tone: "ok",
-          text: "已写入 .env.local。重启 Studio（关闭 Studio Services 窗口后重新双击启动器）后对协调器全面生效。",
+          text: "已写入 .env.local。点右上「重启 Studio」原地生效（无需手动关窗口）。",
         });
         await refresh();
       } catch (error) {
@@ -271,9 +272,13 @@ export default function ModelsPage() {
 
   return (
     <div className="space-y-4">
-      <PageHeader eyebrow="INTELLIGENCE · MODELS & API" title="模型与 API">
+      <PageHeader
+        eyebrow="INTELLIGENCE · MODELS & API"
+        title="模型与 API"
+        actions={<StudioRestartButton />}
+      >
         统一的推理接入面：本地推理节点、OpenAI 兼容云端 API（GLM Coding Plan / DeepSeek 等）与第三方中转站。
-        激活 = 写入 .env.local 托管键段，重启 Studio 后生效。
+        激活 = 写入 .env.local 托管键段，重启 Studio 后生效（右上按钮原地重启，无需手动关窗口）。
       </PageHeader>
 
       {!loaded ? (
