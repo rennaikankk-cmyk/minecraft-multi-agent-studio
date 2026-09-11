@@ -689,6 +689,11 @@ describe("SingleBotRuntime", () => {
       logger,
       now: () => new Date(Date.now()),
       randomId: () => FIXED_UUID,
+      // §5 的重连退避现在带抖动（factor = 0.8 + unit*0.4）。注入中点使抖动
+      // factor 恰为 1.0，于是 baseDelayMs(500) 仍然是精确的 500ms——下面的
+      // advanceTimersByTimeAsync(500) 与 toBe(2) 断言保持原样不变。不注入就会
+      // 落到 [400,600]ms 区间，这条测试将变成随机失败。
+      randomUnit: () => 0.5,
     });
 
     runtime.start();
@@ -730,6 +735,9 @@ describe("SingleBotRuntime", () => {
       logger,
       now: () => new Date(Date.now()),
       randomId: () => FIXED_UUID,
+      // 抖动源钉在中点 0.5 ⇒ 抖动系数 1.0，attempt 1 = 500ms（base 500）。
+      // 本用例验证的是"退避边界"，不是抖动本身。
+      randomUnit: () => 0.5,
     });
 
     runtime.start();
@@ -763,6 +771,66 @@ describe("SingleBotRuntime", () => {
 
     await runtime.stop();
     expect(clients[1]!.closeCalls).toBe(1);
+  });
+
+  it("jitters the reconnect backoff while keeping every delay inside the cap", async () => {
+    // §5「有上限的指数退避和抖动」：没有抖动时被同一服务端事件打掉的一群 Bot
+    // 会锁步重连，把 deliberately 配出来的 45-60s 放行窗口一次撞穿。
+    // 抖动系数 0.8~1.2 但上界仍是 profile.reconnect.maxDelayMs。
+    const randomUnits = [0, 0.999, 0.25, 0.75];
+    const clients = [0, 1, 2, 3, 4].map(() => new FakeBotClient());
+    const jitterProfile: ServerProfile = {
+      ...profile,
+      reconnect: { ...profile.reconnect, maxAttempts: 4 },
+    };
+    let factoryCalls = 0;
+    let randomIndex = 0;
+    const runtime = new SingleBotRuntime(jitterProfile, {
+      createClient: () => clients[factoryCalls++]!,
+      messageSink: () => undefined,
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+      randomUnit: () => randomUnits[randomIndex++] ?? 0.5,
+    });
+
+    runtime.start();
+    const delays: number[] = [];
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const before = factoryCalls;
+      clients[attempt]!.disconnect({
+        reason: "network_error",
+        expected: false,
+        detail: "isolated_test_disconnect",
+      });
+      // 找到实际排定的重连延迟：从 1ms 起逐毫秒推进，直到工厂被再调一次。
+      let elapsed = 0;
+      while (factoryCalls === before && elapsed < 10_000) {
+        await vi.advanceTimersByTimeAsync(1);
+        elapsed += 1;
+      }
+      delays.push(elapsed);
+    }
+
+    expect(factoryCalls).toBe(5);
+    // 每一次都被 profile 的 maxDelayMs 夹住（attempt 1/2 的指数 500/1000ms，
+    // 3/4 的指数 2000ms 已被 maxDelayMs 截断）。
+    for (const delay of delays) {
+      expect(delay).toBeGreaterThanOrEqual(1);
+      expect(delay).toBeLessThanOrEqual(jitterProfile.reconnect.maxDelayMs);
+    }
+    // attempt 1 的指数是 500ms：抖动下界 0.8 ⇒ 400ms，确定性值恰好是 500ms。
+    expect(delays[0]).toBe(Math.round(500 * (0.8 + randomUnits[0]! * 0.4)));
+    expect(delays[0]).toBe(400);
+    expect(delays[0]).not.toBe(500);
+    // attempt 2 的指数是 1000ms，抖动上界 1.2 ⇒ 1199ms。
+    expect(delays[1]).toBe(Math.round(1000 * (0.8 + randomUnits[1]! * 0.4)));
+    expect(delays[1]).not.toBe(1000);
+    // 关键：延迟不是确定性的指数序列，且逐次不同。
+    expect(new Set(delays).size).toBeGreaterThan(1);
+    expect(delays).not.toEqual([500, 1_000, 2_000, 2_000]);
+
+    await runtime.stop();
   });
 
   it("does not retry after an explicit stop", async () => {

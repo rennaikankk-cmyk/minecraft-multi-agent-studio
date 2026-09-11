@@ -134,7 +134,7 @@ import {
   type ProgressWatchdogSnapshot,
 } from "./progress-watchdog.js";
 import { progressContractForAction } from "./progress-watchdog.js";
-import { IncidentReporter, watchdogEventToSignal } from "./incident-reporter.js";
+import { IncidentReporter, parseIncidentEndpointAllowlist, resolveIncidentPositionPolicy, watchdogEventToSignal } from "./incident-reporter.js";
 import { RuntimeEventBuffer } from "./runtime-event-buffer.js";
 import { loadRuntimeIdentity } from "./runtime-identity.js";
 import {
@@ -187,6 +187,14 @@ export type RuntimeDependencies = {
   /** 单调时钟（watchdog elapsed 计算注入用；缺省 performance.now()）。 */
   monotonicNow?: () => number;
   randomId?: () => string;
+  /**
+   * [0,1) 随机源，只用于重连退避抖动（缺省 Math.random）。注入缝与
+   * monotonicNow 同形：测试可以钉住抖动量，生产仍是真随机。
+   * 之所以必须有抖动：同一服务器事件会把整群 Bot 同时打掉，没有抖动的
+   * 指数退避会让它们锁步重连，把 §5「有上限的指数退避和抖动」里的
+   * "有上限"直接撞成限速封禁。
+   */
+  randomUnit?: () => number;
   /**
    * 反射级时序探针。两种形态：
    *   - 静态 CombatReflexProbeReport（操作员在代表性负载下的实测报告）；
@@ -331,6 +339,8 @@ export class SingleBotRuntime {
   private readonly progressWatchdog: ProgressWatchdog;
   /** monotonic 时钟（watchdog elapsed 计算用；wall clock 只做展示）。 */
   private readonly monotonicNow: () => number;
+  /** [0,1) 随机源，仅服务重连退避抖动（缺省 Math.random）。 */
+  private readonly randomUnit: () => number;
   private readonly eventBuffer: RuntimeEventBuffer;
   // P0-3：eventBuffer 的去重/阈值基线（movement owner / pathResets / 距离）
   private lastBufferedMovementOwner: string | null = null;
@@ -445,6 +455,7 @@ export class SingleBotRuntime {
   ) {
     this.now = dependencies.now ?? (() => new Date());
     this.monotonicNow = dependencies.monotonicNow ?? (() => performance.now());
+    this.randomUnit = dependencies.randomUnit ?? (() => Math.random());
     const reflexProbeDependency = dependencies.combatReflexProbe ?? null;
     this.combatReflexProbeSource =
       reflexProbeDependency !== null &&
@@ -472,6 +483,10 @@ export class SingleBotRuntime {
       endpoint: process.env.STUDIO_INCIDENT_ENDPOINT?.trim() || undefined,
       token: process.env.STUDIO_INCIDENT_TOKEN?.trim() || undefined,
       spoolPath: process.env.STUDIO_INCIDENT_SPOOL_PATH?.trim() || undefined,
+      // F-C2：出口边界（回环 / 显式私网白名单）+ 坐标默认粗化。白名单配置非法
+      // 时显式抛错拒绝启动——配置错误不能退化成「没有白名单」。
+      endpointAllowlist: parseIncidentEndpointAllowlist(process.env.STUDIO_INCIDENT_ENDPOINT_ALLOWLIST),
+      positionPolicy: resolveIncidentPositionPolicy(process.env.STUDIO_INCIDENT_ALLOW_FULL_POSITION),
       logger: { warn: (message: string) => dependencies.logger?.warn?.(message) ?? console.warn(message) },
       eventSink: (event) => this.eventBuffer.append({
         kind: event.kind,
@@ -1542,9 +1557,20 @@ export class SingleBotRuntime {
       return;
     }
 
-    const delay = Math.min(
+    // §5「有上限的指数退避和抖动」。只有指数退避没有抖动时，被同一个服务端
+    // 事件同时打掉的一群 Bot 会锁步重连（luv-anarchy.json 特意配的 14×45-60s
+    // 放行窗口会被一次整齐的并发重连撞穿，直接触限速/封禁）。抖动窗口取
+    // 0.8~1.2 倍（与 coordinator-link-client.ts:1154 同一档），上界仍然受
+    // maxDelayMs 约束——抖动不改变"有上限"。
+    const exponential = Math.min(
       config.maxDelayMs,
       config.baseDelayMs * 2 ** this.reconnectAttempts,
+    );
+    const unit = this.randomUnit();
+    const boundedUnit = Number.isFinite(unit) ? Math.min(Math.max(unit, 0), 1) : 0.5;
+    const delay = Math.max(
+      1,
+      Math.min(config.maxDelayMs, Math.round(exponential * (0.8 + boundedUnit * 0.4))),
     );
     this.reconnectAttempts += 1;
     this.metrics.increment("bot_reconnects_scheduled_total", {
@@ -2222,6 +2248,9 @@ export class SingleBotRuntime {
               "l0_emergency_stop",
               this.traceId,
             );
+            // 未确认的紧急停止必须尽快重发（safety 包：
+            // UNCONFIRMED_EMERGENCY_STOP_RETRY_MS），而不是等满 60s 去重窗口。
+            this.safetyController.reportEmergencyStop(stopOutcome.confirmed);
             result = stopOutcome.confirmed
               ? { outcome: "executed", errorCode: null }
               : { outcome: "failed", errorCode: stopOutcome.errorCode };

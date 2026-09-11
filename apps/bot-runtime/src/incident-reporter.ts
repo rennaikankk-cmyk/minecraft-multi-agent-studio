@@ -8,9 +8,15 @@
 //   - 失败重试：指数退避 + jitter（有界），最终失败 → bounded 本地 spool，
 //     manager 恢复后重放（reporterEventId 幂等，manager 去重）
 //   - 绝不抛出到调用方；网络失败绝不递归产生新 Incident
+//   - F-C2 出站边界（两条，都在本文件内自足）：
+//       1) endpoint 只允许显式回环 / 显式白名单私网主机 + http:（否则拒绝出站，
+//          绝不静默跳过：计入 refused + warn，且日志不回显完整 endpoint）；
+//       2) position 默认粗化到 256 格网格且不含 Y（AGENTS.md §6：基地坐标不得
+//          离开本机）；只有显式 operator opt-in 才发送完整坐标。
 // ---------------------------------------------------------------------------
 
 import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { isIP } from "node:net";
 
 const MAX_QUEUE = 32;
 const MAX_BODY_BYTES = 128 * 1024;
@@ -19,6 +25,223 @@ const RETRY_MAX_DELAY_MS = 5_000;
 const RETRY_MAX_ATTEMPTS = 3;
 /** spool 上限（条）：超出丢最旧；0 = 不启用。 */
 const SPOOL_MAX_ENTRIES = 64;
+
+/* ---------------------------------------------------------------------------
+ * F-C2：incident endpoint 出口策略（回环 / 显式私网白名单）
+ * ------------------------------------------------------------------------- */
+
+/** 私网主机显式白名单（逗号分隔的 IP 字面量或 host.docker.internal）。 */
+export const INCIDENT_ENDPOINT_ALLOWLIST_ENV = "STUDIO_INCIDENT_ENDPOINT_ALLOWLIST";
+/** 显式 opt-in：=1/true/yes 才发送完整坐标；空串/垃圾值不当作同意。 */
+export const INCIDENT_POSITION_FULL_ENV = "STUDIO_INCIDENT_ALLOW_FULL_POSITION";
+
+/** 默认坐标粗化网格（格）；256 = 一个 Minecraft region 的边长。 */
+export const INCIDENT_POSITION_COARSE_GRID = 256;
+
+/** 拒绝出站的稳定错误码（logs / stats / 测试共用，不随文案漂移）。 */
+export const INCIDENT_ENDPOINT_REFUSED_CODE = "INCIDENT_ENDPOINT_REFUSED";
+/** 拒绝出站的稳定日志事件名。 */
+export const INCIDENT_ENDPOINT_REFUSED_EVENT = "incident_reporter_endpoint_refused";
+
+export type IncidentEndpointRefusalCode =
+  /** 非法 URL / 非 http: / 带凭据 / 带查询或片段。 */
+  | "ENDPOINT_UNPARSEABLE"
+  /** 主机不是回环，也不在显式私网白名单里（域名一律不算）。 */
+  | "ENDPOINT_HOST_NOT_ALLOWED";
+
+export type IncidentEndpointResolution =
+  | { readonly allowed: true; readonly endpoint: string; readonly hostRule: string }
+  | { readonly allowed: false; readonly code: IncidentEndpointRefusalCode; readonly redactedEndpoint: string };
+
+/** 坐标出站精度：coarse = 默认（网格粗化 + 无 Y）；full = 显式 operator opt-in。 */
+export type IncidentPositionPolicy = "coarse" | "full";
+
+/** 坐标粗化结果（网格单元 + 确定性绑定标识）。 */
+export type IncidentPositionSummary = Readonly<{
+  /** 网格单元内坐标，格式 `coarse-<grid>:<x>:<z>`，不含 Y。 */
+  readonly cell: string;
+  /** botId:x:z 的确定性绑定，防止跨实例关联。 */
+  readonly bind: string;
+}>;
+
+/**
+ * 主机是否显式落在私网范围（IP 字面量判定，绝不做 DNS 解析）。
+ * 与 SECURITY.md §10「目标只允许 loopback、RFC1918、链路本地/唯一本地 IPv6 或
+ * host.docker.internal」同一口径——DNS 名可能解析到任意地址，因此不进白名单。
+ */
+function classifyPrivateHost(host: string): string | null {
+  if (host === "host.docker.internal") return "docker-host";
+  const version = isIP(host);
+  if (version === 4) {
+    const octets = host.split(".").map(Number);
+    const first = octets[0];
+    const second = octets[1];
+    if (first === undefined || second === undefined) return null;
+    if (first === 10) return "rfc1918-10";
+    if (first === 172 && second >= 16 && second <= 31) return "rfc1918-172";
+    if (first === 192 && second === 168) return "rfc1918-192";
+    if (first === 169 && second === 254) return "link-local-ipv4";
+    return null;
+  }
+  if (version === 6) {
+    if (/^f[cd]/u.test(host)) return "unique-local-ipv6";
+    if (/^fe[89ab]/u.test(host)) return "link-local-ipv6";
+    return null;
+  }
+  return null;
+}
+
+/**
+ * 解析出站主机：回环 IP 字面量（127.0.0.0/8 / ::1）或显式私网白名单命中才放行。
+ * 刻意不接受 `localhost` 这类域名（与 SECURITY.md §7「拒绝域名」一致：域名解析
+ * 可被 hosts / DNS 改到任何地址）。只回传粗粒度规则名，绝不回显主机名本身。
+ */
+function resolveIncidentHost(hostname: string, allowlist: ReadonlySet<string>): { rule: string } | null {
+  const host = normalizeHostname(hostname);
+  if (!host) return null;
+  if (isIP(host) === 4 && host.startsWith("127.")) return { rule: "loopback-ipv4" };
+  // URL.hostname 的 IPv6 字面量形如 `[::1]`；两种写法都归一化后再判定。
+  if (host === "::1" || host === "[::1]") return { rule: "loopback-ipv6" };
+  const privateRule = classifyPrivateHost(host);
+  if (privateRule !== null && allowlist.has(host)) return { rule: `allowlisted:${privateRule}` };
+  return null;
+}
+
+/** 取主机名的小写裸形式（去 IPv6 方括号、去尾点），空串 → null。 */
+function normalizeHostname(hostname: string): string | null {
+  let host = hostname.trim().toLowerCase();
+  if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
+  if (host.endsWith(".")) host = host.slice(0, -1);
+  return host.length > 0 ? host : null;
+}
+
+/**
+ * P0-3：endpoint 出口守卫。非法 URL、非 http:、带凭据/查询/片段的主机一律拒绝；
+ * 主机只接受回环或显式私网白名单（`STUDIO_INCIDENT_ENDPOINT_ALLOWLIST`）。
+ * 纯函数，无副作用——调用方负责把拒绝写进日志。
+ */
+export function resolveIncidentEndpoint(
+  rawEndpoint: string | undefined,
+  options: Readonly<{ readonly allowlist?: readonly string[] | undefined }> = {},
+): IncidentEndpointResolution {
+  const raw = rawEndpoint?.trim() ?? "";
+  if (raw.length === 0) {
+    return { allowed: false, code: "ENDPOINT_UNPARSEABLE", redactedEndpoint: "(unconfigured)" };
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return { allowed: false, code: "ENDPOINT_UNPARSEABLE", redactedEndpoint: "(unparseable)" };
+  }
+  const redactedEndpoint = redactEndpoint(parsed);
+  if (
+    parsed.protocol !== "http:" ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.search !== "" ||
+    parsed.hash !== ""
+  ) {
+    return { allowed: false, code: "ENDPOINT_UNPARSEABLE", redactedEndpoint };
+  }
+  const host = resolveIncidentHost(parsed.hostname, new Set(options.allowlist ?? []));
+  if (host === null) {
+    return { allowed: false, code: "ENDPOINT_HOST_NOT_ALLOWED", redactedEndpoint };
+  }
+  return { allowed: true, endpoint: parsed.toString(), hostRule: host.rule };
+}
+
+/**
+ * 解析 `STUDIO_INCIDENT_ENDPOINT_ALLOWLIST`：只接受 IP 字面量或
+ * host.docker.internal，大小写不敏感、去重、**拒绝通配符**（通配符等于没有白名单）。
+ */
+export function parseIncidentEndpointAllowlist(raw: string | undefined): readonly string[] {
+  if (raw === undefined) return [];
+  const entries: string[] = [];
+  for (const value of raw.split(",")) {
+    const trimmed = value.trim().toLowerCase();
+    if (trimmed.length === 0 || entries.includes(trimmed)) continue;
+    if (trimmed === "host.docker.internal" || isIP(trimmed) !== 0) {
+      entries.push(trimmed);
+      continue;
+    }
+    throw new IncidentEndpointAllowlistError(trimmed);
+  }
+  return entries;
+}
+
+/** 白名单条目非法（域名/通配符/空串族）—— 配置错误必须显式失败，不能静默忽略。 */
+export class IncidentEndpointAllowlistError extends Error {
+  readonly code: string = "INCIDENT_ENDPOINT_ALLOWLIST_INVALID";
+  /** 非法条目的字符数（不存原文：避免把地址带进错误对象/日志）。 */
+  readonly entryLength: number;
+
+  constructor(entry: string) {
+    super(
+      `${INCIDENT_ENDPOINT_ALLOWLIST_ENV} 只接受 IP 字面量或 host.docker.internal；` +
+        `不接受域名或通配符（非法条目长度 ${entry.length}，不回显条目本身）。`,
+    );
+    this.name = "IncidentEndpointAllowlistError";
+    this.entryLength = entry.length;
+  }
+}
+
+/** 坐标出站精度：只有 1/true/yes 才算显式 opt-in（空串不当作同意）。 */
+export function resolveIncidentPositionPolicy(raw: string | undefined): IncidentPositionPolicy {
+  const normalized = raw?.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" ? "full" : "coarse";
+}
+
+/**
+ * 坐标粗化：默认出站载荷不含原坐标，只带 region 级网格单元（256 格）且**不含 Y**
+ * ——Y 会直接暴露地下基地深度。`bind` 用 botId 参与哈希，避免不同 bot 的同格
+ * 记录被关联成同一条踪迹。
+ */
+export function coarsenIncidentPosition(
+  position: { readonly x: number; readonly y: number; readonly z: number },
+  options: Readonly<{ readonly gridBlocks?: number | undefined; readonly bind?: string | undefined }> = {},
+): IncidentPositionSummary {
+  const grid = Math.max(1, Math.trunc(options.gridBlocks ?? INCIDENT_POSITION_COARSE_GRID));
+  const x = Number.isFinite(position.x) ? Math.floor(position.x / grid) * grid : null;
+  const z = Number.isFinite(position.z) ? Math.floor(position.z / grid) * grid : null;
+  return {
+    // 非有限数值显式标 null，绝不落 NaN 到出站载荷。
+    cell: `coarse-${grid}:${x === null ? "null" : x}:${z === null ? "null" : z}`,
+    bind: `bot:${stableHash(`${options.bind ?? ""}:${x === null ? "null" : x}:${z === null ? "null" : z}`)}`,
+  };
+}
+
+/** 默认出站字段（粗化坐标或显式标记）：绝不携带原始 x/y/z。 */
+export function coarsenedPositionFields(
+  position: { readonly x: number; readonly y: number; readonly z: number },
+  botId: string,
+): Readonly<Record<string, unknown>> {
+  return {
+    positionRedacted: true,
+    positionPolicy: "coarse",
+    positionPrecision: `grid-${INCIDENT_POSITION_COARSE_GRID}`,
+    yOmitted: true,
+    positionCoarse: coarsenIncidentPosition(position, { bind: botId }),
+  };
+}
+
+/** 稳定的 32 位 FNV-1a：只为绑定标识，不做安全用途。 */
+function stableHash(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+/** 脱敏展示：只留协议、端口和一个字符，绝不回显主机名/路径。 */
+function redactEndpoint(parsed: URL): string {
+  const protocol = parsed.protocol.replace(/:$/u, "");
+  const host = parsed.hostname.replace(/^\[|\]$/gu, "");
+  const head = host.charAt(0);
+  return `${protocol}://${head}***:${parsed.port === "" ? "(default)" : parsed.port}`;
+}
 
 export interface IncidentSignal {
   readonly botId: string;
@@ -39,6 +262,10 @@ export interface IncidentSignal {
   readonly skillId?: string | undefined;
   readonly skillStep?: string | undefined;
   readonly phase?: string | undefined;
+  /**
+   * F-C2：进程内完整坐标（诊断需要）。**出站默认不发送**——post() 会把它换成
+   * 256 格网格的粗化单元（无 Y）；只有 operator 显式 opt-in 才原样出站。
+   */
   readonly position?: { x: number; y: number; z: number } | undefined;
   readonly dimension?: string | undefined;
   readonly failureCode: string;
@@ -67,6 +294,13 @@ export interface IncidentReporterOptions {
   readonly spoolPath?: string | undefined;
   /** 退避基线（测试注入用）；生产默认 500ms。 */
   readonly retryBaseDelayMs?: number | undefined;
+  /**
+   * F-C2：允许出站的私网主机白名单（来自 STUDIO_INCIDENT_ENDPOINT_ALLOWLIST）。
+   * 回环永远允许；不在白名单里的主机一律拒绝出站。
+   */
+  readonly endpointAllowlist?: readonly string[] | undefined;
+  /** F-C2：坐标出站精度；缺省 coarse（粗化 + 无 Y），full 必须 operator 显式 opt-in。 */
+  readonly positionPolicy?: IncidentPositionPolicy | undefined;
   readonly logger?: { warn(message: string, meta?: unknown): void };
   /**
    * P0-3：reporter 生命周期事件进入运行时事件缓冲（Incident eventWindow 的
@@ -87,12 +321,20 @@ interface QueuedSignal {
 export class IncidentReporter {
   private readonly queue: QueuedSignal[] = [];
   private droppedCount = 0;
+  private refusedCount = 0;
   private sentCount = 0;
   private failedCount = 0;
   private spooledCount = 0;
   private replayedCount = 0;
   private draining = false;
+  /**
+   * F-C2：只有通过出口守卫的 endpoint 才会落到这里；被拒绝时恒为 undefined，
+   * 因此 `post()` 的 `if (!this.endpoint)` 早退同时也是深防御——守卫一旦被
+   * 回退/绕过，也不存在可用的出站地址。
+   */
   private readonly endpoint: string | undefined;
+  private readonly endpointRefusalCode: IncidentEndpointRefusalCode | null;
+  private readonly positionPolicy: IncidentPositionPolicy;
   private readonly token: string | undefined;
   private readonly botId: string;
   private readonly spoolPath: string | undefined;
@@ -101,19 +343,65 @@ export class IncidentReporter {
   private readonly eventSink: IncidentReporterOptions["eventSink"];
 
   constructor(options: IncidentReporterOptions) {
-    this.endpoint = options.endpoint;
+    const configured = options.endpoint?.trim();
+    const resolution = resolveIncidentEndpoint(configured, {
+      allowlist: options.endpointAllowlist ?? [],
+    });
+    this.endpoint = resolution.allowed ? resolution.endpoint : undefined;
+    // 未配置 endpoint 是既有的 no-op（只计数、不告警），与「配置了但被拒绝」区分开：
+    // 后者必须可见，前者不该在每台未接 manager 的机器上刷告警。
+    this.endpointRefusalCode = resolution.allowed || !configured ? null : resolution.code;
+    this.positionPolicy = options.positionPolicy ?? "coarse";
     this.token = options.token;
     this.botId = options.botId;
     this.spoolPath = options.spoolPath;
     this.retryBaseDelayMs = options.retryBaseDelayMs ?? RETRY_BASE_DELAY_MS;
     this.logger = options.logger;
     this.eventSink = options.eventSink;
+    if (resolution.allowed) {
+      // 只有通过出口守卫（回环 / 显式白名单私网）才回显完整 endpoint：这条 URL
+      // 已证明不出本机私有范围，运维需要它确认「事件到底发去哪」。
+      this.logger?.warn?.("incident_reporter_endpoint_allowed", {
+        hostRule: resolution.hostRule,
+        endpoint: resolution.endpoint,
+        positionPolicy: this.positionPolicy,
+      });
+    } else if (configured) {
+      // 拒绝必须可见（不是静默跳过）：稳定错误码 + 脱敏 endpoint，绝不回显主机名。
+      this.logger?.warn?.(INCIDENT_ENDPOINT_REFUSED_EVENT, {
+        code: INCIDENT_ENDPOINT_REFUSED_CODE,
+        reason: resolution.code,
+        endpoint: resolution.redactedEndpoint,
+        action: "incident_delivery_disabled",
+        hint: `只允许回环或 ${INCIDENT_ENDPOINT_ALLOWLIST_ENV} 中的显式私网主机`,
+      });
+    }
+    if (this.positionPolicy === "full") {
+      this.logger?.warn?.("incident_reporter_full_position_enabled", {
+        code: "INCIDENT_FULL_POSITION_ENABLED",
+        optIn: INCIDENT_POSITION_FULL_ENV,
+        note: "完整坐标将离开本机；仅限显式排障，用后立即撤销该环境变量",
+      });
+    }
     this.replaySpool();
   }
 
   /** 热路径入口：入队即返回。队列满 → 丢弃 + 计数 + warn（可观测，不静默）。 */
   report(signal: Omit<IncidentSignal, "botId"> & Partial<Pick<IncidentSignal, "botId">>): void {
     const full: IncidentSignal = { ...signal, botId: signal.botId ?? this.botId } as IncidentSignal;
+    if (this.endpointRefusalCode !== null) {
+      // F-C2：endpoint 未通过出口守卫 → 拒绝出站（连队列都不进，绝不静默直发）。
+      this.refusedCount += 1;
+      if (this.refusedCount === 1) {
+        this.logger?.warn?.(INCIDENT_ENDPOINT_REFUSED_EVENT, {
+          code: INCIDENT_ENDPOINT_REFUSED_CODE,
+          reason: this.endpointRefusalCode,
+          action: "incident_report_refused",
+          refused: this.refusedCount,
+        });
+      }
+      return;
+    }
     if (!this.endpoint) {
       this.droppedCount += 1;
       return;
@@ -144,17 +432,21 @@ export class IncidentReporter {
   }
 
   get stats(): {
-    queued: number; dropped: number; sent: number; failed: number;
+    queued: number; dropped: number; refused: number; sent: number; failed: number;
     spooled: number; replayed: number; endpointConfigured: boolean;
+    endpointRefusedCode: IncidentEndpointRefusalCode | null; positionPolicy: IncidentPositionPolicy;
   } {
     return {
       queued: this.queue.length,
       dropped: this.droppedCount,
+      refused: this.refusedCount,
       sent: this.sentCount,
       failed: this.failedCount,
       spooled: this.spooledCount,
       replayed: this.replayedCount,
       endpointConfigured: this.endpoint !== undefined,
+      endpointRefusedCode: this.endpointRefusalCode,
+      positionPolicy: this.positionPolicy,
     };
   }
 
@@ -268,7 +560,7 @@ export class IncidentReporter {
       const response = await fetch(this.endpoint, {
         method: "POST",
         headers,
-        body: JSON.stringify({ ...signal, reporterEventId: eventId, botId: signal.botId || this.botId }).slice(0, MAX_BODY_BYTES),
+        body: JSON.stringify(this.outboundPayload(signal, eventId)).slice(0, MAX_BODY_BYTES),
         signal: controller.signal,
       });
       return response.ok;
@@ -277,6 +569,27 @@ export class IncidentReporter {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /**
+   * F-C2：出站载荷唯一构造点（post 只走这里，`build` 逻辑不再有第二条路径）。
+   * 默认把 `position` 换成粗化网格单元 + 显式脱敏标记；只有 positionPolicy=full
+   * 才原样发送。这是 AGENTS.md §6「基地坐标不得进入公开日志或未授权响应」的
+   * 出站侧对应物：不允许它悄悄以原始形式离开本机。
+   */
+  private outboundPayload(signal: IncidentSignal, eventId: string): Record<string, unknown> {
+    const botId = signal.botId || this.botId;
+    const payload: Record<string, unknown> = { ...signal, reporterEventId: eventId, botId };
+    if (signal.position === undefined || this.positionPolicy === "full") {
+      return {
+        ...payload,
+        positionPolicy: this.positionPolicy,
+        positionRedacted: false,
+        ...(signal.position !== undefined ? { positionPrecision: "full-opt-in" } : {}),
+      };
+    }
+    delete payload.position;
+    return { ...payload, ...coarsenedPositionFields(signal.position, botId) };
   }
 }
 
