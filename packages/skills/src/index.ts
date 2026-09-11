@@ -663,6 +663,17 @@ export * from "./skill-gap-composition.js";
 export * from "./skill-gap-persistence.js";
 export * from "./skill-release.js";
 export * from "./gap-bundle.js";
+// 包对外的 redaction 出口以 incidents.ts 的强实现为准：redactSecrets 递归抠
+// key，并覆盖 JWT / AWS / Slack / URL userinfo / 自由文本 key=value；
+// containsUnredactedSecrets 是"残留即拒绝"的 fail-closed 扫描。gap-bundle 的
+// redactText/scanResidualSecrets 继续导出以保持向后兼容（apps/coordinator 的
+// planner-memory、lesson-store、lesson-review 在用），但它只有 3 条模式，
+// 新代码请用上面这套。
+export {
+  REDACTED,
+  containsUnredactedSecrets,
+  redactSecrets,
+} from "./incidents.js";
 export * from "./provenance.js";
 export * from "./death-recovery.js";
 export * from "./nether-coords.js";

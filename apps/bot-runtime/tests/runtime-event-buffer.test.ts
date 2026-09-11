@@ -112,6 +112,20 @@ describe("RuntimeEventBuffer redaction and untrusted text", () => {
     expect(redactEventDetail("dist=12.3 pathResets=2")).not.toContain("[REDACTED]");
   });
 
+  it("substitutes the key name instead of emitting a literal $1", () => {
+    // 回归：SECRETISH 的键名组曾写作非捕获组 (?:...)，于是替换串里的 $1 原样
+    // 输出为字面量 "$1=[REDACTED]"。上面那条既有用例只断言 toContain("[REDACTED]")，
+    // 对两种写法都成立，因此掩盖了这个缺陷——本条断言键名真的被代入。
+    const redacted = redactEventDetail("api_key=abcdefghijklmnopqrstuvwxyz123456");
+    expect(redacted).not.toContain("$1");
+    expect(redacted).not.toContain("abcdefghijklmnopqrstuvwxyz123456");
+    expect(redacted).toBe("api_key=[REDACTED]");
+
+    const bearer = redactEventDetail("Authorization: Bearer aaaaaaaaaaaaaaaaaaaaaaaa");
+    expect(bearer).not.toContain("$1");
+    expect(bearer).not.toContain("aaaaaaaaaaaaaaaaaaaaaaaa");
+  });
+
   it("truncates pathological long tokens", () => {
     const long = "x".repeat(300);
     expect(redactEventDetail(long)?.length ?? 0).toBeLessThan(120);

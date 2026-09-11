@@ -156,6 +156,101 @@ describe("structured observability", () => {
     expect(serialized).not.toContain("secret-key-value");
   });
 
+  /**
+   * 值级模式此前只有 4 条（Bearer、gho_、github_pat_、sk-），除 Bearer 外全是
+   * 大小写敏感的 {20,} 长体。脱敏是"键名 + 值模式"两层，键名不可信时第二层
+   * 就是唯一防线：同一个令牌换个键名（message/detail/reason/url/body）就原样
+   * 落盘，短一点或大小写变体的直接放过。这里把同一批 secret 家族逐个考一遍。
+   */
+  it("redacts token families carried under a benign key", () => {
+    const { logger, records } = loggerWithSink();
+    const secrets = {
+      githubClassic: "ghp_AFl0Y4Z1N0H9xKq0vB2cD3eF4gH5iJ6kL7mN8",
+      githubOauthUpper: "GHO_AFl0Y4Z1N0H9xKq0vB2cD3eF4gH5iJ6kL7mN8",
+      awsAccessKeyId: "AKIAIOSFODNN7EXAMPLE",
+      slackBotToken: "xoxb-123456789012-abcdefghijklmnop",
+      jwt: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4JcuCA2QIHX8qE3FYk9crJstYPODehqK9s",
+      shortProjectKey: "sk-abcdefghijklmnop",
+    };
+
+    logger.info("value_pattern_event", {
+      message: `auth failed with ${secrets.githubClassic}`,
+      detail: `oauth ${secrets.githubOauthUpper}`,
+      reason: `aws rejected ${secrets.awsAccessKeyId}`,
+      url: `https://hooks.slack.test/${secrets.slackBotToken}`,
+      body: `expired jwt ${secrets.jwt}`,
+      note: `using ${secrets.shortProjectKey}`,
+    });
+
+    const serialized = JSON.stringify(records);
+    for (const secret of Object.values(secrets)) {
+      expect(serialized).not.toContain(secret);
+    }
+    expect(serialized).toContain("[REDACTED]");
+  });
+
+  /**
+   * 自由文本里的 secret 以前完全不扫：`password=hunter2`、`api_key=...`、
+   * `https://user:pass@host`、`Authorization: Basic ...` 都原样进日志。它们就
+   * 藏在一个叫 reason/detail/url 的普通字符串里，键名那一层拦不住。
+   */
+  it("redacts free-text key/value secrets and URL credentials inside string values", () => {
+    const { logger, records } = loggerWithSink();
+
+    logger.info("free_text_event", {
+      reason: "login rejected password=hunter2 while dialing",
+      detail: "api_key=sk-abcdefghijklmnopqrstuvwx rejected",
+      url: "https://operator:s3cr3t-panel@example.test/panel",
+      body: "Authorization: Basic dXNlcjpwYXNzd29yZA==",
+    });
+
+    const serialized = JSON.stringify(records);
+    expect(serialized).not.toContain("hunter2");
+    expect(serialized).not.toContain("sk-abcdefghijklmnopqrstuvwx");
+    expect(serialized).not.toContain("s3cr3t-panel");
+    expect(serialized).not.toContain("dXNlcjpwYXNzd29yZA");
+    expect(serialized).toContain("[REDACTED]");
+  });
+
+  /**
+   * 放宽值模式只能往"更保守"的方向走，不能顺手吃掉普通诊断文本：敏感词根出现
+   * 在别的词里（disposition、maxTokens）、或敏感词后面跟的不是赋值/长串时，
+   * 原文必须保留。过度脱敏是安静的错——日志里写着 [REDACTED]，看起来像保护生效。
+   */
+  it("keeps ordinary diagnostic text readable after broadening value patterns", () => {
+    const { logger, records } = loggerWithSink();
+    const note = "token budget exhausted; secret rotation not required; credential rotation skipped";
+
+    logger.info("benign_text_event", {
+      disposition: "accepted",
+      detail: "position correction applied on retry 3",
+      note,
+      reason: "connection reset by peer",
+    });
+
+    expect(records[0]!.disposition).toBe("accepted");
+    expect(records[0]!.detail).toBe("position correction applied on retry 3");
+    expect(records[0]!.note).toBe(note);
+    expect(records[0]!.reason).toBe("connection reset by peer");
+  });
+
+  /**
+   * 值模式是模块级共享的 g 正则。带 g 的 test()/exec() 会把 lastIndex 推进到
+   * 命中之后，下一次扫描就从中间起步——gap-bundle 刚修过同形状的 fail-open。
+   * 这里连续写两次同一条 secret，锁住"共享 g 正则的状态不跨调用泄漏"
+   * （replace 本身会复位 lastIndex，改回 test/exec 就会先在这里炸掉）。
+   */
+  it("keeps redacting on repeated writes (no shared lastIndex leak)", () => {
+    const { logger, records } = loggerWithSink();
+
+    logger.info("repeat_event", { reason: "password=hunter2" });
+    logger.info("repeat_event", { reason: "password=hunter2" });
+
+    expect(records).toHaveLength(2);
+    expect(JSON.stringify(records[0])).not.toContain("hunter2");
+    expect(JSON.stringify(records[1])).not.toContain("hunter2");
+  });
+
   it("keeps bounded lifecycle counters with non-sensitive labels", () => {
     const metrics = new InMemoryMetricRegistry();
     metrics.increment("bot_connection_attempts_total", { bot_id: "worker-01" });

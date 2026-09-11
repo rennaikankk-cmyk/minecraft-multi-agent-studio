@@ -143,6 +143,55 @@ describe("ServerBehaviorObserver", () => {
     expect(events[0]!.detail).not.toContain("abcdefghijklmnopqrstuvwxyz123456");
   });
 
+  /**
+   * 旧实现的 redaction 是 `SECRETISH.replace(SECRETISH, "$1=[REDACTED]")`，而
+   * SECRETISH 的键名组是 (?:...) 非捕获组——`$1` 不会展开成键名，而是被原样
+   * 写进 detail，脱敏结果里留着字面量 "$1="。键名必须真的回填（捕获组），
+   * 否则"脱敏后"的文本本身就成了一个坏掉的证据字段。
+   */
+  it("redacts secret-shaped detail without leaking the $1 placeholder", () => {
+    const clockImpl = clock();
+    const observer = new ServerBehaviorObserver({ monotonicNow: clockImpl.monotonicNow, wallNow: clockImpl.wallNow });
+    observer.record({
+      kind: "kick",
+      family: "CHAT_COMMAND",
+      detail: "api_key=abcdefghijklmnopqrstuvwxyz123456 reason=x",
+    });
+    const detail = observer.snapshot()[0]!.detail ?? "";
+    expect(detail).not.toContain("$1");
+    expect(detail).toContain("api_key=[REDACTED]");
+    expect(detail).not.toContain("abcdefghijklmnopqrstuvwxyz123456");
+    // 非 secret 的部分照旧可读——脱敏不该顺手删掉诊断信息。
+    expect(detail).toContain("reason=x");
+  });
+
+  /**
+   * detail 的 schema 是 z.string().optional()：省略与显式 undefined 都必须无异常。
+   * 运行期脏数据（非字符串）以前会让 redact 里的 .replace 抛错，被 record 的
+   * try/catch 静默吞掉——整条事件消失（观测缺口，正好丢掉服务器异常行为的证据）。
+   * 现在非字符串一律降级为 undefined，事件本身必须留下。
+   */
+  it("stays total for undefined and non-string detail", () => {
+    const clockImpl = clock();
+    const observer = new ServerBehaviorObserver({ monotonicNow: clockImpl.monotonicNow, wallNow: clockImpl.wallNow });
+
+    observer.record({ kind: "accepted", family: "MOVEMENT" });
+    observer.record({ kind: "accepted", family: "MOVEMENT", detail: undefined });
+    observer.record({
+      kind: "timeout",
+      family: "PACKET_INTENSIVE",
+      detail: 42 as unknown as string,
+    });
+
+    const events = observer.snapshot();
+    expect(events).toHaveLength(3);
+    expect(events[0]!.detail).toBeUndefined();
+    expect(events[1]!.detail).toBeUndefined();
+    expect(events[2]!.detail).toBeUndefined();
+    expect(events[2]!.kind).toBe("timeout");
+    expect(observer.stats.buffered).toBe(3);
+  });
+
   it("snapshot(lastMs) serves the Incident eventWindow copy", () => {
     const clockImpl = clock();
     const observer = new ServerBehaviorObserver({ monotonicNow: clockImpl.monotonicNow, wallNow: clockImpl.wallNow });

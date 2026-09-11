@@ -152,11 +152,46 @@ const SENSITIVE_KEY_TOKEN_PAIRS = new Set([
   "server:host",
   "server:ip",
 ]);
+/**
+ * 值级 secret 模式。键名不可信：同一个令牌换个键名（message/detail/reason/url/
+ * body）就原样落盘，所以字符串值本身必须扫一遍。以前只有 4 条模式，且除 Bearer
+ * 外都是大小写敏感的 {20,} 长体——把 ghp_、AWS AKIA、Slack xoxb、JWT 和
+ * `password=hunter2` 这类自由文本 key/value 全放过去了。
+ *
+ * 覆盖面与 packages/skills/src/incidents.ts 的 redactSecrets 对齐（Bearer/JWT/
+ * sk-pk-ghp-gho-xox/AKIA/URL userinfo/自由文本 key=value）。这里是刻意的重复，
+ * 不是疏忽：observability 是零依赖的叶子包（package.json 里没有 dependencies），
+ * apps/* 与 dashboard 全部依赖它；skills 是上层包（依赖 protocol/zod/asset-policy
+ * 等）。反向依赖会把整条技能栈拖进日志基础设施，方向是错的，所以两处模式各自
+ * 维护、必须同步修改。
+ *
+ * 与 incidents.ts 的两处刻意差异（只更强，不更弱）：
+ *   1. 全部模式统一 g+i：`GHP_…`、`akia…` 这类大小写变体也要拦住；
+ *   2. Slack token 允许连字符（xoxb-<数字>-<字母数字>）；incidents 的
+ *      `[A-Za-z0-9]{16,}` 体匹配不到真实形态。
+ * URL userinfo 用零宽断言只吃掉 `user:pass`，保留 scheme 和 host——脱敏不该把
+ * 一条诊断用的 URL 弄成不可读的碎片。
+ */
 const SENSITIVE_VALUE_PATTERNS = [
-  /Bearer\s+[A-Za-z0-9._~+\/-]+=*/giu,
-  /\bgho_[A-Za-z0-9]{20,}\b/gu,
-  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/gu,
-  /\bsk-[A-Za-z0-9]{20,}\b/gu,
+  // URL userinfo：scheme://user:pass@host，密码常常直接写在 URL 里
+  /(?<=:\/\/)[^\s/@:]+:[^\s/@]+(?=@)/giu,
+  // 授权头（Bearer/Basic），连同 scheme 一起替换
+  /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+\/-]+=*/giu,
+  // JWT：eyJ 开头的三段 base64url
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/giu,
+  // GitHub token 家族（ghp_/gho_/ghu_/ghs_/ghr_）
+  /\bgh[pousr]_[A-Za-z0-9]{16,}\b/giu,
+  // GitHub fine-grained PAT
+  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/giu,
+  // sk-/pk- 前缀密钥（OpenAI、Anthropic、Stripe 等），前缀后允许连字符
+  /\b(?:sk|pk)[-_][A-Za-z0-9_-]{16,}\b/giu,
+  // Slack token
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/giu,
+  // AWS access key id（长期 AKIA / 临时 ASIA）
+  /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/giu,
+  // 自由文本 key/value：password=xxx / token: xxx / api_key: xxx
+  // 字符类排除 `[`：免得把上一条模式刚写下的 [REDACTED] 占位符再吃一遍。
+  /\b(?:password|passwd|token|api[_-]?key|secret|authorization|credential)\b\s*[:=]\s*[^\s,;'}\[\]]+/giu,
 ];
 const CORE_FIELDS = new Set([
   "timestamp",

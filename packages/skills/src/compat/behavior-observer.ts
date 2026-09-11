@@ -31,10 +31,19 @@ export interface BehaviorSignalEvent {
   readonly detail: string | undefined;
 }
 
-const SECRETISH = /(?:api[_-]?key|token|secret|authorization|bearer|password)[\s=:]+[A-Za-z0-9_\-./+]{8,}/giu;
+// 键名组必须是捕获组：替换串里的 `$1` 只有在键名真的被捕获时才会展开成键名。
+// 旧写法用 (?:...) 非捕获组，于是脱敏结果里原样留下字面量 `$1=`——既不安全
+// （读的人以为脱敏生效）也不可用（detail 是 incident 的证据字段）。
+const SECRETISH = /(api[_-]?key|token|secret|authorization|bearer|password)[\s=:]+[A-Za-z0-9_\-./+]{8,}/giu;
 
+/**
+ * detail 在 schema 上是 z.string().optional()，运行期却可能拿到任何东西。
+ * 旧实现只判 undefined，非字符串会在这里 .replace 抛错，被 record 的 try/catch
+ * 静默吞掉——整条事件随之消失（观测缺口：丢掉的恰好是服务器异常行为的证据）。
+ * 现在非字符串一律降级为 undefined：只丢不可清洗的 detail，不丢事件。
+ */
 function redact(raw: string | undefined): string | undefined {
-  if (raw === undefined) return undefined;
+  if (typeof raw !== "string") return undefined;
   let text = raw.replace(SECRETISH, "$1=[REDACTED]");
   text = text.replace(/[A-Za-z0-9_\-./+]{120,}/gu, (m) => `${m.slice(0, 32)}…[truncated]`);
   return text.length > 240 ? `${text.slice(0, 240)}…` : text;

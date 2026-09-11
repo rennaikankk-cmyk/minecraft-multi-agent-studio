@@ -62,7 +62,11 @@ export interface RuntimeEventSnapshot {
   readonly totalBuffered: number;
 }
 
-const SECRETISH = /(?:api[_-]?key|token|secret|authorization|bearer|password)[\s=:]+[A-Za-z0-9_\-./+]{8,}/giu;
+// 键名必须是**捕获组**：替换串里的 $1 指向它。此前写作 (?:...) 非捕获组，
+// 于是脱敏输出的是字面量 "$1=[REDACTED]" 而不是键名——密钥本身确实被吃掉了，
+// 但输出里留下了一个假的 "$1=" 前缀。既有用例只断言 toContain("[REDACTED]")，
+// 对两种写法都成立，因此掩盖了这个缺陷。
+const SECRETISH = /(api[_-]?key|token|secret|authorization|bearer|password)[\s=:]+[A-Za-z0-9_\-./+]{8,}/giu;
 const MAX_DETAIL_BYTES_DEFAULT = 240;
 
 /** detail 统一清洗：secret 模式脱敏 → 长串截断 → 有界返回。 */
