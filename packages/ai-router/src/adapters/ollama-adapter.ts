@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { AIError, asAIError } from "../errors.js";
+import type { AIErrorCode } from "../errors.js";
 import type {
   AIAdapter,
   GenerateOptions,
@@ -29,6 +31,18 @@ const ollamaChatResponseSchema = z
     eval_count: z.number().int().nonnegative(),
   })
   .loose();
+
+/**
+ * HTTP classification table shared with the cloud adapter: 401/403 are permanent
+ * credential failures, 429 and 5xx are transient, and every other 4xx is a
+ * request defect that must not be retried.
+ */
+function classifyHttpStatus(status: number): Readonly<{ code: AIErrorCode; retryable: boolean }> {
+  if (status === 401 || status === 403) return { code: "AI_AUTH_FAILED", retryable: false };
+  if (status === 429) return { code: "AI_RATE_LIMITED", retryable: true };
+  if (status >= 500) return { code: "AI_PROVIDER_UNAVAILABLE", retryable: true };
+  return { code: "AI_CONFIG_INVALID", retryable: false };
+}
 
 /**
  * Ollama's native API exposes `think: false`, which prevents reasoning-model
@@ -74,10 +88,77 @@ export class OllamaAdapter implements AIAdapter {
     }
   }
 
+  private failure(code: AIErrorCode, retryable: boolean): AIError {
+    return new AIError(code, `Ollama request failed (${code}).`, {
+      provider: this.name,
+      retryable,
+    });
+  }
+
+  private httpError(status: number): AIError {
+    const { code, retryable } = classifyHttpStatus(status);
+    // The upstream status text and body are deliberately not echoed: they can
+    // carry gateway or credential material, while the stable code carries the
+    // meaning every consumer classifies on.
+    return new AIError(code, `Ollama provider returned HTTP ${status}.`, {
+      provider: this.name,
+      retryable,
+      statusCode: status,
+    });
+  }
+
+  private async readCompletion(
+    response: Response,
+  ): Promise<z.infer<typeof ollamaChatResponseSchema>> {
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      throw this.failure("AI_OUTPUT_INVALID", false);
+    }
+    const parsed = ollamaChatResponseSchema.safeParse(payload);
+    if (!parsed.success) throw this.failure("AI_OUTPUT_INVALID", false);
+    return parsed.data;
+  }
+
+  /**
+   * A schema that `z.toJSONSchema` cannot express is a request defect that fails
+   * identically on every attempt, so it is classified as a non-retryable
+   * configuration error instead of reaching the retryable transport default.
+   */
+  private outputFormat(
+    schema: NonNullable<GenerateOptions["schema"]>,
+  ): Record<string, unknown> {
+    try {
+      return { format: z.toJSONSchema(schema) };
+    } catch {
+      throw this.failure("AI_CONFIG_INVALID", false);
+    }
+  }
+
+  /**
+   * Single normalisation point for every failure on this path. Caller
+   * cancellation and our own timeout win over whatever the transport surfaced,
+   * an already-classified `AIError` is passed through unchanged, and only a
+   * genuinely unknown throw becomes a retryable transport failure.
+   */
+  private normalizeError(request: GenerateOptions, error: unknown, timedOut: boolean): AIError {
+    if (request.signal?.aborted) return this.failure("AI_CANCELLED", false);
+    if (timedOut) return this.failure("AI_PROVIDER_TIMEOUT", true);
+    return asAIError(error, this.name);
+  }
+
   async generate(request: GenerateOptions): Promise<GenerateResult> {
     const controller = new AbortController();
+    let timedOut = false;
     const timeout = setTimeout(
-      () => controller.abort(new Error(`Ollama request exceeded ${request.timeoutMs}ms.`)),
+      () => {
+        timedOut = true;
+        // Aborting with a classified error keeps the timeout retryable even when
+        // the transport rethrows the abort reason verbatim; the previous plain
+        // `Error` reason surfaced as an unclassifiable failure.
+        controller.abort(this.failure("AI_PROVIDER_TIMEOUT", true));
+      },
       request.timeoutMs,
     );
     const abortFromCaller = () => controller.abort(request.signal?.reason);
@@ -102,15 +183,15 @@ export class OllamaAdapter implements AIAdapter {
             temperature: request.temperature,
             num_predict: request.maxTokens,
           },
-          ...(request.schema ? { format: z.toJSONSchema(request.schema) } : {}),
+          ...(request.schema ? this.outputFormat(request.schema) : {}),
         }),
         signal: controller.signal,
       });
       if (!response.ok) {
-        throw new Error(`Ollama error: ${response.status} ${response.statusText}`);
+        throw this.httpError(response.status);
       }
 
-      const data = ollamaChatResponseSchema.parse(await response.json());
+      const data = await this.readCompletion(response);
       return {
         content: data.message.content,
         usage: {
@@ -118,6 +199,8 @@ export class OllamaAdapter implements AIAdapter {
           completionTokens: data.eval_count,
         },
       };
+    } catch (error) {
+      throw this.normalizeError(request, error, timedOut);
     } finally {
       clearTimeout(timeout);
       request.signal?.removeEventListener("abort", abortFromCaller);

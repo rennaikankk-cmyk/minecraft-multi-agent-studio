@@ -1,4 +1,6 @@
 import type { AIAdapter, GenerateOptions, GenerateResult, HealthResult } from '../types/adapter.js';
+import { AIError, asAIError } from '../errors.js';
+import type { AIErrorCode } from '../errors.js';
 import { z } from 'zod';
 
 function sanitizeVllmJsonSchema(value: unknown): unknown {
@@ -37,6 +39,18 @@ const modelListResponseSchema = z
     data: z.array(z.object({ id: z.string().min(1) }).loose()).min(1),
   })
   .loose();
+
+/**
+ * HTTP classification table shared with the cloud adapter: 401/403 are permanent
+ * credential failures, 429 and 5xx are transient, and every other 4xx is a
+ * request defect that must not be retried.
+ */
+function classifyHttpStatus(status: number): Readonly<{ code: AIErrorCode; retryable: boolean }> {
+  if (status === 401 || status === 403) return { code: 'AI_AUTH_FAILED', retryable: false };
+  if (status === 429) return { code: 'AI_RATE_LIMITED', retryable: true };
+  if (status >= 500) return { code: 'AI_PROVIDER_UNAVAILABLE', retryable: true };
+  return { code: 'AI_CONFIG_INVALID', retryable: false };
+}
 
 export class VLLMAdapter implements AIAdapter {
   readonly name = 'vllm';
@@ -105,10 +119,88 @@ export class VLLMAdapter implements AIAdapter {
     }
   }
 
+  private failure(code: AIErrorCode, retryable: boolean): AIError {
+    return new AIError(code, `vLLM request failed (${code}).`, {
+      provider: this.name,
+      retryable,
+    });
+  }
+
+  private httpError(status: number): AIError {
+    const { code, retryable } = classifyHttpStatus(status);
+    // The upstream status text and body are deliberately not echoed: they can
+    // carry gateway or credential material, while the stable code carries the
+    // meaning every consumer classifies on.
+    return new AIError(code, `vLLM provider returned HTTP ${status}.`, {
+      provider: this.name,
+      retryable,
+      statusCode: status,
+    });
+  }
+
+  private async readCompletion(
+    response: Response,
+  ): Promise<z.infer<typeof chatCompletionResponseSchema>> {
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      throw this.failure('AI_OUTPUT_INVALID', false);
+    }
+    const parsed = chatCompletionResponseSchema.safeParse(payload);
+    if (!parsed.success) throw this.failure('AI_OUTPUT_INVALID', false);
+    return parsed.data;
+  }
+
+  /**
+   * A schema that `z.toJSONSchema` cannot express is a request defect that fails
+   * identically on every attempt, so it is classified as a non-retryable
+   * configuration error instead of reaching the retryable transport default.
+   */
+  private structuredResponseFormat(
+    schema: NonNullable<GenerateOptions['schema']>,
+  ): Record<string, unknown> {
+    let jsonSchema: unknown;
+    try {
+      jsonSchema = sanitizeVllmJsonSchema(z.toJSONSchema(schema));
+    } catch {
+      throw this.failure('AI_CONFIG_INVALID', false);
+    }
+    return {
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'structured_response',
+          strict: true,
+          schema: jsonSchema,
+        },
+      },
+    };
+  }
+
+  /**
+   * Single normalisation point for every failure on this path. Caller
+   * cancellation and our own timeout win over whatever the transport surfaced,
+   * an already-classified `AIError` is passed through unchanged, and only a
+   * genuinely unknown throw becomes a retryable transport failure.
+   */
+  private normalizeError(request: GenerateOptions, error: unknown, timedOut: boolean): AIError {
+    if (request.signal?.aborted) return this.failure('AI_CANCELLED', false);
+    if (timedOut) return this.failure('AI_PROVIDER_TIMEOUT', true);
+    return asAIError(error, this.name);
+  }
+
   async generate(request: GenerateOptions): Promise<GenerateResult> {
     const controller = new AbortController();
+    let timedOut = false;
     const timeout = setTimeout(
-      () => controller.abort(new Error(`vLLM request exceeded ${request.timeoutMs}ms.`)),
+      () => {
+        timedOut = true;
+        // Aborting with a classified error keeps the timeout retryable even when
+        // the transport rethrows the abort reason verbatim; the previous plain
+        // `Error` reason surfaced as an unclassifiable failure.
+        controller.abort(this.failure('AI_PROVIDER_TIMEOUT', true));
+      },
       request.timeoutMs,
     );
     const abortFromCaller = () => controller.abort(request.signal?.reason);
@@ -131,29 +223,18 @@ export class VLLMAdapter implements AIAdapter {
           chat_template_kwargs: { enable_thinking: false },
           max_tokens: request.maxTokens,
           temperature: request.temperature,
-          ...(request.schema
-            ? {
-                response_format: {
-                  type: 'json_schema',
-                  json_schema: {
-                    name: 'structured_response',
-                    strict: true,
-                    schema: sanitizeVllmJsonSchema(z.toJSONSchema(request.schema)),
-                  },
-                },
-              }
-            : {}),
+          ...(request.schema ? this.structuredResponseFormat(request.schema) : {}),
         }),
         signal: controller.signal
       });
 
       if (!response.ok) {
-        throw new Error(`vLLM error: ${response.status} ${response.statusText}`);
+        throw this.httpError(response.status);
       }
 
-      const data = chatCompletionResponseSchema.parse(await response.json());
+      const data = await this.readCompletion(response);
       const choice = data.choices[0];
-      if (!choice) throw new Error('vLLM response did not contain a completion choice.');
+      if (!choice) throw this.failure('AI_OUTPUT_INVALID', false);
       return {
         content: choice.message.content,
         ...(choice.finish_reason !== undefined ? { finishReason: choice.finish_reason } : {}),
@@ -162,6 +243,8 @@ export class VLLMAdapter implements AIAdapter {
           completionTokens: data.usage.completion_tokens
         }
       };
+    } catch (error) {
+      throw this.normalizeError(request, error, timedOut);
     } finally {
       clearTimeout(timeout);
       request.signal?.removeEventListener('abort', abortFromCaller);
