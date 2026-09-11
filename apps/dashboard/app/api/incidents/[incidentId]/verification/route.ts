@@ -1,20 +1,9 @@
 import { NextResponse } from "next/server";
 
+import { isSameOriginAction } from "@/lib/same-origin-guard";
 import { loadStudioManagerConfig } from "@/lib/studio-manager-client";
 
 export const dynamic = "force-dynamic";
-
-function isSameOriginAction(request: Request, action: string): boolean {
-  if (request.headers.get("x-studio-action") !== action) return false;
-  const origin = request.headers.get("origin");
-  const host = request.headers.get("host");
-  if (!origin || !host) return false;
-  try {
-    return new URL(origin).host === host && request.headers.get("sec-fetch-site") === "same-origin";
-  } catch {
-    return false;
-  }
-}
 
 /** POST /api/incidents/:id/verification —— 请求验证 / 记录验证结果。 */
 export async function POST(request: Request, context: { params: Promise<{ incidentId: string }> }) {
@@ -22,7 +11,8 @@ export async function POST(request: Request, context: { params: Promise<{ incide
   if (!/^INC-[0-9]{4,}$/.test(incidentId)) {
     return NextResponse.json({ status: "bad_request" }, { status: 400 });
   }
-  if (!isSameOriginAction(request, "incident-verification")) {
+  // 严格调用点：保持原有「Sec-Fetch-Site 必须显式 same-origin」强度。
+  if (!isSameOriginAction(request, "incident-verification", { requireFetchSite: true })) {
     return NextResponse.json({ status: "forbidden", message: "需要 same-origin + X-Studio-Action。" }, { status: 403 });
   }
   let body: { action?: unknown; result?: unknown };

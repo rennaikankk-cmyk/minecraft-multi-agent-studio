@@ -288,6 +288,15 @@ export class StudioLocalManager {
     response.setHeader("Cache-Control", "no-store");
     response.setHeader("Content-Type", "application/json; charset=utf-8");
     response.setHeader("X-Content-Type-Options", "nosniff");
+    // F-B1 反 DNS-rebinding 闸门：合法客户端只有本机服务端代理（dashboard 的
+    // /api/* 路由与 start-studio 注入的回调），它们既不发 Origin，也只发回环
+    // Host。浏览器页面必然携带 Origin；DNS-rebinding 必然把 Host 换成攻击者域名。
+    // /v1/studio/restart 等端点不需要请求体、不触发 CORS 预检，所以必须在服务端
+    // 自己 fail-closed——先于令牌校验，拒绝一切浏览器形态的请求。
+    if (!isTrustedLoopbackRequest(request)) {
+      this.writeError(response, 403, "AUTH_REQUIRED", "Studio Manager 只接受本机回环客户端的请求。");
+      return;
+    }
     if (!authorized(request.headers.authorization, this.options.token)) {
       this.writeError(response, 401, "AUTH_REQUIRED", "Studio Manager 需要本机访问令牌。");
       return;
@@ -2222,6 +2231,29 @@ function authorized(header, expected) {
   const actual = Buffer.from(header.slice(7), "utf8");
   const wanted = Buffer.from(expected, "utf8");
   return actual.length === wanted.length && timingSafeEqual(actual, wanted);
+}
+
+/** 回环 Host 白名单：127.0.0.1[:port] / localhost[:port] / [::1][:port]（F-B1）。 */
+const LOOPBACK_HOST_PATTERN = /^(?:127\.0\.0\.1|localhost|\[::1\])(?::([0-9]{1,5}))?$/u;
+
+/**
+ * F-B1：只接受「无 Origin + 回环 Host」的请求。
+ * 浏览器页面发起请求必带 Origin；DNS-rebinding 会把 Host 变成攻击者域名
+ * （但页面 URL 看起来仍是 http://127.0.0.1:<port>），因此两者都必须拒绝。
+ */
+function isTrustedLoopbackRequest(request) {
+  if (request.headers.origin !== undefined) return false;
+  return isLoopbackHostHeader(request.headers.host);
+}
+
+function isLoopbackHostHeader(value) {
+  if (typeof value !== "string") return false;
+  const match = LOOPBACK_HOST_PATTERN.exec(value.trim().toLowerCase());
+  if (!match) return false;
+  const port = match[1];
+  if (port === undefined) return true;
+  const parsed = Number(port);
+  return parsed >= 1 && parsed <= 65_535;
 }
 
 function safeRequestUrl(value) {

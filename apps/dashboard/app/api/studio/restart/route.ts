@@ -1,5 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 
+import { isSameOriginAction } from "@/lib/same-origin-guard";
 import {
   loadStudioManagerConfig,
   restartStudioServices,
@@ -8,13 +9,9 @@ import {
 
 export const dynamic = "force-dynamic";
 
-/** 写面统一 X-Studio-Action 守卫（与 stop-bot / skill-release 同纪律）。 */
-function isRestartAction(request: NextRequest): boolean {
-  return request.headers.get("x-studio-action") === "studio-restart";
-}
-
 export async function POST(request: NextRequest) {
-  if (!isRestartAction(request)) {
+  // 写面统一同源守卫（F-B3：与 stop-bot / goals 同一实现，不再是「只查自定义头」）。
+  if (!isSameOriginAction(request, "studio-restart")) {
     return NextResponse.json(
       { ok: false, error: "MISSING_ACTION_HEADER" },
       { status: 403, headers: { "Cache-Control": "no-store" } },

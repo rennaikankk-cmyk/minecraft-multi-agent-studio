@@ -254,6 +254,43 @@ describe("Control API HTTP and WebSocket integration", () => {
     expect(await closed).toBe(1008);
   });
 
+  it("rejects a browser Origin on the bot stream upgrade while the origin-less proxy still connects", async () => {
+    const { webSocketUrl } = await startServer();
+
+    // 浏览器页面（Origin）即便持有有效令牌也必须被拒绝——与 Coordinator
+    // runtime-link 同纪律：内部流只允许服务端代理（不发 Origin）。
+    const browserOrigin = await rejectedWebSocketResponse(
+      webSocketUrl,
+      ["minecraft-studio.v1"],
+      {
+        origin: "http://attacker.example",
+        headers: { Authorization: `Bearer ${READER_TOKEN}` },
+      },
+    );
+    expect(browserOrigin.status).toBe(403);
+    expect(browserOrigin.body.error.code).toBe("PERMISSION_DENIED");
+
+    // 没有令牌时也必须先被 Origin 闸门挡住，而不是退化成 401。
+    const anonymousOrigin = await rejectedWebSocketResponse(
+      webSocketUrl,
+      ["minecraft-studio.v1"],
+      { origin: `http://127.0.0.1:${new URL(webSocketUrl).port}` },
+    );
+    expect(anonymousOrigin.status).toBe(403);
+
+    // 合法客户端（dashboard 服务端代理，不发 Origin）照常建立连接。
+    const { webSocket, firstMessage } = await connectWebSocket(
+      webSocketUrl,
+      ["minecraft-studio.v1"],
+      READER_TOKEN,
+    );
+    expect(firstMessage).toMatchObject({
+      type: "bot.stream.snapshot.v1",
+      payload: { bots: [] },
+    });
+    webSocket.close();
+  });
+
   it("requires stop permission and returns the real confirmed stop result", async () => {
     const requestStop = vi.fn(async (request: Parameters<StopController["requestStop"]>[0]) =>
       stopResult(request),
@@ -728,6 +765,33 @@ function rejectedWebSocketStatus(url: string, protocols: string[]): Promise<numb
       const status = response.statusCode ?? 0;
       response.resume();
       resolve(status);
+    });
+    webSocket.once("error", () => undefined);
+    webSocket.once("open", () => {
+      webSocket.close();
+      reject(new Error("Expected WebSocket upgrade rejection."));
+    });
+  });
+}
+
+/** 与 rejectedWebSocketStatus 相同，但可精确控制 Origin 头并读回拒绝正文。 */
+function rejectedWebSocketResponse(
+  url: string,
+  protocols: string[],
+  options: { origin?: string; headers?: Record<string, string> } = {},
+): Promise<{ status: number; body: any }> {
+  return new Promise((resolve, reject) => {
+    const webSocket = new WebSocket(url, protocols, options);
+    webSocket.once("unexpected-response", (_request, response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      response.once("end", () => {
+        resolve({
+          status: response.statusCode ?? 0,
+          body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
+        });
+      });
+      response.once("error", reject);
     });
     webSocket.once("error", () => undefined);
     webSocket.once("open", () => {

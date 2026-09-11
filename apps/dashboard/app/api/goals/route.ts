@@ -14,6 +14,7 @@ import {
   requestDashboardGoal,
 } from "@/lib/control-api-client";
 import { dashboardLogger } from "@/lib/logger";
+import { isSameOriginAction } from "@/lib/same-origin-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -25,7 +26,7 @@ let goalAttemptCount = 0;
 
 export async function POST(request: NextRequest) {
   const responseRequestId = randomUUID();
-  if (!isSameOriginAction(request)) {
+  if (!isSameOriginAction(request, "submit-goal")) {
     return errorResponse(responseRequestId, 403, "INVALID_REQUEST", "目标只能从本机控制台提交。");
   }
   if (!allowGoalAttempt(Date.now())) {
@@ -87,19 +88,6 @@ function allowGoalAttempt(now: number): boolean {
   }
   goalAttemptCount += 1;
   return goalAttemptCount <= GOAL_ATTEMPT_LIMIT;
-}
-
-function isSameOriginAction(request: NextRequest): boolean {
-  if (request.headers.get("x-studio-action") !== "submit-goal") return false;
-  const origin = request.headers.get("origin");
-  const host = request.headers.get("host");
-  const fetchSite = request.headers.get("sec-fetch-site");
-  if (!origin || !host || (fetchSite !== null && fetchSite !== "same-origin")) return false;
-  try {
-    return new URL(origin).host === host;
-  } catch {
-    return false;
-  }
 }
 
 function isJsonRequest(request: NextRequest): boolean {

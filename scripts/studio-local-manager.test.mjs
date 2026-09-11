@@ -2,7 +2,7 @@ const __T0=Date.now();const __mk=(l)=>console.error(`[${Date.now()-__T0}ms] ${l}
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createServer } from "node:http";
+import { createServer, request as createHttpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -1381,4 +1381,114 @@ test("cloud model may be left empty for activation-time auto-selection", () => {
   assert.equal(selectModelAutomatically(["deepseek-v4-pro", "deepseek-flash"]), "deepseek-flash");
   assert.equal(selectModelAutomatically(["some-relay-model"]), "some-relay-model");
   assert.equal(selectModelAutomatically([]), null);
+});
+
+// ---------------------------------------------------------------------------
+// F-B1：反 DNS-rebinding 闸门（Origin / Host）。
+// 合法客户端只有本机服务端代理（dashboard /api/* 与 start-studio 回调）：
+// 它们既不发 Origin，也只用回环 Host。浏览器页面必然带 Origin；DNS-rebinding
+// 必然把 Host 换成攻击者域名。/v1/studio/restart 不需要请求体，因此不会触发
+// CORS 预检——必须在服务端自己拒绝。
+// ---------------------------------------------------------------------------
+
+/** 原始 HTTP 客户端：fetch 会丢弃 Host 头，闸门测试必须精确控制 Host/Origin。 */
+function rawManagerRequest(base, { method = "GET", requestPath = "/v1/status", headers = {} } = {}) {
+  const target = new URL(base);
+  return new Promise((resolve, reject) => {
+    const request = createHttpRequest(
+      { host: target.hostname, port: target.port, method, path: requestPath, headers },
+      (response) => {
+        const chunks = [];
+        response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        response.on("end", () => {
+          const text = Buffer.concat(chunks).toString("utf8");
+          resolve({ status: response.statusCode, body: text.length > 0 ? JSON.parse(text) : null });
+        });
+      },
+    );
+    request.on("error", reject);
+    request.end();
+  });
+}
+
+async function waitForCondition(predicate, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return predicate();
+}
+
+test("F-B1: rejects browser Origin and non-loopback Host while server-side clients keep working", async (context) => {
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "studio-manager-origin-guard-"));
+  context.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  const restarts = [];
+  const manager = new StudioLocalManager({
+    ...managerTestOptions(runtimeRoot, process.cwd()),
+    onStudioRestart: (requestedBy) => restarts.push(requestedBy),
+  });
+  manager.startBot = fakeStart(manager);
+  const address = await manager.start();
+  context.after(() => manager.stop());
+  const base = `http://127.0.0.1:${address.port}`;
+  const auth = { Authorization: `Bearer ${TOKEN}` };
+
+  // 1) 浏览器页面：Origin + 合法令牌 + 合法 Host → 仍必须拒绝（无 body，无预检）
+  const crossOriginRestart = await rawManagerRequest(base, {
+    method: "POST",
+    requestPath: "/v1/studio/restart",
+    headers: { ...auth, Origin: "http://attacker.example" },
+  });
+  assert.equal(crossOriginRestart.status, 403, "带 Origin 的浏览器请求必须被拒绝");
+  assert.equal(crossOriginRestart.body.error.code, "AUTH_REQUIRED");
+
+  // 2) 跨站读取同样拒绝（GET 无预检）
+  const crossOriginRead = await rawManagerRequest(base, {
+    requestPath: "/v1/status",
+    headers: { ...auth, Origin: "http://attacker.example" },
+  });
+  assert.equal(crossOriginRead.status, 403);
+
+  // 3) DNS-rebinding：Host 指向攻击者域名（Origin 可被省略）→ 拒绝
+  const reboundRestart = await rawManagerRequest(base, {
+    method: "POST",
+    requestPath: "/v1/studio/restart",
+    headers: { ...auth, Host: "attacker.example:3230" },
+  });
+  assert.equal(reboundRestart.status, 403, "非回环 Host 必须被拒绝");
+
+  const reboundRead = await rawManagerRequest(base, {
+    requestPath: "/v1/status",
+    headers: { ...auth, Host: `evil.example:${address.port}` },
+  });
+  assert.equal(reboundRead.status, 403);
+
+  // 4) 合法回环 Host 变体继续可用（无 Origin 的服务端客户端）
+  const localhostHost = await rawManagerRequest(base, {
+    requestPath: "/v1/status",
+    headers: { ...auth, Host: `localhost:${address.port}` },
+  });
+  assert.equal(localhostHost.status, 200);
+  assert.equal(localhostHost.body.schemaVersion, "1.0");
+  const ipv6Host = await rawManagerRequest(base, {
+    requestPath: "/v1/status",
+    headers: { ...auth, Host: `[::1]:${address.port}` },
+  });
+  assert.equal(ipv6Host.status, 200);
+
+  // 5) 真实 dashboard 客户端（fetch：无 Origin、Host=127.0.0.1:port）照常工作
+  const accepted = await fetch(`${base}/v1/studio/restart`, { method: "POST", headers: auth });
+  assert.equal(accepted.status, 202);
+  const unauthenticated = await rawManagerRequest(base, {
+    method: "POST",
+    requestPath: "/v1/studio/restart",
+    headers: { Origin: "http://attacker.example" },
+  });
+  assert.equal(unauthenticated.status, 403, "Origin 闸门先于令牌校验");
+
+  // 6) 被拒请求绝不触发整组重启；合法请求必须触发
+  assert.equal(await waitForCondition(() => restarts.length === 1), true, "合法请求必须触发重启回调");
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  assert.equal(restarts.length, 1, "被拒请求不得触发任何重启");
 });

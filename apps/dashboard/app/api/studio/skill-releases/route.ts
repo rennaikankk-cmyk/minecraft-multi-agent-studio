@@ -1,5 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 
+import { isSameOriginAction } from "@/lib/same-origin-guard";
 import {
   createReleaseDraft,
   loadSharedStateConfig,
@@ -8,13 +9,9 @@ import {
 
 export const dynamic = "force-dynamic";
 
-/** 写操作统一 X-Studio-Action 守卫（与 stop-bot 同纪律）。 */
-function isReleaseAction(request: NextRequest): boolean {
-  return request.headers.get("x-studio-action") === "skill-release";
-}
-
 export async function POST(request: NextRequest) {
-  if (!isReleaseAction(request)) {
+  // F-B3：发布/撤销是破坏性写操作，守卫与 stop-bot 同一实现（同源 Origin+Host）。
+  if (!isSameOriginAction(request, "skill-release")) {
     return NextResponse.json(
       { status: "rejected", detail: "missing x-studio-action header" },
       { status: 403, headers: { "Cache-Control": "no-store" } },

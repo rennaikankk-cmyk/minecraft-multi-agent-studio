@@ -1,6 +1,7 @@
 import { studioManagerErrorV1Schema } from "@minecraft-studio/protocol";
 import { type NextRequest, NextResponse } from "next/server";
 
+import { isSameOriginAction } from "@/lib/same-origin-guard";
 import {
   deleteStudioManagedBot,
   loadStudioManagerConfig,
@@ -13,7 +14,8 @@ export async function DELETE(
   request: NextRequest,
   context: { params: Promise<{ botId: string }> },
 ) {
-  if (request.headers.get("x-studio-action") !== "delete-bot") {
+  // F-B3：删除是不可逆写操作，必须与 stop-bot 同等强度（同源 Origin+Host）。
+  if (!isSameOriginAction(request, "delete-bot")) {
     return errorResponse("INVALID_REQUEST", "Bot 只能从本机控制台删除。", 403);
   }
   const { botId } = await context.params;

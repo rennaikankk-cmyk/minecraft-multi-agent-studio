@@ -28,7 +28,14 @@ function gapConsolePayload() {
 function request(path: string, init: { method?: string; headers?: Record<string, string>; body?: string } = {}): NextRequest {
   return new NextRequest(`http://studio.local${path}`, {
     ...(init.method !== undefined ? { method: init.method } : {}),
-    ...(init.headers !== undefined ? { headers: init.headers } : {}),
+    // F-B3：写面路由要求同源请求（Origin + Host + Sec-Fetch-Site）；
+    // 单测默认按浏览器同源请求构造，需要跨站场景时由用例显式覆盖。
+    headers: {
+      Origin: "http://studio.local",
+      Host: "studio.local",
+      "Sec-Fetch-Site": "same-origin",
+      ...init.headers,
+    },
     ...(init.body !== undefined ? { body: init.body } : {}),
   });
 }
@@ -72,6 +79,24 @@ describe("skill-releases route", () => {
     vi.stubGlobal("fetch", fetcher);
     const response = await postSkillReleases(request("/api/studio/skill-releases", {
       method: "POST",
+      body: JSON.stringify({ action: "create-draft", gapFingerprint: "a".repeat(32) }),
+    }));
+    expect(response.status).toBe(403);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("rejects a cross-site write even when the action header is present (F-B3)", async () => {
+    configure();
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    const response = await postSkillReleases(request("/api/studio/skill-releases", {
+      method: "POST",
+      headers: {
+        "x-studio-action": "skill-release",
+        "Content-Type": "application/json",
+        Origin: "http://attacker.example",
+        "Sec-Fetch-Site": "cross-site",
+      },
       body: JSON.stringify({ action: "create-draft", gapFingerprint: "a".repeat(32) }),
     }));
     expect(response.status).toBe(403);

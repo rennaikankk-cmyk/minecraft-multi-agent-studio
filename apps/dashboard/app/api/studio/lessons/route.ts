@@ -1,5 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 
+import { isSameOriginAction } from "@/lib/same-origin-guard";
 import {
   fetchLessons,
   loadSharedStateConfig,
@@ -21,8 +22,8 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  // 复盘触发是写面：X-Studio-Action 守卫。
-  if (request.headers.get("x-studio-action") !== "lesson-review") {
+  // 复盘触发是写面（F-B3：同源 Origin+Host，不再是「只查自定义头」）。
+  if (!isSameOriginAction(request, "lesson-review")) {
     return NextResponse.json(
       { status: "rejected", detail: "missing x-studio-action header" },
       { status: 403, headers: { "Cache-Control": "no-store" } },

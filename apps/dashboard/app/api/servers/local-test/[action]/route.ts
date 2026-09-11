@@ -1,22 +1,11 @@
 import { NextResponse } from "next/server";
 
+import { isSameOriginAction } from "@/lib/same-origin-guard";
 import { loadStudioManagerConfig } from "@/lib/studio-manager-client";
 
 export const dynamic = "force-dynamic";
 
 const ACTIONS = new Set(["start", "stop", "restart", "reset"]);
-
-function isSameOriginAction(request: Request, action: string): boolean {
-  if (request.headers.get("x-studio-action") !== action) return false;
-  const origin = request.headers.get("origin");
-  const host = request.headers.get("host");
-  if (!origin || !host) return false;
-  try {
-    return new URL(origin).host === host && request.headers.get("sec-fetch-site") === "same-origin";
-  } catch {
-    return false;
-  }
-}
 
 /** POST /api/servers/local-test/:action —— lifecycle 操作（返回 operationId，非乐观成功）。 */
 export async function POST(request: Request, context: { params: Promise<{ action: string }> }) {
@@ -24,7 +13,8 @@ export async function POST(request: Request, context: { params: Promise<{ action
   if (!ACTIONS.has(action)) {
     return NextResponse.json({ status: "bad_request", message: "action 必须是 start|stop|restart|reset" }, { status: 400 });
   }
-  if (!isSameOriginAction(request, `local-test-${action}`)) {
+  // 严格调用点：保持原有「Sec-Fetch-Site 必须显式 same-origin」强度。
+  if (!isSameOriginAction(request, `local-test-${action}`, { requireFetchSite: true })) {
     return NextResponse.json({ status: "forbidden", message: "需要 same-origin + X-Studio-Action。" }, { status: 403 });
   }
   let body: { confirmWorldIdentity?: unknown } = {};

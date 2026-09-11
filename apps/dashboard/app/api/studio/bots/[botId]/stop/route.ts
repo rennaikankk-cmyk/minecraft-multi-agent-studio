@@ -3,6 +3,7 @@ import {
 } from "@minecraft-studio/protocol";
 import { type NextRequest, NextResponse } from "next/server";
 
+import { isSameOriginAction } from "@/lib/same-origin-guard";
 import {
   loadStudioManagerConfig,
   stopStudioManagedBot,
@@ -15,7 +16,8 @@ export async function POST(
   request: NextRequest,
   context: { params: Promise<{ botId: string }> },
 ) {
-  if (!isSameOriginAction(request)) {
+  // F-B3：与 control-api 的 stop-bot 路由同一份同源守卫实现。
+  if (!isSameOriginAction(request, "stop-bot")) {
     return errorResponse("INVALID_REQUEST", "Bot 只能从本机控制台停止。", 403);
   }
   const { botId } = await context.params;
@@ -38,10 +40,6 @@ export async function POST(
           );
     return errorResponse(error.code, error.message, error.httpStatus);
   }
-}
-
-function isSameOriginAction(request: NextRequest): boolean {
-  return request.headers.get("x-studio-action") === "stop-bot";
 }
 
 function errorResponse(code: string, message: string, status: number) {

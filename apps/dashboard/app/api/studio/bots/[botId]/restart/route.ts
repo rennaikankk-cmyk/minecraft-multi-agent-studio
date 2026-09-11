@@ -9,6 +9,7 @@ import {
   restartStudioManagedBot,
   StudioManagerClientError,
 } from "@/lib/studio-manager-client";
+import { isSameOriginAction } from "@/lib/same-origin-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -16,7 +17,7 @@ export async function POST(
   request: NextRequest,
   context: { params: Promise<{ botId: string }> },
 ) {
-  if (!isSameOriginAction(request)) {
+  if (!isSameOriginAction(request, "restart-bot")) {
     return errorResponse("INVALID_REQUEST", "Bot 只能从本机控制台重启。", 403);
   }
   const { botId } = await context.params;
@@ -38,21 +39,6 @@ export async function POST(
             502,
           );
     return errorResponse(error.code, error.message, error.httpStatus);
-  }
-}
-
-function isSameOriginAction(request: NextRequest): boolean {
-  if (request.headers.get("x-studio-action") !== "restart-bot") return false;
-  const origin = request.headers.get("origin");
-  const host = request.headers.get("host");
-  const fetchSite = request.headers.get("sec-fetch-site");
-  if (!origin || !host || (fetchSite !== null && fetchSite !== "same-origin")) {
-    return false;
-  }
-  try {
-    return new URL(origin).host === host;
-  } catch {
-    return false;
   }
 }
 

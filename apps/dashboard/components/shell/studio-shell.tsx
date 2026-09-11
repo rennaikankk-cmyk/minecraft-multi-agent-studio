@@ -108,14 +108,30 @@ export function StudioShell({ children }: { children: ReactNode }) {
             <StatusPill label="Mode" value={status.studioMode} tone={status.studioMode === "UNKNOWN" ? "unknown" : "info"} />
             <StatusDot
               label="Local MC"
-              tone={status.localTest?.status === "online" ? "localtest" : "notstarted"}
-              text={status.localTest?.status === "online" ? "ON" : status.localTest?.status === "starting" ? "STARTING" : "OFF"}
+              tone={status.localTestUnknown ? "neutral" : status.localTest?.status === "online" ? "localtest" : "notstarted"}
+              text={status.localTestUnknown ? "—" : status.localTest?.status === "online" ? "ON" : status.localTest?.status === "starting" ? "STARTING" : "OFF"}
             />
-            <StatusPill label="Bots" value={`${status.bots.online}/${status.bots.total}`} tone={status.bots.online > 0 ? "online" : "neutral"} />
+            <StatusPill
+              label="Bots"
+              value={status.bots === null ? "—" : `${status.bots.online}/${status.bots.total}`}
+              tone={status.bots !== null && status.bots.online > 0 ? "online" : "neutral"}
+            />
             <StatusPill
               label="Incidents"
-              value={status.incidents.critical > 0 ? `${status.incidents.open} (${status.incidents.critical} crit)` : String(status.incidents.open)}
-              tone={status.incidents.critical > 0 ? "failed" : status.incidents.open > 0 ? "warning" : "neutral"}
+              value={
+                status.incidents === null
+                  ? "—"
+                  : status.incidents.critical > 0
+                    ? `${status.incidents.open} (${status.incidents.critical} crit)`
+                    : String(status.incidents.open)
+              }
+              tone={
+                status.incidents !== null && status.incidents.critical > 0
+                  ? "failed"
+                  : status.incidents !== null && status.incidents.open > 0
+                    ? "warning"
+                    : "neutral"
+              }
             />
             <StatusDot
               label="Spark"
@@ -123,7 +139,7 @@ export function StudioShell({ children }: { children: ReactNode }) {
               text={status.spark?.model ?? status.spark?.state?.toUpperCase() ?? "—"}
             />
             <div className="ml-auto flex items-center gap-1">
-              {status.stale ? <Badge tone="warning">STALE</Badge> : null}
+              {status.stale ? <Badge tone="warning" title="部分后端数据不可用，显示为「—」而不是 0/空">STALE</Badge> : null}
               <span className="hidden text-[11px] text-subtle-foreground sm:inline" title={status.lastRefreshAt ?? ""}>
                 {status.lastRefreshAt ? new Date(status.lastRefreshAt).toLocaleTimeString("zh-CN") : "—"}
               </span>
@@ -185,9 +201,9 @@ function SidebarNav({
                     <>
                       {icon}
                       <span className="truncate">{item.label}</span>
-                      {item.badge === "criticalIncidents" && status.incidents.critical > 0 ? (
+                      {item.badge === "criticalIncidents" && (status.incidents?.critical ?? 0) > 0 ? (
                         <span className="ml-auto rounded-[4px] bg-critical/20 px-1.5 text-[10px] font-bold text-critical">
-                          {status.incidents.critical}
+                          {status.incidents?.critical ?? 0}
                         </span>
                       ) : null}
                       {item.badge === "spark" ? (

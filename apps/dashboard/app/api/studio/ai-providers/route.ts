@@ -10,6 +10,7 @@ import {
   type AiProviderSaveInput,
   type AiProviderType,
 } from "@/lib/studio-manager-client";
+import { isSameOriginAction } from "@/lib/same-origin-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -89,21 +90,6 @@ function isValidSaveInput(input: AiProviderSaveInput | null): input is AiProvide
     return false;
   }
   return true;
-}
-
-function isSameOriginAction(request: NextRequest, action: string): boolean {
-  if (request.headers.get("x-studio-action") !== action) return false;
-  const origin = request.headers.get("origin");
-  const host = request.headers.get("host");
-  const fetchSite = request.headers.get("sec-fetch-site");
-  if (!origin || !host || (fetchSite !== null && fetchSite !== "same-origin")) {
-    return false;
-  }
-  try {
-    return new URL(origin).host === host;
-  } catch {
-    return false;
-  }
 }
 
 function clientErrorResponse(cause: unknown, fallback: string) {

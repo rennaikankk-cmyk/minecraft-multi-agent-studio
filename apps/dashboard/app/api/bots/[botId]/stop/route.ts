@@ -16,6 +16,7 @@ import {
   verifyStopConfirmation,
 } from "@/lib/control-api-client";
 import { dashboardLogger } from "@/lib/logger";
+import { isSameOriginAction } from "@/lib/same-origin-guard";
 
 const STOP_WINDOW_MS = 60_000;
 const STOP_ATTEMPT_LIMIT = 10;
@@ -32,7 +33,7 @@ export async function POST(
   if (!allowStopAttempt(Date.now())) {
     return errorResponse(responseRequestId, 429, "RATE_LIMITED", "停止确认尝试过于频繁，请稍后再试。");
   }
-  if (!isSameOriginAction(request)) {
+  if (!isSameOriginAction(request, "stop-bot")) {
     return errorResponse(responseRequestId, 403, "CONFIRMATION_REQUIRED", "停止操作必须从本机控制台确认。");
   }
 
@@ -114,19 +115,6 @@ function allowStopAttempt(now: number): boolean {
   }
   stopAttemptCount += 1;
   return stopAttemptCount <= STOP_ATTEMPT_LIMIT;
-}
-
-function isSameOriginAction(request: NextRequest): boolean {
-  if (request.headers.get("x-studio-action") !== "stop-bot") return false;
-  const origin = request.headers.get("origin");
-  const host = request.headers.get("host");
-  const fetchSite = request.headers.get("sec-fetch-site");
-  if (!origin || !host || (fetchSite !== null && fetchSite !== "same-origin")) return false;
-  try {
-    return new URL(origin).host === host;
-  } catch {
-    return false;
-  }
 }
 
 function errorResponse(

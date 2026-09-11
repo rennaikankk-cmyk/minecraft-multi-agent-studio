@@ -1009,6 +1009,19 @@ export class ControlApiServer {
     head: Buffer,
   ): void {
     const requestId = this.randomId();
+    // F-B2：与 Coordinator runtime-link 同纪律——浏览器页面（携带 Origin）
+    // 一律不得建立内部流连接。合法客户端是 dashboard 的服务端代理，
+    // 它们不发 Origin；闸门先于令牌校验，跨站请求不会退化成 401。
+    if (request.headers.origin !== undefined) {
+      this.rejectUpgrade(
+        socket,
+        403,
+        requestId,
+        "PERMISSION_DENIED",
+        "Browser origins are not allowed.",
+      );
+      return;
+    }
     const now = validNow(this.now());
     const remoteKey = request.socket.remoteAddress ?? "unknown";
     if (!this.handshakeLimiter.allow(remoteKey, now.getTime())) {

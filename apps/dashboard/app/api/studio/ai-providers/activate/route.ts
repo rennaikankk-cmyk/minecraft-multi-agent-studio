@@ -6,6 +6,7 @@ import {
   loadStudioManagerConfig,
   StudioManagerClientError,
 } from "@/lib/studio-manager-client";
+import { isSameOriginAction } from "@/lib/same-origin-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -38,21 +39,6 @@ export async function POST(request: NextRequest) {
         ? cause
         : new StudioManagerClientError("INTERNAL_ERROR", "AI provider 无法激活。", 502);
     return errorResponse(error.code, error.message, error.httpStatus);
-  }
-}
-
-function isSameOriginAction(request: NextRequest, action: string): boolean {
-  if (request.headers.get("x-studio-action") !== action) return false;
-  const origin = request.headers.get("origin");
-  const host = request.headers.get("host");
-  const fetchSite = request.headers.get("sec-fetch-site");
-  if (!origin || !host || (fetchSite !== null && fetchSite !== "same-origin")) {
-    return false;
-  }
-  try {
-    return new URL(origin).host === host;
-  } catch {
-    return false;
   }
 }
 

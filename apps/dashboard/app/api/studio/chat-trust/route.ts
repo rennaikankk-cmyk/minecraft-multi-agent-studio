@@ -1,5 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 
+import { isSameOriginAction } from "@/lib/same-origin-guard";
 import {
   loadStudioManagerConfig,
   StudioManagerClientError,
@@ -15,11 +16,29 @@ function authHeaders(config: ReturnType<typeof loadStudioManagerConfig>): Record
   return { Authorization: `Bearer ${config.token}` };
 }
 
-export async function GET() {
-  const config = loadStudioManagerConfig();
-  if (!config) {
-    return NextResponse.json({ detail: "manager not configured" }, { status: 503 });
+/**
+ * `loadStudioManagerConfig()` 未配置时直接抛 MANAGER_NOT_CONFIGURED（503），
+ * 旧代码里的 `if (!config)` 是死分支——真实响应会退化成 500。
+ * 统一走这里取值：未配置/配置非法都保持预期的 503。
+ */
+function loadConfigOrResponse(): { config: ReturnType<typeof loadStudioManagerConfig> } | { response: NextResponse } {
+  try {
+    return { config: loadStudioManagerConfig() };
+  } catch (error) {
+    const status = error instanceof StudioManagerClientError ? error.httpStatus : 503;
+    return {
+      response: NextResponse.json(
+        { detail: error instanceof Error ? error.message : "manager not configured" },
+        { status },
+      ),
+    };
   }
+}
+
+export async function GET() {
+  const loaded = loadConfigOrResponse();
+  if ("response" in loaded) return loaded.response;
+  const config = loaded.config;
   try {
     const response = await fetch(managerUrl(config), {
       headers: authHeaders(config),
@@ -43,14 +62,13 @@ export async function GET() {
 }
 
 export async function PUT(request: NextRequest) {
-  // 写面守卫：与 stop-bot / skill-release 同纪律。
-  if (request.headers.get("x-studio-action") !== "chat-trust") {
+  // F-B3：白名单改写是 R4 级写面，守卫与 stop-bot 同一实现（同源 Origin+Host）。
+  if (!isSameOriginAction(request, "chat-trust")) {
     return NextResponse.json({ detail: "missing x-studio-action header" }, { status: 403 });
   }
-  const config = loadStudioManagerConfig();
-  if (!config) {
-    return NextResponse.json({ detail: "manager not configured" }, { status: 503 });
-  }
+  const loaded = loadConfigOrResponse();
+  if ("response" in loaded) return loaded.response;
+  const config = loaded.config;
   const body = await request.json().catch(() => null);
   if (body === null || !Array.isArray(body)) {
     return NextResponse.json({ detail: "policies must be an array" }, { status: 400 });
