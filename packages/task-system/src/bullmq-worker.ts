@@ -19,11 +19,17 @@ import {
 } from "./bullmq-queue.js";
 import { TaskSystemError } from "./errors.js";
 import {
+  reasonCodeSchema,
   taskEvidenceSchema,
   type TaskCancellationRequest,
   type TaskRecord,
 } from "./model.js";
 import { PostgresTaskRepository } from "./postgres-repository.js";
+import {
+  TASK_RETRY_SCHEDULED_REASON_CODE,
+  planTaskRecordRetry,
+  taskFailureCauseCode,
+} from "./retry-policy.js";
 
 const taskHandlerResultSchema = z
   .object({
@@ -155,6 +161,13 @@ export type TaskHandlerDefinition = Readonly<{
   taskType: string;
   handlerVersion: string;
   idempotent: boolean;
+  /**
+   * AGENTS.md §5 "可重试错误集合": the stable codes this handler declares as
+   * retryable. It is an opt-in extension of the platform retry policy
+   * (retry-policy.ts) and it can never mark a safety, permission or schema
+   * code as retryable — those classes stay terminal.
+   */
+  retryableErrorCodes?: readonly string[];
   execute(context: TaskHandlerContext): Promise<TaskHandlerResult>;
 }>;
 
@@ -224,6 +237,9 @@ export class TaskHandlerRegistry {
     const handlerVersion = skillVersionSchema.parse(
       definition.handlerVersion,
     );
+    const retryableErrorCodes = (definition.retryableErrorCodes ?? []).map(
+      (code) => reasonCodeSchema.parse(code),
+    );
     const key = `${taskType}@${handlerVersion}`;
     if (this.handlers.has(key)) {
       throw new TaskWorkerError(
@@ -233,7 +249,14 @@ export class TaskHandlerRegistry {
     }
     this.handlers.set(
       key,
-      Object.freeze({ ...definition, taskType, handlerVersion }),
+      Object.freeze({
+        ...definition,
+        taskType,
+        handlerVersion,
+        ...(definition.retryableErrorCodes === undefined
+          ? {}
+          : { retryableErrorCodes: Object.freeze(retryableErrorCodes) }),
+      }),
     );
   }
 
@@ -1055,21 +1078,17 @@ export class BullMqTaskWorker {
       );
     }
     if (timedOut) {
-      const failed = await this.failTask(
-        currentTask,
-        dispatch,
-        active,
-        "TASK_TIMEOUT_EXPIRED",
-      );
+      const failed = await this.failTask(currentTask, dispatch, active, {
+        failureReason: "TASK_TIMEOUT_EXPIRED",
+      });
       return requiredTerminalResult(failed);
     }
     if (handlerError !== null || handlerResult === null) {
-      const failed = await this.failTask(
-        currentTask,
-        dispatch,
-        active,
-        "TASK_HANDLER_FAILED",
-      );
+      const failed = await this.failTask(currentTask, dispatch, active, {
+        failureReason: "TASK_HANDLER_FAILED",
+        cause: handlerError,
+        retryableErrorCodes: handler.retryableErrorCodes,
+      });
       return requiredTerminalResult(failed);
     }
 
@@ -1198,37 +1217,46 @@ export class BullMqTaskWorker {
       task.startedAt !== null &&
       Date.parse(task.startedAt) + task.timeoutMs <= now.getTime()
     ) {
-      return await this.failTask(
-        task,
-        dispatch,
-        active,
-        "TASK_TIMEOUT_EXPIRED",
-      );
+      return await this.failTask(task, dispatch, active, {
+        failureReason: "TASK_TIMEOUT_EXPIRED",
+      });
     }
     return null;
   }
 
+  /**
+   * Persists the terminal `failed` status and then, when the failure is
+   * retryable and the task still owns retry budget, schedules the bounded
+   * re-dispatch. The returned record always describes this attempt
+   * (`failed`), because the durable outcome of this execution is the failure;
+   * a scheduled retry is a new revision owned by the outbox reconciler.
+   */
   private async failTask(
     task: TaskRecord,
     dispatch: TaskDispatchV1,
     active: ActiveTaskExecution,
-    failureReason: "TASK_TIMEOUT_EXPIRED" | "TASK_HANDLER_FAILED",
+    failure: Readonly<{
+      failureReason: "TASK_TIMEOUT_EXPIRED" | "TASK_HANDLER_FAILED";
+      cause?: unknown;
+      retryableErrorCodes?: readonly string[] | undefined;
+    }>,
   ): Promise<TaskRecord> {
+    let failed: TaskRecord;
     try {
-      return await this.repository.transition({
+      failed = await this.repository.transition({
         schemaVersion: "1.0",
         operationId: deterministicOperationId(
           dispatch.messageId,
-          failureReason,
+          failure.failureReason,
           task.revision,
         ),
         taskId: task.taskId,
         expectedRevision: task.revision,
         actorId: this.options.instanceId,
         to: "failed",
-        reasonCode: failureReason,
+        reasonCode: failure.failureReason,
         leaseOwner: active.leaseOwner,
-        failureReason,
+        failureReason: failure.failureReason,
         result: null,
         evidence: [],
       });
@@ -1239,6 +1267,60 @@ export class BullMqTaskWorker {
         active,
       );
       if (cancelled) return cancelled;
+      throw error;
+    }
+    await this.scheduleRetryableRequeue(failed, dispatch, failure);
+    return failed;
+  }
+
+  /**
+   * AGENTS.md §5: a retryable failure is retried with bounded exponential
+   * backoff and jitter while the budget lasts. The `failed` status is already
+   * durable when this runs, so the requeue goes through the same durable
+   * `failed -> queued` transition the operator recovery path uses
+   * (postgres-repository.ts `retryTaskDispatch`), which charges the retry
+   * budget, clears the failure reason and creates the next revision's dispatch
+   * outbox atomically. The backoff is carried by that row's `available_at`, so
+   * a crashed worker cannot lose or early-deliver the scheduled retry.
+   *
+   * The operation ID is derived from the dispatch and the failed revision:
+   * a redelivery of the same failure replays the recorded operation instead of
+   * consuming a second retry, and only the worker holding the execution lease
+   * can reach this point (state-machine.ts `assertActiveLease`).
+   */
+  private async scheduleRetryableRequeue(
+    failed: TaskRecord,
+    dispatch: TaskDispatchV1,
+    failure: Readonly<{
+      failureReason: "TASK_TIMEOUT_EXPIRED" | "TASK_HANDLER_FAILED";
+      cause?: unknown;
+      retryableErrorCodes?: readonly string[] | undefined;
+    }>,
+  ): Promise<void> {
+    const plan = planTaskRecordRetry(failed, {
+      causeCode: taskFailureCauseCode(failure.cause),
+      retryableErrorCodes: failure.retryableErrorCodes,
+    });
+    if (!plan) return;
+    try {
+      await this.repository.retryTaskDispatch({
+        schemaVersion: "1.0",
+        operationId: deterministicOperationId(
+          dispatch.messageId,
+          "failure-requeue",
+          failed.revision,
+        ),
+        taskId: failed.taskId,
+        expectedRevision: failed.revision,
+        actorId: this.options.instanceId,
+        reasonCode: TASK_RETRY_SCHEDULED_REASON_CODE,
+        delayMs: plan.delayMs,
+      });
+    } catch (error) {
+      // A refusal means another durable actor already decided the task's fate
+      // (cancelled, terminal, budget exhausted, concurrent transition). The
+      // recorded `failed` status stands; the retry is simply not performed.
+      if (isRetryRequeueRefusal(error)) return;
       throw error;
     }
   }
@@ -1457,6 +1539,32 @@ function isCancellationOwnershipRace(error: unknown): boolean {
       "TASK_TRANSITION_INVALID",
       "TASK_CANCELLATION_PENDING",
       "TASK_TERMINAL",
+    ].includes(error.code)
+  );
+}
+
+/**
+ * Durable reasons a scheduled retry is intentionally not performed: the budget
+ * is spent, another path made the task terminal (cancelled/expired/completed),
+ * the cancelled-or-changed task no longer accepts the transition, or the task
+ * changed underneath this worker. They are not infrastructure failures, so the
+ * already-durable `failed` outcome is returned as-is.
+ */
+function isRetryRequeueRefusal(error: unknown): boolean {
+  return (
+    error instanceof TaskSystemError &&
+    [
+      "TASK_RETRY_EXHAUSTED",
+      "TASK_TERMINAL",
+      "TASK_TRANSITION_INVALID",
+      "TASK_DEADLINE_EXPIRED",
+      "TASK_CANCELLATION_PENDING",
+      "TASK_REVISION_CONFLICT",
+      "TASK_LEASE_REQUIRED",
+      "TASK_LEASE_OWNER_MISMATCH",
+      "TASK_LEASE_EXPIRED",
+      "TASK_LEASE_CONFLICT",
+      "TASK_NOT_FOUND",
     ].includes(error.code)
   );
 }

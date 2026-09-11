@@ -314,7 +314,8 @@ class RecordingSubmitClient implements PostgresClientLike {
         payload,
         status: "pending",
         attempt_count: 0,
-        available_at: values[5],
+        // $7 is the caller-supplied availability timestamp (retry backoff).
+        available_at: values[6] ?? values[5],
         claimed_by: null,
         claim_expires_at: null,
         last_error: null,
@@ -589,7 +590,9 @@ class RecordingDispatchRetryClient implements PostgresClientLike {
         payload,
         status: "pending",
         attempt_count: 0,
-        available_at: values[5],
+        // $7 is the caller-supplied availability timestamp (retry backoff);
+        // created/updated stay on $6 so a delayed row records when it was made.
+        available_at: values[6] ?? values[5],
         claimed_by: null,
         claim_expires_at: null,
         last_error: null,
@@ -1013,6 +1016,23 @@ describe("PostgresTaskRepository retryTaskDispatch", () => {
       queued.retryTaskDispatch(retryDispatchCommand),
     ).rejects.toMatchObject({ code: "TASK_TRANSITION_INVALID" });
 
+    // A cancelled task is never re-dispatched: only blocked and failed rows are
+    // eligible retry targets.
+    const cancelled = new PostgresTaskRepository(
+      new RecordingDispatchRetryPool(
+        new RecordingDispatchRetryClient(
+          recordingTaskRow({
+            status: "cancelled",
+            failure_reason: "TASK_CANCELLED_BY_OPERATOR",
+            revision: 1,
+          }),
+        ),
+      ),
+    );
+    await expect(
+      cancelled.retryTaskDispatch(retryDispatchCommand),
+    ).rejects.toMatchObject({ code: "TASK_TRANSITION_INVALID" });
+
     const expired = new PostgresTaskRepository(
       new RecordingDispatchRetryPool(
         new RecordingDispatchRetryClient(
@@ -1028,6 +1048,136 @@ describe("PostgresTaskRepository retryTaskDispatch", () => {
     await expect(
       expired.retryTaskDispatch(retryDispatchCommand),
     ).rejects.toMatchObject({ code: "TASK_DEADLINE_EXPIRED" });
+  });
+
+  it("requeues a failed task with a durable backoff on the next revision", async () => {
+    const client = new RecordingDispatchRetryClient(
+      recordingTaskRow({
+        status: "failed",
+        failure_reason: "TASK_WORKER_UNAVAILABLE",
+        retry_count: 0,
+        revision: 1,
+      }),
+    );
+    const repository = new PostgresTaskRepository(
+      new RecordingDispatchRetryPool(client),
+      { dispatchSourceInstanceId: "coordinator-test" },
+    );
+    const delayMs = 4_000;
+
+    const retried = await repository.retryTaskDispatch({
+      ...retryDispatchCommand,
+      reasonCode: "TASK_RETRYABLE_FAILURE_REQUEUED",
+      delayMs,
+    });
+
+    expect(retried).toMatchObject({
+      task: {
+        status: "queued",
+        revision: 2,
+        retryCount: 1,
+        failureReason: null,
+        finishedAt: null,
+      },
+      outbox: {
+        taskId: TASK_A,
+        expectedRevision: 2,
+        status: "pending",
+        attemptCount: 0,
+      },
+    });
+    // The backoff is durable: it is the new outbox row's availability instant,
+    // measured from PostgreSQL's own clock, not from a worker-local timer.
+    const expectedAvailability = new Date(
+      Date.parse(NOW) + delayMs,
+    ).toISOString();
+    expect(retried.outbox.availableAt).toBe(expectedAvailability);
+    const insert = client.calls.find((call) =>
+      call.text.includes("INSERT INTO studio_task_outbox"),
+    );
+    expect(insert?.values[6]).toBe(expectedAvailability);
+    const history = client.calls.filter((call) =>
+      call.text.includes("INSERT INTO studio_task_history"),
+    );
+    expect(history).toHaveLength(1);
+    expect(history[0]?.values.slice(3, 8)).toEqual([
+      "task.dispatch-retried",
+      "failed",
+      "queued",
+      retryDispatchCommand.actorId,
+      "TASK_RETRYABLE_FAILURE_REQUEUED",
+    ]);
+  });
+
+  it("replays a failed-task retry without charging the budget twice", async () => {
+    const client = new RecordingDispatchRetryClient(
+      recordingTaskRow({
+        status: "failed",
+        failure_reason: "TASK_WORKER_UNAVAILABLE",
+        retry_count: 0,
+        revision: 1,
+      }),
+    );
+    const repository = new PostgresTaskRepository(
+      new RecordingDispatchRetryPool(client),
+      { dispatchSourceInstanceId: "coordinator-test" },
+    );
+    const command = {
+      ...retryDispatchCommand,
+      reasonCode: "TASK_RETRYABLE_FAILURE_REQUEUED",
+      delayMs: 1_500,
+    };
+
+    const first = await repository.retryTaskDispatch(command);
+    const replay = await repository.retryTaskDispatch(command);
+
+    expect(replay).toEqual(first);
+    expect(first.task.retryCount).toBe(1);
+    expect(client.outboxInsertCount).toBe(1);
+    expect(
+      client.calls.filter((call) => call.text.includes("UPDATE studio_tasks SET")),
+    ).toHaveLength(1);
+  });
+
+  it("refuses to retry a failed task whose budget is exhausted", async () => {
+    const client = new RecordingDispatchRetryClient(
+      recordingTaskRow({
+        status: "failed",
+        failure_reason: "TASK_WORKER_UNAVAILABLE",
+        retry_count: submitCommand.maxRetries,
+        revision: 1,
+      }),
+    );
+    const repository = new PostgresTaskRepository(
+      new RecordingDispatchRetryPool(client),
+      { dispatchSourceInstanceId: "coordinator-test" },
+    );
+
+    await expect(
+      repository.retryTaskDispatch({
+        ...retryDispatchCommand,
+        reasonCode: "TASK_RETRYABLE_FAILURE_REQUEUED",
+        delayMs: 1_000,
+      }),
+    ).rejects.toMatchObject({ code: "TASK_RETRY_EXHAUSTED" });
+    expect(client.taskRow).toMatchObject({
+      status: "failed",
+      retry_count: submitCommand.maxRetries,
+      revision: 1,
+    });
+    expect(client.outboxInsertCount).toBe(0);
+  });
+
+  it("keeps an immediate retry available for the blocked recovery path", async () => {
+    const client = new RecordingDispatchRetryClient();
+    const repository = new PostgresTaskRepository(
+      new RecordingDispatchRetryPool(client),
+      { dispatchSourceInstanceId: "coordinator-test" },
+    );
+
+    const retried = await repository.retryTaskDispatch(retryDispatchCommand);
+
+    expect(retried.outbox.availableAt).toBe(NOW);
   });
 
   it("rolls back task and history when the new outbox insert fails", async () => {

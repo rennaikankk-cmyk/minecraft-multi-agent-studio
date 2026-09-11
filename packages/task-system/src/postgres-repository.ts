@@ -764,6 +764,14 @@ export class PostgresTaskRepository {
     client: PostgresClientLike,
     task: TaskRecord,
     timestamp: string,
+    /**
+     * Absolute availability timestamp for a newly inserted row. It is the
+     * durable backoff of a scheduled retry: `claimTaskOutbox` only offers rows
+     * whose `available_at` has passed (see the candidate query below), so a
+     * delayed retry cannot be delivered early while the row itself is created
+     * in the same transaction as the retry transition.
+     */
+    availableAt: string = timestamp,
   ): Promise<TaskOutboxRecord> {
     const existing = await client.query(
       `SELECT *
@@ -792,7 +800,7 @@ export class PostgresTaskRepository {
         status, attempt_count, available_at, claimed_by,
         claim_expires_at, last_error, created_at, updated_at, delivered_at
       ) VALUES (
-        $1, $2, $3, $4, $5::jsonb, 'pending', 0, $6,
+        $1, $2, $3, $4, $5::jsonb, 'pending', 0, $7::timestamptz,
         NULL, NULL, NULL, $6, $6, NULL
       )
       ON CONFLICT (task_id, expected_revision, type) DO NOTHING`,
@@ -803,6 +811,7 @@ export class PostgresTaskRepository {
         payload.type,
         JSON.stringify(payload),
         timestamp,
+        availableAt,
       ],
     );
     if (inserted.rowCount !== 1) {
@@ -834,7 +843,7 @@ export class PostgresTaskRepository {
       payload,
       status: "pending",
       attemptCount: 0,
-      availableAt: timestamp,
+      availableAt,
       claimedBy: null,
       claimExpiresAt: null,
       lastError: null,
@@ -1567,6 +1576,15 @@ export class PostgresTaskRepository {
     );
   }
 
+  /**
+   * Drives `blocked -> queued` (operator/reconciler recovery) or
+   * `failed -> queued` (bounded automatic retry) and creates the next
+   * revision's durable dispatch outbox in the same PostgreSQL transaction.
+   * `delayMs` moves the new outbox row's `available_at` forward, which is the
+   * durable form of the retry backoff; the row is created atomically with the
+   * transition, so a crash cannot requeue a task without its dispatch.
+   * Replaying the same operation returns the same task snapshot and outbox.
+   */
   async retryTaskDispatch(input: unknown): Promise<RetryTaskDispatchResult> {
     const command: TaskDispatchRetryCommand =
       taskDispatchRetryCommandSchema.parse(input);
@@ -1606,10 +1624,10 @@ export class PostgresTaskRepository {
       if (!current) {
         throw new TaskSystemError("TASK_NOT_FOUND", "Task does not exist.");
       }
-      if (current.status !== "blocked") {
+      if (current.status !== "blocked" && current.status !== "failed") {
         throw new TaskSystemError(
           "TASK_TRANSITION_INVALID",
-          "Only a blocked task can retry durable dispatch.",
+          "Only a blocked or failed task can retry durable dispatch.",
         );
       }
       if (await this.hasTaskCancellationRequest(client, current.taskId)) {
@@ -1628,8 +1646,11 @@ export class PostgresTaskRepository {
           "Task deadline has already expired.",
         );
       }
+      // `delayMs` schedules the new outbox row; it is not part of the strict
+      // transition command contract.
+      const { delayMs: _delayMs, ...transitionBase } = command;
       const transitionCommand = taskTransitionCommandSchema.parse({
-        ...command,
+        ...transitionBase,
         to: "queued",
         leaseOwner: null,
         failureReason: null,
@@ -1689,6 +1710,7 @@ export class PostgresTaskRepository {
         client,
         next,
         next.updatedAt,
+        new Date(now.getTime() + (command.delayMs ?? 0)).toISOString(),
       );
       await client.query("COMMIT");
       return { task: next, dispatch: outbox.payload, outbox };

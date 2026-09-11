@@ -18,7 +18,12 @@ const taskTypeSchema = z
   .min(3)
   .max(128)
   .regex(/^[a-z0-9][a-z0-9._-]*[a-z0-9]$/u);
-const reasonCodeSchema = z
+/**
+ * Stable failure/reason code vocabulary. Exported so the retry policy can
+ * classify handler-supplied codes with the same pattern the durable record
+ * enforces instead of re-declaring it.
+ */
+export const reasonCodeSchema = z
   .string()
   .min(3)
   .max(128)
@@ -309,6 +314,14 @@ export const taskDispatchRetryCommandSchema = z
   .object({
     ...operationBaseShape,
     reasonCode: reasonCodeSchema,
+    /**
+     * Bounded re-dispatch backoff for the new revision's outbox entry. Omitted
+     * means "available immediately", which is the historical behaviour for the
+     * operator-driven `blocked -> queued` retry. The ceiling matches the
+     * maximum outbox retry delay so a scheduled retry can never outlive the
+     * delivery accounting that owns the same row.
+     */
+    delayMs: z.number().int().min(0).max(5 * 60_000).optional(),
   })
   .strict();
 

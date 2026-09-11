@@ -191,3 +191,20 @@ export {
   type TaskHandlerDefinition,
   type TaskHandlerResult,
 } from "./bullmq-worker.js";
+export {
+  TASK_RETRY_BASE_DELAY_MS,
+  TASK_RETRY_MAX_DELAY_MS,
+  TASK_RETRY_SCHEDULED_REASON_CODE,
+  classifyTaskFailure,
+  deterministicJitterUnit,
+  planTaskRecordRetry,
+  planTaskRetry,
+  taskFailureCauseCode,
+  taskRetryDelayMs,
+  type TaskFailureClass,
+  type TaskFailureClassification,
+  type TaskFailureClassificationInput,
+  type TaskRetryDelayOptions,
+  type TaskRetryPlan,
+  type TaskRetryPlanInput,
+} from "./retry-policy.js";
