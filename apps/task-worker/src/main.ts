@@ -14,27 +14,13 @@ import {
 } from "./config.js";
 import { createIsolatedAcceptanceRegistry } from "./isolated-acceptance-handler.js";
 import { createCoordinatorGoalRegistry } from "./coordinator-goal-handler.js";
+import { raceWorkerOutcome } from "./lifecycle.js";
 
 const instanceId = `task-worker-${randomUUID()}`;
 const logger = createStructuredLogger({
   service: "task-worker",
   instanceId,
 });
-
-function waitForShutdownSignal(): Promise<"SIGINT" | "SIGTERM"> {
-  return new Promise((resolve) => {
-    const onInterrupt = () => {
-      process.removeListener("SIGTERM", onTerminate);
-      resolve("SIGINT");
-    };
-    const onTerminate = () => {
-      process.removeListener("SIGINT", onInterrupt);
-      resolve("SIGTERM");
-    };
-    process.once("SIGINT", onInterrupt);
-    process.once("SIGTERM", onTerminate);
-  });
-}
 
 async function main(): Promise<void> {
   const config = loadTaskWorkerConfig();
@@ -76,8 +62,20 @@ async function main(): Promise<void> {
       handlerProfile: config.handlerProfile,
       concurrency: config.concurrency,
     });
-    const signal = await waitForShutdownSignal();
-    logger.info("task_worker_stopping", { signal });
+    // 竞速：正常关闭信号 vs worker 基础设施失败。
+    // 后者此前完全无人观测——BullMqTaskWorker 只把错误记进
+    // lastInfrastructureError，而其 getter 全仓库零调用者，于是 worker 静默
+    // 死亡时进程仍然活着却不再处理任何任务。现在以非零退出，交由外部
+    // supervisor 重启（本进程不自行重启，避免与 supervisor 的预算双重管理）。
+    const outcome = await raceWorkerOutcome(worker);
+    if (outcome.kind === "infrastructure-failure") {
+      logger.error("task_worker_infrastructure_failed", {
+        code: outcome.error.code,
+      });
+      process.exitCode = 1;
+      return;
+    }
+    logger.info("task_worker_stopping", { signal: outcome.signal });
   } finally {
     let cleanupFailed = false;
     if (worker) {

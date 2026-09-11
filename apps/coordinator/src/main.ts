@@ -688,6 +688,7 @@ async function main(): Promise<void> {
         pollIntervalMs: taskDeliveryConfig.pollIntervalMs,
         retryBaseMs: taskDeliveryConfig.retryBaseMs,
         retryMaxMs: taskDeliveryConfig.retryMaxMs,
+        logger,
       });
       if (taskDeliveryConfig.purpose === "production") {
         goalExecutionServer = new CoordinatorGoalExecutionServer({
@@ -976,7 +977,14 @@ async function createTaskStateMachine(): Promise<Readonly<{
   ) {
     throw new Error("COORDINATOR_TASK_POSTGRES_URL is invalid.");
   }
-  const schemaName = process.env.COORDINATOR_TASK_POSTGRES_SCHEMA?.trim() || "public";
+  // 与 goal-persistence-config 同一纪律（AGENTS.md §10）：配置了持久化就必须
+  // 显式给出 schema，不再静默回落到 "public"。
+  const schemaName = process.env.COORDINATOR_TASK_POSTGRES_SCHEMA?.trim() ?? "";
+  if (schemaName.length === 0) {
+    throw new Error(
+      "COORDINATOR_TASK_POSTGRES_SCHEMA must be configured explicitly; the implicit 'public' default is refused.",
+    );
+  }
   if (!/^[a-z_][a-z0-9_]{0,62}$/u.test(schemaName)) {
     throw new Error("COORDINATOR_TASK_POSTGRES_SCHEMA is invalid.");
   }

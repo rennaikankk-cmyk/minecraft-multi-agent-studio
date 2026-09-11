@@ -80,9 +80,20 @@ export function loadTaskWorkerConfig(
     );
   }
 
+  // AGENTS.md §10：开发、隔离测试与生产配置必须分离。此前未设置时静默取
+  // "public"，会让生产任务表与同实例上其它应用的表混在同一 schema——
+  // 一处误配置即可跨环境污染。改为生产必须显式给出 schema（fail-closed）。
+  // 注意：显式传 "public" 仍然合法，被拒绝的只是"没传就默认 public"。
+  const configuredSchema =
+    environment.COORDINATOR_TASK_POSTGRES_SCHEMA?.trim() ?? "";
+  if (purpose === "production" && configuredSchema.length === 0) {
+    throw new TaskWorkerConfigError(
+      "TASK_WORKER_PURPOSE=production requires an explicit COORDINATOR_TASK_POSTGRES_SCHEMA; refusing the implicit 'public' default.",
+    );
+  }
   const schemaName = purpose === "isolated-test"
     ? environment.TASK_INFRA_TEST_NAMESPACE
-    : environment.COORDINATOR_TASK_POSTGRES_SCHEMA?.trim() || "public";
+    : configuredSchema;
   if (
     !schemaName ||
     !(purpose === "isolated-test"

@@ -99,4 +99,33 @@ describe("Task Worker isolated configuration", () => {
       },
     });
   });
+
+  it("refuses the implicit public schema for the production profile", () => {
+    // AGENTS.md §10：开发/隔离测试/生产配置必须分离。此前未设置
+    // COORDINATOR_TASK_POSTGRES_SCHEMA 时静默取 "public"，会让生产任务表与同
+    // 实例上其它应用的表混在同一 schema。注意上面的用例是**显式**传 "public"
+    // 的，仍然合法——被拒绝的只是"没传就默认 public"。
+    const productionBase = {
+      TASK_WORKER_PURPOSE: "production",
+      TASK_WORKER_HANDLER_PROFILE: "coordinator-goal",
+      COORDINATOR_TASK_POSTGRES_URL:
+        "postgresql://studio:secret@127.0.0.1:5432/studio",
+      COORDINATOR_TASK_REDIS_URL: "redis://127.0.0.1:6379/0",
+      COORDINATOR_TASK_EXECUTION_SECRET: "x".repeat(32),
+    } satisfies NodeJS.ProcessEnv;
+
+    expect(() => loadTaskWorkerConfig(productionBase)).toThrowError(
+      expect.objectContaining<TaskWorkerConfigError>({
+        code: "TASK_WORKER_CONFIG_INVALID",
+      }),
+    );
+
+    // 空白串同样不算"显式配置"
+    expect(() =>
+      loadTaskWorkerConfig({
+        ...productionBase,
+        COORDINATOR_TASK_POSTGRES_SCHEMA: "   ",
+      }),
+    ).toThrow(TaskWorkerConfigError);
+  });
 });

@@ -56,7 +56,16 @@ export function loadGoalPersistenceConfig(
       "The task PostgreSQL connection URL is not an approved database URL.",
     );
   }
-  const parsedSchema = schemaNameSchema.safeParse(rawSchema ?? "public");
+  // AGENTS.md §10：一旦配置了持久化，schema 就必须显式给出。此前缺省取
+  // "public"，会让生产任务表与同实例上其它应用的表混在同一 schema——一处
+  // 误配置即可跨环境污染。显式传 "public" 仍然合法，被拒绝的只是"没传就
+  // 默认 public"。
+  if (rawSchema === undefined || rawSchema.length === 0) {
+    throw new GoalPersistenceConfigError(
+      "A task PostgreSQL schema must be configured explicitly together with the connection URL.",
+    );
+  }
+  const parsedSchema = schemaNameSchema.safeParse(rawSchema);
   if (!parsedSchema.success) {
     throw new GoalPersistenceConfigError(
       "The task PostgreSQL schema name is invalid.",
