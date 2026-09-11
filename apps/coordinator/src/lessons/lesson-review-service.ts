@@ -16,6 +16,7 @@ import type { ModelClient } from "../spark-strategy-v1/model-client.js";
 import type { ReviewTaskFact } from "./lesson-card.js";
 import { askLessonReview, type LessonReviewAccounting } from "./lesson-review.js";
 import type { FileLessonStore } from "./lesson-store.js";
+import type { FileGoalTemplateProposalStore } from "../goal-template-registry.js";
 
 export const LESSON_REVIEW_COOLDOWN_MS = 10 * 60_000;
 
@@ -31,6 +32,8 @@ export class LessonReviewService {
     store: FileLessonStore;
     /** 终态任务事实供给（通常 taskStateMachine.list() 后过滤）。 */
     taskFacts: () => Promise<readonly ReviewTaskFact[]>;
+    /** D2：goal-approach 类 lesson 卡附带产出模板提案（人审后手工实现）。 */
+    templateProposals?: FileGoalTemplateProposalStore;
     logger?: AppLogger;
     now?: () => number;
     cooldownMs?: number;
@@ -100,6 +103,19 @@ export class LessonReviewService {
       try {
         this.options.store.save(card);
         saved++;
+        // D2 联动：goal-approach 卡意味着"这类目标该有确定性模板"——落一条
+        // 人审提案（不自动注册，解析器永远手工实现）。
+        if (card.kind === "goal-approach" && this.options.templateProposals) {
+          try {
+            this.options.templateProposals.propose({
+              source: "lesson",
+              patternExample: card.trigger.goalPattern,
+              rationale: card.advice,
+            });
+          } catch {
+            this.options.logger?.warn("coordinator_template_proposal_failed", { lessonId: card.lessonId });
+          }
+        }
       } catch (error) {
         this.options.logger?.warn("coordinator_lesson_review_card_rejected", {
           code: error instanceof Error ? error.message.slice(0, 100) : "save-failed",

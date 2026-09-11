@@ -29,6 +29,7 @@ import { BotRegistry } from "./bot-registry.js";
 import { FilePersonalMemoryStore } from "./personal-memory-store.js";
 import { buildPlannerMemory, type PlannerMemorySource } from "./planner-memory.js";
 import { createSkillGapRecorder, type SkillGapRecorderProject } from "./skill-gap-recorder.js";
+import { FileGoalTemplateProposalStore } from "./goal-template-registry.js";
 import { builtinSkills, FileSkillGapStore, suggestComposition } from "@minecraft-studio/skills";
 import { FileLessonStore } from "./lessons/lesson-store.js";
 import { LessonReviewService } from "./lessons/lesson-review-service.js";
@@ -388,6 +389,8 @@ async function main(): Promise<void> {
       client: scheduledRouterModelClient(aiScheduledRouter),
       store: lessonStore,
       taskFacts: reviewTaskFacts,
+      templateProposals: new FileGoalTemplateProposalStore(
+        process.env.STUDIO_GOAL_TEMPLATE_DIR?.trim() || path.join("runtime-data", "goal-templates")),
       logger,
     });
     logger.info("coordinator_lesson_review_started", { durability: "file", trigger: "manual+session-end", dispatch: "none" });

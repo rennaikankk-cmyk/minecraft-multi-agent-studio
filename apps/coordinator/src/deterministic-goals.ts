@@ -17,6 +17,7 @@ import type { GoalRequest } from "@minecraft-studio/skills";
 import type { SkillJsonValue } from "@minecraft-studio/protocol";
 
 import { plannedAcquisitionGoalItem } from "./local-planner.js";
+import { parseViaGoalTemplateRegistry } from "./goal-template-registry.js";
 
 /**
  * A plan_items decision produced without a model. The free-form goal grammar
@@ -205,8 +206,9 @@ export function parseDeterministicGoal(
   if (equip !== null) return equip;
   const stance = parseStanceGoal(operatorGoal);
   if (stance !== null) return stance;
-  const blueprint = parseBlueprintGoal(operatorGoal);
-  if (blueprint !== null) return blueprint;
+  // D2：蓝图行等确定性模板经注册表（先注册先用；模板不适用继续旧链兜底）。
+  const templated = parseViaGoalTemplateRegistry(operatorGoal);
+  if (templated !== null) return templated;
   return parseShelterGoal(operatorGoal);
 }
 
