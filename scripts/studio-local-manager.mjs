@@ -44,6 +44,7 @@ export {
   maskedAiProviderProfile,
   aiProbeProvider,
   rewriteAiEnvironment,
+  selectModelAutomatically,
 };
 
 import { GameplayPolicyError, resolveGameplayPolicy } from "../packages/protocol/dist/gameplay-policy.js";
