@@ -267,6 +267,8 @@ Control API 默认且当前只允许绑定 `127.0.0.1` 或 `::1`。服务端配�
 
 HTTP 停止入口只接受固定的优雅停止请求、UUID 幂等命令 ID 和具有 `bot.stop` 权限的服务端主体。Control API 将认证主体绑定为可信操作者，并通过 Control Link 等待 Coordinator/Runtime 确认。链路不可用时返回 `CONTROL_UNAVAILABLE`，不伪造成功。
 
+停止能力的**实际边界**（2026-09-11 审定）：Control API 的 Control Link 客户端有意只放行固定的优雅停止契约，`mode: "emergency"` 会被 `validateStopRequest`（`apps/control-api/src/coordinator-link-client.ts:1399-1419`）以 `REQUEST_INVALID` 拒绝。`emergency` 模式与 `bot.emergency-stop` 权限在协议层依然定义（`packages/protocol/src/bot-messages.ts:1224,1250,1290`），Coordinator（`apps/coordinator/src/stop-controller.ts`）与 Bot Runtime（`apps/bot-runtime/src/runtime-link-client.ts`）也各自保留了对该协议输入的合法处理分支——它们是**协议处理**而非死代码，但本仓库内没有任何发送方会产生该输入，因此**操作员实际可用的是"按 bot 优雅停止"**。仓库内**不存在**集群级"全局暂停"或"全局紧急停止"（`apps/` 下无 `globalPause`/`pauseAll` 实现），这是 AGENTS.md §4 R3 示例与 §6 措辞中尚未落地的能力；按操作员决定不列为待办——异常时逐个停止或删除 bot。唯一的自动紧急动作是 Bot Runtime 自有的 L0 生存断线反射（`apps/bot-runtime/src/runtime.ts` 中 `action.kind === "EMERGENCY_STOP"` 的分支）；其原先的 `STUDIO_L0_EMERGENCY_STOP` 环境变量开关已删除，紧急停止不可再被环境变量关闭。
+
 生产 Control API 入口在首个完整 Control Link 快照前不会启动对外 HTTP 服务。四进程服务级验收已经覆盖空快照、在线增量、停止完成、离线增量、固定追踪编号和断线清理；验收中的 Runtime 是测试专用 fixture，没有连接 Minecraft，也没有经过浏览器 Playwright 页面。
 
 ## 10. Dashboard 真实数据链路
