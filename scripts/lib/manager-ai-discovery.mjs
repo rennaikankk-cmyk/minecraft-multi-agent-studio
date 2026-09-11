@@ -67,7 +67,7 @@ export async function discoverLocalAI(environment = process.env) {
       status: unavailableAiStatus(
         "explicit",
         configuredProvider,
-        safeOrigin(rawUrl),
+        cloudSafeBaseUrl(rawUrl) ?? rawUrl,
         preferredModel || null,
         checkedAt,
         "已配置的 Local AI 地址不可用。",
@@ -368,10 +368,29 @@ function unavailableAiStatus(source, provider, baseUrl, model, checkedAt, messag
 }
 
 
+/**
+ * 云端/中转档案 baseUrl 的探测校验：https 任意（含默认 443 端口、带路径
+ * 前缀——GLM /api/paas/v4 与中转站是常态）；http 仅限回环且必须显式端口
+ * （Spark 本地纪律不变）。safeOrigin 的 origin-only 纪律只属于本地 hub
+ * 自动发现面，套在云端档案上会把 DeepSeek/GLM 这类默认端口地址全拒掉。
+ */
+function cloudSafeBaseUrl(value) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    if (!url.hostname || url.username || url.password || url.search || url.hash) return null;
+    if (url.protocol === "http:" && !url.port && !/^(localhost|127(?:\.\d{1,3}){3}|\[::1\])$/iu.test(url.hostname)) {
+      return null;
+    }
+    return value.replace(/\/+$/u, "");
+  } catch {
+    return null;
+  }
+}
 async function probeExplicitEndpoint(rawUrl, provider, preferredModel, apiKey, source) {
-  const baseUrl = safeOrigin(rawUrl);
+  const baseUrl = cloudSafeBaseUrl(rawUrl);
   if (!baseUrl) return null;
-  const probe = await probeAIEndpoint({ provider, baseUrl, apiKey }, 2_000);
+  const probe = await probeAIEndpoint({ provider, baseUrl, apiKey }, 4_000);
   if (!probe) return null;
   const selection = selectModel(probe.models, preferredModel);
   if (selection.error) {
