@@ -161,7 +161,14 @@ describe("F-C1: 凭据文件落盘权限被真实收紧并回读校验", () => {
 });
 
 describe("F-C1: 权限收紧失败必须 fail-closed，不留可读明文", () => {
-  it("ACL chmod 失败 → 抛稳定错误码、目标文件不存在、磁盘上无明文残留", () => {
+  // 仅在 Windows 运行：本用例靠"注入的 ACL 执行器抛错"模拟收不紧，而 POSIX 走
+  // chmod、不经过该执行器，注入无效（fail-closed 本身与平台无关，只是缺少与
+  // ACL 执行器等价的 POSIX 注入缝）。POSIX 侧的权限收紧与回读校验由本文件上方
+  // 的用例覆盖。
+  it.skipIf(!IS_WINDOWS)("ACL chmod 失败 → 抛稳定错误码、目标文件不存在、磁盘上无明文残留", () => {
+    // 注入"ACL 收紧必失败"。注意：该注入缝只对 Windows 的 ACL 路径生效
+    // （ensureDir/save 在 win32 上直接调用 applyWindowsAclBatch；POSIX 走
+    // chmod，不经过 aclRunner），因此下面这些用例按平台门控为 it.skipIf。
     __setAclRunnerForTests(() => {
       throw new Error("injected-acl-failure");
     });
@@ -190,8 +197,9 @@ describe("F-C1: 权限收紧失败必须 fail-closed，不留可读明文", () =
     expect(store.find("example.com", 25565)).toBeNull();
   }, PERSIST_TIMEOUT_MS);
 
-  it("未显式 opt-in 时，环境变量未设置也不会静默降级", () => {
+  it.skipIf(!IS_WINDOWS)("未显式 opt-in 时，环境变量未设置也不会静默降级", () => {
     delete process.env[AUTH_STORE_ALLOW_UNPROTECTED_ENV];
+    // 同 describe 首条的说明：ACL 注入缝仅在 Windows 生效。
     __setAclRunnerForTests(() => {
       throw new Error("injected-acl-failure");
     });
@@ -200,11 +208,12 @@ describe("F-C1: 权限收紧失败必须 fail-closed，不留可读明文", () =
     expect(existsSync(path.join(tempDir, "studio-bot-01.json"))).toBe(false);
   }, PERSIST_TIMEOUT_MS);
 
-  it("显式 opt-out 时才降级，并且必须发出大声告警（含稳定事件码）", () => {
+  it.skipIf(!IS_WINDOWS)("显式 opt-out 时才降级，并且必须发出大声告警（含稳定事件码）", () => {
     process.env[AUTH_STORE_ALLOW_UNPROTECTED_ENV] = "1";
     __resetAuthStoreCachesForTests();
     const warnings: string[] = [];
     const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    // 同 describe 首条的说明：ACL 注入缝仅在 Windows 生效。
     __setAclRunnerForTests(() => {
       throw new Error("injected-acl-failure");
     });
