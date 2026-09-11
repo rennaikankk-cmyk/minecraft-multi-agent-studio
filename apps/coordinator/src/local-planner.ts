@@ -581,6 +581,11 @@ export type CoordinatorLocalPlannerOptions = Readonly<{
     botId: string;
     leaseOwner: string;
   }>) => boolean | Promise<boolean>;
+  /**
+   * D1 gap 接线：任务进入失败终态（ABORT + failureReason）时的单点回调。
+   * 消费方做 classifyGap 入册；回调抛错不影响转换结果（调用方须自行兜底）。
+   */
+  onTaskAborted?: (record: TaskExecutionRecord) => void;
   transport: SkillInvocationTransport;
   coordinatorInstanceId: string;
   actorId?: string;
@@ -3196,6 +3201,16 @@ export class CoordinatorLocalPlanner {
       before,
       after,
     );
+    if (after.state === "ABORT" && after.failureReason !== null) {
+      try {
+        this.options.onTaskAborted?.(after);
+      } catch (error) {
+        this.options.logger?.warn("coordinator_task_abort_hook_failed", {
+          taskId: after.taskId,
+          detail: error instanceof Error ? error.message.slice(0, 200) : String(error),
+        });
+      }
+    }
     return after;
   }
 

@@ -46,6 +46,11 @@ export interface SharedStateServerOptions {
   readonly lessonReview?: { requestReview(serverProfileId: string, trigger: "manual" | "session-end"): Readonly<{ queued: boolean; reason?: string }> };
   /** Phase B：lesson 卡只读列表（同 profile，按时间倒序）。 */
   readonly lessonStore?: { list(serverProfileId: string): readonly unknown[] };
+  /** Phase D1：skill gap 只读视图（含 composition 建议，D4 Gap Console 消费）。 */
+  readonly skillGaps?: {
+    list(): ReadonlyArray<Record<string, unknown>>;
+    compositionSuggestions?(): ReadonlyArray<Readonly<{ fingerprint: string; suggestion: unknown }>>;
+  };
   /** 定时落盘间隔；默认 60s；<=0 表示只在 stop 时落盘。 */
   readonly persistIntervalMs?: number;
   readonly logger?: { info(message: string, meta?: unknown): void; warn(message: string, meta?: unknown): void };
@@ -187,6 +192,24 @@ export class SharedStateServer {
           return;
         }
         this.writeJson(response, 202, { ok: true, review: this.options.lessonReview.requestReview(serverProfileId, "manual") });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/skill-gaps") {
+        if (!this.token || !this.authorized(request)) {
+          this.writeJson(response, 403, { ok: false, error: "unauthorized" });
+          return;
+        }
+        if (!this.options.skillGaps) {
+          this.writeJson(response, 503, { ok: false, error: "skill_gaps_unavailable" });
+          return;
+        }
+        this.writeJson(response, 200, {
+          ok: true,
+          gaps: this.options.skillGaps.list(),
+          ...(this.options.skillGaps.compositionSuggestions
+            ? { compositionSuggestions: this.options.skillGaps.compositionSuggestions() }
+            : {}),
+        });
         return;
       }
       if (request.method === "GET" && url.pathname === "/snapshot") {

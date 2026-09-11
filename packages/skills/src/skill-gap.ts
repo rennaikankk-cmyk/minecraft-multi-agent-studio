@@ -379,6 +379,15 @@ export class SkillGapStore {
     return this.gaps.get(fingerprint) ?? null;
   }
 
+  /**
+   * 持久化恢复专用：原样写回一条完整 gap（保留 occurrenceCount 与时间戳，
+   * 不走 record 的聚合/eviction 路径）。仅 FileSkillGapStore 启动恢复使用。
+   */
+  restore(gap: SkillGapRequest): void {
+    const validated = skillGapRequestSchema.parse(gap);
+    this.gaps.set(validated.fingerprint, validated);
+  }
+
   list(): readonly SkillGapRequest[] {
     return [...this.gaps.values()].sort((a, b) => b.occurrenceCount - a.occurrenceCount);
   }

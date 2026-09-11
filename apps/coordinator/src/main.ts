@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { loadOperatorBaseAssignments } from "./operator-base-assignments.js";
 import path from "node:path";
 
@@ -27,6 +28,8 @@ import {
 import { BotRegistry } from "./bot-registry.js";
 import { FilePersonalMemoryStore } from "./personal-memory-store.js";
 import { buildPlannerMemory, type PlannerMemorySource } from "./planner-memory.js";
+import { createSkillGapRecorder, type SkillGapRecorderProject } from "./skill-gap-recorder.js";
+import { builtinSkills, FileSkillGapStore, suggestComposition } from "@minecraft-studio/skills";
 import { FileLessonStore } from "./lessons/lesson-store.js";
 import { LessonReviewService } from "./lessons/lesson-review-service.js";
 import type { ReviewTaskFact } from "./lessons/lesson-card.js";
@@ -391,6 +394,23 @@ async function main(): Promise<void> {
   } else {
     logger.info("coordinator_lesson_review_unavailable", { reason: "ai-router-not-configured" });
   }
+  // Phase D1：SkillGap 救活——文件持久化 store + task 失败终态自动入册。
+  const skillGapStore = new FileSkillGapStore(
+    process.env.STUDIO_SKILL_GAP_DIR?.trim() || path.join("runtime-data", "skill-gaps"));
+  const gapProject = loadGapProject();
+  const skillGapRecorder = createSkillGapRecorder({
+    store: skillGapStore,
+    catalogSkillIds: builtinSkills.map((skill) => skill.id),
+    project: gapProject,
+    serverProfileFor: (botId) => registry.get(botId)?.serverProfileId ?? null,
+    minecraftVersionFor: (botId) => registry.get(botId)?.minecraftVersion?.resolvedVersion ?? undefined,
+    log: (event, fields) => logger.info(event, fields),
+  });
+  logger.info("coordinator_skill_gap_started", {
+    durability: skillGapStore.durability,
+    catalogSize: builtinSkills.length,
+    note: "evidence-gated: catalog-dependent kinds require a named skill",
+  });
   // Phase A 记忆源：goal 历史（task store）+ personal-memory + lesson 卡。
   // 全部读取失败都降级为 null/[]——记忆是增强，绝不阻塞规划。
   const plannerMemorySource: PlannerMemorySource = async ({ botId, serverProfileId }) => {
@@ -443,6 +463,7 @@ async function main(): Promise<void> {
       workstationRegistry,
       planJournalStore, baseRegistry, facilityRegistry, persistBaseState, explorationJournal, taskStateMachine,
       plannerMemory: plannerMemorySource,
+      onTaskAborted: skillGapRecorder,
       logger,
     });
   } else {
@@ -465,6 +486,7 @@ async function main(): Promise<void> {
       workstationRegistry,
       planJournalStore, baseRegistry, facilityRegistry, persistBaseState, explorationJournal, taskStateMachine,
       plannerMemory: plannerMemorySource,
+      onTaskAborted: skillGapRecorder,
       logger,
     });
     logger.warn("coordinator_planner_deterministic_only", {
@@ -631,6 +653,21 @@ async function main(): Promise<void> {
         personalMemory,
         lessonStore,
         ...(lessonReviewService ? { lessonReview: lessonReviewService } : {}),
+        skillGaps: {
+          list: () => skillGapStore.list() as ReadonlyArray<Record<string, unknown>>,
+          compositionSuggestions: () => skillGapStore.list().map((gap) => ({
+            fingerprint: gap.fingerprint,
+            suggestion: suggestComposition(
+              {
+                kind: gap.kind,
+                actionFamily: gap.gap.actionFamily,
+                ...(gap.gap.requestedSkillId !== undefined ? { requestedSkillId: gap.gap.requestedSkillId } : {}),
+                ...(gap.gap.requestedCapability !== undefined ? { requestedCapability: gap.gap.requestedCapability } : {}),
+              },
+              builtinSkills.map((skill) => ({ skillId: skill.id })),
+            ),
+          })),
+        },
         provenanceDir: path.join(process.cwd(), "runtime-data", "provenance"),
         host: sharedStateConfig.host,
         port: sharedStateConfig.port,
@@ -772,6 +809,30 @@ async function main(): Promise<void> {
   };
   process.once("SIGINT", () => void stop("SIGINT"));
   process.once("SIGTERM", () => void stop("SIGTERM"));
+}
+
+/**
+ * gap 元数据用构建身份：monorepo 单树构建，bot-runtime dist 的 manifest 与
+ * coordinator 同 commit（构建顺序保证）。读不到时用占位并标 dirty——绝不
+ * 阻止 gap 记录（元数据缺失不是丢证据的理由）。
+ */
+function loadGapProject(): SkillGapRecorderProject {
+  try {
+    const manifest = JSON.parse(readFileSync(
+      path.join(process.cwd(), "apps", "bot-runtime", "dist", "build-manifest.json"), "utf8")) as {
+      gitCommit?: unknown; branch?: unknown; dirty?: unknown;
+    };
+    const gitCommit = typeof manifest.gitCommit === "string" && /^[0-9a-f]{7,40}$/u.test(manifest.gitCommit)
+      ? manifest.gitCommit : "0000000";
+    return {
+      gitCommit,
+      branch: typeof manifest.branch === "string" ? manifest.branch.slice(0, 128) : "unknown",
+      buildVersion: "coordinator",
+      dirty: manifest.dirty !== false,
+    };
+  } catch {
+    return { gitCommit: "0000000", branch: "unknown", buildVersion: "coordinator", dirty: true };
+  }
 }
 
 async function createTaskStateMachine(): Promise<Readonly<{
