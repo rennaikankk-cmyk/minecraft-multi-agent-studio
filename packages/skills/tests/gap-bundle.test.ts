@@ -55,6 +55,26 @@ describe("scanResidualSecrets", () => {
   it("有 secret → false", () => {
     expect(scanResidualSecrets("api_key=abc123")).toBe(false);
   });
+
+  it("跨调用不复用 lastIndex（fail-open 回归）", () => {
+    // 第一次命中位置靠后的 secret，会把带 g 标志的模块级正则 lastIndex
+    // 推进到命中之后（200 + 1 + 14 = 215）。
+    const far = `${"a".repeat(200)} api_key=LEAKED`;
+    expect(scanResidualSecrets(far)).toBe(false);
+
+    // 第二次的 secret 位于更靠前的位置，且文本总长恰好等于残留的
+    // lastIndex。若未复位，test() 会从 215 起步、越过整个字符串而漏检，
+    // 从而误报 true（安全）。修复后必须仍判定为不安全。
+    const near = `api_key=LEAKED ${"b".repeat(200)}`;
+    expect(scanResidualSecrets(near)).toBe(false);
+  });
+
+  it("反复调用同一文本结果稳定", () => {
+    const text = "token: ghp_abcdef1234567890abcdef1234567890abcdef12";
+    for (let i = 0; i < 4; i += 1) {
+      expect(scanResidualSecrets(text)).toBe(false);
+    }
+  });
 });
 
 describe("generateGapBundle", () => {

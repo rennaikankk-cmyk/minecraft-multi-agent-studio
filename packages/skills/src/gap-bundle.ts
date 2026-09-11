@@ -32,6 +32,13 @@ export function redactText(text: string): string {
 /** 残留 secret 检测（scan after redact）。返回 true = 安全。 */
 export function scanResidualSecrets(text: string): boolean {
   for (const pattern of SECRET_PATTERNS) {
+    // SECRET_PATTERNS 是模块级共享的，且都带 g 标志（redactText 的 replace
+    // 需要 g 才能全量替换）。带 g 的正则 test() 会从 lastIndex 处开始并把
+    // lastIndex 推进到命中之后；若不复位，上一次命中就会让本次扫描从中间
+    // 起步，漏掉更靠前的 secret 并误报 true（"安全"）——即 fail-open，
+    // 与本模块"先 redact，再 secret scan（fail-closed）"的纪律相反。
+    // 与 incidents.ts 的 containsUnredactedSecrets 保持同一写法。
+    pattern.lastIndex = 0;
     if (pattern.test(text)) return false;
   }
   return true;
