@@ -61,6 +61,20 @@ const ACTION_COOLDOWN_MS: Readonly<Record<L0SafetyActionKind, number>> = {
   EMERGENCY_STOP: 60_000,
 };
 
+/**
+ * 未确认紧急停止的重发间隔（§6「全局暂停和紧急停止优先于所有任务与模型建议」）。
+ *
+ * 60s 的 ACTION_COOLDOWN_MS 是"确认成功后的去重"，不能同时充当"没送出去时的
+ * 沉默期"：断线保号是分钟级的事，一次 client.close() 失败却要等满 60s 才允许
+ * 再发，期间血量继续掉——那是把去重写成了放弃。
+ *
+ * 取值论证：5s 远小于 60s 的正常去重间隔（确认后不会变成刷屏），又足够长到
+ * 不构成每 tick 的噪声。评估周期最快约 1s（statusIntervalMs），5s 意味着最坏
+ * 约 5 次评估一次重发；即便一直无法确认也只有 12 次/分钟量级，且每次重发都
+ * 走同一条受审计的 stop 路径，不会放大成失控循环。
+ */
+const UNCONFIRMED_EMERGENCY_STOP_RETRY_MS = 5_000;
+
 const ACTION_DURATION_MS: Partial<Record<L0SafetyActionKind, number>> = {
   RETREAT_STEP: 700,
   ASCEND: 750,
@@ -88,6 +102,11 @@ export class L0SafetyController {
   private lowHealthRetreatSteps = 0;
   /** 上一次观测的绝对血量；None = 本连接还没有基线。 */
   private previousHealth: number | null = null;
+  /**
+   * 上一次 EMERGENCY_STOP 的确认结果。null = 本连接还没有发出过紧急停止。
+   * false 期间按 UNCONFIRMED_EMERGENCY_STOP_RETRY_MS 重发，而不是等满 60s。
+   */
+  private emergencyStopConfirmed: boolean | null = null;
 
   reset(): void {
     this.sequence = 0;
@@ -97,6 +116,17 @@ export class L0SafetyController {
     this.lastFingerprint = "";
     this.lowHealthRetreatSteps = 0;
     this.previousHealth = null;
+    this.emergencyStopConfirmed = null;
+  }
+
+  /**
+   * 上报上一次 EMERGENCY_STOP 的执行结果。运行时在 stop() 返回后调用：
+   * confirmed=true 时维持 60s 去重；false 时缩短到重发间隔。
+   * 没有已记录的紧急停止时间戳时忽略（不存在可缩短的沉默期）。
+   */
+  reportEmergencyStop(confirmed: boolean): void {
+    if (!this.lastActionAt.has("EMERGENCY_STOP")) return;
+    this.emergencyStopConfirmed = confirmed;
   }
 
   evaluate(snapshot: L0SafetySnapshot): L0SafetyDecision {
@@ -117,8 +147,16 @@ export class L0SafetyController {
       risk: L0SafetyRisk,
     ): boolean => {
       const lastAt = this.lastActionAt.get(kind) ?? Number.NEGATIVE_INFINITY;
-      if (snapshot.observedAtMs - lastAt < ACTION_COOLDOWN_MS[kind]) return false;
+      const intervalMs =
+        kind === "EMERGENCY_STOP" && this.emergencyStopConfirmed === false
+          ? UNCONFIRMED_EMERGENCY_STOP_RETRY_MS
+          : ACTION_COOLDOWN_MS[kind];
+      if (snapshot.observedAtMs - lastAt < intervalMs) return false;
       this.lastActionAt.set(kind, snapshot.observedAtMs);
+      if (kind === "EMERGENCY_STOP") {
+        // 本次重发在拿到结果之前不算"已确认"。
+        this.emergencyStopConfirmed = false;
+      }
       const durationMs = ACTION_DURATION_MS[kind];
       actions.push({ kind, risk, ...(durationMs ? { durationMs } : {}) });
       return true;

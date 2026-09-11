@@ -105,6 +105,11 @@ function outbox(
 
 class FakeOutboxRepository implements TaskOutboxRepositoryLike {
   readonly entries = new Map<string, TaskOutboxRecord>();
+  /**
+   * messageId 集合：本实例仍能领到该行，但确认与重排都会失败——模拟"批次处理
+   * 期间 claim 被别处抢走"（真实 PostgreSQL 在这两种写入上都是 fail-closed）。
+   */
+  readonly lostClaims = new Set<string>();
   now = new Date(NOW);
 
   async claimTaskOutbox(input: {
@@ -119,6 +124,7 @@ class FakeOutboxRepository implements TaskOutboxRepositoryLike {
         !(
           entry.status === "pending" ||
           entry.status === "delivered" ||
+          this.lostClaims.has(messageId) ||
           (entry.status === "claimed" &&
             Date.parse(entry.claimExpiresAt ?? "") <= this.now.getTime())
         ) ||
@@ -145,6 +151,7 @@ class FakeOutboxRepository implements TaskOutboxRepositoryLike {
     messageId: string;
     claimerId: string;
   }): Promise<boolean> {
+    if (this.lostClaims.has(input.messageId)) return false;
     const entry = this.entries.get(input.messageId);
     if (!entry || entry.status !== "claimed" || entry.claimedBy !== input.claimerId) {
       return false;
@@ -169,6 +176,7 @@ class FakeOutboxRepository implements TaskOutboxRepositoryLike {
     error: string;
     delayMs?: number;
   }): Promise<boolean> {
+    if (this.lostClaims.has(input.messageId)) return false;
     const entry = this.entries.get(input.messageId);
     if (!entry || entry.status !== "claimed" || entry.claimedBy !== input.claimerId) {
       return false;
@@ -240,7 +248,12 @@ class FakeQueue {
 function reconciler(
   repository: FakeOutboxRepository,
   queue: FakeQueue,
-  options: Partial<{ batchSize: number; retryBaseMs: number; retryMaxMs: number }> = {},
+  options: Partial<{
+    batchSize: number;
+    retryBaseMs: number;
+    retryMaxMs: number;
+    jitterUnit: (seed: string) => number;
+  }> = {},
 ): TaskOutboxReconciler {
   return new TaskOutboxReconciler({
     repository,
@@ -249,6 +262,7 @@ function reconciler(
     batchSize: options.batchSize,
     retryBaseMs: options.retryBaseMs,
     retryMaxMs: options.retryMaxMs,
+    ...(options.jitterUnit ? { jitterUnit: options.jitterUnit } : {}),
   });
 }
 
@@ -632,6 +646,9 @@ describe("TaskOutboxReconciler", () => {
     const runner = reconciler(repository, queue, {
       retryBaseMs: 100,
       retryMaxMs: 1_000,
+      // 抖动源注入成确定值：本例只验证"退避后何时重新可投递"，把 attempt 1
+      // 的 equal jitter 钉在 ceiling 上限（100ms），使下面的精确断言保持原样。
+      jitterUnit: () => 1,
     });
 
     await expect(runner.reconcileOnce()).resolves.toEqual({
@@ -871,8 +888,96 @@ describe("TaskOutboxReconciler", () => {
     });
   });
 
-  it("never dead-letters an already-delivered row during a Redis outage", async () => {
-    // A delivered outbox row is periodically re-checked while its task stays
+  it("keeps delivering the rest of a claimed batch after one entry loses its claim", async () => {
+    // 一次 PostgreSQL 抖动可以让整批 claim 失效或让单条写失败。此前第一条的
+    // retryTaskOutbox 返回 false 会 throw 出 for 循环，同批已经 claim 到的其余
+    // 条目既不投递也不重排，只能干等到 claim_expires_at。
+    const repository = new FakeOutboxRepository();
+    const queue = new FakeQueue();
+    const lost = {
+      ...outbox(TASK_A, 0, "a7a7a7a7-a7a7-4a7a-8a7a-a7a7a7a7a7a7"),
+      status: "claimed" as const,
+      claimedBy: "reconciler-01",
+      claimExpiresAt: "2026-07-27T12:00:30.000Z",
+    };
+    const healthy = outbox(TASK_B, 0, "b7b7b7b7-b7b7-4b7b-8b7b-b7b7b7b7b7b7");
+    repository.entries.set(lost.messageId, lost);
+    repository.entries.set(healthy.messageId, healthy);
+    // lost 仍在 claim 期内所以会被本实例领走，但确认与重排都失败
+    // （= claim 在批内被别处抢走）：旧代码在这里 throw 出整个 for 循环。
+    repository.lostClaims.add(lost.messageId);
+    // 可投递的那一条排在失败的后面。
+    queue.jobs.set(`${TASK_A}:0`, { getState: async () => "failed" });
+
+    await expect(reconciler(repository, queue).reconcileOnce()).resolves.toEqual({
+      claimed: 2,
+      enqueued: 1,
+      skipped: 0,
+      failed: 1,
+    });
+    // 同批次里可结算的那一条照常投递并确认，不再被上一条拖住。
+    expect(queue.enqueued.map(({ messageId }) => messageId)).toContain(
+      healthy.messageId,
+    );
+    expect(repository.entries.get(healthy.messageId)?.status).toBe("delivered");
+    // 丢失 claim 的那条不可被本实例改写，保持原样。
+    expect(repository.entries.get(lost.messageId)).toMatchObject({
+      status: "claimed",
+      attemptCount: 0,
+      lastError: null,
+    });
+  });
+
+  it("jitters the outbox delivery backoff while staying inside the retry cap", async () => {
+    // §5「有上限的指数退避和抖动」。确定性延迟会让 N 个 Coordinator 在同一次
+    // 故障恢复后锁步重试；这里换成 retry-policy 的确定性 equal jitter。
+    const repository = new FakeOutboxRepository();
+    const queue = new FakeQueue();
+    const entry = outbox(TASK_A, 0, "c3c3c3c3-c3c3-4c3c-8c3c-c3c3c3c3c3c3");
+    repository.entries.set(entry.messageId, entry);
+    queue.failNext = true;
+    const runner = reconciler(repository, queue, {
+      retryBaseMs: 250,
+      retryMaxMs: 1_000,
+    });
+
+    await expect(runner.reconcileOnce()).resolves.toEqual({
+      claimed: 1,
+      enqueued: 0,
+      skipped: 0,
+      failed: 1,
+    });
+    const first = Date.parse(
+      repository.entries.get(entry.messageId)!.availableAt,
+    ) - repository.now.getTime();
+    // attempt 1: ceiling 250ms -> equal jitter 落在 [125, 250]。
+    expect(first).toBeGreaterThanOrEqual(125);
+    expect(first).toBeLessThanOrEqual(250);
+    // 确定性值就是 ceiling 本身；命中它说明没有抖动。
+    expect(first).toBeLessThan(250);
+
+    // attempt 2: ceiling 500ms -> jitter 落在 [250, 500]。
+    repository.now = new Date(
+      Date.parse(repository.entries.get(entry.messageId)!.availableAt),
+    );
+    queue.failNext = true;
+    await expect(runner.reconcileOnce()).resolves.toEqual({
+      claimed: 1,
+      enqueued: 0,
+      skipped: 0,
+      failed: 1,
+    });
+    const second = Date.parse(
+      repository.entries.get(entry.messageId)!.availableAt,
+    ) - repository.now.getTime();
+    expect(second).toBeGreaterThanOrEqual(250);
+    expect(second).toBeLessThanOrEqual(500);
+    // 关键：第二次不是确定性的 500ms——抖动确实生效，且两次不同。
+    expect(second).toBeLessThan(500);
+    expect(second).not.toBe(first);
+  });
+
+  it("never dead-letters an already-delivered row during a Redis outage", async () => {    // A delivered outbox row is periodically re-checked while its task stays
     // queued. A prolonged Redis outage must not consume the delivery failure
     // budget of a message that was already delivered once — flipping it to
     // 'failed' would block/expire a task whose dispatch already succeeded.

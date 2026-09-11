@@ -265,4 +265,71 @@ describe("L0SafetyController", () => {
       controller.evaluate(snapshot({ observedAtMs: 2_000, foodLevel: 10 })).actions,
     ).toContainEqual({ kind: "CONSUME_SAFE_FOOD", risk: "HUNGER" });
   });
+
+  it("re-issues an unconfirmed emergency stop instead of waiting out the dedupe window", () => {
+    // §6 紧急停止优先于一切：60s 是"确认成功后的去重"，不能同时充当"没送出去
+    // 时的沉默期"。未确认时按 UNCONFIRMED_EMERGENCY_STOP_RETRY_MS（5s）重发。
+    const controller = new L0SafetyController();
+    // 断线保号本来的判据就是"血还在掉"：先建立基线，再观测到下降。
+    controller.evaluate(snapshot({ health: 4, observedAtMs: 1_000 }));
+    expect(
+      controller.evaluate(snapshot({ health: 2, observedAtMs: 2_000 })).actions,
+    ).toContainEqual({ kind: "EMERGENCY_STOP", risk: "CRITICAL_HEALTH" });
+    controller.reportEmergencyStop(false);
+
+    // 5s 重发间隔内不刷屏。
+    expect(
+      controller.evaluate(snapshot({ health: 1, observedAtMs: 4_000 })).actions,
+    ).not.toContainEqual(expect.objectContaining({ kind: "EMERGENCY_STOP" }));
+
+    // 超过 5s 立刻重发，不必等满 60s（血仍在掉）。
+    controller.evaluate(snapshot({ health: 2, observedAtMs: 7_000 - 1 }));
+    expect(
+      controller.evaluate(snapshot({ health: 1, observedAtMs: 7_000 })).actions,
+    ).toContainEqual({ kind: "EMERGENCY_STOP", risk: "CRITICAL_HEALTH" });
+
+    // 仍处于 60s 去重窗口内（12s - 2s = 10s < 60s），却已经发出了第二次。
+    expect(12_000 - 2_000).toBeLessThan(60_000);
+    controller.reportEmergencyStop(false);
+    controller.evaluate(snapshot({ health: 2, observedAtMs: 11_999 }));
+    expect(
+      controller.evaluate(snapshot({ health: 1, observedAtMs: 12_000 })).actions,
+    ).toContainEqual({ kind: "EMERGENCY_STOP", risk: "CRITICAL_HEALTH" });
+  });
+
+  it("still dedupes a confirmed emergency stop for the normal window", () => {
+    const controller = new L0SafetyController();
+    controller.evaluate(snapshot({ health: 4, observedAtMs: 1_000 }));
+    expect(
+      controller.evaluate(snapshot({ health: 2, observedAtMs: 2_000 })).actions,
+    ).toContainEqual({ kind: "EMERGENCY_STOP", risk: "CRITICAL_HEALTH" });
+    controller.reportEmergencyStop(true);
+
+    // 确认成功后即使过了 5s 甚至 59s 也不重发。
+    for (const observedAtMs of [7_000, 30_000, 61_000]) {
+      controller.evaluate(snapshot({ health: 2, observedAtMs: observedAtMs - 1_000 }));
+      expect(
+        controller.evaluate(snapshot({ health: 1, observedAtMs })).actions,
+      ).not.toContainEqual(expect.objectContaining({ kind: "EMERGENCY_STOP" }));
+    }
+    // 60s 去重窗口过去后才会再次请求。
+    controller.evaluate(snapshot({ health: 2, observedAtMs: 62_000 }));
+    expect(
+      controller.evaluate(snapshot({ health: 1, observedAtMs: 62_001 })).actions,
+    ).toContainEqual({ kind: "EMERGENCY_STOP", risk: "CRITICAL_HEALTH" });
+  });
+
+  it("ignores an emergency stop result for a stop it never issued", () => {
+    // 没有已记录的紧急停止时间戳 = 不存在可缩短的沉默期；此时上报不能凭空
+    // 造出一次动作，也不能污染后续去重。
+    const controller = new L0SafetyController();
+    controller.reportEmergencyStop(false);
+    const decision = controller.evaluate(
+      snapshot({ health: 2, observedAtMs: 2_000 }),
+    );
+    expect(decision.actions).toEqual([{ kind: "PAUSE_NORMAL_TASKS", risk: "CRITICAL_HEALTH" }]);
+    expect(decision.actions).not.toContainEqual(
+      expect.objectContaining({ kind: "EMERGENCY_STOP" }),
+    );
+  });
 });

@@ -19,6 +19,30 @@ describe("FacilityExecutor", () => {
     expect(result.ok).toBe(true);
     expect((facility.metadata.productionLedger as { state: string }).state).toBe("ACTIVE");
     expect((facility.metadata.productionLedger as { produced: Record<string, number> }).produced.iron_ingot).toBe(12);
+    // 实体阶段消耗的 1 个铁锭只能记一次。修复前 entities 与
+    // verification.output 两处循环都写 "consumed"，累加成 2。
+    expect((facility.metadata.productionLedger as { consumed: Record<string, number> }).consumed).toEqual({ iron_ingot: 1 });
+    expect(result.consumed).toEqual({ iron_ingot: 1 });
+  });
+
+  it("counts activation consumption exactly once alongside entity consumption", async () => {
+    const { registry, facility } = makeRegistry();
+    const executor = new FacilityExecutor(registry, {
+      invoke: async ({ phase }) => ({
+        ok: true,
+        consumed: phase === "entities"
+          ? { iron_ingot: 3 }
+          : phase === "activate"
+            ? { redstone: 2 }
+            : undefined,
+      }),
+      readback: async () => ({ cells: [{ slotIndex: 0, blockPresent: true, blockName: "chest" }], output: { iron_ingot: 12 } }),
+    });
+    expect((await executor.run(facility.id)).ok).toBe(true);
+    expect((facility.metadata.productionLedger as { consumed: Record<string, number> }).consumed).toEqual({
+      iron_ingot: 3,
+      redstone: 2,
+    });
   });
 
   it("marks blocked collectors degraded and can restart through repair", async () => {

@@ -477,4 +477,84 @@ describe("affinity failure isolation", () => {
       }),
     ).rejects.toThrow("not authorized");
   });
+
+  it("contains a throwing scheduler tick instead of killing the host process", async () => {
+    // 定时 tick 里 await 的路径会真的 throw：tick 期间 await applyPool()，而
+    // 该 await 让并发控制流有机会摘除 workload，rebalance() 随即在
+    // requireSnapshot() 抛 TypeError（scheduler.ts 的 commitMigration 也同级）。
+    // 没有 unhandledRejection 处理器时，setInterval(() => void this.tick())
+    // 意味着一次资源调用异常 = Node 默认终止宿主 Bot 进程；而 :449 已明说
+    // 资源遥测绝不能让 Bot 退出。
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const rejections: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandledRejection);
+    try {
+      const events: CpuResourceEvent[] = [];
+      let affinityCalls = 0;
+      let detachArmed = false;
+      let detach: (() => void) | null = null;
+      const manager = await CPUResourceManager.create({
+        config: enabledConfig(),
+        detection: hybridFixture(),
+        affinityAdapter: {
+          apply: async (pid, cpuIds) => {
+            affinityCalls += 1;
+            // 只在定时 tick 期间武装：该 await 让并发控制流摘除 workload。
+            if (detachArmed) detach?.();
+            return { applied: true, pid, cpuIds, source: "noop" as const };
+          },
+        },
+        monitor: new ProcStatCpuMonitor({
+          now: () => new Date(),
+          loadAverage: () => [0, 0, 0],
+          readTextFile: async () => "cpu 100 0 100 800 0 0 0 0\n",
+        }),
+        eventSink: (event) => events.push(event),
+        pidAuthorizer: () => true,
+        now: () => new Date(),
+      });
+      const scheduler = Reflect.get(manager, "scheduler") as {
+        release(id: string): unknown;
+      };
+      detach = () => {
+        scheduler.release("bot-9");
+      };
+
+      await manager.assignProcess({
+        id: "bot-9",
+        pid: 9_009,
+        kind: "minecraft-bot",
+        deploymentTier: DeploymentTier.PRODUCTION,
+        state: BotState.IDLE,
+      });
+      // 制造一条待提交的迁移决策：ESCAPE 抬到 realtimePool（提交），随后回到
+      // IDLE 让调度器在 tick 里重新规划 realtimePool -> backgroundPool。
+      await manager.updateBotState("bot-9", BotState.ESCAPE);
+      await manager.updateBotState("bot-9", BotState.IDLE);
+      // 越过 demotionDelay / rebalance cooldown，使下一拍一定产生该降级决策。
+      await vi.advanceTimersByTimeAsync(41_000);
+      detachArmed = true;
+      expect(manager.start()).toBe(true);
+
+      const callsBeforeTick = affinityCalls;
+      await vi.advanceTimersByTimeAsync(2_000);
+      // tick 在 await applyPool() 期间摘除了 workload，rebalance() 随即在
+      // requireSnapshot() 抛 TypeError；定时器路径把它收敛成 CPU_TICK_FAILED。
+      expect(affinityCalls).toBeGreaterThan(callsBeforeTick);
+      expect(events.map((event) => event.type)).toContain("CPU_TICK_FAILED");
+      expect(rejections).toEqual([]);
+      // 定时器仍在运行，没有被一次异常打断。
+      expect(manager.snapshot().schedulerRunning).toBe(true);
+
+      manager.stop();
+      expect(manager.snapshot().schedulerRunning).toBe(false);
+    } finally {
+      process.off("unhandledRejection", onUnhandledRejection);
+      vi.useRealTimers();
+    }
+  });
 });

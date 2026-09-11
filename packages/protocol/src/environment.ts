@@ -57,7 +57,20 @@ export const environmentSnapshotSchema = z.object({
     architecture: z.string().min(1),
     cpu: z.object({
       model: z.string().min(1),
-      logicalCores: z.number().int().positive(),
+      /**
+       * AGENTS.md §1.9：探测失败必须显示不可用，不能补造状态。旧定义
+       * `.int().positive()` 连"未知"都表达不了，环境包只能拿
+       * `Math.max(1, cpus.length)` 编一个 1 出来。改为可选：缺失即"不可用"，
+       * 由 cpuProbe.probeReason 说明来源；旧的带值载荷照常校验通过（1.0 不变）。
+       */
+      logicalCores: z.number().int().positive().optional(),
+      cpuProbe: z
+        .object({
+          source: z.enum(["node-os-cpus"]),
+          probeReason: z.string().min(1).optional(),
+        })
+        .strict()
+        .optional(),
     }),
     memory: environmentMemorySchema,
     gpu: z.object({
@@ -67,8 +80,10 @@ export const environmentSnapshotSchema = z.object({
         z.object({
           name: z.string().min(1),
           vendor: z.string().min(1).optional(),
-          memoryBytes: z.number().int().nonnegative().optional(),
+          /** 只有真实测到正数才写入；不可测量时缺失并给出 probeReason。 */
+          memoryBytes: z.number().int().positive().optional(),
           driverVersion: z.string().min(1).optional(),
+          probeReason: z.string().min(1).optional(),
         }),
       ),
     }),

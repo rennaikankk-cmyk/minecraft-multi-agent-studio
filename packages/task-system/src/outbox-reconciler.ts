@@ -4,6 +4,7 @@ import type {
   TaskOutboxClaimOptions,
   TaskOutboxRetryOptions,
 } from "./postgres-repository.js";
+import { deterministicJitterUnit, taskRetryDelayMs } from "./retry-policy.js";
 
 const MAX_OUTBOX_BATCH_SIZE = 100;
 const DEFAULT_CLAIM_TTL_MS = 30_000;
@@ -42,6 +43,14 @@ export type TaskOutboxRepositoryLike = Readonly<{
   retryTaskOutbox(input: TaskOutboxRetryOptions): Promise<boolean>;
 }>;
 
+/**
+ * 仅需要 warn 的结构化日志缝（与 observability 的 AppLogger 结构兼容）。
+ * 不 import observability：task-system 不该为此新增包依赖。
+ */
+export type TaskOutboxReconcilerLogger = Readonly<{
+  warn(event: string, fields?: Readonly<Record<string, unknown>>): void;
+}>;
+
 export type TaskOutboxReconcilerOptions = Readonly<{
   repository: TaskOutboxRepositoryLike;
   queue: TaskDispatchQueueLike;
@@ -51,6 +60,13 @@ export type TaskOutboxReconcilerOptions = Readonly<{
   pollIntervalMs?: number;
   retryBaseMs?: number;
   retryMaxMs?: number;
+  /**
+   * 抖动源：[0,1) 的确定性映射，缺省用 retry-policy 的 sha256 实现
+   * （同一 messageId + 同一 attempt 必然得到同一延迟，重放稳定），测试可注入。
+   */
+  jitterUnit?: ((seed: string) => number) | undefined;
+  /** 结构化日志（可选）。claim 丢失这类"非致命但必须可见"的事件走这里。 */
+  logger?: TaskOutboxReconcilerLogger | undefined;
 }>;
 
 export type TaskOutboxReconcileResult = Readonly<{
@@ -69,6 +85,8 @@ type ResolvedOptions = Readonly<{
   pollIntervalMs: number;
   retryBaseMs: number;
   retryMaxMs: number;
+  randomUnit: (seed: string) => number;
+  logger: TaskOutboxReconcilerLogger | null;
 }>;
 
 function clampInteger(value: number, minimum: number, maximum: number): number {
@@ -122,6 +140,8 @@ export class TaskOutboxReconciler {
         100,
         MAX_RETRY_DELAY_MS,
       ),
+      randomUnit: options.jitterUnit ?? deterministicJitterUnit,
+      logger: options.logger ?? null,
     };
     if (resolved.retryBaseMs > resolved.retryMaxMs) {
       throw new RangeError("Outbox retry base must not exceed retry maximum.");
@@ -138,31 +158,52 @@ export class TaskOutboxReconciler {
     let enqueued = 0;
     let failed = 0;
     for (const entry of outbox) {
+      // 批次内逐条失败隔离：一条 PostgreSQL 故障让整批 claim 丢失时，剩下的
+      // 已 claim 条目绝不能因为前一条的异常而既不投递也不重排——那会把它们
+      // 一起卡到 claim_expires_at，正是"恢复风暴"的放大器。每一条独立结算，
+      // 单条彻底无法结算只记 failed 并继续。
+      let claimLost: unknown = null;
       try {
         await this.ensureEnqueued(entry);
-        const acknowledged = await this.options.repository.markTaskOutboxDelivered(
-          {
+        const acknowledged =
+          await this.options.repository.markTaskOutboxDelivered({
             messageId: entry.messageId,
             claimerId: this.options.instanceId,
-          },
-        );
+          });
         if (!acknowledged) {
-          throw new Error("Task dispatch outbox claim was lost before acknowledgement.");
+          throw new Error(
+            "Task dispatch outbox claim was lost before acknowledgement.",
+          );
         }
         enqueued += 1;
+        continue;
       } catch (error) {
-        const retryRecorded = await this.options.repository.retryTaskOutbox({
-          messageId: entry.messageId,
-          claimerId: this.options.instanceId,
-          error: errorMessage(error),
-          delayMs: this.retryDelay(entry.attemptCount + 1),
-        });
+        const retryRecorded = await this.options.repository
+          .retryTaskOutbox({
+            messageId: entry.messageId,
+            claimerId: this.options.instanceId,
+            error: errorMessage(error),
+            delayMs: this.retryDelay(entry),
+          })
+          .catch((retryError: unknown) => {
+            claimLost = retryError;
+            return false;
+          });
         if (!retryRecorded) {
-          throw new Error(
+          // 重排没能写入 = 本实例对该条目的 claim 已失效（别处已结算或已被
+          // 回收）。无权再写，但同批次其余条目照常结算。
+          claimLost ??= new Error(
             "Task dispatch outbox claim was lost before retry scheduling.",
           );
         }
-        failed += 1;
+      }
+      failed += 1;
+      if (claimLost !== null) {
+        this.options.logger?.warn("task_outbox_claim_lost", {
+          messageId: entry.messageId,
+          taskId: entry.taskId,
+          error: errorMessage(claimLost),
+        });
       }
     }
     // claimTaskOutbox filters task status and exact revision in PostgreSQL,
@@ -254,11 +295,19 @@ export class TaskOutboxReconciler {
     await this.options.queue.enqueue(entry.payload);
   }
 
-  private retryDelay(failureCount: number): number {
-    return Math.min(
-      this.options.retryMaxMs,
-      this.options.retryBaseMs *
-        2 ** Math.min(Math.max(0, failureCount - 1), 20),
-    );
+  /**
+   * §5 "有上限的指数退避和抖动"。复用 retry-policy 的确定性抖动（equal
+   * jitter：ceiling 的一半到全量，绝不超过 retryMaxMs），种子与
+   * planTaskRetry 同构 `messageId NUL attempt`，同一 outbox 记录重放得到
+   * 完全相同的延迟，但 N 个 Coordinator 从同一次故障恢复时不再锁步重试。
+   */
+  private retryDelay(entry: TaskOutboxRecord): number {
+    const attempt = entry.attemptCount + 1;
+    return taskRetryDelayMs(attempt, {
+      baseMs: this.options.retryBaseMs,
+      maxMs: this.options.retryMaxMs,
+      seed: `${entry.messageId}\u0000${attempt}`,
+      randomUnit: this.options.randomUnit,
+    });
   }
 }

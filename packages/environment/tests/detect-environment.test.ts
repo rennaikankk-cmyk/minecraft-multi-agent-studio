@@ -72,6 +72,87 @@ describe("detectEnvironment", () => {
       freeBytes: 8_000,
     });
   });
+
+  it("reports unknown CPU cores as unavailable instead of fabricating one core", async () => {
+    // AGENTS.md §1.9：探测失败必须显示不可用，不能补造状态。旧代码
+    // Math.max(1, cpuList.length) 会把"一个核都没探到"发布成 logicalCores: 1。
+    const snapshot = await detectEnvironment({
+      env: {},
+      platform: "linux",
+      commandRunner: async () => ({ stdout: "", stderr: "" }),
+      dockerMarkerExists: async () => false,
+      now: () => new Date("2026-07-19T10:00:00.000Z"),
+      memoryReader: () => ({ totalBytes: 16_000, freeBytes: 8_000 }),
+      cpuReader: () => [],
+    });
+
+    expect(snapshot.hardware.cpu.logicalCores).toBeUndefined();
+    expect(snapshot.hardware.cpu).not.toHaveProperty("logicalCores");
+    expect(snapshot.hardware.cpu.logicalCores).not.toBe(1);
+    expect(snapshot.hardware.cpu.cpuProbe).toEqual({
+      source: "node-os-cpus",
+      probeReason: "os_cpus_reported_no_logical_processors",
+    });
+    // 探测到真实核数时照常如实上报。
+    const measured = await detectEnvironment({
+      env: {},
+      platform: "linux",
+      commandRunner: async () => ({ stdout: "", stderr: "" }),
+      dockerMarkerExists: async () => false,
+      memoryReader: () => ({ totalBytes: 16_000, freeBytes: 8_000 }),
+      cpuReader: () => [{ model: "Fixture CPU" }, { model: "Fixture CPU" }],
+    });
+    expect(measured.hardware.cpu.logicalCores).toBe(2);
+    expect(measured.hardware.cpu.cpuProbe).toEqual({ source: "node-os-cpus" });
+  });
+
+  it("never publishes a zero or absent GPU memory reading as a measurement", async () => {
+    // Number(null) === 0 会通过旧的 >= 0 守卫，把"驱动没给 AdapterRAM"发布成
+    // memoryBytes: 0 —— 那是伪造的测量值。只有真实正整数才算测到。
+    const snapshot = await detectEnvironment({
+      env: {},
+      platform: "win32",
+      commandRunner: async (_executable, args) => {
+        if (args.some((arg) => arg.includes("Win32_VideoController"))) {
+          return {
+            stdout: JSON.stringify([
+              {
+                Name: "Measured Adapter",
+                AdapterRAM: 4_294_967_296,
+                DriverVersion: "1.2.3",
+              },
+              { Name: "Null Adapter", AdapterRAM: null, DriverVersion: "" },
+              { Name: "Wrapped Adapter", AdapterRAM: 0, DriverVersion: "" },
+            ]),
+            stderr: "",
+          };
+        }
+        return { stdout: "", stderr: "" };
+      },
+      dockerMarkerExists: async () => false,
+      memoryReader: () => ({ totalBytes: 16_000, freeBytes: 8_000 }),
+      cpuReader: () => [{ model: "Fixture CPU" }],
+    });
+
+    const devices = snapshot.hardware.gpu.devices;
+    expect(devices[0]).toEqual({
+      name: "Measured Adapter",
+      memoryBytes: 4_294_967_296,
+      driverVersion: "1.2.3",
+    });
+    // 旧行为会给这两台发布 memoryBytes: 0。
+    expect(devices[1]).toEqual({
+      name: "Null Adapter",
+      probeReason: "adapter_memory_not_reported",
+    });
+    expect(devices[2]).toEqual({
+      name: "Wrapped Adapter",
+      probeReason: "adapter_memory_not_a_positive_integer",
+    });
+    for (const device of devices) {
+      expect(device.memoryBytes ?? null).not.toBe(0);
+    }
+  });
 });
 
 describe("captureMemorySample", () => {

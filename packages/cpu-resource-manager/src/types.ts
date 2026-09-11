@@ -118,7 +118,13 @@ export type CpuResourceEventType =
   | "CPU_DEMOTE"
   | "CPU_REBALANCE"
   | "CPU_AFFINITY_FAILURE"
-  | "CPU_FALLBACK";
+  | "CPU_FALLBACK"
+  /**
+   * 周期 tick 自身失败。调度器是被监视的旁路，它的异常绝不能顺着
+   * unhandledRejection 杀掉宿主 Bot 进程——失败在这里被如实上报，
+   * 下一拍照常继续。
+   */
+  | "CPU_TICK_FAILED";
 
 export type CpuResourceEvent = Readonly<{
   schemaVersion: "1.0";

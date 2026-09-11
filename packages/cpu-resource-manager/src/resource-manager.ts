@@ -58,6 +58,18 @@ type PendingPriorityChange = Readonly<{
   reason: string;
 }>;
 
+/** 把任意 thrown 值收敛成一个稳定的短错误码（绝不把自由文本丢进遥测）。 */
+function errorCodeOf(error: unknown): string {
+  if (error !== null && typeof error === "object" && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string" && code.trim()) return code.trim().slice(0, 96);
+  }
+  if (error instanceof Error && error.name.trim()) {
+    return error.name.trim().slice(0, 96);
+  }
+  return "CPU_TICK_ERROR";
+}
+
 export class CPUResourceManager {
   readonly topology: CpuTopology;
   readonly pools: CpuPools;
@@ -314,7 +326,13 @@ export class CPUResourceManager {
     ) {
       return false;
     }
-    this.timer = setInterval(() => void this.tick(), this.config.scheduler.intervalMs);
+    // 定时器路径必须自吞异常：tick() 会 await 真正会 throw 的调用
+    // （requireSnapshot、commitMigration），而生产源码没有
+    // unhandledRejection 处理器，Node 默认会直接终止进程——那等于资源
+    // 遥测把宿主 Bot 杀掉。这里 catch 后如实上报，并保证后续 tick 继续跑。
+    this.timer = setInterval(() => {
+      void this.tick().catch((error: unknown) => this.tickFailure(error));
+    }, this.config.scheduler.intervalMs);
     this.timer.unref();
     return true;
   }
@@ -346,6 +364,25 @@ export class CPUResourceManager {
     } finally {
       this.tickRunning = false;
     }
+  }
+
+  /**
+   * 周期 tick 失败的上报口。这里绝不 rethrow：emit 自己已经吞掉了 sink 的
+   * 异常（见 :449「Resource telemetry must never make a Bot exit」），所以
+   * 整条定时器路径对宿主进程是安全的。
+   */
+  private tickFailure(error: unknown): void {
+    this.emit({
+      type: "CPU_TICK_FAILED",
+      workloadId: null,
+      pid: null,
+      previousPriority: null,
+      priority: null,
+      previousPool: null,
+      pool: null,
+      reason: "scheduler_tick_failed_continuing",
+      errorCode: errorCodeOf(error),
+    });
   }
 
   private async applyPool(

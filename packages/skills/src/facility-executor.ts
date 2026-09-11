@@ -83,7 +83,10 @@ export class FacilityExecutor {
     if (verification.blockedReason || verification.collectorFull) return this.degrade(facility, verification.blockedReason ?? "collector_full");
     if (!verification.output || Object.values(verification.output).every((count) => !Number.isSafeInteger(count) || count <= 0)) return this.degrade(facility, "NO_SERVER_OUTPUT");
     for (const [item, count] of Object.entries(verification.output)) recordFacilityProduction(facility, item, count, this.now(), "produced");
-    for (const [item, count] of Object.entries(entityResult.consumed ?? {})) recordFacilityProduction(facility, item, count, this.now(), "consumed");
+    // 消耗只在各自拿到结果时记一次：entities 由 :77、activate 由 :80 的
+    // recordConsumed() 登记。这里曾把 entityResult.consumed 再记一遍，
+    // 而 recordFacilityProduction 是无幂等守卫的累加，于是实体阶段的消耗
+    // 被算成两倍。
     transitionFacilityOperationalState(facility, "ACTIVE", this.now(), "server_output_verified");
     await this.adapter.persist?.();
     return { ok: true, produced: verification.output, ...(entityResult.consumed ? { consumed: entityResult.consumed } : {}), evidence: ["construction_readback", "activation_readback", "production_readback"] };

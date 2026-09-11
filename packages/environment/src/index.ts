@@ -32,12 +32,19 @@ export type DetectionOptions = {
   commandRunner?: CommandRunner;
   dockerMarkerExists?: () => Promise<boolean>;
   memoryReader?: MemoryReader;
+  cpuReader?: CpuReader;
 };
 
 export type MemoryReader = () => Readonly<{
   totalBytes: number;
   freeBytes: number;
 }>;
+
+/**
+ * 逻辑处理器探测缝。与 memoryReader 同一形态：测试可以注入"什么都没探到"
+ * 的真实退化结果，从而验证不会补造 logicalCores: 1。
+ */
+export type CpuReader = () => readonly Readonly<{ model?: string | undefined }>[];
 
 export type MemorySampleOptions = {
   now?: () => Date;
@@ -144,13 +151,29 @@ function parseWindowsGpu(value: string): EnvironmentSnapshot["hardware"]["gpu"][
     const name = String(source.Name ?? "").trim();
     if (!name) return [];
 
-    const rawMemory = Number(source.AdapterRAM);
+    // `Number(null) === 0` 会通过旧的 `>= 0` 守卫，把"探测没给值"发布成
+    // memoryBytes: 0，等于声称显存是 0 字节（AGENTS.md §1.9 禁止补造状态）。
+    // 只有真实的正整数才写入；缺失/null/NaN/Win32 AdapterRAM 的 u32 截断
+    // 0 一律记为不可用并说明原因。
+    const rawAdapterRam = source.AdapterRAM;
+    const rawMemory =
+      typeof rawAdapterRam === "number" || typeof rawAdapterRam === "string"
+        ? Number(rawAdapterRam)
+        : Number.NaN;
+    const memoryBytes =
+      Number.isSafeInteger(rawMemory) && rawMemory > 0 ? rawMemory : null;
     const driverVersion = String(source.DriverVersion ?? "").trim();
     return [
       {
         name,
-        ...(Number.isSafeInteger(rawMemory) && rawMemory >= 0
-          ? { memoryBytes: rawMemory }
+        ...(memoryBytes !== null ? { memoryBytes } : {}),
+        ...(memoryBytes === null
+          ? {
+              probeReason:
+                rawAdapterRam === null || rawAdapterRam === undefined
+                  ? "adapter_memory_not_reported"
+                  : "adapter_memory_not_a_positive_integer",
+            }
           : {}),
         ...(driverVersion ? { driverVersion } : {}),
       },
@@ -263,7 +286,7 @@ export async function detectEnvironment(
   const markerExists = options.dockerMarkerExists ?? defaultDockerMarkerExists;
   const hasDockerMarker = await markerExists();
   const mode = resolveDeploymentMode(env, hasDockerMarker);
-  const cpuList = os.cpus();
+  const cpuList = (options.cpuReader ?? (() => os.cpus()))();
   const gpuResult = await detectGpu(platform, runner);
 
   const software = await Promise.all([
@@ -292,7 +315,15 @@ export async function detectEnvironment(
       architecture: os.arch(),
       cpu: {
         model: normalizeCpuModel(cpuList[0]?.model),
-        logicalCores: Math.max(1, cpuList.length),
+        // §1.9：探测不到就报"不可用"。旧代码用 Math.max(1, cpuList.length)
+        // 把"一个核都没探到"发布成 logicalCores: 1 —— 那不是测量结果。
+        ...(cpuList.length > 0 ? { logicalCores: cpuList.length } : {}),
+        cpuProbe: {
+          source: "node-os-cpus",
+          ...(cpuList.length > 0
+            ? {}
+            : { probeReason: "os_cpus_reported_no_logical_processors" }),
+        },
       },
       memory: memorySample.memory,
       gpu: gpuResult.gpu,
