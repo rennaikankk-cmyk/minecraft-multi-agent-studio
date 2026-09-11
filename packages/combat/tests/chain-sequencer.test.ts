@@ -4,6 +4,7 @@ import {
   ChainSequencer,
   DEFAULT_CHAIN_SEQUENCER_POLICY,
   type CombatChainContext,
+  type CombatChainSequencerPolicy,
   type CombatChainStep,
 } from "../src/chain-sequencer.js";
 import { CombatReflexNotClearedError } from "../src/reflex-clearance.js";
@@ -46,15 +47,59 @@ describe("ChainSequencer", () => {
     ).toBe("STEP_READY");
   });
 
-  it("requires reflex clearance for a requested sub-50ms chain", () => {
+  it("requires reflex clearance when a gated class sits below the reflex budget", () => {
+    // 显式把 attack 声明为反射级门禁类，才能用合法策略（validatePolicy 强制
+    // useIntervalMs >= REFLEX_BUDGET_MS）构造出"低于反射预算"的步：
+    // attackIntervalMs = 0，故 max(0, minimumGapMs) < 50。
+    const gatedPolicy: CombatChainSequencerPolicy = {
+      ...DEFAULT_CHAIN_SEQUENCER_POLICY,
+      reflexGatedClasses: ["use", "attack"],
+    };
     const steps = [use("place"), attack("detonate", { minimumGapMs: 20 })];
-    expect(() => new ChainSequencer().beginChain(steps, 0, {
+    expect(() => new ChainSequencer(gatedPolicy).beginChain(steps, 0, {
       retreatInProgress: false,
       clearance: { cleared: false, denial: "NO_PROBE_DATA", budgetMs: 50 },
     })).toThrowError(CombatReflexNotClearedError);
-    expect(new ChainSequencer().beginChain(steps, 0, CONTEXT).state).toBe(
+    expect(new ChainSequencer(gatedPolicy).beginChain(steps, 0, CONTEXT).state).toBe(
       "STEP_READY",
     );
+  });
+
+  it("inspects the first step of a chain, not just the trailing ones", () => {
+    // 回归守卫：chainRequiresClearance 曾写作 `steps.slice(1).some(...)`，静默
+    // 跳过第 0 步；而 CombatDriver 只提交**单步**链，于是 requiresClearance 恒为
+    // false、assertClearance 永不执行——门禁形同虚设。单步链必须被检查。
+    const gatedPolicy: CombatChainSequencerPolicy = {
+      ...DEFAULT_CHAIN_SEQUENCER_POLICY,
+      reflexGatedClasses: ["attack"],
+    };
+    expect(() => new ChainSequencer(gatedPolicy).beginChain(
+      [attack("swing")],
+      0,
+      {
+        retreatInProgress: false,
+        clearance: { cleared: false, denial: "NO_PROBE_DATA", budgetMs: 50 },
+      },
+    )).toThrowError(CombatReflexNotClearedError);
+  });
+
+  it("keeps melee combat available under the default policy without a probe", () => {
+    // §0.6.3 把"武器管理"（WeaponManager 的攻击冷却与 i-frame 时机）定为
+    // **战术级（≤200ms）**，不是反射级；attack 因此不在 reflexGatedClasses 内。
+    // 若把 attack 算作反射级，attackIntervalMs=0 会因 0 < 50 把每次攻击都判成
+    // 反射级，在探针无法放行（生产中的常态）时封掉全部近战与远程攻击。
+    expect(DEFAULT_CHAIN_SEQUENCER_POLICY.reflexGatedClasses).toEqual(["use"]);
+    const uncleared: CombatChainContext = {
+      retreatInProgress: false,
+      clearance: { cleared: false, denial: "NO_PROBE_DATA", budgetMs: 50 },
+    };
+    expect(
+      new ChainSequencer().beginChain([attack("swing")], 0, uncleared).state,
+    ).toBe("STEP_READY");
+    // use 类在合法策略下（useIntervalMs = 200 >= 50）同样不低于反射预算。
+    expect(
+      new ChainSequencer().beginChain([use("place")], 0, uncleared).state,
+    ).toBe("STEP_READY");
   });
 
   it("does not issue the next step before the pending ACK", () => {

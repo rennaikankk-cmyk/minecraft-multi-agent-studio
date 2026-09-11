@@ -58,6 +58,21 @@ export type CombatChainDecision = Readonly<{
 export type CombatChainSequencerPolicy = Readonly<{
   useIntervalMs: number;
   attackIntervalMs: number;
+  /**
+   * 受 §0.6.3 反射时序放行门约束的交互类（显式声明，取代原先"按间隔算术
+   * 隐式推断"的写法）。
+   *
+   * 缺省仅 "use"：只有客户端物品使用这一类的 cadence 由 useIntervalMs 决定，
+   * 才可能落进 50ms 反射预算。实体攻击（MELEE_ATTACK / RELEASE_RANGED_WEAPON）
+   * 不共享客户端 use-item delay，其节奏与 i-frame 时机归 WeaponManager 与
+   * ServerPolicyGate 所有——§0.6.3 明确把"武器管理"定为**战术级（≤200ms）**，
+   * 不属于反射级，因此 attack 步不得按反射预算判定。
+   *
+   * 真正的反射级放行门在三个模块各自的 planForLiveCombat/decideForLiveCombat：
+   * TotemManager、CrystalEngine、PacketMineController（均 fail-closed）。
+   * 本字段是配置绊线：把某个类加进来，该类就会被反射探针放行门拦住。
+   */
+  reflexGatedClasses: readonly CombatInteractionClass[];
   cadenceJitterMaxMs: number;
   stepJitterMaxMs: number;
   initialAckBudgetMs: number;
@@ -74,6 +89,10 @@ export const DEFAULT_CHAIN_SEQUENCER_POLICY: CombatChainSequencerPolicy = {
   // Entity attacks do not share the client use-item delay. WeaponManager owns
   // attack cooldown and i-frame timing.
   attackIntervalMs: 0,
+  // 反射级门禁只覆盖 "use"。attack 若被算作反射级，会因 attackIntervalMs=0
+  // 而恒判为"低于反射预算"，在探针无法放行时封掉全部近战/远程攻击——
+  // 那是把战术级的武器管理误按反射级处理（§0.6.3）。
+  reflexGatedClasses: ["use"],
   cadenceJitterMaxMs: 40,
   stepJitterMaxMs: 20,
   initialAckBudgetMs: 1_000,
@@ -381,7 +400,15 @@ function chainRequiresClearance(
   steps: readonly CombatChainStep[],
   policy: CombatChainSequencerPolicy,
 ): boolean {
-  return steps.slice(1).some((step) => {
+  // 必须检查**每一步**。此处曾写作 `steps.slice(1).some(...)`，静默跳过第 0 步；
+  // 而 CombatDriver 只提交单步链（combat-driver.ts 的 beginChain 调用传入
+  // 单元素数组），于是 requiresClearance 恒为 false、assertClearance 永不执行
+  // ——整个门禁形同虚设。修成 some() 后，被 reflexGatedClasses 声明的类在第 0
+  // 步就会被拦住。
+  return steps.some((step) => {
+    if (!policy.reflexGatedClasses.includes(step.interactionClass)) {
+      return false;
+    }
     const classInterval = step.interactionClass === "use"
       ? policy.useIntervalMs
       : policy.attackIntervalMs;
@@ -400,6 +427,9 @@ function assertClearance(
 }
 
 function validatePolicy(policy: CombatChainSequencerPolicy): void {
+  for (const interactionClass of policy.reflexGatedClasses) {
+    validateInteractionClass(interactionClass);
+  }
   for (const value of [
     policy.useIntervalMs,
     policy.attackIntervalMs,
