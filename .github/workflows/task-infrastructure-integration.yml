@@ -34,10 +34,39 @@ jobs:
           corepack prepare pnpm@11.9.0+sha512.bd682d5d03fe525ef7c9fd6780c6884d1e756ac4c9c9fe00c538782824310dcf90e3ddc4f53835f06dfaebd5085e41855e0bcbb3b60de2ac5bbab89e5036f03b --activate
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
+      # The pathfinder-rs cargo commands that used to be inlined in the gate step now live in the
+      # root `check:rust` script, which the gate step invokes, so cargo does NOT run twice.
+      - name: Run Rust gate (pathfinder-rs fmt + locked tests, studio-shell fmt + conditional check)
+        # apps/studio-shell had never been compiled by any workflow. On 2026-09-11 it was verified
+        # locally for the first time and THREE defects were found and fixed in this repo:
+        #   1. `apps/studio-shell/icons/` did not exist at all. tauri-build requires `icons/icon.ico`
+        #      to generate the Windows resource file, so compilation aborted. A placeholder icon set
+        #      (icon.ico 16/32/48/256 + icon.png 512 + 32/128/128@2x png) is now committed.
+        #      ⚠ These are generated placeholders, not real branding — replace when branding exists.
+        #   2. Two genuine Rust compile errors: E0716 "temporary value dropped while borrowed" at
+        #      src/main.rs:178 and :269 (`app.state::<Backend>().0.lock()` borrowed a temporary
+        #      `State`). Both are fixed by binding the state to a `let`/scoped block first.
+        #   3. `package.metadata does not exist` is NOT an error and needs no fix: it is a plain
+        #      `println!` diagnostic from tauri-winres-0.3.6/src/helpers.rs:33.
+        #
+        # After (1) and (2), `cargo check --manifest-path apps/studio-shell/Cargo.toml` succeeds.
+        # The ONE remaining precondition is the bundle resource:
+        #   tauri.conf.json declares bundle.resources ["MinecraftMultiAgentStudioBackend.exe"], and
+        #   tauri-build requires it to exist AT COMPILE TIME (an exact path errors with "resource path
+        #   ... doesn't exist"; switching to a glob errors with "glob pattern ... didn't match any
+        #   files"). That file is produced only by the Windows-only `pnpm build:exe`
+        #   (scripts/build-studio-exe.mjs hard-fails on non-win32) and is copied into place by
+        #   scripts/build-studio-shell.mjs before packaging. It cannot be removed from the config:
+        #   src/main.rs:203-209 loads it from next to the shell executable at runtime.
+        #   => `cargo check` is structurally impossible on a Linux runner.
+        #
+        # `node scripts/check-studio-shell.mjs` (invoked via `pnpm check:rust`) therefore runs the real
+        # cargo check when the resource is present (Windows after `pnpm build:exe`) and prints an
+        # explicit "SKIPPED — 本项未验证" notice when it is not. It never fakes a pass.
+        # To gate this on Windows CI, add a windows-runner job that runs `pnpm build:exe` first.
+        run: pnpm check:rust
       - name: Run complete offline quality gate
         run: |
-          cargo fmt --manifest-path packages/pathfinder-rs/Cargo.toml --check
-          cargo test --manifest-path packages/pathfinder-rs/Cargo.toml --locked
           pnpm --filter @minecraft-studio/pathfinder-rs build
           node scripts/check-pathfinder-native.mjs
           pnpm check

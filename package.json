@@ -16,7 +16,7 @@
     "start:services": "node scripts/start-studio.mjs",
     "build:exe": "node scripts/build-studio-exe.mjs",
     "build:exe:skip-build": "node scripts/build-studio-exe.mjs --skip-build",
-    "studio:shell:check": "cargo check --manifest-path apps/studio-shell/Cargo.toml",
+    "studio:shell:check": "node scripts/check-studio-shell.mjs",
     "studio:shell:build": "cargo tauri build --manifest-path apps/studio-shell/tauri.conf.json",
     "studio:shell:package": "node scripts/build-studio-shell.mjs",
     "bot:start": "pnpm build:packages && pnpm --filter @minecraft-studio/bot-runtime build && pnpm --filter @minecraft-studio/bot-runtime start",
@@ -48,7 +48,8 @@
     "test:minecraft-skills": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-isolated-minecraft-test.ps1",
     "check:minecraft-workflow": "node scripts/validate-minecraft-acceptance-workflow.mjs",
     "test:e2e": "pnpm --filter @minecraft-studio/dashboard test:e2e",
-    "check": "pnpm typecheck && pnpm test && pnpm build",
+    "check:rust": "cargo fmt --manifest-path packages/pathfinder-rs/Cargo.toml --check && cargo test --manifest-path packages/pathfinder-rs/Cargo.toml --locked && cargo fmt --manifest-path apps/studio-shell/Cargo.toml --check && node scripts/check-studio-shell.mjs",
+    "check": "pnpm check:rust && pnpm typecheck && pnpm test && pnpm build",
     "studio:start": "node scripts/start-studio.mjs",
     "studio:start:local-test": "node scripts/start-studio.mjs --mode local_test",
     "minecraft:e2e": "node apps/bot-runtime/e2e/generic-e2e.mjs"
