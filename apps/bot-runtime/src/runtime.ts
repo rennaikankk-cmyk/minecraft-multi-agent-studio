@@ -349,6 +349,12 @@ export class SingleBotRuntime {
   private statusTimer: TimerHandle | null = null;
   /** anti-idle：无规则服防挂机踢（45s 节拍；仅闲时触发小角度视线偏转）。 */
   private antiIdleTimer: TimerHandle | null = null;
+  /**
+   * 最近一次"真实活动"的单调时钟，仅供 anti-idle 的 60s 空闲判定使用。
+   * 只有实际动作（技能调用、视线偏转本身）才允许经 markActivity() 更新；
+   * 遥测发送（emitStatus）不是活动——曾在此处刷新该字段，使 idleMs 永远
+   * 达不到 60s，防挂机偏转从未触发（死代码）。
+   */
   private lastActivityMonotonic = 0;
   private deferredStatusTimer: TimerHandle | null = null;
   private reconnectTimer: TimerHandle | null = null;
@@ -750,7 +756,6 @@ export class SingleBotRuntime {
       knobs: {
         STUDIO_RUST_PATHFINDER: probeKnob("STUDIO_RUST_PATHFINDER"),
         STUDIO_NO_HUNGER: probeKnob("STUDIO_NO_HUNGER"),
-        STUDIO_L0_EMERGENCY_STOP: probeKnob("STUDIO_L0_EMERGENCY_STOP"),
         STUDIO_PURSUIT: probeKnob("STUDIO_PURSUIT"),
         // P5-D2c WorldMirror 同步通道灰度门（默认关；与 Rust Pathfinder 门
         // 分离——两者可独立 AB）。无效值显式降级标 invalid（§20）。
@@ -818,6 +823,8 @@ export class SingleBotRuntime {
     externalSignal?: AbortSignal,
   ): Promise<SkillExecutionResultV1> {
     const invocation = parseSkillInvocation(input);
+    // 技能被受理即真实活动，重置 anti-idle 空闲窗口。
+    this.markActivity();
     const controller = new AbortController();
     const cancelFromCaller = () => controller.abort();
     externalSignal?.addEventListener("abort", cancelFromCaller, { once: true });
@@ -1334,6 +1341,8 @@ export class SingleBotRuntime {
     }
     this.state = "online";
     this.reconnectAttempts = 0;
+    // 每次连接建立都重置空闲窗口：刚上线不应被判定为"闲置"。
+    this.markActivity();
     // 每条连接各自算一次：重连后同样要等服务端补上第一个 health 包。
     this.statusEmittedForConnection = false;
     this.emitVersion();
@@ -1614,6 +1623,15 @@ export class SingleBotRuntime {
   }
 
   /**
+   * 记录一次真实活动，重置 anti-idle 的 60s 空闲窗口。
+   * 允许调用点仅限"bot 真的做了事"：技能调用被受理、anti-idle 自身偏转、
+   * 以及每次连接建立。遥测/心跳等纯观测路径一律不得调用。
+   */
+  private markActivity(): void {
+    this.lastActivityMonotonic = this.monotonicNow();
+  }
+
+  /**
    * 无规则服防挂机：服务器踢"完全无输入"的客户端。空闲（无技能、无 L0 干预、
    * 60s 无任何活动）时每 45s 做一次 ±5° 视线偏转——位移为零、不碰方块，
    * 与真实玩家的微操作不可区分。仅 anarchy purpose 启用（章程 §6）；
@@ -1640,7 +1658,7 @@ export class SingleBotRuntime {
           void look
             .look(yaw + jitter, Math.max(-1.2, Math.min(1.2, pitch + jitter)))
             .catch(() => undefined);
-          this.lastActivityMonotonic = this.monotonicNow();
+          this.markActivity();
         }
       },
       45_000,
@@ -1652,7 +1670,8 @@ export class SingleBotRuntime {
     if (generation !== this.generation || this.state !== "online" || !this.client) {
       return;
     }
-    this.lastActivityMonotonic = this.monotonicNow();
+    // 遥测发送不是"活动"。此处曾刷新 lastActivityMonotonic（每秒一次），
+    // 使 anti-idle 的 idleMs 永远 < 60s，防挂机偏转成为死代码。
     this.clearTimer("deferredStatus");
 
     // Phase 4 诊断门（no_telemetry）：跳过序列化+发送；安全评估在
@@ -2194,20 +2213,11 @@ export class SingleBotRuntime {
           }
           let result: L0SafetyActionResult;
           if (action.kind === "EMERGENCY_STOP") {
-            // 断线保号保险丝（STUDIO_L0_EMERGENCY_STOP=0 关闭）：本地测试/
-            // 死亡代价可控的场景里，"危急血量+血量在降→断线"会反复打停 bot
-            // （卡方块窒息、地形伤等非战斗源），关掉后由受击反应/撤退/吃食物
-            // 这些就地反射接手。生产 anarchy 语义（死亡=掉全部）默认保持开启。
-            if (process.env.STUDIO_L0_EMERGENCY_STOP === "0") {
-              this.dependencies.logger.warn(
-                "l0_emergency_stop_suppressed",
-                this.logFields({
-                  code: "EMERGENCY_STOP_DISABLED_BY_ENV",
-                  risk: action.risk,
-                }),
-              );
-              continue;
-            }
+            // 断线保号保险丝：危急血量且血量在降时断线，是 L0 最高优先级反射
+            // （章程 §0.4「存活即金钱」）。此处曾有 STUDIO_L0_EMERGENCY_STOP=0
+            // 的裸环境变量开关可静默跳过本分支：它不校验 purpose/ServerProfile、
+            // 只记 warn、也不在 .env.example 中，属 §0.3「严禁把测试捷径逻辑带上
+            // 正式服」禁止的形态——已整体删除，紧急停止不可再被环境变量关闭。
             const stopOutcome = await this.stop(
               "l0_emergency_stop",
               this.traceId,

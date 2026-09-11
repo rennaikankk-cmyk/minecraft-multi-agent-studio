@@ -1781,4 +1781,43 @@ describe("SingleBotRuntime", () => {
       ]),
     );
   });
+
+  it("emergency stop cannot be suppressed by an environment variable", async () => {
+    // 回归：runtime 曾支持 STUDIO_L0_EMERGENCY_STOP=0 静默跳过断线保号分支，
+    // 且不校验 purpose/ServerProfile、只记 warn、也不在 .env.example 中——
+    // §0.3「严禁把测试捷径逻辑带上正式服」禁止的形态。该开关已整体删除，
+    // 本测试锁定"该环境变量对紧急停止不再有任何影响"。
+    const previous = process.env.STUDIO_L0_EMERGENCY_STOP;
+    process.env.STUDIO_L0_EMERGENCY_STOP = "0";
+    try {
+      const client = new FakeBotClient({
+        ...snapshot,
+        health: { current: 4, maximum: 20 },
+      });
+      const runtime = new SingleBotRuntime(profile, {
+        createClient: () => client,
+        messageSink: () => undefined,
+        logger,
+        now: () => new Date(Date.now()),
+        randomId: () => FIXED_UUID,
+      });
+
+      runtime.start();
+      client.spawn();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(client.closeCalls).toBe(0);
+
+      await vi.advanceTimersByTimeAsync(6_000);
+      client.setSnapshot({ ...snapshot, health: { current: 2, maximum: 20 } });
+      client.stateChanged();
+      await vi.advanceTimersByTimeAsync(0);
+
+      // 即便环境变量要求关闭，断线保号仍必须发生。
+      expect(client.closeCalls).toBe(1);
+      expect(runtime.getState()).toBe("offline");
+    } finally {
+      if (previous === undefined) delete process.env.STUDIO_L0_EMERGENCY_STOP;
+      else process.env.STUDIO_L0_EMERGENCY_STOP = previous;
+    }
+  });
 });
