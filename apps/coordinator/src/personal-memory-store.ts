@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import {
   botPersonalMemoryScopeSchema, botPersonalMemoryV1Schema, botStatusV1Schema,
@@ -10,6 +10,8 @@ export interface PersonalMemoryStore {
   readonly durability: "file";
   get(scope: BotPersonalMemoryScope): BotPersonalMemoryV1 | null;
   observeStatus(message: BotStatusV1): void;
+  /** Latest observation for a bot on one server across every world generation. */
+  getLatestForBot?(botId: string, serverProfileId: string): BotPersonalMemoryV1 | null;
 }
 
 export class PersonalMemoryError extends Error {
@@ -35,6 +37,34 @@ export class FilePersonalMemoryStore implements PersonalMemoryStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw new PersonalMemoryError("PERSONAL_MEMORY_READ_FAILED");
     }
+  }
+
+  /**
+   * Filenames are scope hashes, so bot lookup scans the directory. The file
+   * population is one file per (bot, server, world) scope, which is bounded
+   * by the bot fleet size. Unreadable or corrupt files are skipped rather
+   * than failing the lookup: memory is an enhancement, never a precondition.
+   */
+  getLatestForBot(botId: string, serverProfileId: string): BotPersonalMemoryV1 | null {
+    let entries: readonly string[];
+    try {
+      entries = readdirSync(this.dir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw new PersonalMemoryError("PERSONAL_MEMORY_READ_FAILED");
+    }
+    let latest: BotPersonalMemoryV1 | null = null;
+    for (const entry of entries) {
+      if (!entry.endsWith(".json")) continue;
+      try {
+        const parsed = botPersonalMemoryV1Schema.parse(JSON.parse(readFileSync(path.join(this.dir, entry), "utf8")));
+        if (parsed.scope.botId !== botId || parsed.scope.serverProfileId !== serverProfileId) continue;
+        if (latest === null || Date.parse(parsed.lastObservedAt) > Date.parse(latest.lastObservedAt)) latest = parsed;
+      } catch {
+        continue;
+      }
+    }
+    return latest;
   }
 
   observeStatus(input: BotStatusV1): void {

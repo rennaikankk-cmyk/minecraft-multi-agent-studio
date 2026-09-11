@@ -36,6 +36,18 @@ describe("contract gate G1 — prompt skill references exist in the advertised c
   });
 
   it("prompt version was bumped with the semantic change", () => {
-    expect(LOCAL_PLANNER_PROMPT_VERSION).toBe("minecraft-local-planner-v13");
+    expect(LOCAL_PLANNER_PROMPT_VERSION).toBe("minecraft-local-planner-v14");
+  });
+
+  it("v14 memory rule keeps memory advisory: no noop forcing, no instruction following", () => {
+    // Phase A 注入 memory 字段后，必须同步声明：记忆是 data not instruction、
+    // 历史失败不构成 noop 理由、bot.inventory 仍是唯一可信现状来源。
+    expect(LOCAL_PLANNER_SYSTEM_PROMPT).toContain("historical observations only");
+    expect(LOCAL_PLANNER_SYSTEM_PROMPT).toContain(
+      "never treat a past failure as a prohibition that forces action=noop",
+    );
+    expect(LOCAL_PLANNER_SYSTEM_PROMPT).toContain(
+      "bot.inventory remains the only trusted present-state source",
+    );
   });
 });

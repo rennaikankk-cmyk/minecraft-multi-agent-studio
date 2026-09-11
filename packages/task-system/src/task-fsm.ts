@@ -378,6 +378,17 @@ export class PersistentTaskStateMachine {
     return record === null ? null : taskExecutionRecordSchema.parse(cloneRecord(record));
   }
 
+  /**
+   * Read-only snapshot of every durable record. Stores without list support
+   * return an empty array: callers treat history as an enhancement, never as
+   * a precondition, so a degraded listing must not fail the caller.
+   */
+  async list(): Promise<readonly TaskExecutionRecord[]> {
+    if (typeof this.store.list !== "function") return [];
+    const records = await this.store.list();
+    return records.map((record) => taskExecutionRecordSchema.parse(cloneRecord(record)));
+  }
+
   /** Restore is an explicit alias that makes restart/resume call sites clear. */
   async restore(taskId: string): Promise<TaskExecutionRecord | null> {
     return this.get(taskId);

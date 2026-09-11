@@ -26,6 +26,7 @@ import {
 
 import { BotRegistry } from "./bot-registry.js";
 import { FilePersonalMemoryStore } from "./personal-memory-store.js";
+import { buildPlannerMemory, type PlannerMemorySource } from "./planner-memory.js";
 import { loadChatTrustPolicies } from "./chat-trust-config.js";
 import { InvitationChatRouter } from "./invitation-chat.js";
 import { InvitationMigrationService } from "./invitation-service.js";
@@ -352,6 +353,23 @@ async function main(): Promise<void> {
   const taskPersistence = await createTaskStateMachine();
   taskPool = taskPersistence.pool;
   const taskStateMachine = taskPersistence.stateMachine;
+  // Phase A 记忆源：goal 历史（task store）+ personal-memory。全部读取失败
+  // 都降级为 null/[]——记忆是增强，绝不阻塞规划。
+  const plannerMemorySource: PlannerMemorySource = async ({ botId, serverProfileId }) => {
+    let taskRecords: Awaited<ReturnType<typeof taskStateMachine.list>> = [];
+    try {
+      taskRecords = await taskStateMachine.list();
+    } catch {
+      taskRecords = [];
+    }
+    let memory: ReturnType<FilePersonalMemoryStore["get"]> = null;
+    try {
+      memory = personalMemory.getLatestForBot?.(botId, serverProfileId) ?? null;
+    } catch {
+      memory = null;
+    }
+    return buildPlannerMemory({ botId, serverProfileId, taskRecords, personalMemory: memory });
+  };
   if (localAIConfig.enabled && localAIConfig.baseUrl && resolvedAIModel) {
     localPlanner = new CoordinatorLocalPlanner({
       ai: aiScheduledRouter!,
@@ -374,6 +392,7 @@ async function main(): Promise<void> {
       coordinatorInstanceId: instanceId,
       workstationRegistry,
       planJournalStore, baseRegistry, facilityRegistry, persistBaseState, explorationJournal, taskStateMachine,
+      plannerMemory: plannerMemorySource,
       logger,
     });
   } else {
@@ -395,6 +414,7 @@ async function main(): Promise<void> {
       coordinatorInstanceId: instanceId,
       workstationRegistry,
       planJournalStore, baseRegistry, facilityRegistry, persistBaseState, explorationJournal, taskStateMachine,
+      plannerMemory: plannerMemorySource,
       logger,
     });
     logger.warn("coordinator_planner_deterministic_only", {

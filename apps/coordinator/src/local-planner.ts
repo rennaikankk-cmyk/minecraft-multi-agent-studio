@@ -68,6 +68,7 @@ import {
   LOCAL_PLANNER_PROMPT_VERSION,
   LOCAL_PLANNER_SYSTEM_PROMPT,
 } from "./planner-prompts.js";
+import type { PlannerMemoryContext, PlannerMemorySource } from "./planner-memory.js";
 
 export const LOCAL_PLANNER_REASON_CODES = Object.freeze([
   "ADVANCE_TASK",
@@ -552,6 +553,11 @@ export type CoordinatorLocalPlannerOptions = Readonly<{
    * 仍可运行但 resume 语义退化为 skill 自身 nextIndex（诚实降级）。
    */
   planJournalStore?: PlanJournalStore;
+  /**
+   * Phase A 记忆源：bot 历史观测（goal 成败/死亡/资源基线）。未注入时
+   * prompt 无 memory 字段（规划零依赖）；解析失败降级为 null 并记日志。
+   */
+  plannerMemory?: PlannerMemorySource;
   /** Experimental workface selector; STUDIO_BLUEPRINT_WORKSET=1 opts in when omitted. */
   blueprintWorksetEnabled?: boolean;
   baseRegistry?: BaseRegistry;
@@ -872,6 +878,23 @@ export class CoordinatorLocalPlanner {
       { botId: request.botId, taskId: request.taskId },
     );
 
+    let memory: PlannerMemoryContext | null = null;
+    if (this.options.plannerMemory) {
+      try {
+        memory = await this.options.plannerMemory({
+          botId: request.botId,
+          serverProfileId: record.serverProfileId,
+          taskId: request.taskId,
+        });
+      } catch (error) {
+        this.options.logger?.warn("coordinator_planner_memory_unavailable", {
+          botId: request.botId,
+          detail: error instanceof Error ? error.message.slice(0, 200) : String(error),
+          degraded: "planning-proceeds-without-memory",
+        });
+      }
+    }
+
     let prompt: string;
     try {
       prompt = buildLocalPlannerPrompt({
@@ -879,6 +902,7 @@ export class CoordinatorLocalPlanner {
         operatorGoal,
         bot: safeBotContext(record, request.taskId),
         plannedItems: plannedItemNames,
+        ...(memory ? { memory } : {}),
         availableSkills: availableSkills.map(
           ({
             skillId,
