@@ -27,6 +27,9 @@ import {
 import { BotRegistry } from "./bot-registry.js";
 import { FilePersonalMemoryStore } from "./personal-memory-store.js";
 import { buildPlannerMemory, type PlannerMemorySource } from "./planner-memory.js";
+import { FileLessonStore } from "./lessons/lesson-store.js";
+import { LessonReviewService } from "./lessons/lesson-review-service.js";
+import type { ReviewTaskFact } from "./lessons/lesson-card.js";
 import { loadChatTrustPolicies } from "./chat-trust-config.js";
 import { InvitationChatRouter } from "./invitation-chat.js";
 import { InvitationMigrationService } from "./invitation-service.js";
@@ -153,7 +156,10 @@ async function main(): Promise<void> {
   let invitationMigrationService: InvitationMigrationService | null = null;
   // 聊天指挥扇入：director 构造完成后才存在，用闭包变量转接。
   let chatGoalHandler: ((botId: string, speaker: string, message: string) => boolean) | null = null;
+  // Phase B 复盘服务同样晚构造（依赖 taskStateMachine/aiScheduledRouter）。
+  let lessonReviewService: LessonReviewService | null = null;
   registry.subscribe((record, event) => {
+    lessonReviewService?.noteConnectionState(record.botId, record.serverProfileId, record.connectionState);
     if (event?.kind === "chat") {
       // Parse trusted invitations before free-text handling. This keeps raw
       // coordinates in the durable, access-controlled business record rather
@@ -353,8 +359,40 @@ async function main(): Promise<void> {
   const taskPersistence = await createTaskStateMachine();
   taskPool = taskPersistence.pool;
   const taskStateMachine = taskPersistence.stateMachine;
-  // Phase A 记忆源：goal 历史（task store）+ personal-memory。全部读取失败
-  // 都降级为 null/[]——记忆是增强，绝不阻塞规划。
+  // Phase B lesson 复盘：store 全局单例（planner 记忆消费与复盘落盘共享）。
+  const lessonStore = new FileLessonStore(process.env.STUDIO_LESSON_DIR?.trim() ||
+    path.join("runtime-data", "lessons"));
+  const reviewTaskFacts = async (): Promise<readonly ReviewTaskFact[]> => {
+    let records: Awaited<ReturnType<typeof taskStateMachine.list>> = [];
+    try {
+      records = await taskStateMachine.list();
+    } catch {
+      return [];
+    }
+    return records
+      .filter((record) => record.state === "SUCCESS" || record.state === "ABORT")
+      .map((record) => ({
+        taskId: record.taskId,
+        botId: record.botId,
+        goal: record.goal,
+        state: record.state as "SUCCESS" | "ABORT",
+        failureReason: record.failureReason,
+        updatedAt: record.updatedAt,
+      }));
+  };
+  if (aiScheduledRouter) {
+    lessonReviewService = new LessonReviewService({
+      client: scheduledRouterModelClient(aiScheduledRouter),
+      store: lessonStore,
+      taskFacts: reviewTaskFacts,
+      logger,
+    });
+    logger.info("coordinator_lesson_review_started", { durability: "file", trigger: "manual+session-end", dispatch: "none" });
+  } else {
+    logger.info("coordinator_lesson_review_unavailable", { reason: "ai-router-not-configured" });
+  }
+  // Phase A 记忆源：goal 历史（task store）+ personal-memory + lesson 卡。
+  // 全部读取失败都降级为 null/[]——记忆是增强，绝不阻塞规划。
   const plannerMemorySource: PlannerMemorySource = async ({ botId, serverProfileId }) => {
     let taskRecords: Awaited<ReturnType<typeof taskStateMachine.list>> = [];
     try {
@@ -368,7 +406,19 @@ async function main(): Promise<void> {
     } catch {
       memory = null;
     }
-    return buildPlannerMemory({ botId, serverProfileId, taskRecords, personalMemory: memory });
+    let lessons: ReadonlyArray<{ kind: string; goalPattern: string; advice: string; confidence: number; observedAtMs: number }> = [];
+    try {
+      lessons = lessonStore.listTop(serverProfileId, 4).map((lesson) => ({
+        kind: lesson.kind,
+        goalPattern: lesson.trigger.goalPattern,
+        advice: lesson.advice,
+        confidence: lesson.confidence,
+        observedAtMs: lesson.observedAtMs,
+      }));
+    } catch {
+      lessons = [];
+    }
+    return buildPlannerMemory({ botId, serverProfileId, taskRecords, personalMemory: memory, lessons });
   };
   if (localAIConfig.enabled && localAIConfig.baseUrl && resolvedAIModel) {
     localPlanner = new CoordinatorLocalPlanner({
@@ -579,6 +629,8 @@ async function main(): Promise<void> {
         facilities: facilityRegistry,
         persistState: persistBaseState,
         personalMemory,
+        lessonStore,
+        ...(lessonReviewService ? { lessonReview: lessonReviewService } : {}),
         provenanceDir: path.join(process.cwd(), "runtime-data", "provenance"),
         host: sharedStateConfig.host,
         port: sharedStateConfig.port,

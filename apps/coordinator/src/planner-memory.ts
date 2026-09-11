@@ -30,6 +30,14 @@ export type PlannerRecentGoal = Readonly<{
   ageMs: number;
 }>;
 
+export type PlannerMemoryLesson = Readonly<{
+  kind: string;
+  goalPattern: string;
+  advice: string;
+  confidence: number;
+  ageMs: number;
+}>;
+
 export type PlannerMemoryContext = Readonly<{
   memoryVersion: typeof PLANNER_MEMORY_VERSION;
   botId: string;
@@ -38,6 +46,8 @@ export type PlannerMemoryContext = Readonly<{
   /** 最近窗口内同一 goal 文本重复失败的规则信号（非 LLM 推断）。 */
   repeatedFailureGoalText: string | null;
   repeatedFailureCount: number;
+  /** Phase B lesson 卡摘要（同 profile 已验证 acceptable 的卡）。 */
+  lessons: readonly PlannerMemoryLesson[];
   lastDeath: Readonly<{
     ageMs: number;
     dimension: string;
@@ -57,6 +67,8 @@ export type PlannerMemoryInput = Readonly<{
   /** 终态任务记录（taskStateMachine.list() 的全量，函数内部过滤）。 */
   taskRecords: readonly TaskExecutionRecord[];
   personalMemory: BotPersonalMemoryV1 | null;
+  /** Phase B lesson 卡（同 profile，已验证 acceptable；内部再裁剪脱敏）。 */
+  lessons?: readonly Readonly<{ kind: string; goalPattern: string; advice: string; confidence: number; observedAtMs: number }>[];
 }>;
 
 /**
@@ -73,8 +85,17 @@ export function buildPlannerMemory(input: PlannerMemoryInput): PlannerMemoryCont
   const nowMs = (input.now ?? Date.now)();
   const recent = recentGoalsFrom(input.taskRecords, input.botId, nowMs);
   const memory = input.personalMemory;
+  const lessons = (input.lessons ?? [])
+    .slice(0, 4)
+    .map((lesson) => ({
+      kind: lesson.kind,
+      goalPattern: redactText(lesson.goalPattern).slice(0, 200),
+      advice: redactText(lesson.advice).slice(0, 400),
+      confidence: lesson.confidence,
+      ageMs: Math.max(0, nowMs - lesson.observedAtMs),
+    }));
   // 无任何历史可用时返回 null：prompt 不携带 memory 字段（规划零依赖）。
-  if (recent.items.length === 0 && recent.repeatedCount === 0 && memory === null) return null;
+  if (recent.items.length === 0 && recent.repeatedCount === 0 && memory === null && lessons.length === 0) return null;
   const context: PlannerMemoryContext = {
     memoryVersion: PLANNER_MEMORY_VERSION,
     botId: input.botId,
@@ -82,6 +103,7 @@ export function buildPlannerMemory(input: PlannerMemoryInput): PlannerMemoryCont
     recentGoals: recent.items,
     repeatedFailureGoalText: recent.repeatedText,
     repeatedFailureCount: recent.repeatedCount,
+    lessons,
     lastDeath: memory?.lastDeath
       ? {
           ageMs: Math.max(0, nowMs - Date.parse(memory.lastDeath.value.diedAt)),

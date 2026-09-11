@@ -42,6 +42,10 @@ export interface SharedStateServerOptions {
   readonly persistState?: () => void;
   /** Private, explicitly scoped historical observations. Requires a token even on loopback. */
   readonly personalMemory?: PersonalMemoryStore;
+  /** Phase B：手动触发 lesson 复盘（Bearer 鉴权同其它端点）。 */
+  readonly lessonReview?: { requestReview(serverProfileId: string, trigger: "manual" | "session-end"): Readonly<{ queued: boolean; reason?: string }> };
+  /** Phase B：lesson 卡只读列表（同 profile，按时间倒序）。 */
+  readonly lessonStore?: { list(serverProfileId: string): readonly unknown[] };
   /** 定时落盘间隔；默认 60s；<=0 表示只在 stop 时落盘。 */
   readonly persistIntervalMs?: number;
   readonly logger?: { info(message: string, meta?: unknown): void; warn(message: string, meta?: unknown): void };
@@ -145,6 +149,44 @@ export class SharedStateServer {
           schemaVersion: "1.0", durability: this.options.personalMemory.durability,
           freshness: "historical", memory: this.options.personalMemory.get(scope),
         }));
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/lessons") {
+        // Lesson 数据面与 personal-memory 同级敏感：token 必须配置且匹配。
+        if (!this.token || !this.authorized(request)) {
+          this.writeJson(response, 403, { ok: false, error: "unauthorized" });
+          return;
+        }
+        if (!this.options.lessonStore) {
+          this.writeJson(response, 503, { ok: false, error: "lesson_store_unavailable" });
+          return;
+        }
+        const serverProfileId = url.searchParams.get("serverProfileId") ?? "";
+        if (serverProfileId.length === 0 || serverProfileId.length > 128) {
+          this.writeJson(response, 400, { ok: false, error: "invalid_server_profile" });
+          return;
+        }
+        this.writeJson(response, 200, { ok: true, lessons: this.options.lessonStore.list(serverProfileId) });
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/lessons/review") {
+        // 写触发面：同样 fail-closed 于未配置 token 的部署。
+        if (!this.token || !this.authorized(request)) {
+          this.writeJson(response, 403, { ok: false, error: "unauthorized" });
+          return;
+        }
+        if (!this.options.lessonReview) {
+          this.writeJson(response, 503, { ok: false, error: "lesson_review_unavailable" });
+          return;
+        }
+        const body = await this.readBody(request);
+        const serverProfileId = typeof (body as { serverProfileId?: unknown }).serverProfileId === "string"
+          ? (body as { serverProfileId: string }).serverProfileId : "";
+        if (serverProfileId.length === 0 || serverProfileId.length > 128) {
+          this.writeJson(response, 400, { ok: false, error: "invalid_server_profile" });
+          return;
+        }
+        this.writeJson(response, 202, { ok: true, review: this.options.lessonReview.requestReview(serverProfileId, "manual") });
         return;
       }
       if (request.method === "GET" && url.pathname === "/snapshot") {
