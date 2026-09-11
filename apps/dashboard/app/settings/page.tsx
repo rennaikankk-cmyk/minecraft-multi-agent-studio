@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { ThemeSwitcher } from "@/components/theme-switcher";
 import { StudioRestartButton } from "@/components/studio-restart-button";
+import { ChatTrustPanel } from "@/components/chat-trust-panel";
 import {Badge, Card, CardContent, CardHeader, CardTitle, KeyValueRow, Skeleton, UiEmptyState , PageHeader } from "@/components/ui/primitives";
 
 interface GameplayPolicyView {
@@ -104,6 +105,7 @@ export default function SettingsPage() {
         title="其余设置项：无浏览器可编辑的安全配置"
         hint="Studio 的运行时配置来自 .env / .env.local（服务端读取，含 secrets，不回传浏览器）。需要变更时修改配置文件并重启 Studio；secrets 在任何 UI 中只以 configured/not-configured 形式存在。"
       />
+          <ChatTrustPanel />
     </main>
   );
 }

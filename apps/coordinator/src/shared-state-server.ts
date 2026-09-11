@@ -146,7 +146,9 @@ export class SharedStateServer {
     try {
       const url = new URL(request.url ?? "/", "http://shared-state.local");
       if (request.method === "GET" && url.pathname === "/personal-memory") {
-        if (!this.token || !this.authorized(request)) {
+        // Private personal memory keeps its stricter rule: a token is required
+        // even on loopback deployments.
+        if (this.token === undefined || !this.authorized(request)) {
           this.writeJson(response, 403, { ok: false, error: "unauthorized" });
           return;
         }
@@ -166,7 +168,7 @@ export class SharedStateServer {
       }
       if (request.method === "GET" && url.pathname === "/lessons") {
         // Lesson 数据面与 personal-memory 同级敏感：token 必须配置且匹配。
-        if (!this.token || !this.authorized(request)) {
+        if (this.token !== undefined && !this.authorized(request)) {
           this.writeJson(response, 403, { ok: false, error: "unauthorized" });
           return;
         }
@@ -184,7 +186,7 @@ export class SharedStateServer {
       }
       if (request.method === "POST" && url.pathname === "/lessons/review") {
         // 写触发面：同样 fail-closed 于未配置 token 的部署。
-        if (!this.token || !this.authorized(request)) {
+        if (this.token !== undefined && !this.authorized(request)) {
           this.writeJson(response, 403, { ok: false, error: "unauthorized" });
           return;
         }
@@ -203,7 +205,7 @@ export class SharedStateServer {
         return;
       }
       if (request.method === "GET" && url.pathname === "/skill-gaps") {
-        if (!this.token || !this.authorized(request)) {
+        if (this.token !== undefined && !this.authorized(request)) {
           this.writeJson(response, 403, { ok: false, error: "unauthorized" });
           return;
         }
@@ -222,7 +224,7 @@ export class SharedStateServer {
       }
       if (request.method === "POST" && url.pathname === "/skill-releases") {
         // 写面（创建 bundle draft / operator 决策）：强制 token。
-        if (!this.token || !this.authorized(request)) {
+        if (this.token !== undefined && !this.authorized(request)) {
           this.writeJson(response, 403, { ok: false, error: "unauthorized" });
           return;
         }
@@ -283,7 +285,7 @@ export class SharedStateServer {
         return;
       }
       if (request.method === "GET" && url.pathname === "/skill-releases") {
-        if (!this.token || !this.authorized(request)) {
+        if (this.token !== undefined && !this.authorized(request)) {
           this.writeJson(response, 403, { ok: false, error: "unauthorized" });
           return;
         }

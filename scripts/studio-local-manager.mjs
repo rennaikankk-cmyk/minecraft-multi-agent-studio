@@ -46,6 +46,7 @@ export {
 };
 
 import { GameplayPolicyError, resolveGameplayPolicy } from "../packages/protocol/dist/gameplay-policy.js";
+import { chatIdentityPolicySchema } from "../packages/protocol/dist/chat-identity.js";
 import {
   evaluateAdaptation,
   evaluateFeatureGates,
@@ -484,6 +485,53 @@ export class StudioLocalManager {
       if (request.method === "GET" && url.pathname === "/v1/status") {
         this.writeJson(response, 200, this.status());
         return;
+      }
+      if (url.pathname === "/v1/chat-trust") {
+        // 白名单（Chat Trust）管理面：读/写 coordinator 同一配置文件。
+        // 写后需重启 Studio 生效（前端一键重启按钮閃可达）。
+        const chatTrustPath = process.env.STUDIO_CHAT_TRUST_PATH?.trim() ||
+          path.join(this.runtimeRoot, "chat-trust.json");
+        if (request.method === "GET") {
+          let policies = [];
+          try {
+            policies = JSON.parse(await fsReadFile(chatTrustPath, "utf8"));
+          } catch (error) {
+            if (error?.code !== "ENOENT") {
+              this.writeError(response, 500, "CHAT_TRUST_READ_FAILED", "白名单文件读取失败。");
+              return;
+            }
+          }
+          this.writeJson(response, 200, {
+            schemaVersion: "1.0",
+            generatedAt: new Date().toISOString(),
+            path: chatTrustPath,
+            policies,
+          });
+          return;
+        }
+        if (request.method === "PUT") {
+          const body = await readJson(request);
+          const validation = chatTrustPoliciesArraySchema.safeParse(body);
+          if (!validation.success) {
+            this.writeError(response, 400, "CHAT_TRUST_INVALID", "白名单结构不合法（schema 校验失败）。");
+            return;
+          }
+          const keys = validation.data.map((p) => JSON.stringify([p.serverProfileId, p.worldId]));
+          if (new Set(keys).size !== keys.length) {
+            this.writeError(response, 400, "CHAT_TRUST_INVALID", "同一 serverProfileId+worldId 重复。");
+            return;
+          }
+          const temporary = `${chatTrustPath}.${Date.now()}.tmp`;
+          await fsWriteFile(temporary, JSON.stringify(validation.data, null, 2), { mode: 0o600 });
+          await fsRename(temporary, chatTrustPath);
+          this.writeJson(response, 200, {
+            schemaVersion: "1.0",
+            generatedAt: new Date().toISOString(),
+            saved: validation.data.length,
+            restartRequired: true,
+          });
+          return;
+        }
       }
       if (request.method === "POST" && url.pathname === "/v1/studio/restart") {
         // 整组重启（AI provider 激活后的 restartRequired 落地端点）。回调由
@@ -2090,6 +2138,19 @@ export function managedServerProfileId(config) {
 
 // 身份与请求上限常量（原与发现常量同区，拆分后归位于此）。
 const USERNAME_PATTERN = /^[A-Za-z0-9_]{3,16}$/u;
+async function fsReadFile(filePath, encoding) {
+  const { readFile } = await import("node:fs/promises");
+  return readFile(filePath, encoding);
+}
+async function fsWriteFile(filePath, data, options) {
+  const { writeFile } = await import("node:fs/promises");
+  return writeFile(filePath, data, options);
+}
+async function fsRename(from, to) {
+  const { rename } = await import("node:fs/promises");
+  return rename(from, to);
+}
+const chatTrustPoliciesArraySchema = chatIdentityPolicySchema.array().max(256);
 const shutdownPreload = `data:text/javascript,${encodeURIComponent(
   "process.on('message', (message) => { if (message?.type === 'studio.shutdown') process.emit('SIGTERM'); });",
 )}`;

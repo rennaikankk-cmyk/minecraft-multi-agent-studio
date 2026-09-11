@@ -449,6 +449,25 @@ async function main(): Promise<void> {
     { autoPromoteToCanary: skillDevMode === "sandbox_auto" },
   );
   liveReleaseStore = skillReleaseStore;
+  if (skillDevMode === "sandbox_auto") {
+    // sandbox_auto 闭环判据：release 的 skillId 出现在 catalog = 实现已合入
+    // （bundle→人/Codex 实现→重启）→ 自动进入验收态，等真实使用信号晋升。
+    const catalogIds = new Set(builtinSkills.map((skill) => skill.id));
+    let activated = 0;
+    for (const release of skillReleaseStore.pipeline.list()) {
+      if (release.status !== "draft" || !catalogIds.has(release.skillId)) continue;
+      try {
+        skillReleaseStore.pipeline.promoteToSandboxed(release.releaseId);
+        skillReleaseStore.persist(release.releaseId);
+        activated++;
+      } catch {
+        // 转换失败保留 draft，下次重启再试。
+      }
+    }
+    if (activated > 0) {
+      logger.info("coordinator_skill_release_auto_sandboxed", { activated });
+    }
+  }
   logger.info("coordinator_skill_release_started", {
     devMode: skillDevMode,
     autoPromoteToCanary: skillDevMode === "sandbox_auto",

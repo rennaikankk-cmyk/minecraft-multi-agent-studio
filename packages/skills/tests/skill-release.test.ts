@@ -145,3 +145,49 @@ describe("FileSkillReleaseStore", () => {
     expect(restored?.evidence[0]?.kind).toBe("bundle-exported");
   });
 });
+
+describe("live-run channel + sandbox_auto auto-promotion", () => {
+  function sandboxedPipeline(autoPromoteToCanary: boolean) {
+    const pipeline = new SkillReleasePipeline({ now: () => 2_000, autoPromoteToCanary });
+    const draft = pipeline.createDraftRelease({ skillId: "x.y", gapFingerprint: "f".repeat(32), bundleContentHash: "c".repeat(64) });
+    pipeline.promoteToSandboxed(draft.releaseId);
+    return { pipeline, releaseId: draft.releaseId };
+  }
+
+  it("a passing live-run promotes sandboxed→verified without any fixture server", () => {
+    const { pipeline, releaseId } = sandboxedPipeline(false);
+    const verified = pipeline.recordLiveRun(releaseId, {
+      serverProfileId: "luv-anarchy", passed: true,
+      checks: [{ label: "skill completed on live server", passed: true }], failures: [],
+    });
+    expect(verified.status).toBe("verified"); // export_only 档：verified 停车
+    expect(verified.evidence.some((e) => e.kind === "live-run" && e.passed)).toBe(true);
+  });
+
+  it("sandbox_auto auto-promotes a passing run straight to canary with an honest signature", () => {
+    const { pipeline, releaseId } = sandboxedPipeline(true);
+    const canary = pipeline.recordLiveRun(releaseId, {
+      serverProfileId: "luv-anarchy", passed: true, checks: [], failures: [],
+    });
+    expect(canary.status).toBe("canary");
+    const signature = canary.evidence.find((e) => e.kind === "operator-decision");
+    expect(signature).toMatchObject({ operator: "sandbox-auto", decision: "promote-canary" });
+  });
+
+  it("active still requires a human operator even under sandbox_auto", () => {
+    const { pipeline, releaseId } = sandboxedPipeline(true);
+    pipeline.recordLiveRun(releaseId, { serverProfileId: "p", passed: true, checks: [], failures: [] });
+    expect(() => pipeline.operatorDecision(releaseId, "promote-active", "")).toThrow();
+    const active = pipeline.operatorDecision(releaseId, "promote-active", "renna", "clean canary");
+    expect(active.status).toBe("active");
+  });
+
+  it("a failing live-run keeps evidence but does not advance", () => {
+    const { pipeline, releaseId } = sandboxedPipeline(true);
+    const after = pipeline.recordLiveRun(releaseId, {
+      serverProfileId: "p", passed: false, checks: [{ label: "check", passed: false }], failures: ["skill failed"],
+    });
+    expect(after.status).toBe("sandboxed");
+    expect(after.evidence.some((e) => e.kind === "live-run" && !e.passed)).toBe(true);
+  });
+});
