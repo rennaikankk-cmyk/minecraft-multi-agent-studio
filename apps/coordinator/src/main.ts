@@ -30,7 +30,7 @@ import { FilePersonalMemoryStore } from "./personal-memory-store.js";
 import { buildPlannerMemory, type PlannerMemorySource } from "./planner-memory.js";
 import { createSkillGapRecorder, type SkillGapRecorderProject } from "./skill-gap-recorder.js";
 import { FileGoalTemplateProposalStore } from "./goal-template-registry.js";
-import { builtinSkills, FileSkillGapStore, suggestComposition } from "@minecraft-studio/skills";
+import { builtinSkills, FileSkillGapStore, suggestComposition, FileSkillReleaseStore, generateGapBundle } from "@minecraft-studio/skills";
 import { FileLessonStore } from "./lessons/lesson-store.js";
 import { LessonReviewService } from "./lessons/lesson-review-service.js";
 import type { ReviewTaskFact } from "./lessons/lesson-card.js";
@@ -414,6 +414,43 @@ async function main(): Promise<void> {
     catalogSize: builtinSkills.length,
     note: "evidence-gated: catalog-dependent kinds require a named skill",
   });
+  // Phase D3：release lifecycle 运行时（verified 停车、canary/active 人审）。
+  const skillReleaseStore = new FileSkillReleaseStore(
+    process.env.STUDIO_SKILL_RELEASE_DIR?.trim() || path.join("runtime-data", "skill-releases"));
+  const skillReleases = {
+    list: () => skillReleaseStore.list() as ReadonlyArray<Record<string, unknown>>,
+    createDraftFromGap: (input: Readonly<{ gapFingerprint: string; skillId?: string }>) => {
+      const gap = skillGapStore.get(input.gapFingerprint);
+      if (gap === null) return { ok: false as const, error: "gap_not_found" };
+      const bundle = generateGapBundle(gap, {
+        existingSkills: builtinSkills.map((skill) => ({ skillId: skill.id, capabilities: [] })),
+      });
+      if (bundle === null) return { ok: false as const, error: "bundle_generation_failed" };
+      const skillId = input.skillId ?? gap.gap.requestedSkillId ?? "unset.candidate";
+      const release = skillReleaseStore.createDraftRelease({
+        skillId,
+        gapFingerprint: gap.fingerprint,
+        bundleContentHash: bundle.contentHash,
+      });
+      logger.info("coordinator_skill_release_draft_created", {
+        releaseId: release.releaseId, skillId, gapFingerprint: gap.fingerprint,
+      });
+      return { ok: true as const, releaseId: release.releaseId, implementationPrompt: bundle.implementationPrompt };
+    },
+    operatorDecision: (input: Readonly<{ releaseId: string; decision: "promote-canary" | "promote-active" | "revoke"; operator: string; note?: string }>) => {
+      try {
+        const updated = skillReleaseStore.pipeline.operatorDecision(
+          input.releaseId, input.decision, input.operator, input.note);
+        skillReleaseStore.persist(input.releaseId);
+        logger.info("coordinator_skill_release_decision", {
+          releaseId: input.releaseId, decision: input.decision, operator: input.operator, status: updated.status,
+        });
+        return { ok: true as const, status: updated.status };
+      } catch (error) {
+        return { ok: false as const, error: error instanceof Error ? error.message : "decision_failed" };
+      }
+    },
+  };
   // Phase A 记忆源：goal 历史（task store）+ personal-memory + lesson 卡。
   // 全部读取失败都降级为 null/[]——记忆是增强，绝不阻塞规划。
   const plannerMemorySource: PlannerMemorySource = async ({ botId, serverProfileId }) => {
@@ -671,6 +708,7 @@ async function main(): Promise<void> {
             ),
           })),
         },
+        skillReleases,
         provenanceDir: path.join(process.cwd(), "runtime-data", "provenance"),
         host: sharedStateConfig.host,
         port: sharedStateConfig.port,

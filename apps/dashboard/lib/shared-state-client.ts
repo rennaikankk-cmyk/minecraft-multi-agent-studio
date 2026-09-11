@@ -253,3 +253,212 @@ export async function fetchSharedStateView(
     clearTimeout(timer);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Gap Console（D4）：skill gaps / releases / lessons 的受限代理视图。
+// 契约与 snapshot 相同：token 只在 Node 侧，未配置/不可达如实 unavailable。
+// ---------------------------------------------------------------------------
+
+export interface SkillGapView {
+  fingerprint: string;
+  kind: string;
+  severity: string;
+  occurrenceCount: number;
+  actionFamily: string;
+  terminalFailureCode: string;
+  requestedSkillId: string | null;
+  serverProfileId: string;
+  lastSeenAtMs: number;
+}
+
+export interface CompositionSuggestionView {
+  fingerprint: string;
+  skillIds: string[];
+  rationale: string | null;
+}
+
+export interface SkillReleaseView {
+  releaseId: string;
+  skillId: string;
+  status: string;
+  gapFingerprint: string;
+  evidenceCount: number;
+  updatedAtMs: number;
+}
+
+export type GapConsoleResult =
+  | { status: "ok"; gaps: SkillGapView[]; suggestions: CompositionSuggestionView[]; releases: SkillReleaseView[] }
+  | { status: "not_configured" | "unreachable"; detail?: string };
+
+async function sharedStateFetch(
+  config: SharedStateConfig,
+  pathname: string,
+  init: { method: "GET" | "POST"; body?: unknown; timeoutMs?: number },
+): Promise<{ ok: boolean; status: number; json: unknown }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), init.timeoutMs ?? 4_000);
+  try {
+    const headers: Record<string, string> = {};
+    if (config.token) headers.Authorization = `Bearer ${config.token}`;
+    if (init.body !== undefined) headers["Content-Type"] = "application/json";
+    const response = await fetch(`${config.baseUrl}${pathname}`, {
+      method: init.method,
+      headers,
+      signal: controller.signal,
+      cache: "no-store",
+      ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
+    });
+    const json = await response.json().catch(() => null);
+    return { ok: response.ok, status: response.status, json };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function toGapView(gap: Record<string, unknown>): SkillGapView {
+  const gapDetail = (gap.gap ?? {}) as Record<string, unknown>;
+  return {
+    fingerprint: String(gap.fingerprint ?? ""),
+    kind: String(gap.kind ?? "unknown"),
+    severity: String(gap.severity ?? "info"),
+    occurrenceCount: Number(gap.occurrenceCount ?? 0),
+    actionFamily: String(gapDetail.actionFamily ?? "general"),
+    terminalFailureCode: String(gapDetail.terminalFailureCode ?? ""),
+    requestedSkillId: typeof gapDetail.requestedSkillId === "string" ? gapDetail.requestedSkillId : null,
+    serverProfileId: String((gap.runtime as Record<string, unknown> | undefined)?.serverProfileId ?? ""),
+    lastSeenAtMs: Number(gap.lastSeenAtMs ?? 0),
+  };
+}
+
+export async function fetchGapConsole(config: SharedStateConfig | null): Promise<GapConsoleResult> {
+  if (!config) return { status: "not_configured" };
+  try {
+    const gaps = await sharedStateFetch(config, "/skill-gaps", { method: "GET" });
+    if (!gaps.ok) return { status: "unreachable", detail: `gaps HTTP ${gaps.status}` };
+    const releases = await sharedStateFetch(config, "/skill-releases", { method: "GET" });
+    const payload = gaps.json as {
+      gaps?: Array<Record<string, unknown>>;
+      compositionSuggestions?: Array<{ fingerprint?: string; suggestion?: { skillIds?: string[]; rationale?: string } | null }>;
+    };
+    const releasePayload = (releases.json ?? {}) as { releases?: Array<Record<string, unknown>> };
+    return {
+      status: "ok",
+      gaps: (payload.gaps ?? []).map(toGapView),
+      suggestions: (payload.compositionSuggestions ?? []).map((entry) => ({
+        fingerprint: String(entry.fingerprint ?? ""),
+        skillIds: entry.suggestion?.skillIds ?? [],
+        rationale: entry.suggestion?.rationale ?? null,
+      })),
+      releases: (releasePayload.releases ?? []).map((release) => ({
+        releaseId: String(release.releaseId ?? ""),
+        skillId: String(release.skillId ?? ""),
+        status: String(release.status ?? ""),
+        gapFingerprint: String(release.gapFingerprint ?? ""),
+        evidenceCount: Array.isArray(release.evidence) ? release.evidence.length : 0,
+        updatedAtMs: Number(release.updatedAtMs ?? 0),
+      })),
+    };
+  } catch (error) {
+    return { status: "unreachable", detail: error instanceof Error ? error.message : "unknown" };
+  }
+}
+
+export type ReleaseActionResult =
+  | { status: "ok"; releaseId?: string; implementationPrompt?: string; releaseStatus?: string }
+  | { status: "not_configured" | "unreachable" | "rejected"; detail?: string };
+
+export async function createReleaseDraft(config: SharedStateConfig | null, gapFingerprint: string): Promise<ReleaseActionResult> {
+  if (!config) return { status: "not_configured" };
+  try {
+    const result = await sharedStateFetch(config, "/skill-releases", {
+      method: "POST",
+      body: { action: "create-draft", gapFingerprint },
+      timeoutMs: 8_000,
+    });
+    const json = (result.json ?? {}) as { ok?: boolean; error?: string; releaseId?: string; implementationPrompt?: string };
+    if (!result.ok || json.ok !== true) return { status: "rejected", detail: json.error ?? `HTTP ${result.status}` };
+    return {
+      status: "ok",
+      ...(json.releaseId !== undefined ? { releaseId: json.releaseId } : {}),
+      ...(json.implementationPrompt !== undefined ? { implementationPrompt: json.implementationPrompt } : {}),
+    };
+  } catch (error) {
+    return { status: "unreachable", detail: error instanceof Error ? error.message : "unknown" };
+  }
+}
+
+export async function releaseOperatorDecision(
+  config: SharedStateConfig | null,
+  input: { releaseId: string; decision: "promote-canary" | "promote-active" | "revoke"; operator: string; note?: string },
+): Promise<ReleaseActionResult> {
+  if (!config) return { status: "not_configured" };
+  try {
+    const result = await sharedStateFetch(config, "/skill-releases", {
+      method: "POST",
+      body: { action: "operator-decision", ...input },
+      timeoutMs: 8_000,
+    });
+    const json = (result.json ?? {}) as { ok?: boolean; error?: string; status?: string };
+    if (!result.ok || json.ok !== true) return { status: "rejected", detail: json.error ?? `HTTP ${result.status}` };
+    return {
+      status: "ok",
+      ...(json.status !== undefined ? { releaseStatus: json.status } : {}),
+    };
+  } catch (error) {
+    return { status: "unreachable", detail: error instanceof Error ? error.message : "unknown" };
+  }
+}
+
+export interface LessonCardView {
+  lessonId: string;
+  kind: string;
+  goalPattern: string;
+  advice: string;
+  confidence: number;
+  observedAtMs: number;
+}
+
+export type LessonListResult =
+  | { status: "ok"; lessons: LessonCardView[] }
+  | { status: "not_configured" | "unreachable"; detail?: string };
+
+export async function fetchLessons(config: SharedStateConfig | null, serverProfileId: string): Promise<LessonListResult> {
+  if (!config) return { status: "not_configured" };
+  try {
+    const result = await sharedStateFetch(config, `/lessons?serverProfileId=${encodeURIComponent(serverProfileId)}`, { method: "GET" });
+    if (!result.ok) return { status: "unreachable", detail: `HTTP ${result.status}` };
+    const payload = (result.json ?? {}) as { lessons?: Array<Record<string, unknown>> };
+    return {
+      status: "ok",
+      lessons: (payload.lessons ?? []).map((lesson) => ({
+        lessonId: String(lesson.lessonId ?? ""),
+        kind: String(lesson.kind ?? ""),
+        goalPattern: String(((lesson.trigger ?? {}) as Record<string, unknown>).goalPattern ?? ""),
+        advice: String(lesson.advice ?? ""),
+        confidence: Number(lesson.confidence ?? 0),
+        observedAtMs: Number(lesson.observedAtMs ?? 0),
+      })),
+    };
+  } catch (error) {
+    return { status: "unreachable", detail: error instanceof Error ? error.message : "unknown" };
+  }
+}
+
+export async function requestLessonReview(config: SharedStateConfig | null, serverProfileId: string): Promise<ReleaseActionResult> {
+  if (!config) return { status: "not_configured" };
+  try {
+    const result = await sharedStateFetch(config, "/lessons/review", {
+      method: "POST",
+      body: { serverProfileId },
+      timeoutMs: 8_000,
+    });
+    const json = (result.json ?? {}) as { ok?: boolean; review?: { queued?: boolean; reason?: string } };
+    if (!result.ok) return { status: "rejected", detail: `HTTP ${result.status}` };
+    if (json.review && json.review.queued === false) {
+      return { status: "rejected", detail: json.review.reason ?? "cooldown" };
+    }
+    return { status: "ok" };
+  } catch (error) {
+    return { status: "unreachable", detail: error instanceof Error ? error.message : "unknown" };
+  }
+}

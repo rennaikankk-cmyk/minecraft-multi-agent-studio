@@ -51,6 +51,12 @@ export interface SharedStateServerOptions {
     list(): ReadonlyArray<Record<string, unknown>>;
     compositionSuggestions?(): ReadonlyArray<Readonly<{ fingerprint: string; suggestion: unknown }>>;
   };
+  /** Phase D3/D4：release lifecycle 运行时（gap→bundle→draft；operator 决策）。 */
+  readonly skillReleases?: {
+    list(): ReadonlyArray<Record<string, unknown>>;
+    createDraftFromGap(input: Readonly<{ gapFingerprint: string; skillId?: string }>): Readonly<{ ok: boolean; error?: string; releaseId?: string; implementationPrompt?: string }>;
+    operatorDecision(input: Readonly<{ releaseId: string; decision: "promote-canary" | "promote-active" | "revoke"; operator: string; note?: string }>): Readonly<{ ok: boolean; error?: string; status?: string }>;
+  };
   /** 定时落盘间隔；默认 60s；<=0 表示只在 stop 时落盘。 */
   readonly persistIntervalMs?: number;
   readonly logger?: { info(message: string, meta?: unknown): void; warn(message: string, meta?: unknown): void };
@@ -210,6 +216,63 @@ export class SharedStateServer {
             ? { compositionSuggestions: this.options.skillGaps.compositionSuggestions() }
             : {}),
         });
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/skill-releases") {
+        // 写面（创建 bundle draft / operator 决策）：强制 token。
+        if (!this.token || !this.authorized(request)) {
+          this.writeJson(response, 403, { ok: false, error: "unauthorized" });
+          return;
+        }
+        if (!this.options.skillReleases) {
+          this.writeJson(response, 503, { ok: false, error: "skill_releases_unavailable" });
+          return;
+        }
+        const body = await this.readBody(request) as { action?: unknown; gapFingerprint?: unknown; skillId?: unknown; releaseId?: unknown; decision?: unknown; operator?: unknown; note?: unknown };
+        if (body.action === "create-draft") {
+          if (typeof body.gapFingerprint !== "string" || !/^[a-f0-9]{16,64}$/u.test(body.gapFingerprint)) {
+            this.writeJson(response, 400, { ok: false, error: "invalid_gap_fingerprint" });
+            return;
+          }
+          const result = this.options.skillReleases.createDraftFromGap({
+            gapFingerprint: body.gapFingerprint,
+            ...(typeof body.skillId === "string" && body.skillId.length > 0 ? { skillId: body.skillId } : {}),
+          });
+          this.writeJson(response, result.ok ? 201 : 409, result);
+          return;
+        }
+        if (body.action === "operator-decision") {
+          if (typeof body.releaseId !== "string" || typeof body.decision !== "string" ||
+              typeof body.operator !== "string" || body.operator.length === 0) {
+            this.writeJson(response, 400, { ok: false, error: "invalid_request" });
+            return;
+          }
+          if (body.decision !== "promote-canary" && body.decision !== "promote-active" && body.decision !== "revoke") {
+            this.writeJson(response, 400, { ok: false, error: "invalid_decision" });
+            return;
+          }
+          const result = this.options.skillReleases.operatorDecision({
+            releaseId: body.releaseId,
+            decision: body.decision,
+            operator: body.operator.slice(0, 128),
+            ...(typeof body.note === "string" ? { note: body.note.slice(0, 300) } : {}),
+          });
+          this.writeJson(response, result.ok ? 200 : 409, result);
+          return;
+        }
+        this.writeJson(response, 400, { ok: false, error: "unknown_action" });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/skill-releases") {
+        if (!this.token || !this.authorized(request)) {
+          this.writeJson(response, 403, { ok: false, error: "unauthorized" });
+          return;
+        }
+        if (!this.options.skillReleases) {
+          this.writeJson(response, 503, { ok: false, error: "skill_releases_unavailable" });
+          return;
+        }
+        this.writeJson(response, 200, { ok: true, releases: this.options.skillReleases.list() });
         return;
       }
       if (request.method === "GET" && url.pathname === "/snapshot") {

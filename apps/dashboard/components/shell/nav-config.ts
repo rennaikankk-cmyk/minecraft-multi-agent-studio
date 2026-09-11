@@ -6,6 +6,7 @@ import {
   Cpu,
   FlaskConical,
   LayoutDashboard,
+  Lightbulb,
   ScrollText,
   Server,
   Sparkles,
@@ -61,6 +62,7 @@ export const NAV_GROUPS: readonly NavGroup[] = [
     items: [
       { label: "Models & API", href: "/models", icon: Sparkles, badge: "spark", hint: "本地推理 / 云端 API / 中转站" },
       { label: "Goals / Plans", href: "/goals", icon: Target, hint: "目标与仲裁" },
+      { label: "Gap Console", href: "/gaps", icon: Lightbulb, hint: "自我改善：gap/lesson/release" },
     ],
   },
   {
