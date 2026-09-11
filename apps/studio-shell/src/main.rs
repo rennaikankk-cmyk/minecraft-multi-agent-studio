@@ -175,8 +175,10 @@ fn build_local_backend(app: tauri::AppHandle) -> Result<String, String> {
     if !backend_path.exists() {
         return Err("local build did not produce dist/MinecraftMultiAgentStudio.exe".into());
     }
-    let mut slot = app
-        .state::<Backend>()
+    // 先绑定 state：app.state::<Backend>() 返回的 State 是临时值，若直接在其上
+    // 取 .0.lock()，临时值会在语句结束处释放，而 MutexGuard 仍在借用它（E0716）。
+    let backend_state = app.state::<Backend>();
+    let mut slot = backend_state
         .0
         .lock()
         .map_err(|_| "backend lock poisoned".to_string())?;
@@ -266,12 +268,13 @@ pub fn run() {
                     .min_inner_size(1024.0, 700.0)
                     .build()?;
             let backend = launch_backend().unwrap_or_else(|error| panic!("{error}"));
-            let mut slot = app
-                .state::<Backend>()
-                .0
-                .lock()
-                .expect("backend lock poisoned");
-            *slot = Some(backend);
+            // 同 restart 处的 E0716：State 临时值必须在独立作用域内先绑定，
+            // 且让借用在此作用域结束时释放，之后才能继续使用 app。
+            {
+                let backend_state = app.state::<Backend>();
+                let mut slot = backend_state.0.lock().expect("backend lock poisoned");
+                *slot = Some(backend);
+            }
             wait_for_dashboard(app.handle().clone());
             let _ = window.emit("studio-starting", "Starting local services...");
             Ok(())

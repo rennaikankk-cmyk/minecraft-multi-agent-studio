@@ -1,0 +1,5 @@
+target/
+gen/
+# 打包时由 scripts/build-studio-shell.mjs 从 dist/ 复制进来的后端可执行文件；
+# 只在 Windows 上由 `pnpm build:exe` 产出，绝不提交。
+MinecraftMultiAgentStudioBackend.exe
