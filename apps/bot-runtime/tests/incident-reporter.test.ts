@@ -210,8 +210,11 @@ describe("IncidentReporter endpoint export policy (F-C2)", () => {
   it("refuses a non-loopback public endpoint and sends nothing", async () => {
     const warnings: Array<{ message: string; meta?: unknown }> = [];
     const spoolPath = join(tmpdir(), `reporter-refused-${Date.now()}.jsonl`);
-    let fetchCalls = 0;
-    vi.stubGlobal("fetch", vi.fn(async () => { fetchCalls += 1; return new Response("{}", { status: 201 }); }));
+    const attempted: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: unknown) => {
+      attempted.push(typeof input === "string" ? input : String((input as { url?: unknown })?.url ?? ""));
+      return new Response("{}", { status: 201 });
+    }));
 
     // 仍然是 http:（只有 scheme 合法时才会走到主机判定），主机是公网域名。
     const reporter = new IncidentReporter({
@@ -226,7 +229,13 @@ describe("IncidentReporter endpoint export policy (F-C2)", () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     // 拒绝 = 零出站：不发请求、不进队列、不落 spool、不算 failed（也就不会重试）。
-    expect(fetchCalls).toBe(0);
+    //
+    // 这里只断言"没有发往被拒端点的请求"，而不是全局调用次数：本文件的 fetch 桩是
+    // 全局的，而前面几条用例的 reporter 指向 127.0.0.1:9/:10（端口关闭）且带
+    // retryBaseDelayMs:1，它们从未被 stop，测试结束后仍在重试——那些重试会打进全局
+    // 计数器（Linux CI 上实测本断言收到 32 次）。reporter 自身的零出站由下面逐项
+    // stats 断言锁死（sent/failed/spooled/queued 全 0、refused 1、endpointConfigured false）。
+    expect(attempted.filter((url) => url.includes("collector.example.net"))).toEqual([]);
     expect(reporter.stats.sent).toBe(0);
     expect(reporter.stats.failed).toBe(0);
     expect(reporter.stats.spooled).toBe(0);
