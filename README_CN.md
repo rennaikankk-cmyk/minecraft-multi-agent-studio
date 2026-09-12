@@ -473,6 +473,37 @@ pnpm test:task-infra
 
 三个变量缺少任意一个时命令会失败，不会静默跳过。测试会构建并启动独立 `task-worker` 子进程，但强制注入 `TASK_WORKER_PURPOSE=isolated-test` 与 `TASK_WORKER_HANDLER_PROFILE=isolated-acceptance`，不会连接 Minecraft。GitHub Actions 使用固定摘要的临时 PostgreSQL/Redis 服务完成同一组测试；2026-08-14 运行 `31793333384` 的 20 项真实基础设施场景全部通过，包括跨 Worker 与独立进程取消。此后 2026-08-27 本地运行 `studio_test_20260827_real03` 在临时 PostgreSQL/Redis 上 28/28 通过（含此前待确认的 digest 场景，见 `CHANGELOG.md:22`）；该边界不代表当前机器的生产基础设施在线，Minecraft 生产处理器和正式部署审批仍保持未接入状态。
 
+## Skill Author：自动自我改进闭环
+
+连接一个云端 OpenAI 兼容档案（Models 页有 **DeepSeek** 预设，`baseUrl` 填 `https://api.deepseek.com`，模型可留空由激活时自动探测选定）后，可以让 bot 依据自己遇到的能力缺口自动生成技能并合入：
+
+```powershell
+pnpm skill-author --list                 # 列出当前能力缺口
+pnpm skill-author --latest --dry-run     # 只生成并校验，不写盘不提交
+pnpm skill-author --latest               # 生成 → 跑闸 → 合入 main 并推送
+pnpm skill-author --latest --no-merge     # 生成并提交到分支，但不合并
+pnpm skill-author --rollback <sha>       # revert 一次已合并的自动提交并推送
+```
+
+闭环是：Coordinator 在任务失败时记录 gap（`runtime-data/skill-gaps/`）→ Skill Author 读 gap 与既有 bundle，调模型生成技能源码与单元测试 → **写盘前先按路径策略校验** → 写 git 分支 → 跑闸（全仓 `typecheck` + skills 单元测试）→ 绿灯合并到 `main` 并推送、红灯中止并保留分支待查。合入后既有的 release 闭环（`STUDIO_SKILL_DEV_MODE=sandbox_auto`）接管：skillId 出现在 catalog 即进入验收态，真实运行的成功信号即可晋升 canary；`active` 始终需要人工。
+
+### 边界（`configs/skill-author-policy.json`，改动会留在 git 历史里）
+
+- **可写**：`packages/skills/src/`、`packages/skills/tests/`、`apps/bot-runtime/src/`（新增 `invokeXxx` 能力适配器）。
+- **只读**：敌我识别与聊天身份（`packages/combat/src/identity.ts`、`packages/protocol/src/chat-identity.ts`）、`packages/safety/`（L0 阈值）、ServerProfile 白名单校验、反射级门禁判定、授权面（`bot-messages.ts`、control-api `auth.ts`）。**只读判定优先于可写前缀**——落在 `apps/bot-runtime/src/` 里的 `server-profile.ts` 同样只读。
+- **不可配置的自保护**：策略文件自身与 `scripts/lib/skill-author/`、`scripts/skill-author*.mjs` 永远拒绝写入——一个能改自己权限配置的自动化不构成边界。
+- 任一文件越界即**整体放弃**：不建分支、不写盘、不提交（不做部分写入）。
+
+### 为什么合并前必须过闸
+
+技能是 TypeScript，一个类型错误会让整包构建失败、bot 起不来——所以"自动合并"必须配全仓 `typecheck`。闸全部是进程内的，**不需要隔离服务器、不吃内存**。真实游戏语义由合入后的真实运行证据来验证（`live-run` 可替代 `fixture-run`，见 `packages/skills/tests/skill-release.test.ts`），因此隔离服 E2E 不是这条闭环的前置。
+
+### 已知残余风险（如实记录）
+
+- 自动合并到 `main` 且只过"便宜闸"，因此**语义错误会在真实服上才暴露**；部署在 anarchy 服时按章程 §0.4「死亡=掉全部装备」评估代价。
+- 越权改动由路径策略拦，但**策略看不出语义**：例如在可写前缀内新增一个调用既有能力但参数组合危险的技能，闸不会报错。
+- 每次运行起步要求干净工作区与 `main` 分支（脏树无法可靠回滚，直接拒绝）。
+
 ## 安全说明
 
 - 软件检测使用固定可执行文件和固定参数，不拼接用户输入。
