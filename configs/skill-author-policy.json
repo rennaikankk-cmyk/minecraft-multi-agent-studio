@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "1.0",
+  "writablePrefixes": [
+    "packages/skills/src/",
+    "packages/skills/tests/",
+    "apps/bot-runtime/src/"
+  ],
+  "readonlyPrefixes": [
+    "packages/safety/",
+    "apps/control-api/src/auth.ts",
+    "packages/protocol/src/bot-messages.ts"
+  ],
+  "readonlyPaths": [
+    "packages/combat/src/identity.ts",
+    "packages/protocol/src/chat-identity.ts",
+    "apps/bot-runtime/src/server-profile.ts",
+    "packages/combat/src/reflex-clearance.ts",
+    "packages/combat/src/chain-sequencer.ts",
+    "packages/skills/src/builtin/combat-stance.ts"
+  ],
+  "maxFiles": 12,
+  "maxBytesPerFile": 262144
+}
