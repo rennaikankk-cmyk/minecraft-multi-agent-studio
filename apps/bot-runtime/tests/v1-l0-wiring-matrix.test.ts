@@ -121,6 +121,8 @@ class WiringBotClient implements BotClient {
       plan?: unknown;
       itemName?: string;
       target?: { x: number; y: number; z: number };
+      referenceBlock?: { x: number; y: number; z: number };
+      face?: { x: number; y: number; z: number };
       direction?: "deposit" | "withdraw";
       count?: number;
     };
@@ -136,13 +138,45 @@ class WiringBotClient implements BotClient {
     }
     if (request.operation === "block.place-safe") {
       // invokePlaceBlock 返回落块事实；blueprint 分支按 target 校验位置。
-      if (input.itemName === undefined || input.target === undefined) {
-        throw new Error("place capability request is missing itemName/target");
+      if (input.itemName === undefined) {
+        throw new Error("place capability request is missing itemName");
+      }
+      // blueprint 分支自带 target；普通放置（world.place-block / light.place）只给
+      // referenceBlock + face，目标由适配器自己算——照
+      // mineflayer-client 的 expectedTarget = referenceBlock + face 还原。
+      const target =
+        input.target ??
+        (input.referenceBlock !== undefined && input.face !== undefined
+          ? {
+              x: input.referenceBlock.x + input.face.x,
+              y: input.referenceBlock.y + input.face.y,
+              z: input.referenceBlock.z + input.face.z,
+            }
+          : undefined);
+      if (target === undefined) {
+        throw new Error(
+          "place capability request is missing target (or referenceBlock+face)",
+        );
       }
       return {
         placed: true,
         placedBlockName: input.itemName,
-        position: { x: input.target.x, y: input.target.y, z: input.target.z },
+        position: { x: target.x, y: target.y, z: target.z },
+      };
+    }
+    if (request.operation === "food.eat-safe") {
+      // invokeFoodEat 的读回事实形状（计数必须真的降，或有饥饿上升）。
+      return {
+        succeeded: true,
+        itemName: input.itemName,
+        remainingCount: 0,
+        consumedCount: 1,
+        hungerBefore: 16,
+        hungerAfter: 20,
+        saturationBefore: 0,
+        saturationAfter: 5,
+        projectedSaturationGain: 5,
+        reasonCode: "BEST_SATURATION_EFFICIENCY",
       };
     }
     if (request.operation === "container.transfer-safe") {
@@ -484,6 +518,122 @@ describe("L0 wiring matrix", () => {
         errorCode: "NORMAL_ACTIONS_PAUSED",
       });
       expect(client.capabilityCalls).toHaveLength(2);
+      await runtime.stop("test_cleanup");
+    });
+  });
+
+  describe("light.place", () => {
+    it("executes through handleSkillInvocation and is blocked when L0 pauses", async () => {
+      const { client, runtime } = startWiredRuntime();
+      // length 30 + 默认最低光照 1 → 间距 26 → 偏移 [0, 26]，正好两支。
+      const invocation = skillInvocation("light.place", {
+        itemName: "torch",
+        axis: "z",
+        origin: { x: 10, z: -20 },
+        floorY: 64,
+        length: 30,
+        maxPlacements: 2,
+        dimension: "minecraft:overworld",
+        serverProfileId: profile.id,
+      });
+
+      const completed = await runtime.handleSkillInvocation(
+        invocation,
+        authorizationFor(invocation, ["world.interact"]),
+      );
+      expect(completed.payload).toMatchObject({
+        outcome: "completed",
+        skillId: "light.place",
+      });
+      // 每支火把一次 block.place-safe。
+      expect(client.capabilityCalls).toHaveLength(2);
+      for (const call of client.capabilityCalls) {
+        expect(call).toMatchObject({
+          capability: "world.interact",
+          operation: "block.place-safe",
+          skillId: "light.place",
+        });
+      }
+      // 参照方块是**地面**，face 朝上——火把落在它上面；顺带证明间距来自
+      // commons 的规则（26）而不是别处拍出来的数字。
+      expect(
+        client.capabilityCalls.map(
+          (call) => (call.input as { referenceBlock?: unknown }).referenceBlock,
+        ),
+      ).toEqual([
+        { x: 10, y: 64, z: -20 },
+        { x: 10, y: 64, z: 6 },
+      ]);
+      expect(
+        client.capabilityCalls.map(
+          (call) => (call.input as { face?: unknown }).face,
+        ),
+      ).toEqual([
+        { x: 0, y: 1, z: 0 },
+        { x: 0, y: 1, z: 0 },
+      ]);
+
+      await pauseViaLowHealth(client);
+      expect(runtime.canAcceptNormalActions()).toBe(false);
+
+      const rejected = await runtime.handleSkillInvocation(
+        invocation,
+        authorizationFor(invocation, ["world.interact"]),
+      );
+      expect(rejected.payload).toMatchObject({
+        outcome: "rejected",
+        errorCode: "NORMAL_ACTIONS_PAUSED",
+      });
+      expect(client.capabilityCalls).toHaveLength(2);
+      await runtime.stop("test_cleanup");
+    });
+  });
+
+  describe("food.eat", () => {
+    it("executes through handleSkillInvocation and is blocked when L0 pauses", async () => {
+      const { client, runtime } = startWiredRuntime();
+      // 共享快照的背包里没有食物，而 food.eat 的前置 food.available 要求
+      // foodItemCount >= 1（由 skillState() 从快照背包投影）。只在本组补一件，
+      // 不动共享快照——其他组不该被这组的需求改变。
+      // 饥饿 16 刻意落在 L0 的 EAT_AT_FOOD_LEVEL(=14) 之上：≤14 触发 HUNGER 风险
+      // 并 PAUSE_NORMAL_TASKS，那时进食归 L0 反射层，普通技能根本进不来。
+      client.setSnapshot({
+        ...snapshot,
+        inventory: [...snapshot.inventory, { itemName: "bread", count: 3 }],
+      });
+      const invocation = skillInvocation("food.eat", {
+        itemName: "bread",
+        dimension: "minecraft:overworld",
+        serverProfileId: profile.id,
+      });
+
+      const completed = await runtime.handleSkillInvocation(
+        invocation,
+        authorizationFor(invocation, ["world.interact"]),
+      );
+      expect(completed.payload).toMatchObject({
+        outcome: "completed",
+        skillId: "food.eat",
+      });
+      expect(client.capabilityCalls).toHaveLength(1);
+      expect(client.capabilityCalls[0]).toMatchObject({
+        capability: "world.interact",
+        operation: "food.eat-safe",
+        skillId: "food.eat",
+      });
+
+      await pauseViaLowHealth(client);
+      expect(runtime.canAcceptNormalActions()).toBe(false);
+
+      const rejected = await runtime.handleSkillInvocation(
+        invocation,
+        authorizationFor(invocation, ["world.interact"]),
+      );
+      expect(rejected.payload).toMatchObject({
+        outcome: "rejected",
+        errorCode: "NORMAL_ACTIONS_PAUSED",
+      });
+      expect(client.capabilityCalls).toHaveLength(1);
       await runtime.stop("test_cleanup");
     });
   });

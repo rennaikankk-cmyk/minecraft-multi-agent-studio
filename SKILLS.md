@@ -26,7 +26,7 @@
 - 自相矛盾的证据组合**拒绝装载**，例如"真实服跑过但运行时没接线"。
 - 只有四道闸全绿才允许对外称"已验证"（`evidenceSupportsVerifiedClaim`）。
 
-当前注册表包含 44 个技能；新增 Baritone 对应能力保持 **Partial**，仍缺 `isolated-server-scenarios` 与 `cross-version-matrix` 两道环境闸。Minecraft 常识层（`hazard.assess` / `tool.plan` / `food.pick` / `station.plan` / `inventory.room`）与实践层的 `stock.levels` 保持 **Experimental**，证据以 `skill-status.ts` 与场景账本为准。
+当前注册表包含 48 个技能；新增 Baritone 对应能力保持 **Partial**，仍缺 `isolated-server-scenarios` 与 `cross-version-matrix` 两道环境闸。Minecraft 常识层（`hazard.assess` / `tool.plan` / `food.pick` / `station.plan` / `inventory.room`）与实践层的 `stock.levels` 保持 **Experimental**；常识层的执行面 `light.place` 与基础动作层 `food.eat` / `sleep.bed` / `bucket.fill` 复用已接线的能力路径，因此为 **Partial**。证据以 `skill-status.ts` 与场景账本为准。
 真实隔离服六类场景与 1.21.8 跨版本矩阵一次没跑过。这与编译产物里的
 `verification=unverified` 是同一个事实的两种表述（AGENTS.md §8：无隔离测试服时不得声称联机测试通过）。
 
@@ -47,7 +47,7 @@
 
 - Skill ID 后的 SemVer 表示技能输入、输出和行为契约，不表示 Minecraft 服务器版本。
 - 每个 Skill 另有有序 `compatibility.variants`。Runtime 只使用连接后真实协商出的版本/协议，以及当前 registry 的 feature、物品、方块、实体和显式服务端能力探针解析变体；不以 `minVersion/maxVersion` 一刀切。
-- 当前目录中的 44 个 Skill 声明能力变体；只有证据中的 `runtime-wiring=true` 条目可由 Runtime 执行，其余条目保持 `Experimental`。实际装备、目标资源和世界观测仍须经适配器校验；`verification=unverified` 不代表实机已验证。
+- 当前目录中的 48 个 Skill 声明能力变体；只有证据中的 `runtime-wiring=true` 条目可由 Runtime 执行，其余条目保持 `Experimental`。实际装备、目标资源和世界观测仍须经适配器校验；`verification=unverified` 不代表实机已验证。
 - 新版本特色 Skill 必须声明它实际依赖的 feature/资源；如果还依赖服务器插件、数据包或规则，则必须等待显式探针。能力为 `unknown` 时 fail-closed，不从版本号猜测。
 - `collect.block`、`craft.item`、`world.place-block` 和 `container.transfer` 当前仍接收目标版本 registry 的原生资源名。兼容变体可以表达旧/新 ID 的替代顺序，但规划器使用的语义资源别名尚未接入。
 
@@ -587,3 +587,43 @@
 - 约束：容量算术复用 `builtin/inventory-space.ts` 的 `freeInventorySlots`（**唯一入口**），用保守**槽位**数而不是件数——一次采集拿回 4 组不同方块占 4 槽，64 个同种方块可能只占 1 槽。
 - fail-closed：`state.inventory` 为 null（观测不到背包）时报 `INVENTORY_UNKNOWN` 并给 `freeSlots: 0`，不按"大概还有空"放行——与 capability `unknown` 的既有纪律一致。
 - 与 `stock.levels` 的分工：那条管战略库存水位，这条管"这次任务塞不塞得下"。
+
+## `light.place@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`world.interact`；操作 `block.place-safe`；超时 60 秒；`idempotent: false`（放置有世界副作用，重试前必须查回执）。
+- 进度契约：`PLACE_AND_VERIFY`。这是常识层里唯一的**执行**面技能：`commons/placement.ts` 只负责算出"该在哪插火把"，本技能把它变成真实放置。
+- 纯组合、不新增底层能力：每一支都走既有的 `world.place-block` 路径，因此越界拒绝、L0 抢占与**放置读回**语义全部复用同一条已被验证的路径，不另开一套。
+- 间距取 `min(maxTorchSpacingFor(最低方块光照), 26)`：公式给的是"中点恰好仍不刷怪"的理论最远值，常识表的 26 留了 1 格余量——保守方向永远是放得更密，绝不会更稀。
+- 只铺**地面**（`face=up`）的直线走廊/隧道。墙面火把与天花板**不在本技能范围内**，需要时另开技能，不在这里假装支持。
+- 读回校验：只有 `block.place-safe` 回执确认 `placed === true` 才算数，不按"我发过请求"计数；未确认则报 `SKILL_VERIFY_FAILED` 并停止续做。取消信号置位时报 `SKILL_CANCELLED`。
+- 部分完成用 `startIndex`/`nextIndex` 表达，调用方据此续做；能力失败**不吞**，带稳定码向上传播（与 `stock.levels` 同一约定）。
+- 错误消息刻意不带坐标：火把位置等于基地位置，AGENTS.md §6 禁止入日志。
+
+## `food.eat@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`world.interact`；操作 `food.eat-safe`；超时 10 秒；`idempotent: false`，`maxAttempts: 1` 且 `retryableErrorCodes` 为空——**不给出盲重试的许可**。
+- 与 `food.pick` 的分工：那条只回答"该吃哪个、为什么"（纯函数、零能力）；本技能把那个答复**执行掉**。
+- 带读回的硬要求：`consume()` resolve 只说明"包发出去了"。必须满足 **[食物计数下降] 或 [饥饿值上升]** 之一，否则报 `FOOD_EAT_NOT_CONFIRMED`——非幂等动作既不谎报成功，也不声称"什么都没动"。
+- 入参的 `itemName` 是**建议而非命令**：能力端仍按 `commons/food-values.ts` 的规则重新选一口（满饥饿拒绝 `FOOD_NOT_NEEDED`、有害食物排除、食物储备保护经 `safeFoodItems()` 生效），以免上层用过期快照指名吃掉不该吃的东西。
+- fail-closed：饥饿值读数缺失报 `BOT_HUNGER_UNKNOWN`，不补默认值——补一个"饥饿 20"恰好会推出"不必吃"这个**有利结论**。
+- **可用区间是饥饿 15..19**（不是 0..19）：饥饿 ≤14 时 L0 反射层自己吃（`CONSUME_SAFE_FOOD`）并 `PAUSE_NORMAL_TASKS`，普通技能的前置条件会以 `NORMAL_ACTIONS_PAUSED` 被拒；满饥饿（20）则由 `FOOD_NOT_NEEDED` 拒绝。也就是说"紧急饥饿归 L0、非紧急补充归本技能"是**刻意分工**，不是缺陷。
+- 饥饿值快照由 Runtime 组装（`skillState()` 从 `BotClientSnapshot.food` 如实转发）；读不到就保持缺失，前置条件因此 fail-closed 而不是放行。
+
+## `sleep.bed@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`world.interact`；操作 `sleep-safe`；超时 20 秒；`idempotent: false`（睡觉推进时间并绑定重生点，且期间 bot 不响应普通动作）。
+- 价值：夜晚是敌意生物的主场；睡眠还是唯一能把重生点绑到床边的手段——对"死了掉光装备"的服务器是最便宜的一条保命线。
+- 三处**确定性**拒绝（AGENTS.md §0.1：确定性代码决定，不是模型）：① 下界/末地床会爆炸（判定来自 `commons/hazards.ts` 的 `assessBedUse`，维度清单不在本文件重写）；② 非睡眠窗口；③ 床被占或床上方受阻。
+- 睡眠窗口是**三档**且为**单一实现**（`sleepableWindow`，适配器直接 import，不重写常量）：晴天 12523–23477、下雨 12002–23998、雷暴全天可睡。依据 [minecraft.wiki · Bed](https://minecraft.wiki/w/Bed) 的 Sleeping 小节；真正的机制是内部天空光照 ≤ 11，tick 区间是该规则在地表标准情形下的表现，因此它是**近似判据**——服务器永远权威。
+- 读回：只认服务器 `entitySleep` 之后置位的 `bot.isSleeping`，不认"`sleep()` 没抛错"。
+
+## `bucket.fill@1.0.0`
+
+- 状态：**Partial**（待 `isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：`world.interact`；操作 `fluid.fill-safe`；超时 12 秒；`idempotent: false`，`maxAttempts: 1`（与 `fluid.place` 同档）。
+- 与 `fluid.place` 合起来才是完整的桶生命周期：`bucket.fill`（装满）→ `fluid.place(mode=place)`（倒出）→ `fluid.place(mode=scoop)`（回收）。空桶本身没有用处，装桶才把它变成资源（灭火、落地缓冲、刷石机、下界赶路、岩浆燃料）。
+- 读回是**双证据**，缺一不可：① 背包——对应满桶 **+1 且** 空桶 **−1**（只看 "+1 个满桶"可能是别处捡的，只看 "−1 个空桶"可能是桶被别的事消耗掉了）；② 方块——目标格液体读数如实上报。
+- 只认液体**源**方块（流动水/岩浆不可装，1.13+ 语义），目标不可达时报 `TARGET_OUT_OF_REACH`（复用 `reach.ts` 的 `blockWithinPolicyReach`**唯一入口**）。

@@ -30,6 +30,10 @@ import { toolPlanSkill } from "./tool-plan.js";
 import { foodPickSkill } from "./food-pick.js";
 import { stationPlanSkill } from "./station-plan.js";
 import { inventoryRoomSkill } from "./inventory-room.js";
+import { lightPlaceSkill } from "./light-place.js";
+import { bucketFillSkill } from "./bucket-fill.js";
+import { foodEatSkill } from "./food-eat.js";
+import { sleepBedSkill } from "./sleep-bed.js";
 import { baritoneProcessSkills } from "../baritone-processes.js";
 
 /**
@@ -89,6 +93,15 @@ export const builtinSkills: readonly AnySkillDefinition[] = Object.freeze([
   foodPickSkill,
   stationPlanSkill,
   inventoryRoomSkill,
+  // 常识层的**执行**面：只做组合，不新增底层能力。light.place 复用已有的
+  // block.place-safe，把"这条走廊要不要插火把、插在哪"变成真实放置。
+  lightPlaceSkill,
+  // 基础动作层：常识的**执行**面。三个都只调 world.interact 的一个操作，
+  // 但都会真的碰世界，因此读回校验在适配器里（见 mineflayer-client 的
+  // invokeFoodEat / invokeSleepBed / invokeBucketFill）。
+  foodEatSkill,
+  sleepBedSkill,
+  bucketFillSkill,
   ...baritoneProcessSkills,
 ] as readonly unknown[] as readonly AnySkillDefinition[]);
 

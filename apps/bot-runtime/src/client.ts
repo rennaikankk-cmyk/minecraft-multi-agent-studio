@@ -36,6 +36,20 @@ export type BotClientSnapshot = {
   }>[];
   position: BotPosition;
   latencyMs: number | null;
+  /**
+   * 世界时间/天气原始读数（服务器权威）。
+   *
+   * 为什么放进快照：sleep.bed 的前置条件要判断"现在能不能睡"，而这个判断
+   * 必须是**可见拒绝**（给规划器看），不能只留在适配器里当硬闸。整块字段
+   * 可选——服务器没推时间包时它就是 undefined，于是技能按 fail-closed 拒绝
+   * （BOT_TIME_UNKNOWN），而不是拿"白天"当默认值。缺省（有 time 但字段缺失）
+   * 按晴天/无雷暴处理，因为那正是 mineflayer 的语义（无雨无雷）。
+   */
+  time?: {
+    timeOfDay: number;
+    isRaining: boolean;
+    thunderState: number;
+  };
   safety: {
     oxygenLevel: number | null;
     inWater: boolean;

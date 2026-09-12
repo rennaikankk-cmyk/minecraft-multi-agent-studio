@@ -138,7 +138,7 @@ export type SkillStatusEntry = Readonly<{
 /**
  * 每个内建技能的证据位。**只允许在这里改布尔值，且改之前那道闸必须真的跑过。**
  *
- * 当前注册表包含四十四技能；证据中的 runtime-wiring=true 条目为 Partial，其余
+ * 当前注册表包含四十八技能；证据中的 runtime-wiring=true 条目为 Partial，其余
  * 规划/策略条目为 Experimental。唯一的例外是 stock.levels：纯函数技能（无
  * capability、state 被 strip 成 {}、无前置条件），L0 暂停对它按设计不生效，
  * 在为这类只读计算技能定义豁免语义之前它的 runtime-wiring 保持 false。
@@ -208,6 +208,29 @@ const EVIDENCE: Readonly<Record<string, SkillEvidence>> = Object.freeze({
   },
   "inventory.room": {
     offlineTests: true, runtimeWiring: false,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
+  // light.place 是**组合**技能：它自己不新增底层能力，但调用的 world.interact /
+  // block.place-safe 在 apps/bot-runtime 已接线（mineflayer-client.ts 分派 + 
+  // invokePlaceBlock 的读回校验），与 build.blueprint 走的是同一条已接线路径，
+  // 因此按同一标准记 runtime-wiring=true。真实隔离服场景仍未跑。
+  "light.place": {
+    offlineTests: true, runtimeWiring: true,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
+  // 基础动作层：三个操作在 apps/bot-runtime 都已接线（分派 + invokeFoodEat /
+  // invokeSleepBed / invokeBucketFill 的读回校验），food.eat 另有 L0 接线矩阵组
+  // 证明"暂停必须压过排队中的进食"。真实隔离服场景仍未跑。
+  "food.eat": {
+    offlineTests: true, runtimeWiring: true,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
+  "sleep.bed": {
+    offlineTests: true, runtimeWiring: true,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
+  "bucket.fill": {
+    offlineTests: true, runtimeWiring: true,
     isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
   },
   "combat.engage": {

@@ -33,7 +33,7 @@ import type {
   L0SafetyAction,
   L0SafetyActionResult,
 } from "@minecraft-studio/safety";
-import { armorEquipCapabilityInputSchema, armorEquipCapabilityOutputSchema, armorSnapshotCapabilityInputSchema, armorSnapshotCapabilityOutputSchema, ACTION_FAMILIES, collectBlockCapabilityInputSchema, collectBlockCapabilityOutputSchema, containerTransferCapabilityInputSchema, containerTransferCapabilityOutputSchema, craftItemCapabilityInputSchema, craftItemCapabilityOutputSchema, inventorySnapshotCapabilityInputSchema, inventorySnapshotCapabilityOutputSchema, placeBlockCapabilityInputSchema, placeBlockCapabilityOutputSchema, smeltItemCapabilityInputSchema, smeltItemCapabilityOutputSchema, MOVEMENT_PRIORITIES, MovementController, ServerBehaviorObserver, farmMaintainInputSchema, farmMaintainOutputSchema, farmSustainInputSchema, farmSustainOutputSchema, foodFarmLayout, foodFarmMaintenance, cropRules, navigationGoalInputSchema, navigationGoalOutputSchema, followEntityInputSchema, followEntityOutputSchema, getToBlockInputSchema, getToBlockOutputSchema, exploreInputSchema, exploreOutputSchema, clearAreaInputSchema, clearAreaOutputSchema, elytraInputSchema, elytraOutputSchema, type MovementLease, SAFE_PATH_MAX_DISTANCE, SkillFault, SkillRefusal, ActionLockError, ActionLockManager, type ActionLockKind, resolveMovementProfile, type ServerPolicyLimits, safeMovementGotoCapabilityInputSchema, safeMovementGotoCapabilityOutputSchema, travelRouteCapabilityInputSchema, tradeVillagerCapabilityInputSchema, tradeVillagerCapabilityOutputSchema, ALL_EDIBLE_ITEMS, scanBlocksCapabilityInputSchema, scanBlocksCapabilityOutputSchema, secureFoodCapabilityInputSchema, secureFoodCapabilityOutputSchema, siteObserveCapabilityInputSchema, siteObserveCapabilityOutputSchema, shelterDigCapabilityInputSchema, shelterDigCapabilityOutputSchema, mineBranchCapabilityInputSchema, mineBranchCapabilityOutputSchema, mineVeinCapabilityInputSchema, mineVeinCapabilityOutputSchema, buildBlueprintCapabilityInputSchema, buildBlueprintCapabilityOutputSchema, blueprintSchema, blueprintWorksetObservationSchema, orderBlueprintCells, SharedStateClient, type MaybeAsyncWorkstationRegistryPort, type BehaviorSignalEvent, type FamilyWindowStats, type SkillCapabilityRequest, type SkillCompatibilityEnvironment, type SkillResourceKind, animalBreedCapabilityInputSchema, animalBreedCapabilityOutputSchema, fluidPlaceCapabilityInputSchema, fluidPlaceCapabilityOutputSchema, inventoryDropCapabilityInputSchema, inventoryDropCapabilityOutputSchema, portalIgniteInputSchema, portalIgniteOutputSchema, portalUseInputSchema, portalUseOutputSchema, ascendInputSchema, ascendOutputSchema, bridgeInputSchema, bridgeOutputSchema } from '@minecraft-studio/skills';
+import { armorEquipCapabilityInputSchema, armorEquipCapabilityOutputSchema, armorSnapshotCapabilityInputSchema, armorSnapshotCapabilityOutputSchema, ACTION_FAMILIES, collectBlockCapabilityInputSchema, collectBlockCapabilityOutputSchema, containerTransferCapabilityInputSchema, containerTransferCapabilityOutputSchema, craftItemCapabilityInputSchema, craftItemCapabilityOutputSchema, inventorySnapshotCapabilityInputSchema, inventorySnapshotCapabilityOutputSchema, placeBlockCapabilityInputSchema, placeBlockCapabilityOutputSchema, smeltItemCapabilityInputSchema, smeltItemCapabilityOutputSchema, MOVEMENT_PRIORITIES, MovementController, ServerBehaviorObserver, farmMaintainInputSchema, farmMaintainOutputSchema, farmSustainInputSchema, farmSustainOutputSchema, foodFarmLayout, foodFarmMaintenance, cropRules, navigationGoalInputSchema, navigationGoalOutputSchema, followEntityInputSchema, followEntityOutputSchema, getToBlockInputSchema, getToBlockOutputSchema, exploreInputSchema, exploreOutputSchema, clearAreaInputSchema, clearAreaOutputSchema, elytraInputSchema, elytraOutputSchema, type MovementLease, SAFE_PATH_MAX_DISTANCE, SkillFault, SkillRefusal, ActionLockError, ActionLockManager, type ActionLockKind, resolveMovementProfile, type ServerPolicyLimits, safeMovementGotoCapabilityInputSchema, safeMovementGotoCapabilityOutputSchema, travelRouteCapabilityInputSchema, tradeVillagerCapabilityInputSchema, tradeVillagerCapabilityOutputSchema, ALL_EDIBLE_ITEMS, scanBlocksCapabilityInputSchema, scanBlocksCapabilityOutputSchema, secureFoodCapabilityInputSchema, secureFoodCapabilityOutputSchema, siteObserveCapabilityInputSchema, siteObserveCapabilityOutputSchema, shelterDigCapabilityInputSchema, shelterDigCapabilityOutputSchema, mineBranchCapabilityInputSchema, mineBranchCapabilityOutputSchema, mineVeinCapabilityInputSchema, mineVeinCapabilityOutputSchema, buildBlueprintCapabilityInputSchema, buildBlueprintCapabilityOutputSchema, blueprintSchema, blueprintWorksetObservationSchema, orderBlueprintCells, SharedStateClient, type MaybeAsyncWorkstationRegistryPort, type BehaviorSignalEvent, type FamilyWindowStats, type SkillCapabilityRequest, type SkillCompatibilityEnvironment, type SkillResourceKind, animalBreedCapabilityInputSchema, animalBreedCapabilityOutputSchema, fluidPlaceCapabilityInputSchema, fluidPlaceCapabilityOutputSchema, inventoryDropCapabilityInputSchema, inventoryDropCapabilityOutputSchema, portalIgniteInputSchema, portalIgniteOutputSchema, portalUseInputSchema, portalUseOutputSchema, ascendInputSchema, ascendOutputSchema, bridgeInputSchema, bridgeOutputSchema, bucketFillCapabilityInputSchema, bucketFillCapabilityOutputSchema, foodEatCapabilityInputSchema, foodEatCapabilityOutputSchema, sleepBedCapabilityInputSchema, sleepBedCapabilityOutputSchema, assessBedUse, pickFood, foodEntryFor, hungerStateSchema, projectEat, sleepableWindow, type SleepWeather } from '@minecraft-studio/skills';
 import { authorizeHarvest, withinWorkArea, workScopeSchema, type WorkPosition, type WorkArea, type WorkstationType } from '@minecraft-studio/asset-policy';
 import type {
   CombatActionAcknowledgement,
@@ -119,6 +119,14 @@ const CONTAINER_BLOCK_NAMES = new Set([
 /** Armor skill slot names paired with Mineflayer equipment destinations. */
 
 const SAFE_FOOD_NAMES = ALL_EDIBLE_ITEMS;
+
+/**
+ * 装桶读回预算：服务器的窗口同步（set_slot / window_items）是异步的，
+ * 发完 use_item 立刻读背包必然还是旧的。与 fluid.place 的 350ms 定长等待
+ * 不同，这里用有界轮询——两个方向都读到就立刻返回，读不到才耗满预算。
+ */
+const BUCKET_FILL_READBACK_BUDGET_MS = 1_500;
+const BUCKET_FILL_POLL_INTERVAL_MS = 150;
 
 type MineflayerBlock = NonNullable<
   Awaited<ReturnType<Bot["blockAt"]>>
@@ -1018,6 +1026,22 @@ export class MineflayerBotClient implements BotClient {
         typeof ping === "number" && Number.isFinite(ping) && ping >= 0
           ? Math.round(ping)
           : null,
+      // 世界时间/天气：只在**真的读到** timeOfDay 时才出现（时间包缺失时整块
+      // 省略，sleep.bed 据此 fail-closed）。isRaining/thunderState 缺失按
+      // mineflayer 语义取 false/0——那正是"没下雨、没雷暴"的真实含义。
+      ...(typeof this.bot.time?.timeOfDay === "number" &&
+      Number.isFinite(this.bot.time.timeOfDay)
+        ? {
+            time: {
+              timeOfDay: this.bot.time.timeOfDay,
+              isRaining: this.bot.isRaining === true,
+              thunderState:
+                typeof this.bot.thunderState === "number"
+                  ? this.bot.thunderState
+                  : 0,
+            },
+          }
+        : {}),
       safety: {
         oxygenLevel:
           Number.isInteger(this.bot.oxygenLevel) &&
@@ -1781,6 +1805,24 @@ export class MineflayerBotClient implements BotClient {
       return this.withActionLocks(request, ["blockInteraction", "inventory"], () => this.invokePortalIgnite(request));
     }
     if (
+      request.capability === "world.interact" &&
+      request.operation === "food.eat-safe"
+    ) {
+      return this.withActionLocks(request, ["inventory"], () => this.invokeFoodEat(request));
+    }
+    if (
+      request.capability === "world.interact" &&
+      request.operation === "sleep-safe"
+    ) {
+      return this.withActionLocks(request, ["blockInteraction", "movement"], () => this.invokeSleepBed(request));
+    }
+    if (
+      request.capability === "world.interact" &&
+      request.operation === "fluid.fill-safe"
+    ) {
+      return this.withActionLocks(request, ["blockInteraction", "inventory"], () => this.invokeBucketFill(request));
+    }
+    if (
       request.capability === "bot.move" &&
       request.operation === "portal.use-safe"
     ) {
@@ -2307,6 +2349,263 @@ export class MineflayerBotClient implements BotClient {
     }
     return fluidPlaceCapabilityOutputSchema.parse({
       succeeded: true, mode: "scoop", resultingBlockName,
+      position: { x: target.x, y: target.y, z: target.z },
+    });
+  }
+
+  /** 背包里某物品名的计数总和（可堆叠多格）。快照不可用时抛错而不是返回 0。 */
+  private itemCount(itemName: string): number {
+    const inventory = this.bot.inventory as unknown as { items?: () => readonly { name: string; count: number }[] } | undefined;
+    if (typeof inventory?.items !== "function") throw new SkillFault("INVENTORY_COUNT_UNKNOWN");
+    return inventory.items()
+      .filter((item) => item.name === itemName)
+      .reduce((sum, item) => sum + item.count, 0);
+  }
+
+  /** 逐物品名的背包计数快照（bucket 家族读回用，避免多次 items() 之间漂移）。 */
+  private itemCounts(names: readonly string[]): ReadonlyMap<string, number> {
+    return new Map(names.map((name) => [name, this.itemCount(name)]));
+  }
+
+  /**
+   * food.eat-safe：吃一口安全食物。
+   *
+   * 复用 L0 `CONSUME_SAFE_FOOD` 的装备+进食原语（equip → 复核 → consume），
+   * 但补上 L0 不需要、技能证据必须有的**读回**：
+   *   - 吃前/吃后该食物计数与饥饿值都必须取到（取不到 = BOT_HUNGER_UNKNOWN，
+   *     fail-closed，绝不把"读不到"当成"没变化"）；
+   *   - 完成后必须满足 [食物计数下降] 或 [饥饿值上升] 之一，否则
+   *     FOOD_EAT_NOT_CONFIRMED——"consume() resolve 了"本身不是证据。
+   *
+   * 选哪一口交给 commons/food-values.ts 的 pickFood（满饥饿拒绝、有害食物排除、
+   * 按有效饱和度效率排序），本适配器不重写这张表。食物储备（FoodReserves）经
+   * safeFoodItems() 生效：技能不得吃掉 L0 留给下一轮播种的种子。
+   */
+  private async invokeFoodEat(request: SkillCapabilityRequest): Promise<unknown> {
+    const input = foodEatCapabilityInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    this.assertDimensionMatch(input.data.dimension);
+    const signal = this.activeProcessSignal ?? request.signal;
+    const hunger = this.readHungerState();
+    if (hunger === null) throw new SkillFault("BOT_HUNGER_UNKNOWN");
+
+    // 候选来自 safeFoodItems()：既过滤了 SAFE_FOOD_NAMES，也尊重食物储备。
+    const items = this.safeFoodItems();
+    const candidates = items.map((entry) => ({ itemName: entry.item.name, count: entry.item.count }));
+    const decision = pickFood(candidates, hunger);
+    if (decision.verdict === "REFUSE") {
+      // 满饥饿进食 = 白丢一件（原版满饥饿自然回血）。这条规则来自 commons，
+      // 不在适配器里重写；理由码如实上报，便于上层区分"没食物"与"不必吃"。
+      if (decision.reasonCode === "HUNGER_ALREADY_FULL") throw new SkillFault("FOOD_NOT_NEEDED");
+      throw new SkillFault("PROCESS_NO_SAFE_FOOD_SOURCE");
+    }
+    const chosenName = decision.itemName!;
+    const chosenEntry = foodEntryFor(chosenName);
+    if (chosenEntry === null) throw new SkillFault("PROCESS_NO_SAFE_FOOD_SOURCE");
+    const projection = projectEat(chosenName, hunger.hunger, hunger.saturation, 1);
+    if (projection === null) throw new SkillFault("PROCESS_NO_SAFE_FOOD_SOURCE");
+
+    const countBefore = this.itemCount(chosenName);
+    if (countBefore < 1) throw new SkillFault("INVENTORY_INSUFFICIENT_ITEMS");
+    const hungerBefore = hunger.hunger;
+    const saturationBefore = hunger.saturation;
+
+    this.bot.clearControlStates();
+    const held = this.safeFoodItems().find((entry) => entry.item.name === chosenName);
+    if (!held) throw new SkillFault("INVENTORY_INSUFFICIENT_ITEMS");
+    await this.bot.equip(held.item, "hand");
+    if (signal.aborted) throw new SkillFault("SKILL_ABORTED");
+    // 装备是异步的：等它落定后重新确认手里那一件还在（与 L0 同一道复核）。
+    if (!this.safeFoodItems().some((entry) => entry.item.name === chosenName)) {
+      throw new SkillFault("INVENTORY_INSUFFICIENT_ITEMS");
+    }
+    await this.bot.consume();
+    if (signal.aborted) throw new SkillFault("SKILL_ABORTED");
+
+    const countAfter = this.itemCount(chosenName);
+    const hungerAfter = this.readHungerState();
+    const consumed = countBefore - countAfter;
+    const hungerGain = hungerAfter === null ? null : hungerAfter.hunger - hungerBefore;
+    if (consumed < 1 && !(hungerGain !== null && hungerGain > 0)) {
+      // 非幂等动作：consume() 已发过包，物品可能真被吃掉而饥饿值读回滞后。
+      // 这里既不谎报成功，也不能声称"什么都没动"。
+      throw new SkillFault("FOOD_EAT_NOT_CONFIRMED");
+    }
+    return foodEatCapabilityOutputSchema.parse({
+      succeeded: true,
+      itemName: chosenName,
+      remainingCount: countAfter,
+      consumedCount: Math.max(consumed, 0),
+      hungerBefore,
+      hungerAfter: hungerAfter === null ? null : hungerAfter.hunger,
+      saturationBefore,
+      saturationAfter: hungerAfter === null ? null : hungerAfter.saturation,
+      projectedSaturationGain: projection.effectiveSaturation,
+      reasonCode: decision.reasonCode,
+    });
+  }
+
+  /**
+   * 读当前饥饿/饱和度。原版这两项由服务器权威推送，读不到就是读不到——
+   * 返回 null 让调用方 fail-closed，不补 20/5 之类的默认值。
+   */
+  private readHungerState(): { hunger: number; saturation: number } | null {
+    const raw = this.bot as unknown as { food?: unknown; foodSaturation?: unknown };
+    const parsed = hungerStateSchema.safeParse({ hunger: raw.food, saturation: raw.foodSaturation });
+    return parsed.success ? parsed.data : null;
+  }
+
+  /**
+   * sleep-safe：睡一觉到天亮。
+   *
+   * 三处**确定性**拒绝，全部在调用 bot.sleep() 之前完成（AGENTS.md §0.1：
+   * 确定性代码决定，不问模型）：
+   *   1. 下界/末地——床会爆炸。判定来自 commons/hazards.ts 的
+   *      hazardProfileFor().bedExplodes，不在这里重写维度清单；
+   *      未知维度在该表里同样是 bedExplodes=true（保守档）。
+   *   2. 非夜晚（含雷暴例外）——判据**不在本文件**，走 skills 包的 sleepableWindow：
+   *      晴天 12523–23477、下雨 12002–23998、雷暴全天可睡。时间读数缺失按
+   *      BOT_TIME_UNKNOWN 拒绝（不假定是夜晚）。
+   *   3. 床上方两格有阻挡——原版要求床上有空间。
+   *
+   * 读回只用 mineflayer 的 `bot.isSleeping`（由 entitySleep 事件置位），
+   * 不是"sleep() 没抛错"。
+   */
+  private async invokeSleepBed(request: SkillCapabilityRequest): Promise<unknown> {
+    const input = sleepBedCapabilityInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    this.assertDimensionMatch(input.data.dimension);
+    const dimension = normalizeDimension(String(this.bot.game?.dimension ?? ""));
+    // 床爆炸维度：拒绝码由 assessBedUse 决定（BED_EXPLODES → 稳定码 BED_EXPLODES）。
+    const bedVerdict = assessBedUse(dimension);
+    if (!bedVerdict.allowed) throw new SkillFault("BED_EXPLODES");
+
+    const { bed } = input.data;
+    const position = new Vec3(bed.x, bed.y, bed.z);
+    const bedBlock = this.bot.blockAt(position);
+    if (!bedBlock) throw new SkillFault("BLOCK_NAME_UNKNOWN");
+    const isBed = typeof this.bot.isABed === "function"
+      ? this.bot.isABed(bedBlock)
+      : /(^|_)bed$/u.test(bedBlock.name);
+    if (!isBed) throw new SkillFault("SLEEP_BED_UNAVAILABLE");
+    // 床上有人（occupied 方块状态）：原版只允许一个人睡一张床。确定性拒绝，
+    // 不让 bot.sleep() 抛出它的自由文本错误。
+    if (bedBlock.getProperties?.().occupied === true) throw new SkillFault("SLEEP_BED_UNAVAILABLE");
+
+    const nightReading = this.readNightWindow();
+    if (nightReading === null) throw new SkillFault("BOT_TIME_UNKNOWN");
+    if (!nightReading.sleepable) throw new SkillFault("SLEEP_NOT_NIGHT");
+
+    const above = [{ y: 1 }, { y: 2 }].map((offset) => this.bot.blockAt(position.offset(0, offset.y, 0)));
+    if (above.some((block) => block === null || block.boundingBox !== "empty")) {
+      throw new SkillFault("SLEEP_BED_UNAVAILABLE");
+    }
+    const sleepingBefore = this.bot.isSleeping === true;
+    if (sleepingBefore) throw new SkillFault("SLEEP_BED_UNAVAILABLE");
+
+    const signal = this.activeProcessSignal ?? request.signal;
+    this.bot.clearControlStates();
+    await this.bot.sleep(bedBlock);
+    if (signal.aborted) throw new SkillFault("SKILL_ABORTED");
+    // 读回：服务器 entitySleep 事件才置位 isSleeping。
+    const sleepingAfter = this.bot.isSleeping === true;
+    if (!sleepingAfter) throw new SkillFault("SLEEP_NOT_CONFIRMED");
+    const after = this.readNightWindow();
+    return sleepBedCapabilityOutputSchema.parse({
+      succeeded: true,
+      isSleepingAfter: true,
+      sleepableWindowAtAttempt: nightReading.sleepable,
+      timeOfDayAtAttempt: nightReading.timeOfDay,
+      timeOfDayAfter: after === null ? null : after.timeOfDay,
+      bedBlockName: bedBlock.name,
+      position: { x: bed.x, y: bed.y, z: bed.z },
+    });
+  }
+
+  /**
+   * 睡眠窗口读数。判据本身**不在本文件**：走 skills 包的 `sleepableWindow`
+   * （唯一实现，三档窗口见该文件常量注释：晴天 12523–23477、下雨 12002–23998、
+   * 雷暴全天；真正的机制闸是内部天空光照 ≤ 11，所以这是近似判据、服务器权威）。
+   *
+   * 这里只做适配器该做的事——**独立读**世界事实（bot.time.timeOfDay、
+   * isRaining、thunderState），不自己维护常量、不自己比较 tick。双闸要独立的
+   * 是读数，不是判据。
+   *
+   * 时间不可读时返回 null（fail-closed，不假定是夜晚）。
+   */
+  private readNightWindow(): { timeOfDay: number; sleepable: boolean } | null {
+    const time = (this.bot as unknown as { time?: { timeOfDay?: unknown } }).time;
+    const timeOfDay = time?.timeOfDay;
+    if (typeof timeOfDay !== "number" || !Number.isFinite(timeOfDay)) return null;
+    return { timeOfDay, sleepable: sleepableWindow(timeOfDay, this.readWeatherFacts()) };
+  }
+
+  /** 天气原始读数：下雨取 bot.isRaining；雷暴取 bot.thunderState > 0。 */
+  private readWeatherFacts(): SleepWeather {
+    const weather = this.bot as unknown as { isRaining?: unknown; thunderState?: unknown };
+    return {
+      raining: weather.isRaining === true,
+      thundering: typeof weather.thunderState === "number" && weather.thunderState > 0,
+    };
+  }
+
+  /**
+   * fluid.fill-safe：手持空桶对液体源方块装桶。
+   *
+   * 读回是**双证据**：
+   *   1. 背包——对应满桶 +1 且空桶 -1（两个方向都要成立；只多一个满桶可能是
+   *      别处捡的，只少一个空桶可能是桶被别的事消耗掉了）；
+   *   2. 方块——目标格的液体读数如实上报（装桶后源方块变 air/消失）。
+   * 非幂等：桶只能装一次，重复执行第二次会因没有空桶而失败。
+   */
+  private async invokeBucketFill(request: SkillCapabilityRequest): Promise<unknown> {
+    const input = bucketFillCapabilityInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    this.assertServerProfileMatch(input.data.serverProfileId);
+    this.assertDimensionMatch(input.data.dimension);
+    const signal = this.activeProcessSignal ?? request.signal;
+    const { mode, target } = input.data;
+    const filledName = mode === "water" ? "water_bucket" : "lava_bucket";
+
+    const targetBlock = this.bot.blockAt(new Vec3(target.x, target.y, target.z));
+    if (!targetBlock || targetBlock.name !== mode) throw new SkillFault("FLUID_TARGET_NOT_SOURCE");
+    const bucketCountsBefore = this.itemCounts(["bucket", filledName]);
+    const emptyBefore = bucketCountsBefore.get("bucket") ?? 0;
+    const filledBefore = bucketCountsBefore.get(filledName) ?? 0;
+    if (emptyBefore < 1) throw new SkillFault("FLUID_BUCKET_MISSING");
+
+    const emptyBucket = this.bot.inventory.items().find((item) => item.name === "bucket");
+    if (!emptyBucket) throw new SkillFault("FLUID_BUCKET_MISSING");
+    await this.bot.equip(emptyBucket, "hand");
+    if (signal.aborted) throw new SkillFault("SKILL_ABORTED");
+    await this.bot.lookAt(new Vec3(target.x + 0.5, target.y + 0.5, target.z + 0.5), true);
+    this.bot.activateItem();
+    // 服务器窗口同步是异步的：有界轮询等到两个方向都读得到为止。
+    const deadline = Date.now() + BUCKET_FILL_READBACK_BUDGET_MS;
+    let emptyAfter = emptyBefore;
+    let filledAfter = filledBefore;
+    while (Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, BUCKET_FILL_POLL_INTERVAL_MS));
+      if (signal.aborted) throw new SkillFault("SKILL_ABORTED");
+      emptyAfter = this.itemCount("bucket");
+      filledAfter = this.itemCount(filledName);
+      if (filledAfter >= filledBefore + 1 && emptyAfter <= emptyBefore - 1) break;
+    }
+    if (!(filledAfter >= filledBefore + 1 && emptyAfter <= emptyBefore - 1)) {
+      throw new SkillFault("FLUID_FILL_NOT_CONFIRMED");
+    }
+    const resultingBlockName = this.bot.blockAt(new Vec3(target.x, target.y, target.z))?.name ?? "unknown";
+    return bucketFillCapabilityOutputSchema.parse({
+      succeeded: true,
+      mode,
+      filledItemName: filledName,
+      emptyBucketBefore: emptyBefore,
+      emptyBucketAfter: emptyAfter,
+      filledBucketBefore: filledBefore,
+      filledBucketAfter: filledAfter,
+      resultingBlockName,
       position: { x: target.x, y: target.y, z: target.z },
     });
   }

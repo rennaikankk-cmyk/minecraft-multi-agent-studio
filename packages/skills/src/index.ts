@@ -145,6 +145,40 @@ export {
   type BlockCoordinate,
   type ObservedCoordinate,
 } from "./builtin/reach.js";
+// 基础动作技能（food.eat / sleep.bed / bucket.fill）的 barrel 出口。
+// bot-runtime 的适配器从这里取 capability input/output schema 与
+// sleepableWindow（睡眠判据的唯一实现）；三条 export 是接线的一部分，
+// 删掉会让 apps/bot-runtime 的 typecheck 与测试直接失败。
+export {
+  bucketFillCapabilityInputSchema,
+  bucketFillCapabilityOutputSchema,
+  bucketFillInputSchema,
+  bucketFillOutputSchema,
+  bucketFillSkill,
+  BUCKET_FILL_TIMEOUT_MS,
+} from "./builtin/bucket-fill.js";
+export {
+  foodEatCapabilityInputSchema,
+  foodEatCapabilityOutputSchema,
+  foodEatInputSchema,
+  foodEatOutputSchema,
+  foodEatSkill,
+  FOOD_EAT_TIMEOUT_MS,
+} from "./builtin/food-eat.js";
+export {
+  sleepBedCapabilityInputSchema,
+  sleepBedCapabilityOutputSchema,
+  sleepBedInputSchema,
+  sleepBedOutputSchema,
+  sleepBedSkill,
+  SLEEP_BED_TIMEOUT_MS,
+  SLEEP_WINDOW_CLEAR,
+  SLEEP_WINDOW_RAIN,
+  SLEEP_WINDOW_THUNDERSTORM,
+  sleepableWindow,
+  sleepWeatherFrom,
+  type SleepWeather,
+} from "./builtin/sleep-bed.js";
 export {
   MINIMUM_INCOMING_SLOTS,
   freeInventorySlots,
@@ -701,3 +735,5 @@ export { toolPlanSkill } from "./builtin/tool-plan.js";
 export { foodPickSkill } from "./builtin/food-pick.js";
 export { stationPlanSkill } from "./builtin/station-plan.js";
 export { inventoryRoomSkill } from "./builtin/inventory-room.js";
+// 常识层的执行面：把"该在哪插火把"变成真实放置（纯组合，复用 block.place-safe）。
+export { lightPlaceSkill, plannedTorchPositions, LIGHT_PLACE_MAX_PLACEMENTS, LIGHT_PLACE_TIMEOUT_MS, lightPlaceInputSchema } from "./builtin/light-place.js";

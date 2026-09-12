@@ -614,6 +614,13 @@ class GoalExecutionClient implements BotClient {
       health: { current: 20, maximum: 20 },
       food: { level: 20, saturation: 5 },
       armorPoints: 0,
+      // BotClientSnapshot 的必需字段。此前这两项被漏掉而没人发现：apps/*/tsconfig.json
+      // 的 include 只有 src/**/*.ts，**测试不在 typecheck 范围内**，所以假 client 少
+      // 必需字段不会被编译期挡住。运行时一旦读了这两块（技能 state 要投影背包物品级
+      // 计数），缺失就会抛进 skillState() 的 catch，把 position/inventory 一起打成
+      // null，于是所有技能被莫名拒绝。这里补回接口要求的形状。
+      armorSlots: { head: null, chest: null, legs: null, feet: null },
+      inventory: [],
       position: { x: 0, y: 64, z: 0, dimension: "minecraft:overworld" },
       latencyMs: 1,
       safety: {

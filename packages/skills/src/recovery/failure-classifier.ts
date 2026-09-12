@@ -285,6 +285,11 @@ const EXPLICIT: Readonly<Record<string, FailureCategory>> = Object.freeze({
   FURNACE_OUTPUT_MISMATCH: "STALE_WORLD",
   SMELT_OUTPUT_NOT_CONFIRMED: "STALE_WORLD",
   BOT_POSITION_UNAVAILABLE: "STALE_WORLD",
+  // 饥饿值/世界时间是**服务器权威**读数，读不到就是读不到。补一个默认值
+  // （饥饿 20、"白天"）会直接推出"不必吃/不能睡"这类**有利结论**——正是
+  // fail-closed 禁止的那类推断。两条都按"世界读数过期"处置：重新观察。
+  BOT_HUNGER_UNKNOWN: "STALE_WORLD",
+  BOT_TIME_UNKNOWN: "STALE_WORLD",
   // 寻路自认为到了，但读回的真实距离仍超出 radius+0.5：世界模型与实际不符
   // （地形被改、被推开、目标本就进不去）。原样重投同一个 goal 会再短一次，
   // 所以下一步是重新观察。没有这条显式项它会落到 UNKNOWN，把"走近了但不够近"
@@ -337,6 +342,25 @@ const EXPLICIT: Readonly<Record<string, FailureCategory>> = Object.freeze({
   SHULKER_REQUIRED: "UNSUPPORTED",
   PROCESS_DELIVERY_PARTIAL: "MISSING_RESOURCE",
   PROCESS_NO_SAFE_FOOD_SOURCE: "MISSING_RESOURCE",
+  // —— 基础动作（food.eat / sleep.bed / bucket.fill）——
+  // FOOD_NOT_NEEDED 是**正常拒绝**而不是故障：满饥饿进食只会白丢一件
+  // （满饥饿自然回血），重试同样的时序永远得到同一个答复，所以既不能
+  // 走 RETRY_SAME 也不能升级人工——规划器该做的是取消这一口。
+  FOOD_NOT_NEEDED: "UNSUPPORTED",
+  // 吃完了但读不回证据。非幂等动作不能重放，也不该谎报成功：重新观察
+  // （再看一次背包与饥饿值）才是对的下一步。
+  FOOD_EAT_NOT_CONFIRMED: "STALE_WORLD",
+  // 睡眠窗口/床位是纯世界事实：白天、床上有方块、床上已经躺着人——
+  // 这些都会变，重新观察比原样重试有意义。
+  SLEEP_NOT_NIGHT: "STALE_WORLD",
+  SLEEP_BED_UNAVAILABLE: "STALE_WORLD",
+  SLEEP_NOT_CONFIRMED: "STALE_WORLD",
+  // 床在爆炸维度：**不是**抖动，也不是世界过期。重投一次等于再自杀一次，
+  // 所以不吃任何重试阶梯（UNSUPPORTED 阶梯首级就是 ESCALATE_TO_OPERATOR）。
+  BED_EXPLODES: "UNSUPPORTED",
+  // 装桶发了包但没读到双证据。与 scoop 同一病因（服务器窗口同步滞后/
+  // 目标被他人改变），所以与 FLUID_SCOOP_NOT_CONFIRMED 同档处置。
+  FLUID_FILL_NOT_CONFIRMED: "STALE_WORLD",
   PROCESS_BUDGET_EXHAUSTED: "STALE_WORLD",
   ARMOR_EQUIP_FAILED: "TRANSIENT",
   SMELT_FAILED: "TRANSIENT",

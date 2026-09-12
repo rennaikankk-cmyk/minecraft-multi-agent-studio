@@ -89,11 +89,16 @@ export function maxTorchSpacingFor(minimumBlockLight: number): number {
 /**
  * 沿一条直线按火把间距铺点，返回每支火把相对起点的偏移（含起点 0）。
  * 纯算术：不做世界查询、不决定火把放哪一面。
+ *
+ * `spacing` 缺省为 `MAX_TORCH_SPACING`（方块光照 ≥1 的最宽间距）；调用方要更亮的
+ * 下限时传 `maxTorchSpacingFor(minimumBlockLight)`。非有限值或 ≤0 时回落到缺省，
+ * 因为"间距 0"会让循环无法终止。
  */
-export function torchOffsets(length: number): readonly number[] {
+export function torchOffsets(length: number, spacing = MAX_TORCH_SPACING): readonly number[] {
+  const step = Number.isFinite(spacing) && spacing > 0 ? Math.floor(spacing) : MAX_TORCH_SPACING;
   if (!Number.isFinite(length) || length <= 0) return Object.freeze([0]);
   const offsets: number[] = [];
-  for (let offset = 0; offset <= Math.floor(length); offset += MAX_TORCH_SPACING) {
+  for (let offset = 0; offset <= Math.floor(length); offset += step) {
     offsets.push(offset);
   }
   return Object.freeze(offsets);

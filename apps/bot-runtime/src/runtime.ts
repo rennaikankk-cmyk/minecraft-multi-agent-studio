@@ -54,6 +54,7 @@ import {
 } from "@minecraft-studio/safety";
 import {
   builtinSkills,
+  ALL_EDIBLE_ITEMS,
   craftItemCapabilityOutputSchema,
   inventorySnapshotCapabilityOutputSchema,
   ServerPolicyGate,
@@ -237,6 +238,22 @@ export class RuntimeControlError extends Error {
  * signals) — never raw world state, inventory contents, or credentials. Unknown
  * shapes degrade to `null` rather than dumping arbitrary output.
  */
+/** 安全食物名册（与 mineflayer-client 的 SAFE_FOOD_NAMES 同源：ALL_EDIBLE_ITEMS）。 */
+const SAFE_FOOD_NAMES = ALL_EDIBLE_ITEMS;
+
+/**
+ * 物品级背包（快照 inventory 已按物品名聚合）里某物品的总量。
+ * 读到 0 就是 0——快照本身缺失时调用方根本不会走到这里（整块保持 null）。
+ */
+function countOf(
+  inventory: BotClientSnapshot["inventory"],
+  itemName: string,
+): number {
+  return inventory
+    .filter((entry) => entry.itemName === itemName)
+    .reduce((sum, entry) => sum + entry.count, 0);
+}
+
 function skillResultTelemetryDigest(
   result: SkillExecutionResultV1,
 ): Readonly<Record<string, number>> | null {
@@ -2438,6 +2455,16 @@ export class SingleBotRuntime {
     // 背包占用与 position 同源同帧：分两次读会让"够不着"和"装不下"基于两个
     // 不同时刻的世界状态，前置条件就不再是一致快照的纯判断了。
     let inventory: BotClientSnapshot["safety"]["inventory"] | null = null;
+    // 饥饿读数与 position 同源同帧，理由同上。快照拿不到就是 null（技能按
+    // fail-closed 拒绝），绝不补一个"饥饿 20"之类的默认值——那会凭空推出
+    // "不必吃"这种有利结论。
+    let hunger: { level: number; saturation: number } | null = null;
+    // 背包里安全食物的总量：food.eat 的"有没有得吃"判定要它。
+    let safeFoodCount: number | null = null;
+    // 桶计数（bucket.fill 的前置读数），同一快照同一帧算出。
+    let bucketCounts: { bucket: number; water_bucket: number; lava_bucket: number } | null = null;
+    // 世界时间/天气（sleep.bed 的前置读数）。服务器没推时间包时整块缺失。
+    let time: { timeOfDay: number; isRaining: boolean; thunderState: number } | undefined;
     // Mining skills need an explicit safety fact. Unknown state stays unsafe;
     // only a live client snapshot can clear the flags for this invocation.
     let safety = {
@@ -2453,6 +2480,34 @@ export class SingleBotRuntime {
           serverProfileId: this.profile.id,
         };
         inventory = snapshot.safety.inventory;
+        // 逐块判形，不让"后加的字段读不到"把 position/inventory 一起打成 null：
+        // `apps/*/tsconfig.json` 的 include 只有 `src/**/*.ts`，测试**不在** typecheck
+        // 范围内，所以遍布 tests/ 的假 client 少字段不会被编译期挡住。一次 TypeError
+        // 若冒到外层 catch，会让**所有**技能莫名被拒——而且看起来跟 fail-closed 毫无
+        // 区别，正是最难查的那种坏法。
+        // 注意：值本身**原样透传**（不把 NaN 改成 null）。非有限的饥饿读数应当由技能
+        // stateSchema 拒成 SKILL_STATE_INVALID，那是设计，不是要被"顺手修正"的瑕疵。
+        const itemStacks = Array.isArray(snapshot.inventory) ? snapshot.inventory : null;
+        hunger =
+          snapshot.food == null
+            ? null
+            : { level: snapshot.food.level, saturation: snapshot.food.saturation };
+        safeFoodCount =
+          itemStacks === null
+            ? null
+            : itemStacks
+                .filter((entry) => SAFE_FOOD_NAMES.has(entry.itemName))
+                .reduce((sum, entry) => sum + entry.count, 0);
+        // 桶是普通物品，按名字数就行；三类都读到 0 也算"读到了"。
+        bucketCounts =
+          itemStacks === null
+            ? null
+            : {
+                bucket: countOf(itemStacks, "bucket"),
+                water_bucket: countOf(itemStacks, "water_bucket"),
+                lava_bucket: countOf(itemStacks, "lava_bucket"),
+              };
+        time = snapshot.time;
         safety = {
           // Mineflayer exposes current liquid contact at this boundary. The
           // execution adapter still re-checks each target before digging.
@@ -2463,6 +2518,10 @@ export class SingleBotRuntime {
       } catch {
         position = null;
         inventory = null;
+        hunger = null;
+        safeFoodCount = null;
+        bucketCounts = null;
+        time = undefined;
       }
     }
     const policy = this.serverPolicyStore.resolve(this.profile.id);
@@ -2486,6 +2545,21 @@ export class SingleBotRuntime {
       retreatInProgress: this.combatDriver?.status().stance === "retreating",
       position,
       inventory,
+      // food.eat / sleep.bed / bucket.fill 的前置读数（名字与各自 stateSchema
+      // 对齐）。快照缺失时保持 null/undefined，技能按 fail-closed 拒绝；
+      // 绝不补"饥饿 20 / 白天"之类的默认值——那是凭空造有利结论。
+      hunger: hunger === null ? null : hunger.level,
+      saturation: hunger === null ? null : hunger.saturation,
+      foodItemCount: safeFoodCount,
+      bucketCounts,
+      // 时间读数**只**在快照真的带 time 时出现（缺失 = 技能报 BOT_TIME_UNKNOWN）。
+      ...(time === undefined
+        ? {}
+        : {
+            timeOfDay: time.timeOfDay,
+            isRaining: time.isRaining,
+            thunderState: time.thunderState,
+          }),
     };
   }
 

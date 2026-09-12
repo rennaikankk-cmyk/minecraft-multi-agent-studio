@@ -1,12 +1,12 @@
 {
   "schemaVersion": "1.0",
   "generatedFrom": "packages/skills/src/v1-manifest.ts",
-  "totalSkills": 44,
+  "totalSkills": 48,
   "maturitySummary": {
     "L0": 0,
     "L1": 0,
     "L2": 6,
-    "L3": 34,
+    "L3": 38,
     "L4": 4,
     "L5": 0
   },
@@ -1607,6 +1607,177 @@
       ],
       "unitTested": true,
       "runtimeWired": false,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [],
+      "ownerModule": "unknown"
+    },
+    {
+      "skillId": "light.place",
+      "schemaVersion": "1.0.0",
+      "family": "uncategorized",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "llm",
+      "runtimeCapabilities": [
+        "world.interact"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "PLACE_AND_VERIFY",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "NORMAL_ACTIONS_PAUSED",
+        "TARGET_DIMENSION_MISMATCH",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [],
+      "ownerModule": "unknown"
+    },
+    {
+      "skillId": "food.eat",
+      "schemaVersion": "1.0.0",
+      "family": "uncategorized",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "llm",
+      "runtimeCapabilities": [
+        "world.interact"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "INVENTORY_CHANGE",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "REOBSERVE_THEN_RETRY",
+        "ACQUIRE_RESOURCES_THEN_RETRY",
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_HUNGER_UNKNOWN",
+        "BOT_NOT_ONLINE",
+        "FOOD_NOT_NEEDED",
+        "INVENTORY_COUNT_UNKNOWN",
+        "INVENTORY_INSUFFICIENT_ITEMS",
+        "NORMAL_ACTIONS_PAUSED",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [],
+      "ownerModule": "unknown"
+    },
+    {
+      "skillId": "sleep.bed",
+      "schemaVersion": "1.0.0",
+      "family": "uncategorized",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "llm",
+      "runtimeCapabilities": [
+        "world.interact"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "WAITING_EXTERNAL",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "REOBSERVE_THEN_RETRY",
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BED_EXPLODES",
+        "BOT_NOT_ONLINE",
+        "BOT_TIME_UNKNOWN",
+        "NORMAL_ACTIONS_PAUSED",
+        "SLEEP_NOT_NIGHT",
+        "TARGET_DIMENSION_MISMATCH",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [],
+      "ownerModule": "unknown"
+    },
+    {
+      "skillId": "bucket.fill",
+      "schemaVersion": "1.0.0",
+      "family": "uncategorized",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "llm",
+      "runtimeCapabilities": [
+        "world.interact"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "INVENTORY_CHANGE",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "REOBSERVE_THEN_RETRY",
+        "MOVE_CLOSER_THEN_RETRY",
+        "ACQUIRE_RESOURCES_THEN_RETRY",
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "FLUID_BUCKET_MISSING",
+        "INVENTORY_COUNT_UNKNOWN",
+        "NORMAL_ACTIONS_PAUSED",
+        "TARGET_DIMENSION_MISMATCH",
+        "TARGET_OUT_OF_REACH",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
       "realScenarioIds": [],
       "evidenceRefs": [],
       "limitations": [],

@@ -122,7 +122,27 @@ export const FAILURE_CODES = [
   "FLUID_BUCKET_MISSING",
   "FLUID_PLACE_NOT_CONFIRMED",
   "FLUID_SCOOP_NOT_CONFIRMED",
+  "FLUID_FILL_NOT_CONFIRMED",
   "FLUID_TARGET_NOT_SOURCE",
+  // 基础动作（food.eat / sleep.bed）的读数与拒绝码。饥饿值/世界时间是**服务器权威**
+  // 读数：读不到就必须拒绝（UNKNOWN），补一个"饥饿 20 / 白天"之类的默认值等于凭空
+  // 推出"不必吃 / 不能睡"这类**有利结论**，正是 fail-closed 禁止的方向。
+  "BOT_HUNGER_UNKNOWN",
+  "BOT_TIME_UNKNOWN",
+  // 满饥饿进食是**正常拒绝**而不是故障（满饥饿自然回血，吃下去纯浪费），
+  // 所以它既不该走 RETRY_SAME 也不该升级人工——分类为 UNSUPPORTED。
+  "FOOD_NOT_NEEDED",
+  "FOOD_EAT_NOT_CONFIRMED",
+  // 睡眠：窗口/床位是纯世界事实，会随时间与天气变，重新观察比原样重试有意义。
+  "SLEEP_NOT_NIGHT",
+  "SLEEP_BED_UNAVAILABLE",
+  "SLEEP_NOT_CONFIRMED",
+  // 床在爆炸维度（下界/末地）。重投一次等于再自杀一次，因此不吃任何重试阶梯。
+  "BED_EXPLODES",
+  // 长年缺登记：Runtime 早就在抛它（mineflayer-client 的 invokePlaceBlock：参照方块
+  // 不是实心方块时拒绝放置），failure-classifier 也一直把它归为 STALE_WORLD，
+  // 唯独注册表漏了这一条。GM-6 门禁在 sleep.bed 把它用作前置码时才暴露出来。
+  "REFERENCE_BLOCK_NOT_FOUND",
   "BREED_FOOD_INCOMPATIBLE",
   "PORTAL_IGNITE_NO_FLINT",
   "PORTAL_IGNITE_FRAME_INVALID",
@@ -141,6 +161,13 @@ export const FAILURE_CODES = [
   "ENTITY_OUT_OF_REACH",
   "ENTITY_NOT_FOUND",
   "SKILL_ABORTED",
+  // executor 在信封/state 校验阶段产出的两个**拒绝**码（executor.ts:147/157），
+  // failure-classifier 一直把它们归为 CONTRACT_BUG，注册表却漏登记——于是
+  // normalizeFailureCode 会把它们抹成 UNKNOWN_FAILURE，丢掉真实码。
+  // SKILL_STATE_INVALID 因 skillState() 新增投影（饥饿/背包/时间）而新近可达：
+  // 例如服务器推来 NaN 饥饿值时，state schema 的 min/max 会拒掉它。
+  "SKILL_INPUT_INVALID",
+  "SKILL_STATE_INVALID",
   "CRAFTING_TABLE_OUT_OF_REACH",
   "TARGET_OUT_OF_REACH",
   "CONTAINER_OUT_OF_REACH",
@@ -464,6 +491,10 @@ export function classifyIncident(input: ClassifyInput): Classification {
     case "INVENTORY_REQUIRED_ITEM_MISSING":
     case "INVENTORY_STATE_MISMATCH":
     case "INVENTORY_DROP_NOT_SETTLED":
+    // 动作已下发但读回不了确认：不确定的是**结果**，与"掉落没安定"同一族。
+    case "FOOD_EAT_NOT_CONFIRMED":
+    case "SLEEP_NOT_CONFIRMED":
+    case "FLUID_FILL_NOT_CONFIRMED":
       matched.push(`failureCode=${input.failureCode}`);
       return { suspectedLayer: "SKILL", ruleId: "R-SKILL-1", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "low", matchedEvidence: matched };
     // Skill System v1 前置拒绝码：正常运行中的拒绝不是故障；只有它们罕见地出现在
@@ -479,6 +510,11 @@ export function classifyIncident(input: ClassifyInput): Classification {
     case "POLICY_STRAIGHT_DOWN_FORBIDDEN":
     case "POLICY_PARKOUR_FORBIDDEN":
     case "TARGET_SERVER_PROFILE_MISMATCH":
+    // 饥饿值/世界时间是运行时读数：读不到属运行态，不属世界事实。
+    case "BOT_HUNGER_UNKNOWN":
+    case "BOT_TIME_UNKNOWN":
+    // 满饥饿进食是**正常拒绝**（前置条件挡住的一次白费），运行态判定。
+    case "FOOD_NOT_NEEDED":
       matched.push(`failureCode=${input.failureCode}`);
       return { suspectedLayer: "RUNTIME", ruleId: "R-PRECOND-RUNTIME-1", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "medium", matchedEvidence: matched };
     case "TARGET_DIMENSION_MISMATCH":
@@ -502,6 +538,11 @@ export function classifyIncident(input: ClassifyInput): Classification {
     case "BRIDGE_BLOCKS_EXHAUSTED":
     case "BREED_FOOD_INCOMPATIBLE":
     case "ENTITY_INTERACT_NOT_SETTLED":
+    // 睡眠窗口/床位/维度都是纯世界事实，会随天气与时间变——重新观察比原样重试有意义。
+    case "SLEEP_NOT_NIGHT":
+    case "SLEEP_BED_UNAVAILABLE":
+    case "BED_EXPLODES":
+    case "REFERENCE_BLOCK_NOT_FOUND":
       matched.push(`failureCode=${input.failureCode}`);
       return { suspectedLayer: "WORLD_STATE", ruleId: "R-PRECOND-WORLD-1", classifierVersion: CLASSIFIER_VERSION, confidenceBand: "medium", matchedEvidence: matched };
     case "PORTAL_IGNITE_NOT_CONFIRMED":

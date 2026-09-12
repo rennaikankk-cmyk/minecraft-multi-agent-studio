@@ -184,6 +184,15 @@ const baseInputs: Readonly<Record<string, z.infer<typeof skillJsonValueSchema>>>
   "food.pick": { candidates: [{ itemName: "bread", count: 1 }], hunger: { hunger: 12, saturation: 0 }, serverProfileId: server },
   "station.plan": { station: "crafting_table", existing: null, candidate: { x: 1, y: 64, z: 0 }, headroomBlocks: 1, solidFloor: true, dimension, serverProfileId: server },
   "inventory.room": { slotsNeeded: 2, serverProfileId: server },
+  // 常识层的执行面：一条 4 格长的走廊，够放两三支火把——验的是"计划→放置→读回"
+  // 这条链路能跑通，而不是"地形刚好需要几支"。
+  "light.place": { itemName: "torch", axis: "z", origin: { x: 0, z: 0 }, floorY: 64, length: 4, minimumBlockLight: 1, maxPlacements: 4, dimension, serverProfileId: server },
+
+  // 基础动作层：fixture 仍是"最典型的一次调用"。吃/睡/装桶的**被拒**路径
+  // （满饥饿、白天、没空桶）由各自的单测与适配器测试覆盖，不占验收场景位。
+  "food.eat": { itemName: "bread", dimension, serverProfileId: server },
+  "sleep.bed": { bed: { x: 1, y: 64, z: 0 }, dimension, serverProfileId: server },
+  "bucket.fill": { mode: "water", target: { x: 0, y: 63, z: 0 }, dimension, serverProfileId: server },
 };
 
 /**
