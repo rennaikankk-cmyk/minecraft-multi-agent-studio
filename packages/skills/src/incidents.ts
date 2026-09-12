@@ -38,6 +38,15 @@ export const FAILURE_CODES = [
   "MOVEMENT_NO_PATH_CONFIRMED",
   "SKILL_VERIFY_FAILED",
   "SKILL_RECOVERY_EXHAUSTED",
+  // 规划层（commons/ 与 planning/）产出的稳定码。failure-classifier 一直认识这一族
+  // （PLAN_* → UNSUPPORTED 或 CONTRACT_BUG），但注册表此前漏登记——于是 GM-6 门禁
+  // （"每个 failureCode 必须在注册表或别名表里"）会在第一个真正用到它的技能上变红。
+  "PLAN_ITEM_UNOBTAINABLE",
+  "PLAN_TOOL_TIER_UNREACHABLE",
+  "PLAN_GOAL_INVALID",
+  "PLAN_CYCLIC_DEPENDENCY",
+  "PLAN_DEPTH_EXCEEDED",
+  "PLAN_STEP_LIMIT_EXCEEDED",
   "TASK_PROGRESS_TIMEOUT",
   "RUNTIME_PLACE_REJECTED",
   "RUNTIME_FALSE_SUCCESS",

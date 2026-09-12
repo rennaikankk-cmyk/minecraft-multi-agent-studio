@@ -25,6 +25,11 @@ import { movementProfileSkill } from "../planning/movement-profile.js";
 import { farmMaintainSkill } from "../farm-maintenance.js";
 import { farmSustainSkill } from "../farm-sustain.js";
 import { residenceCheckSkill } from "./residence-check.js";
+import { hazardAssessSkill } from "./hazard-assess.js";
+import { toolPlanSkill } from "./tool-plan.js";
+import { foodPickSkill } from "./food-pick.js";
+import { stationPlanSkill } from "./station-plan.js";
+import { inventoryRoomSkill } from "./inventory-room.js";
 import { baritoneProcessSkills } from "../baritone-processes.js";
 
 /**
@@ -76,6 +81,14 @@ export const builtinSkills: readonly AnySkillDefinition[] = Object.freeze([
   farmMaintainSkill,
   farmSustainSkill,
   residenceCheckSkill,
+  // Minecraft 常识层：纯确定性判断（requiredCapabilities: []），不产生游戏动作，
+  // 用于让战略/战术层把"危险、工具缺口、吃哪口、站点够不够、背包塞不塞得下"
+  // 交给确定性代码，而不是让模型凭印象决定。知识表见 src/commons/。
+  hazardAssessSkill,
+  toolPlanSkill,
+  foodPickSkill,
+  stationPlanSkill,
+  inventoryRoomSkill,
   ...baritoneProcessSkills,
 ] as readonly unknown[] as readonly AnySkillDefinition[]);
 

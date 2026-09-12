@@ -692,3 +692,12 @@ export * from "./farm-sustain.js";
 export * from "./facility-lease.js";
 export * from "./planning/resource-management.js";
 export { residenceCheckSkill } from "./builtin/residence-check.js";
+
+// Minecraft 常识层：纯知识表与判定函数（危险/工具树/食物/放置），以及在其之上的
+// 纯判断技能。它们不产生游戏动作，也不声明 capability。
+export * from "./commons/index.js";
+export { hazardAssessSkill } from "./builtin/hazard-assess.js";
+export { toolPlanSkill } from "./builtin/tool-plan.js";
+export { foodPickSkill } from "./builtin/food-pick.js";
+export { stationPlanSkill } from "./builtin/station-plan.js";
+export { inventoryRoomSkill } from "./builtin/inventory-room.js";

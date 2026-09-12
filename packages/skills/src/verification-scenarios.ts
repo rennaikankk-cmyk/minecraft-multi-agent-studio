@@ -175,6 +175,15 @@ const baseInputs: Readonly<Record<string, z.infer<typeof skillJsonValueSchema>>>
   "mine.vein": { targetItem: "minecraft:diamond", yLevel: -50, maxBlocks: 8, origin: { x: 100, y: -50, z: 200 }, orePositions: [{ x: 101, y: -50, z: 200 }], dimension, serverProfileId: server, backfill: true, exclusions: ["own-hideout", "blueprint-anchor", "load-bearing", "liquid-adjacent"] },
   "site.assess": { candidate: { x: 12_000, y: 64, z: 13_000, dimension, serverProfileId: server }, ownRecords: [], policy: { minSpawnDistance: 10_000, minAxisDistance: 2_000, minHighwayDistance: 1_000, minPortalLineDistance: 512, coordinateGridSize: 1_000, minCoordinateGridOffset: 96, symmetryTolerance: 64, hazardClearance: 64, hideoutSeparation: 10_000, burialDepthTarget: 24, escapeRouteTarget: 2, acceptanceScore: 0.62, verified: false, verificationNote: "未实测" }, observedAt: "2026-08-23T00:00:00.000Z", staleAfterMs: 60_000 },
   "shelter.dig": { direction: "north", depth: 2, sealItemName: "cobblestone", dimension, serverProfileId: server },
+
+  // Minecraft 常识层（src/commons/）：纯判断技能，输入即全部事实，不碰世界也不调能力。
+  // 这些 fixture 选的是"最典型的一次调用"，不是"会通过的调用"：
+  // hazard.assess 的垂直下挖按设计就是拒绝级，它验的是拒绝路径能跑通。
+  "hazard.assess": { action: { kind: "dig-straight-down", depthBlocks: 1 }, dimension, y: 64, serverProfileId: server },
+  "tool.plan": { goalTool: "stone_pickaxe", count: 1, available: [], harvestable: ["oak_log", "stone"], serverProfileId: server },
+  "food.pick": { candidates: [{ itemName: "bread", count: 1 }], hunger: { hunger: 12, saturation: 0 }, serverProfileId: server },
+  "station.plan": { station: "crafting_table", existing: null, candidate: { x: 1, y: 64, z: 0 }, headroomBlocks: 1, solidFloor: true, dimension, serverProfileId: server },
+  "inventory.room": { slotsNeeded: 2, serverProfileId: server },
 };
 
 /**

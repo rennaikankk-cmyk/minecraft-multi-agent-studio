@@ -26,7 +26,7 @@
 - 自相矛盾的证据组合**拒绝装载**，例如"真实服跑过但运行时没接线"。
 - 只有四道闸全绿才允许对外称"已验证"（`evidenceSupportsVerifiedClaim`）。
 
-当前注册表包含 39 个技能；新增 Baritone 对应能力保持 **Partial**，仍缺 `isolated-server-scenarios` 与 `cross-version-matrix` 两道环境闸。`stock.levels` 保持 **Experimental**，证据以 `skill-status.ts` 与场景账本为准。
+当前注册表包含 44 个技能；新增 Baritone 对应能力保持 **Partial**，仍缺 `isolated-server-scenarios` 与 `cross-version-matrix` 两道环境闸。Minecraft 常识层（`hazard.assess` / `tool.plan` / `food.pick` / `station.plan` / `inventory.room`）与实践层的 `stock.levels` 保持 **Experimental**，证据以 `skill-status.ts` 与场景账本为准。
 真实隔离服六类场景与 1.21.8 跨版本矩阵一次没跑过。这与编译产物里的
 `verification=unverified` 是同一个事实的两种表述（AGENTS.md §8：无隔离测试服时不得声称联机测试通过）。
 
@@ -47,7 +47,7 @@
 
 - Skill ID 后的 SemVer 表示技能输入、输出和行为契约，不表示 Minecraft 服务器版本。
 - 每个 Skill 另有有序 `compatibility.variants`。Runtime 只使用连接后真实协商出的版本/协议，以及当前 registry 的 feature、物品、方块、实体和显式服务端能力探针解析变体；不以 `minVersion/maxVersion` 一刀切。
-- 当前目录中的 39 个 Skill 声明能力变体；只有证据中的 `runtime-wiring=true` 条目可由 Runtime 执行，其余条目保持 `Experimental`。实际装备、目标资源和世界观测仍须经适配器校验；`verification=unverified` 不代表实机已验证。
+- 当前目录中的 44 个 Skill 声明能力变体；只有证据中的 `runtime-wiring=true` 条目可由 Runtime 执行，其余条目保持 `Experimental`。实际装备、目标资源和世界观测仍须经适配器校验；`verification=unverified` 不代表实机已验证。
 - 新版本特色 Skill 必须声明它实际依赖的 feature/资源；如果还依赖服务器插件、数据包或规则，则必须等待显式探针。能力为 `unknown` 时 fail-closed，不从版本号猜测。
 - `collect.block`、`craft.item`、`world.place-block` 和 `container.transfer` 当前仍接收目标版本 registry 的原生资源名。兼容变体可以表达旧/新 ID 的替代顺序，但规划器使用的语义资源别名尚未接入。
 
@@ -550,3 +550,40 @@
 - 权限：`world.interact` + `inventory.write`；操作 `animal.breed-safe`；对两只同类成年实体各喂一份饲料（useOn + 物品消耗对账）。
 - 牛羊肉/皮革/羽毛的可持续来源——农场之后食物安全的第二层保险。物种-饲料矩阵数据驱动（BREED_FOOD_BY_ANIMAL）。
 - 爱心粒子不可观测：验证用物品消耗 ≥2 + 双实体在场（offspringObserved 如实为 false，不伪造出生判定）。
+
+## `hazard.assess@1.0.0`
+
+- 状态：**Experimental**（待 `runtime-wiring`、`isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：无外部能力（纯确定性判断，`requiredCapabilities: []`）
+- 约束：把"这一步危不危险"交给确定性规则，而不是模型凭印象判断。规则表在 `src/commons/hazards.ts`，逐维度取值：主世界规划地板 y=-48、硬地板 y=-64（1.18+ 世界下界，基岩层 -64..-60）；下界岩浆海静水面 y=31、基岩地板 y=0..4、y≥127 报 `BEDROCK_CEILING`；末地硬地板 y=0。未知维度走最保守兜底档（`bedExplodes: true`，fail-closed）。
+- 恒定拒绝级：垂直下挖（`DIG_STRAIGHT_DOWN`）、掏头顶（`HOLLOW_OVERHEAD`，上方有流体升级为 `DIG_INTO_LAVA`）、贴岩浆挖（`LAVA_ADJACENT` + `DIG_INTO_LAVA`）、**在下界与末地使用床（`BED_EXPLODES`）**。坠落 >3 格才扣血（伤害 = floor(格数) − 3），超过策略 `maxFallBlocks` 时报 `FALL_BEYOND_POLICY`。
+
+## `tool.plan@1.0.0`
+
+- 状态：**Experimental**（待 `runtime-wiring`、`isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：无外部能力（只出计划、不动手；实际合成仍走 `craft.item`）
+- 约束：自举科技树按 `src/commons/tools.ts` 的配方表展开——原木→木板（1⇒4）、木板→木棍（2⇒4）、工作台（4 木板，2×2 背包网格即可制作）、熔炉（8 圆石，必须工作台）、箱子（8 木板，必须工作台）；四档材料 wood/stone/iron/diamond，镐 3+2、斧 3+2、铲 1+2、剑 2+1。
+- 开采约束如实建模：**原木徒手可采**（写成需要斧头会让整条自举链死锁），石头/矿石必须镐，矿石另有最低档（铁需石镐、金/红石/钻石需铁镐、黑曜石需钻石镐），土/沙/沙砾用铲，羊毛/树叶用剪刀。
+- `verdict` 分硬/软两类缺口：`NO_SOURCE`（表中既无配方也无已知来源）→ `MISSING_MATERIALS`；`NO_TOOL`/`NEEDS_CRAFTING_TABLE` → 仍给 `PLAN_READY` 并在 `missingMaterials` 里如实上报，避免把"还没有铁镐"错报成"没有铁矿"。
+
+## `food.pick@1.0.0`
+
+- 状态：**Experimental**（待 `runtime-wiring`、`isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：无外部能力（只选、不吃；实际进食是 L0 反射 `CONSUME_SAFE_FOOD`）
+- 约束：**按"有效饱和度 / 饥饿"效率选**，不按饥饿点选——饱和度决定饱腹时长。`projectEat` 照原版顺序计算（先加饥饿，饱和度上限等于加完后的饥饿值），所以饥饿高时吃大餐会溢出浪费。
+- 满饥饿一律拒绝（`HUNGER_ALREADY_FULL`）；有害食物（腐肉/毒马铃薯/蜘蛛眼/河豚）永不用于填饥饿；生食风险如实告知（生鸡肉约 30% 概率饥饿效果），**判定不掷骰子**——只报风险，不假装知道结果。
+
+## `station.plan@1.0.0`
+
+- 状态：**Experimental**（待 `runtime-wiring`、`isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：无外部能力（只判"够不够得着、落点合不合法"）
+- 约束：交互距离按原版 4.5 格（方块中心 +0.5 偏移），但**距离数学不在这里实现**——唯一入口是 `builtin/reach.ts`，策略更严（STRICT 3.8）时以策略裁决。站点要求表在 `src/commons/placement.ts`：床需 2 格净空 + 实心地板，工作台/熔炉/箱子需 1 格净空，火把可贴墙不需要地板。
+- 观测缺失时**不假装够用**：`headroomBlocks`/`solidFloor` 为 null 时按"需人工确认"处理，报 `STATION_PLACEMENT_UNKNOWN`。
+
+## `inventory.room@1.0.0`
+
+- 状态：**Experimental**（待 `runtime-wiring`、`isolated-server-scenarios`、`cross-version-matrix`）
+- 权限：无外部能力（只算够不够；腾空间走 `inventory.drop`）
+- 约束：容量算术复用 `builtin/inventory-space.ts` 的 `freeInventorySlots`（**唯一入口**），用保守**槽位**数而不是件数——一次采集拿回 4 组不同方块占 4 槽，64 个同种方块可能只占 1 槽。
+- fail-closed：`state.inventory` 为 null（观测不到背包）时报 `INVENTORY_UNKNOWN` 并给 `freeSlots: 0`，不按"大概还有空"放行——与 capability `unknown` 的既有纪律一致。
+- 与 `stock.levels` 的分工：那条管战略库存水位，这条管"这次任务塞不塞得下"。

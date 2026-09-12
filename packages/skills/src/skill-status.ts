@@ -138,7 +138,7 @@ export type SkillStatusEntry = Readonly<{
 /**
  * 每个内建技能的证据位。**只允许在这里改布尔值，且改之前那道闸必须真的跑过。**
  *
- * 当前注册表包含二十个技能；证据中的 runtime-wiring=true 条目为 Partial，其余
+ * 当前注册表包含四十四技能；证据中的 runtime-wiring=true 条目为 Partial，其余
  * 规划/策略条目为 Experimental。唯一的例外是 stock.levels：纯函数技能（无
  * capability、state 被 strip 成 {}、无前置条件），L0 暂停对它按设计不生效，
  * 在为这类只读计算技能定义豁免语义之前它的 runtime-wiring 保持 false。
@@ -184,6 +184,30 @@ const EVIDENCE: Readonly<Record<string, SkillEvidence>> = Object.freeze({
   },
   "base.residence-check": {
     offlineTests: true, runtimeWiring: true,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
+  // Minecraft 常识层（src/commons/）：纯确定性判断，不声明任何 capability，因此没有
+  // 可"接线"的适配器；runtime-wiring 保持 false，直到它们被纳入 apps/bot-runtime 的
+  // 接线矩阵。注意它们**有**前置条件（bot.online / l0.normal-actions-allowed 等），
+  // 所以与 stock.levels 那类"L0 按设计不生效"的纯计算技能不是同一情形。
+  "hazard.assess": {
+    offlineTests: true, runtimeWiring: false,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
+  "tool.plan": {
+    offlineTests: true, runtimeWiring: false,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
+  "food.pick": {
+    offlineTests: true, runtimeWiring: false,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
+  "station.plan": {
+    offlineTests: true, runtimeWiring: false,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
+  },
+  "inventory.room": {
+    offlineTests: true, runtimeWiring: false,
     isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
   },
   "combat.engage": {
