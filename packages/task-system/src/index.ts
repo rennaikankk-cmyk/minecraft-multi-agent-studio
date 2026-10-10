@@ -55,10 +55,12 @@ export {
 } from "./composite-task.js";
 export {
   MAX_EXPIRED_LEASE_BATCH_SIZE,
+  MAX_OUTBOX_RETENTION_BATCH_SIZE,
   MAX_TASK_HISTORY_BATCH_SIZE,
   MAX_TASK_LIFECYCLE_BATCH_SIZE,
   MAX_TASK_OUTBOX_ATTEMPTS,
   MAX_TASK_OUTBOX_BATCH_SIZE,
+  MIN_OUTBOX_RETENTION_MS,
   PostgresTaskRepository,
   taskOperationFingerprint,
   type CreateTaskResult,

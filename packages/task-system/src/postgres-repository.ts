@@ -200,6 +200,8 @@ const DEFAULT_DISPATCH_SOURCE_INSTANCE_ID = "coordinator-main";
 const TASK_DISPATCH_RETRY_OPERATION_KIND = "task.dispatch-retry.v1";
 export const MAX_TASK_OUTBOX_BATCH_SIZE = 100;
 export const MAX_TASK_OUTBOX_ATTEMPTS = 1_000;
+export const MAX_OUTBOX_RETENTION_BATCH_SIZE = 1_000;
+export const MIN_OUTBOX_RETENTION_MS = 60_000;
 const DEFAULT_OUTBOX_CLAIM_MS = 30_000;
 const MAX_OUTBOX_CLAIM_MS = 5 * 60_000;
 const DEFAULT_OUTBOX_RETRY_MS = 1_000;
@@ -1342,6 +1344,64 @@ export class PostgresTaskRepository {
 
   markOutboxDelivered(input: TaskOutboxAckOptions): Promise<boolean> {
     return this.markTaskOutboxDelivered(input);
+  }
+
+  /**
+   * 保留清扫：删除「任务已终态且送达已久」的 outbox 行。此前全库无任何
+   * DELETE——delivered 行在任务进入终态后成为永久孤儿（不再可被
+   * claimTaskOutbox 重取），事实源表无界增长。只动 status='delivered'、
+   * delivered_at 早于 TTL 且任务处于终态（completed/failed/cancelled/
+   * expired）的行；queued/assigned 任务的 delivered 行仍可能被重取投递，
+   * pending/claimed 行在投递生命周期内，一律保留。
+   */
+  async purgeDeliveredOutbox(input: {
+    deliveredBeforeMs: number;
+    limit: number;
+  }): Promise<number> {
+    if (
+      !Number.isInteger(input.deliveredBeforeMs) ||
+      input.deliveredBeforeMs < MIN_OUTBOX_RETENTION_MS
+    ) {
+      throw new RangeError(
+        `Outbox retention window must be at least ${MIN_OUTBOX_RETENTION_MS}ms.`,
+      );
+    }
+    if (
+      !Number.isInteger(input.limit) ||
+      input.limit < 1 ||
+      input.limit > MAX_OUTBOX_RETENTION_BATCH_SIZE
+    ) {
+      throw new RangeError(
+        `Outbox retention batch limit must be between 1 and ${MAX_OUTBOX_RETENTION_BATCH_SIZE}.`,
+      );
+    }
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(
+        `WITH candidates AS (
+           SELECT outbox.message_id
+           FROM studio_task_outbox AS outbox
+           JOIN studio_tasks AS task ON task.task_id = outbox.task_id
+           WHERE outbox.status = 'delivered'
+             AND outbox.delivered_at IS NOT NULL
+             AND outbox.delivered_at <=
+               clock_timestamp() - ($1 * interval '1 millisecond')
+             AND task.status IN ('completed', 'failed', 'cancelled', 'expired')
+           ORDER BY outbox.delivered_at ASC, outbox.message_id ASC
+           LIMIT $2
+         )
+         DELETE FROM studio_task_outbox AS outbox
+         USING candidates
+         WHERE outbox.message_id = candidates.message_id
+         RETURNING outbox.message_id`,
+        [input.deliveredBeforeMs, input.limit],
+      );
+      return result.rowCount ?? 0;
+    } catch (error) {
+      throw this.persistenceError(error);
+    } finally {
+      client.release();
+    }
   }
 
   async retryTaskOutbox(input: TaskOutboxRetryOptions): Promise<boolean> {

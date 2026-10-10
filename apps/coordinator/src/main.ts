@@ -85,6 +85,7 @@ import {
 import { resolveGameplayPolicy } from "@minecraft-studio/protocol";
 import { FilePlanJournalStore } from "./plan-journal.js";
 import { ExpiredLeaseRecoveryController } from "./expired-lease-recovery.js";
+import { OutboxRetentionController } from "./outbox-retention.js";
 import { CoordinatorGoalExecutionServer } from "./goal-execution-server.js";
 import {
   TaskDeliveryConfigError,
@@ -266,6 +267,7 @@ async function main(): Promise<void> {
     memoryGoalStore ?? undefined;
   let queuedGoalStore: PostgresGoalLifecycleStore | undefined;
   let leaseRecovery: ExpiredLeaseRecoveryController | null = null;
+  let outboxRetention: OutboxRetentionController | null = null;
   let taskQueue: BullMqTaskQueue | null = null;
   let outboxReconciler: TaskOutboxReconciler | null = null;
   let goalExecutionServer: CoordinatorGoalExecutionServer | null = null;
@@ -668,6 +670,10 @@ async function main(): Promise<void> {
       actorId: instanceId,
       logger,
     });
+    outboxRetention = new OutboxRetentionController({
+      repository: taskRepository,
+      logger,
+    });
     if (taskDeliveryConfig) {
       if (taskDeliveryConfig.purpose === "production" && !localPlanner) {
         throw new TaskDeliveryConfigError(
@@ -802,6 +808,7 @@ async function main(): Promise<void> {
     // after readiness and both control endpoints are available, so recovered
     // outbox records are not created during a partially started process.
     leaseRecovery?.start();
+    outboxRetention?.start();
     await outboxReconciler?.start();
     staleTimer = setInterval(() => {
       try {
@@ -856,6 +863,7 @@ async function main(): Promise<void> {
       }
     }
     if (leaseRecovery) await Promise.allSettled([leaseRecovery.stop()]);
+    if (outboxRetention) await Promise.allSettled([outboxRetention.stop()]);
     if (outboxReconciler) await Promise.allSettled([outboxReconciler.stop()]);
     if (taskQueue) await Promise.allSettled([taskQueue.close()]);
     if (taskPool) await Promise.allSettled([taskPool.close()]);
@@ -891,6 +899,15 @@ async function main(): Promise<void> {
       } catch {
         logger.error("coordinator_task_lease_recovery_stop_failed", {
           code: "TASK_LEASE_RECOVERY_STOP_FAILED",
+        });
+      }
+    }
+    if (outboxRetention) {
+      try {
+        await outboxRetention.stop();
+      } catch {
+        logger.error("coordinator_outbox_retention_stop_failed", {
+          code: "OUTBOX_RETENTION_STOP_FAILED",
         });
       }
     }

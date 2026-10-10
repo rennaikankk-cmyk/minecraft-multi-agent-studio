@@ -96,6 +96,13 @@ const migrationFiles = [
     sha256:
       "a31a75eacc054473e0d10c5a766eadc32064ae80b6145eb0217843ab9bc636ff",
   },
+  {
+    path: fileURLToPath(
+      new URL("../migrations/0009_outbox_retention.sql", import.meta.url),
+    ),
+    sha256:
+      "c8a93ae97fbfcf5e079d6ff8922c8ea41d3bde4ef29b34f73b9b124b991616f6",
+  },
 ] as const;
 
 function isolatedNamespace(input: string | undefined): string {
@@ -757,6 +764,75 @@ describeReal.sequential(
           [created.task.taskId],
         ),
       ).rejects.toThrow();
+    }, REAL_TEST_TIMEOUT_MS);
+
+    it("purges only terminal-task outbox rows past the retention window", async () => {
+      // 保留清扫（0009）：此前全库无任何 DELETE，delivered 行在任务终态后
+      // 成为永久孤儿。三类对照——终态+超期（删）、终态+新近（保留）、
+      // 非终态+超期（保留：仍可能被 claimTaskOutbox 重取投递）。
+      const terminalOld = await repository.createTask(
+        taskCreateCommand("test.outbox-retention.terminal-old"),
+      );
+      const terminalFresh = await repository.createTask(
+        taskCreateCommand("test.outbox-retention.terminal-fresh"),
+      );
+      const liveOld = await repository.createTask(
+        taskCreateCommand("test.outbox-retention.live-old"),
+      );
+      const messageOf = async (taskId: string): Promise<string> => {
+        const rows = await assertionPool.query<{ message_id: string }>(
+          "SELECT message_id FROM studio_task_outbox WHERE task_id = $1",
+          [taskId],
+        );
+        expect(rows.rows).toHaveLength(1);
+        return rows.rows[0]!.message_id;
+      };
+      await assertionPool.query(
+        "UPDATE studio_tasks SET status = 'completed' WHERE task_id = $1",
+        [terminalOld.task.taskId],
+      );
+      await assertionPool.query(
+        "UPDATE studio_tasks SET status = 'failed' WHERE task_id = $1",
+        [terminalFresh.task.taskId],
+      );
+      const markDelivered = (taskId: string, ageMs: number) =>
+        assertionPool.query(
+          `UPDATE studio_task_outbox
+           SET status = 'delivered',
+               delivered_at =
+                 clock_timestamp() - ($2 * interval '1 millisecond')
+           WHERE task_id = $1`,
+          [taskId, ageMs],
+        );
+      const RETENTION_MS = 24 * 3_600_000;
+      await markDelivered(terminalOld.task.taskId, RETENTION_MS + 3_600_000);
+      await markDelivered(terminalFresh.task.taskId, 0);
+      await markDelivered(liveOld.task.taskId, RETENTION_MS + 3_600_000);
+      const oldMessage = await messageOf(terminalOld.task.taskId);
+      const freshMessage = await messageOf(terminalFresh.task.taskId);
+      const liveMessage = await messageOf(liveOld.task.taskId);
+
+      await expect(
+        repository.purgeDeliveredOutbox({
+          deliveredBeforeMs: RETENTION_MS,
+          limit: 100,
+        }),
+      ).resolves.toBe(1);
+
+      const remaining = await assertionPool.query<{ message_id: string }>(
+        "SELECT message_id FROM studio_task_outbox WHERE message_id = ANY($1)",
+        [[oldMessage, freshMessage, liveMessage]],
+      );
+      expect(new Set(remaining.rows.map(({ message_id }) => message_id))).toEqual(
+        new Set([freshMessage, liveMessage]),
+      );
+
+      await expect(
+        repository.purgeDeliveredOutbox({ deliveredBeforeMs: 59_999, limit: 10 }),
+      ).rejects.toThrow(RangeError);
+      await expect(
+        repository.purgeDeliveredOutbox({ deliveredBeforeMs: RETENTION_MS, limit: 0 }),
+      ).rejects.toThrow(RangeError);
     }, REAL_TEST_TIMEOUT_MS);
 
     it("restores persistent execution FSM progress after a runtime restart", async () => {
