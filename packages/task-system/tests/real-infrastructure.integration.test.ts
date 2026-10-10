@@ -770,47 +770,70 @@ describeReal.sequential(
       // 保留清扫（0009）：此前全库无任何 DELETE，delivered 行在任务终态后
       // 成为永久孤儿。三类对照——终态+超期（删）、终态+新近（保留）、
       // 非终态+超期（保留：仍可能被 claimTaskOutbox 重取投递）。
-      const terminalOld = await repository.createTask(
-        taskCreateCommand("test.outbox-retention.terminal-old"),
-      );
-      const terminalFresh = await repository.createTask(
-        taskCreateCommand("test.outbox-retention.terminal-fresh"),
-      );
-      const liveOld = await repository.createTask(
-        taskCreateCommand("test.outbox-retention.live-old"),
-      );
-      const messageOf = async (taskId: string): Promise<string> => {
-        const rows = await assertionPool.query<{ message_id: string }>(
-          "SELECT message_id FROM studio_task_outbox WHERE task_id = $1",
-          [taskId],
-        );
-        expect(rows.rows).toHaveLength(1);
-        return rows.rows[0]!.message_id;
-      };
+      // createTask 不保证派发路径写 outbox 行，沿用本套件的直接 INSERT 夹具。
+      const terminalOld = (
+        await repository.createTask(
+          taskCreateCommand("test.outbox-retention.terminal-old"),
+        )
+      ).task;
+      const terminalFresh = (
+        await repository.createTask(
+          taskCreateCommand("test.outbox-retention.terminal-fresh"),
+        )
+      ).task;
+      const liveOld = (
+        await repository.createTask(
+          taskCreateCommand("test.outbox-retention.live-old"),
+        )
+      ).task;
       await assertionPool.query(
         "UPDATE studio_tasks SET status = 'completed' WHERE task_id = $1",
-        [terminalOld.task.taskId],
+        [terminalOld.taskId],
       );
       await assertionPool.query(
         "UPDATE studio_tasks SET status = 'failed' WHERE task_id = $1",
-        [terminalFresh.task.taskId],
+        [terminalFresh.taskId],
       );
-      const markDelivered = (taskId: string, ageMs: number) =>
-        assertionPool.query(
-          `UPDATE studio_task_outbox
-           SET status = 'delivered',
-               delivered_at =
-                 clock_timestamp() - ($2 * interval '1 millisecond')
-           WHERE task_id = $1`,
-          [taskId, ageMs],
-        );
       const RETENTION_MS = 24 * 3_600_000;
-      await markDelivered(terminalOld.task.taskId, RETENTION_MS + 3_600_000);
-      await markDelivered(terminalFresh.task.taskId, 0);
-      await markDelivered(liveOld.task.taskId, RETENTION_MS + 3_600_000);
-      const oldMessage = await messageOf(terminalOld.task.taskId);
-      const freshMessage = await messageOf(terminalFresh.task.taskId);
-      const liveMessage = await messageOf(liveOld.task.taskId);
+      const seedDelivered = async (
+        taskId: string,
+        deliveredAgoMs: number,
+      ): Promise<string> => {
+        const messageId = randomUUID();
+        const payload = {
+          schemaVersion: "1.0",
+          messageId,
+          taskId,
+          type: "task.dispatch.v1",
+          payload: { expectedRevision: 1 },
+        };
+        await assertionPool.query(
+          `INSERT INTO studio_task_outbox (
+             message_id, task_id, expected_revision, type, payload,
+             status, available_at, created_at, updated_at, delivered_at
+           ) VALUES (
+             $1, $2, 1, 'task.dispatch.v1', $3::jsonb,
+             'delivered', clock_timestamp(), clock_timestamp(),
+             clock_timestamp(), $4::timestamptz
+           )`,
+          [
+            messageId,
+            taskId,
+            JSON.stringify(payload),
+            new Date(Date.now() - deliveredAgoMs).toISOString(),
+          ],
+        );
+        return messageId;
+      };
+      const oldMessage = await seedDelivered(
+        terminalOld.taskId,
+        RETENTION_MS + 3_600_000,
+      );
+      const freshMessage = await seedDelivered(terminalFresh.taskId, 0);
+      const liveMessage = await seedDelivered(
+        liveOld.taskId,
+        RETENTION_MS + 3_600_000,
+      );
 
       await expect(
         repository.purgeDeliveredOutbox({
