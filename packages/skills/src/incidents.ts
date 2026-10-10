@@ -891,6 +891,10 @@ const DISK_SOFT_RATIO = 0.8;
 export class IncidentStore {
   private readonly issues = new Map<string, IncidentIssue>();
   private readonly occurrences = new Map<string, IncidentOccurrence[]>();
+  /** fingerprint → incidentId 索引：report() 去重从 O(issues) 线性扫描降为
+   *  O(1)。与 issues 同步维护（创建/删除/加载三处）；重复 fingerprint 时
+   *  先入者优先——与此前 values() 顺序扫描的 .find 语义一致。 */
+  private readonly issuesByFingerprint = new Map<string, string>();
   private readonly persistPath: string | undefined;
   private readonly maxIssues: number;
   private readonly maxAgeDays: number;
@@ -995,6 +999,11 @@ export class IncidentStore {
         ((migrated as unknown) as Record<string, unknown>).terminalFailureCode = null;
       }
       this.issues.set(migrated.incidentId, migrated);
+      // 索引重建同样先入者优先：与 values() 顺序扫描的 .find 语义一致
+      // （磁盘上手写编辑产生重复 fingerprint 时保持加载序裁决）。
+      if (!this.issuesByFingerprint.has(migrated.fingerprint)) {
+        this.issuesByFingerprint.set(migrated.fingerprint, migrated.incidentId);
+      }
     }
     for (const [incidentId, list] of Object.entries(parsed.occurrences ?? {})) {
       const migratedList = list.map((occurrence) => {
@@ -1082,7 +1091,8 @@ export class IncidentStore {
       ...(versionFamily === undefined ? {} : { versionFamily }),
     });
 
-    const existing = [...this.issues.values()].find((issue) => issue.fingerprint === fingerprint);
+    const existingId = this.issuesByFingerprint.get(fingerprint);
+    const existing = existingId === undefined ? undefined : this.issues.get(existingId);
     const now = new Date().toISOString();
     let issue = existing;
     let createdIssue = false;
@@ -1115,6 +1125,7 @@ export class IncidentStore {
         metadata: {},
       };
       this.issues.set(issue.incidentId, issue);
+      this.issuesByFingerprint.set(fingerprint, issue.incidentId);
       createdIssue = true;
     }
 
@@ -1349,8 +1360,12 @@ export class IncidentStore {
       if (incidentId === protectedIncidentId) continue;
       this.stripIssueEvidence(incidentId);
     }
-    // 软限：再淘汰最旧的 closed/ignored
-    for (const victim of this.listIssues()) {
+    // 软限：再淘汰最旧的 closed/ignored。排序快照同时供硬限 pinned 计算
+    // 复用：两段之间只会删除 closed 行，pinned（open/investigating）集合
+    // 与相对顺序不变；已删 id 再进 deleteIssue/stripIssueEvidence 均为守卫
+    // 过的 no-op，两段的字节 break 条件读的都是实时 approxStoreBytes。
+    const sorted = this.listIssues();
+    for (const victim of sorted) {
       if (this.approxStoreBytes <= softLimit) break;
       if (victim.status === "open" || victim.status === "investigating") continue;
       if (victim.incidentId === protectedIncidentId) continue;
@@ -1358,7 +1373,7 @@ export class IncidentStore {
     }
     // 硬限：仍超 → pinned 配额外（按 lastSeenAt 最旧）的 pinned 也可淘汰
     if (this.approxStoreBytes > this.maxDiskBytes) {
-      const pinned = this.listIssues().filter((issue) => issue.status === "open" || issue.status === "investigating");
+      const pinned = sorted.filter((issue) => issue.status === "open" || issue.status === "investigating");
       // listIssues 为最新在前；overflow 取最旧的（尾部）pinned
       const overflow = pinned.slice().reverse().slice(0, Math.max(0, pinned.length - this.maxPinnedIssues));
       for (const victim of overflow) {
@@ -1432,7 +1447,11 @@ export class IncidentStore {
       for (const occurrence of list) this.approxStoreBytes -= byteLength(occurrence);
     }
     this.occurrences.delete(incidentId);
+    const issue = this.issues.get(incidentId);
     this.issues.delete(incidentId);
+    if (issue && this.issuesByFingerprint.get(issue.fingerprint) === incidentId) {
+      this.issuesByFingerprint.delete(issue.fingerprint);
+    }
   }
 
   /** 热路径只标脏 + 排程防抖 flush；绝不同步写盘。 */
