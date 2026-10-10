@@ -271,4 +271,57 @@ describe("InMemoryWorldMemoryRepository", () => {
       { limit: 501 },
     )).toThrowError(RangeError);
   });
+
+  it("returns query results in insertion order (records append with monotonic sequence)", () => {
+    // 不变量锁死：records 按插入序追加且 sequence 严格递增，filter 保序
+    // 输出天然按 sequence 升序——排序移除后行为必须逐位不变。
+    const repository = new InMemoryWorldMemoryRepository({ nowMs: () => 0 });
+    repository.switchServer(PROFILE_A);
+    const kinds = ["SAFE_SITE", "HAZARD", "SAFE_SITE", "HIGHWAY_NODE", "HAZARD"] as const;
+    for (const [index, kind] of kinds.entries()) {
+      repository.put(record(PROFILE_A, {
+        kind,
+        payload: { index },
+        position: { x: 100 + index, y: 64, z: 200 },
+      }));
+    }
+    // findByKind：插入序（不是 observedAt/kind 序）。
+    expect(repository.findByKind(PROFILE_A, "SAFE_SITE").map((view) => view.payload))
+      .toEqual([{ index: 0 }, { index: 2 }]);
+    // findAtPosition / findNearby 同一不变量（混合 kind 过滤后仍按插入序）。
+    expect(repository.findAtPosition(
+      PROFILE_A,
+      DIMENSION,
+      { x: 102, y: 64, z: 200 },
+    ).map((view) => view.payload)).toEqual([{ index: 2 }]);
+    expect(repository.findNearby(
+      PROFILE_A,
+      DIMENSION,
+      { x: 100, y: 64, z: 200 },
+      3,
+    ).map((view) => view.payload)).toEqual([
+      { index: 0 },
+      { index: 1 },
+      { index: 2 },
+      { index: 3 },
+    ]);
+  });
+
+  it("evicts the oldest records beyond maxRecords regardless of scope", () => {
+    const repository = new InMemoryWorldMemoryRepository({ nowMs: () => 0, maxRecords: 2 });
+    repository.switchServer(PROFILE_A);
+    repository.put(record(PROFILE_A, { payload: { tag: "oldest" } }));
+    repository.put(record(PROFILE_A, { payload: { tag: "middle" } }));
+    repository.put(record(PROFILE_A, { payload: { tag: "newest" } }));
+    expect(repository.findByKind(PROFILE_A, "SAFE_SITE").map((view) => view.payload))
+      .toEqual([{ tag: "middle" }, { tag: "newest" }]);
+    // 再入一条，"middle" 也被淘汰——容量按插入序共享，不按 scope 分账。
+    repository.put(record(PROFILE_A, { payload: { tag: "final" } }));
+    expect(repository.findByKind(PROFILE_A, "SAFE_SITE").map((view) => view.payload))
+      .toEqual([{ tag: "newest" }, { tag: "final" }]);
+
+    expect(() => new InMemoryWorldMemoryRepository({ maxRecords: 0 })).toThrowError(RangeError);
+    expect(() => new InMemoryWorldMemoryRepository({ maxRecords: 1.5 })).toThrowError(RangeError);
+    expect(() => new InMemoryWorldMemoryRepository({ maxRecords: 1 })).not.toThrow();
+  });
 });

@@ -45,6 +45,12 @@ export type WorldMemorySwitchEvent = Readonly<{
 export type WorldMemoryRepositoryOptions = Readonly<{
   /** Inject a monotonic source in tests; production uses Date.now(). */
   nowMs?: () => number;
+  /**
+   * 有界保留上限（默认 10_000）：超出后按插入序（即 sequence 序）淘汰
+   * 最旧记录，与 scope 无关——所有服务器共享同一容量预算（与同仓
+   * EventRingBuffer/ReconLedgerStore 的 bounded 纪律一致）。非正整数拒绝。
+   */
+  maxRecords?: number;
 }>;
 
 export type WorldMemorySwitchListener = (
@@ -113,6 +119,7 @@ type StoredRecord = Readonly<{
 }>;
 
 const POSITION_EPSILON = 1e-6;
+const DEFAULT_MAX_RECORDS = 10_000;
 
 function cloneRecord(record: WorldMemoryRecord): WorldMemoryRecord {
   return {
@@ -155,15 +162,24 @@ function squaredDistance(left: WorldMemoryPosition, right: WorldMemoryPosition):
 }
 
 export class InMemoryWorldMemoryRepository implements WorldMemoryRepository {
+  /** 按插入序（sequence 严格递增，只追加不重排）保存；查询的 filter 保序
+   *  输出天然按 sequence 升序，无需再排序。 */
   private readonly records: StoredRecord[] = [];
   private readonly listeners = new Set<WorldMemorySwitchListener>();
   private readonly nowMs: () => number;
+  private readonly maxRecords: number;
   private lastNowMs: number | null = null;
   private nextSequence = 1;
   private currentServerProfile: string | null = null;
 
   constructor(options: WorldMemoryRepositoryOptions = {}) {
     this.nowMs = options.nowMs ?? (() => Date.now());
+    this.maxRecords = options.maxRecords ?? DEFAULT_MAX_RECORDS;
+    if (!Number.isInteger(this.maxRecords) || this.maxRecords < 1) {
+      throw new RangeError(
+        `World memory maxRecords must be a positive integer (got ${options.maxRecords}).`,
+      );
+    }
   }
 
   get activeServerProfileId(): string | null {
@@ -216,6 +232,7 @@ export class InMemoryWorldMemoryRepository implements WorldMemoryRepository {
     // allowed to be older than an already stored observation.
     const stored = cloneRecord(record);
     this.records.push({ sequence: this.nextSequence++, record: stored });
+    while (this.records.length > this.maxRecords) this.records.shift();
     return cloneRecord(stored);
   }
 
@@ -233,7 +250,6 @@ export class InMemoryWorldMemoryRepository implements WorldMemoryRepository {
         ({ record }) =>
           record.serverProfileId === scope && record.kind === parsedKind,
       )
-      .sort((left, right) => left.sequence - right.sequence)
       .slice(0, limit)
       .map(({ record }) => this.withFreshness(record, nowMs));
   }
@@ -260,7 +276,6 @@ export class InMemoryWorldMemoryRepository implements WorldMemoryRepository {
           samePosition(record.position, parsedPosition) &&
           (parsedOptions.kind === undefined || record.kind === parsedOptions.kind),
       )
-      .sort((left, right) => left.sequence - right.sequence)
       .slice(0, limit)
       .map(({ record }) => this.withFreshness(record, nowMs));
   }
@@ -295,7 +310,6 @@ export class InMemoryWorldMemoryRepository implements WorldMemoryRepository {
           squaredDistance(record.position, parsedCenter) <= radiusSquared &&
           (parsedOptions.kind === undefined || record.kind === parsedOptions.kind),
       )
-      .sort((left, right) => left.sequence - right.sequence)
       .slice(0, limit)
       .map(({ record }) => this.withFreshness(record, nowMs));
   }
