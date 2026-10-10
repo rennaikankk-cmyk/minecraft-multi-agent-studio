@@ -123,6 +123,8 @@ export type ControlLinkServerOptions = Readonly<{
   goalPlanner?: Pick<CoordinatorLocalPlanner, "planAndDispatch">;
   goalStore?: GoalLifecycleStore;
   queuedGoalStore?: QueuedGoalLifecycleStore;
+  /** 测试注入点：可钉住队列时钟/文件位置；缺省用服务器时钟 + 默认文件。 */
+  durableWaitingQueue?: DurableWaitingGoalQueue;
   autonomousTaskSource?: AutonomousTaskSource;
   taskHistoryReader?: TaskHistoryReader;
   logger: AppLogger;
@@ -239,7 +241,12 @@ export class ControlLinkServer {
     }
 
     this.now = options.now ?? (() => new Date());
-    this.durableWaitingQueue = new DurableWaitingGoalQueue();
+    // 单一时间源：等待死线由 this.now 计算，队列的过期判定必须用同一时钟
+    // （此前队列用真实 Date.now()，与服务器注入时钟漂移时会把未过期条目
+    // 误判过期、或反之）。
+    this.durableWaitingQueue =
+      options.durableWaitingQueue ??
+      new DurableWaitingGoalQueue({ now: () => this.now().getTime() });
     this.randomId = options.randomId ?? randomUUID;
     this.randomNonce =
       options.randomNonce ?? (() => randomBytes(32).toString("base64url"));
@@ -1648,13 +1655,23 @@ export class ControlLinkServer {
         expiresAt: new Date(entry.expiresAtMs).toISOString(),
       },
     };
+    const previous = this.pendingGoals.get(entry.operationId);
     const pending: PendingGoal = {
-      fingerprint: `durable-${entry.operationId}`,
+      // 与原提交同一内容指纹（durable entry 重建的 payload 与原请求一致）：
+      // 恢复执行窗口内的重复提交按内容合并等待，不会误报 GOAL_ID_CONFLICT。
+      fingerprint: goalFingerprint(request),
       request,
-      responders: new Map(),
+      // 接管原 pending 的 responder 集合（含原提交方）：终态帧送达完整集合，
+      // 不再只发一帧 waiting_for_bot 后沉默到客户端本地超时。
+      responders: previous?.responders ?? new Map(),
       controller: new AbortController(),
       execution: null,
     };
+    // map 条目所有权移交：否则 map 里仍是入队时的旧 pending，executeGoal /
+    // executeAcquiredGoal 的 finally 守卫（get(opId) === pending）永不命中，
+    // 条目（钉着 WebSocket session 引用）永久泄漏，累计到容量上限后 goal
+    // 通道整体 BACKPRESSURE 直到进程重启。
+    this.pendingGoals.set(entry.operationId, pending);
     void this.executeGoal(pending).finally(() => {
       if (!this.stopped && this.options.registry.goalExecutionReady(botId)) {
         this.resumeWaitingGoals(botId);
@@ -1959,6 +1976,7 @@ export class ControlLinkServer {
 
   private refreshPersistedGoals(): Promise<void> {
     if (!this.options.goalStore) return Promise.resolve();
+    this.sweepDurableWaitingGoals();
     if (this.goalRefreshInFlight) return this.goalRefreshInFlight;
     const refresh = this.options.goalStore
       .refresh(COMPLETED_GOAL_TTL_MS)
@@ -2004,6 +2022,22 @@ export class ControlLinkServer {
   private publishBotTaskState(botId: string, now: Date): void {
     const record = this.options.registry.get(botId, now);
     if (record) this.publishRecord(record);
+  }
+
+  /**
+   * durable 等待条目的主动过期清扫：bot 一直未 ready 时 claimForBot 永不
+   * 触发，过期条目此前无人清理——pendingGoals 条目永久泄漏（钉住 session
+   * 引用）且提交方永远收不到终态帧，只能等本地 AI_TIMEOUT。清扫出的条目
+   * 走与内存停车场相同的诚实过期路径（GOAL_EXPIRED_WAITING_FOR_BOT +
+   * completedGoals 缓存 + map 清理；durable 等待未取得 lease，无需
+   * recordError）。挂在 goal 恢复节拍（5s）上。
+   */
+  private sweepDurableWaitingGoals(): void {
+    for (const entry of this.durableWaitingQueue.purgeExpired()) {
+      void this.expireParkedGoal(entry.botId, entry.operationId, {
+        cause: "deadline",
+      });
+    }
   }
 
   private projectBotState(record: BotRegistryRecord): PublicBotDetailV1 {

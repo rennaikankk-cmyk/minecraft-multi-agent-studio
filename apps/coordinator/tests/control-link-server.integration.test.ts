@@ -1,4 +1,7 @@
 import { createHash, createHmac } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 import type { AppLogger } from "@minecraft-studio/observability";
 import {
@@ -35,6 +38,7 @@ import {
   type QueuedGoalLifecycleStore,
   type TaskHistoryReader,
 } from "../src/index.js";
+import { DurableWaitingGoalQueue } from "../src/durable-waiting-queue.js";
 
 const NOW = new Date("2026-08-07T10:00:00.000Z");
 const BOT_ID = "worker-01";
@@ -762,6 +766,150 @@ describe("Coordinator Control Link server", () => {
     expect(internals.pendingGoals.size).toBe(0);
   });
 
+  it("hands the durable-wait goal over on resume: terminal frame reaches the original responder and pendingGoals drains", async () => {
+    // 回归：resumeWaitingGoals 重建的 pending 此前不接管 map 条目——
+    // pendingGoals 永久泄漏（128 条后 goal 通道整体 BACKPRESSURE），
+    // 原提交方只收到 waiting_for_bot 后沉默。接管后：终态帧送达原
+    // responder，map 排空，恢复窗口内语义完整。
+    const queueDir = mkdtempSync(path.join(tmpdir(), "durable-wait-resume-"));
+    const queue = new DurableWaitingGoalQueue({
+      filePath: path.join(queueDir, "waiting-goals.json"),
+      now: () => NOW.getTime(),
+    });
+    const planAndDispatch = vi.fn(async (request: any) => ({
+      action: "noop" as const,
+      reasonCode: "NO_SAFE_SKILL",
+      ai: {
+        requestId: request.requestId,
+        botId: request.botId,
+        priority: 30,
+        value: { content: "{}", model: "local-test", usage: {} },
+        attempts: 1,
+        enqueuedAt: NOW.toISOString(),
+        startedAt: NOW.toISOString(),
+        completedAt: NOW.toISOString(),
+        queueTimeMs: 2,
+        executionTimeMs: 98,
+        totalTimeMs: 100,
+      },
+    }));
+    const { registry, url, server } = await startServer({
+      goalPlanner: { planAndDispatch },
+      goalStore: testGoalStore(),
+      durableWaitingQueue: queue,
+    });
+    // 注意：先不 ingest——bot 未 ready，goal 走 durable 等待。
+    const { socket, reader } = await authenticate(url);
+    await readSnapshot(reader);
+    const operationId = testUuid(992);
+    socket.send(JSON.stringify(controlLinkGoalRequestV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: testUuid(993),
+      timestamp: NOW.toISOString(),
+      type: "control.link.goal-request.v1",
+      payload: {
+        coordinatorInstanceId: "coordinator-test",
+        clientId: CLIENT_ID,
+        controlApiInstanceId: CONTROL_API_INSTANCE_ID,
+        operationId,
+        taskId: operationId,
+        botId: BOT_ID,
+        actorId: "operator-01",
+        operatorGoal: "采集附近的木材",
+        timeoutMs: 30_000,
+        issuedAt: NOW.toISOString(),
+        expiresAt: new Date(NOW.getTime() + 35_000).toISOString(),
+      },
+    })));
+    await expect(nextGoalResponse(reader)).resolves.toMatchObject({
+      type: "control.link.goal-response.v1",
+      ok: true,
+      payload: {
+        operationId,
+        result: { action: "waiting_for_bot" },
+      },
+    });
+    const internals = server as unknown as { pendingGoals: Map<string, unknown> };
+    expect(internals.pendingGoals.size).toBe(1);
+
+    // bot 就绪翻沿 → 恢复执行 → 终态帧必须送达原提交方（同一 responder）。
+    registry.ingest(statusMessage(1), NOW);
+    registry.ingest(catalogMessage(2), NOW);
+    await expect(nextGoalResponse(reader)).resolves.toMatchObject({
+      type: "control.link.goal-response.v1",
+      ok: true,
+      payload: {
+        operationId,
+        result: { action: "noop", reasonCode: "NO_SAFE_SKILL" },
+      },
+    });
+    expect(planAndDispatch).toHaveBeenCalledTimes(1);
+    expect(internals.pendingGoals.size).toBe(0);
+    rmSync(queueDir, { recursive: true, force: true });
+  });
+
+  it("expires durable-wait goals honestly when the bot never becomes ready", async () => {
+    // 回归：bot 一直未 ready 时 durable 条目过期后无人清理——pendingGoals
+    // 泄漏且提交方永远收不到终态帧。清扫挂在 goal 恢复节拍上，过期条目走
+    // 与内存停车场相同的诚实过期路径。
+    let queueNow = NOW.getTime();
+    const queueDir = mkdtempSync(path.join(tmpdir(), "durable-wait-expire-"));
+    const queue = new DurableWaitingGoalQueue({
+      filePath: path.join(queueDir, "waiting-goals.json"),
+      now: () => queueNow,
+    });
+    const planAndDispatch = vi.fn(async () => {
+      throw new Error("planner_must_not_be_reached");
+    });
+    const { url, server } = await startServer({
+      goalPlanner: { planAndDispatch },
+      goalStore: testGoalStore(),
+      durableWaitingQueue: queue,
+    });
+    const { socket, reader } = await authenticate(url);
+    await readSnapshot(reader);
+    const operationId = testUuid(994);
+    socket.send(JSON.stringify(controlLinkGoalRequestV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: testUuid(995),
+      timestamp: NOW.toISOString(),
+      type: "control.link.goal-request.v1",
+      payload: {
+        coordinatorInstanceId: "coordinator-test",
+        clientId: CLIENT_ID,
+        controlApiInstanceId: CONTROL_API_INSTANCE_ID,
+        operationId,
+        taskId: operationId,
+        botId: BOT_ID,
+        actorId: "operator-01",
+        operatorGoal: "采集附近的木材",
+        timeoutMs: 30_000,
+        issuedAt: NOW.toISOString(),
+        expiresAt: new Date(NOW.getTime() + 35_000).toISOString(),
+      },
+    })));
+    await expect(nextGoalResponse(reader)).resolves.toMatchObject({
+      type: "control.link.goal-response.v1",
+      ok: true,
+      payload: { operationId, result: { action: "waiting_for_bot" } },
+    });
+    const internals = server as unknown as { pendingGoals: Map<string, unknown> };
+    expect(internals.pendingGoals.size).toBe(1);
+
+    // 队列时钟越过死线；触发一次恢复节拍（生产为 5s interval）。
+    queueNow = NOW.getTime() + 31_000;
+    await (server as unknown as { refreshPersistedGoals(): Promise<void> }).refreshPersistedGoals();
+
+    await expect(nextGoalResponse(reader)).resolves.toMatchObject({
+      type: "control.link.goal-response.v1",
+      ok: false,
+      payload: { operationId, errorCode: "GOAL_EXPIRED_WAITING_FOR_BOT" },
+    });
+    expect(planAndDispatch).not.toHaveBeenCalled();
+    expect(internals.pendingGoals.size).toBe(0);
+    rmSync(queueDir, { recursive: true, force: true });
+  });
+
   it("streams queued goal state through completion before acknowledging success", async () => {
     const operationId = testUuid(1100);
     const request = goalRequest(operationId, testUuid(1101));
@@ -1333,6 +1481,7 @@ async function startServer(
     goalPlanner: { planAndDispatch: (...args: any[]) => Promise<any> };
     goalStore: GoalLifecycleStore;
     queuedGoalStore: QueuedGoalLifecycleStore;
+    durableWaitingQueue: DurableWaitingGoalQueue;
     taskHistoryReader: TaskHistoryReader;
     taskReadCapability: boolean;
     maxPendingTaskReads: number;
@@ -1374,6 +1523,9 @@ async function startServer(
     ...(overrides.queuedGoalStore === undefined
       ? {}
       : { queuedGoalStore: overrides.queuedGoalStore }),
+    ...(overrides.durableWaitingQueue === undefined
+      ? {}
+      : { durableWaitingQueue: overrides.durableWaitingQueue }),
     ...(overrides.taskHistoryReader === undefined
       ? {}
       : { taskHistoryReader: overrides.taskHistoryReader }),

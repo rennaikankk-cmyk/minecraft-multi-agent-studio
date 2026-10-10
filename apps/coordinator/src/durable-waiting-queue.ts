@@ -184,6 +184,25 @@ export class DurableWaitingGoalQueue {
     return this.entries.get(operationId) ?? null;
   }
 
+  /**
+   * 主动清扫全部已过期条目：bot 一直未 ready 时 claimForBot/dequeueForBot
+   * 永不被调用，过期条目此前只有被动清理路径（无人触发）——条目连同
+   * 提交方等待一起被遗忘。claimed 条目不在清扫范围（正在恢复执行，由
+   * completeClaim / 崩溃重置负责）。返回被清除的条目供调用方发诚实终态。
+   */
+  purgeExpired(): DurableWaitingGoal[] {
+    const nowMs = this.now();
+    const purged: DurableWaitingGoal[] = [];
+    for (const entry of this.entries.values()) {
+      if (entry.claimedAtMs === undefined && entry.expiresAtMs <= nowMs) {
+        this.entries.delete(entry.operationId);
+        purged.push(entry);
+      }
+    }
+    if (purged.length > 0) this.persist();
+    return purged;
+  }
+
   get size(): number {
     return this.entries.size;
   }
