@@ -2863,7 +2863,10 @@ export class SingleBotRuntime {
   ): void {
     if (generation !== this.generation || this.stopping || !this.client) return;
     const policy = this.profile.chatTrust;
-    const dimension = this.client.snapshot().position?.dimension;
+    // 每条聊天都要绑当前维度做防伪证据：优先轻量访问器（与快照同源同值），
+    // 避免为读一个字段构建全量快照（inventory 全槽扫描等）；未实现的
+    // 遗留/测试 client 回退快照路径，语义不变。
+    const dimension = this.client.currentDimension?.() ?? this.client.snapshot().position?.dimension;
     if (!policy || !info.protocolIdentity || !dimension || policy.authMode !== this.profile.auth) return;
     const identity: ChatIdentityEvidence = {
       ...info.protocolIdentity, schemaVersion: "1.0", source: "protocol-player-chat",

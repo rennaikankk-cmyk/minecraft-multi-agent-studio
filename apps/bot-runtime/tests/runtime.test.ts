@@ -14,6 +14,7 @@ import { ensureItemOutputSchema } from "@minecraft-studio/skills";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  BotChatMessage,
   BotClient,
   BotClientHandlers,
   BotClientSnapshot,
@@ -245,6 +246,13 @@ class FakeBotClient implements BotClient {
   stateChanged(): void {
     this.handlers?.onStateChanged();
   }
+
+  chat(message: BotChatMessage): void {
+    this.handlers?.onChat?.(message);
+  }
+
+  /** 可选轻量维度访问器；测试按需安装/删除以覆盖两条路径。 */
+  currentDimension?: () => string;
 
   setSnapshot(next: BotClientSnapshot): void {
     this.currentSnapshot = structuredClone(next);
@@ -605,6 +613,75 @@ describe("SingleBotRuntime", () => {
     );
 
     await runtime.stop();
+  });
+
+  it("binds chat identity evidence via the lightweight dimension accessor without a full snapshot", async () => {
+    const messages: BotTelemetryMessageV1[] = [];
+    const client = new FakeBotClient();
+    const chatProfile: ServerProfile = {
+      ...profile,
+      worldId: "season-2",
+      chatTrust: {
+        schemaVersion: "1.0",
+        serverProfileId: profile.id,
+        worldId: "season-2",
+        revision: 1,
+        authMode: "offline",
+        usernames: ["Ally"],
+        uuids: [],
+        offlineTrust: "server-player-list",
+        allowUnsignedOnline: false,
+      },
+      combat: {
+        enabled: true,
+        stance: "preserve-life",
+        whitelist: { usernames: ["Ally"], uuids: [] },
+      },
+    };
+    const runtime = new SingleBotRuntime(chatProfile, {
+      createClient: () => client,
+      messageSink: (message) => messages.push(message),
+      logger,
+      now: () => new Date(Date.now()),
+      randomId: () => FIXED_UUID,
+    });
+    runtime.start();
+    client.spawn();
+
+    const chatInfo: BotChatMessage = {
+      speaker: "Ally",
+      message: "过来住",
+      protocolIdentity: {
+        senderUuid: "01234567-89ab-cdef-0123-456789abcdef",
+        playerListUsername: "Ally",
+        signatureVerified: true,
+        channel: "public",
+      },
+    };
+
+    // 访问器存在：证据维度来自访问器，聊天路径不再构建全量快照。
+    client.currentDimension = () => "minecraft:the_nether";
+    const snapshotSpy = vi.spyOn(client, "snapshot");
+    client.chat(chatInfo);
+    const chatMessage = messages.find(({ type }) => type === "bot.chat-received.v1");
+    expect(chatMessage?.payload).toMatchObject({
+      speaker: "Ally",
+      identity: { dimension: "minecraft:the_nether" },
+    });
+    expect(snapshotSpy).not.toHaveBeenCalled();
+    snapshotSpy.mockRestore();
+
+    // 访问器缺失（遗留/测试 client）：回退快照维度，放行行为不变。
+    delete client.currentDimension;
+    client.chat(chatInfo);
+    const fallback = messages
+      .filter(({ type }) => type === "bot.chat-received.v1")
+      .at(-1);
+    expect(fallback?.payload).toMatchObject({
+      identity: { dimension: snapshot.position.dimension },
+    });
+
+    await runtime.stop("test");
   });
 
   it("logs the pre-first-packet status rejection as a warning, then as an error once status has flowed", async () => {

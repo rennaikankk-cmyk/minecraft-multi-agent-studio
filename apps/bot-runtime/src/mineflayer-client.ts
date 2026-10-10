@@ -973,6 +973,11 @@ export class MineflayerBotClient implements BotClient {
     return this.noHungerController.snapshot();
   }
 
+  /** 与 snapshot().position.dimension 同一表达式；聊天证据路径免全量快照。 */
+  currentDimension(): string {
+    return normalizeDimension(String(this.bot.game.dimension));
+  }
+
   snapshot(): BotClientSnapshot {
     const position = this.bot.entity.position;
     const ping = this.bot.player?.ping;

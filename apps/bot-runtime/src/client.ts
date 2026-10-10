@@ -145,6 +145,13 @@ export interface BotClient {
   /** Phase 4 测量面（可选）：客户端内部子段计时记录器。 */
   setPerfRecorder?(record: (category: string, durationMs: number, detail?: Readonly<Record<string, unknown>>) => void): void;
   snapshot(): BotClientSnapshot;
+  /**
+   * 轻量当前维度读取：与 snapshot().position.dimension 同源同值（同一
+   * normalizeDimension 表达式），但不构建完整快照。聊天身份证据每条
+   * 消息都要绑定当前维度，这条评估链之外的路径不应支付全量快照成本
+   * （inventory 全槽扫描等）。absent = 调用方回退 snapshot()。
+   */
+  currentDimension?(): string;
   executeSafetyAction(action: L0SafetyAction): Promise<L0SafetyActionResult>;
   /** Stop ordinary gathering/pathfinding before a higher-priority reaction. */
   interruptNormalActions?(): void;
