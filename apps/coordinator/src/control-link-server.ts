@@ -133,6 +133,8 @@ export type ControlLinkServerOptions = Readonly<{
   randomNonce?: () => string;
   maxSessions?: number;
   maxPendingStops?: number;
+  /** goal 通道容量；未配置时沿用 maxPendingStops（既有行为）。 */
+  maxPendingGoals?: number;
   maxPendingTaskReads?: number;
   maxBufferedSnapshotEvents?: number;
   pingIntervalMs?: number;
@@ -169,7 +171,7 @@ export class ControlLinkServer {
   private readonly unsubscribeReadiness: () => void;
   private readonly maxSessions: number;
   private readonly maxPendingStops: number;
-  private readonly maxPendingTaskReads: number;
+  private readonly maxPendingGoals: number;  private readonly maxPendingTaskReads: number;
   private readonly maxBufferedSnapshotEvents: number;
   private readonly pingIntervalMs: number;
   private readonly unsubscribeAutonomous: () => void;
@@ -261,6 +263,15 @@ export class ControlLinkServer {
       1,
       1_000,
       "maxPendingStops",
+    );
+    // goal 容量此前复用 maxPendingStops：调 stop 上限会隐式钳制 goal 通道
+    // （两个独立通道的背压语义混在同一配置名下）。显式可解耦；未配置时
+    // 沿用既有行为（与 stop 同限），不改变现有部署的容量语义。
+    this.maxPendingGoals = boundedInteger(
+      options.maxPendingGoals ?? this.maxPendingStops,
+      1,
+      1_000,
+      "maxPendingGoals",
     );
     this.maxPendingTaskReads = boundedInteger(
       options.maxPendingTaskReads ?? 128,
@@ -1203,7 +1214,7 @@ export class ControlLinkServer {
       });
       return;
     }
-    if (this.pendingGoals.size >= this.maxPendingStops) {
+    if (this.pendingGoals.size >= this.maxPendingGoals) {
       this.sendGoalFailure(session, request, "CONTROL_LINK_BACKPRESSURE");
       return;
     }

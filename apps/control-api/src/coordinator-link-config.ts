@@ -15,6 +15,8 @@ export type CoordinatorLinkClientConfig = Readonly<{
     maxDelayMs: number;
   }>;
   maxPendingStops: number;
+  /** goal 通道容量；与服务端同名配置对应，避免 stop 上限隐式钳制 goal。 */
+  maxPendingGoals: number;
   maxSocketBufferedBytes: number;
 }>;
 
@@ -78,6 +80,7 @@ export function loadCoordinatorLinkConfig(
     stopTimeoutMs: 17_000,
     reconnect: { baseDelayMs: 250, maxDelayMs: 8_000 },
     maxPendingStops: 128,
+    maxPendingGoals: 128,
     maxSocketBufferedBytes: 256 * 1_024,
   };
 }

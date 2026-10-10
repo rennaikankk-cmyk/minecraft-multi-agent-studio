@@ -374,7 +374,7 @@ export class CoordinatorLinkClient
         "Coordinator Link has no complete authoritative snapshot.",
       );
     }
-    if (this.pendingGoals.size >= this.options.config.maxPendingStops) {
+    if (this.pendingGoals.size >= this.options.config.maxPendingGoals) {
       throw new CoordinatorGoalError(
         "CONTROL_LINK_BACKPRESSURE",
         "Coordinator Link has reached its pending goal limit.",

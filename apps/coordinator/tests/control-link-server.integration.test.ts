@@ -910,6 +910,96 @@ describe("Coordinator Control Link server", () => {
     rmSync(queueDir, { recursive: true, force: true });
   });
 
+  it("decouples goal capacity from stop capacity via maxPendingGoals (legacy fallback preserved)", async () => {
+    // 命名陷阱回归：goal 容量此前复用 maxPendingStops——调 stop 上限会隐式
+    // 钳制 goal 通道。bot 不 ready 的 durable 等待让 goal 稳定驻留
+    // pendingGoals，用钉住时钟的队列避免过期干扰。
+    const queueDir = mkdtempSync(path.join(tmpdir(), "goal-capacity-"));
+    const pinnedQueue = (name: string) =>
+      new DurableWaitingGoalQueue({
+        filePath: path.join(queueDir, `${name}.json`),
+        now: () => NOW.getTime(),
+      });
+    const planAndDispatch = vi.fn(async () => {
+      throw new Error("planner_must_not_be_reached");
+    });
+    const goalFrame = (index: number) => {
+      const operationId = testUuid(1_000 + index * 2);
+      return controlLinkGoalRequestV1Schema.parse({
+        schemaVersion: "1.0",
+        messageId: testUuid(1_001 + index * 2),
+        timestamp: NOW.toISOString(),
+        type: "control.link.goal-request.v1",
+        payload: {
+          coordinatorInstanceId: "coordinator-test",
+          clientId: CLIENT_ID,
+          controlApiInstanceId: CONTROL_API_INSTANCE_ID,
+          operationId,
+          taskId: operationId,
+          botId: BOT_ID,
+          actorId: "operator-01",
+          operatorGoal: "采集附近的木材",
+          timeoutMs: 30_000,
+          issuedAt: NOW.toISOString(),
+          expiresAt: new Date(NOW.getTime() + 35_000).toISOString(),
+        },
+      });
+    };
+
+    // 解耦：stop 上限 1 不再钳制 goal——goal 通道按自己的上限 2 背压。
+    {
+      const { url } = await startServer({
+        goalPlanner: { planAndDispatch },
+        goalStore: testGoalStore(),
+        durableWaitingQueue: pinnedQueue("decoupled"),
+        maxPendingStops: 1,
+        maxPendingGoals: 2,
+      });
+      const { socket, reader } = await authenticate(url);
+      await readSnapshot(reader);
+      for (let index = 0; index < 3; index += 1) {
+        socket.send(JSON.stringify(goalFrame(index)));
+      }
+      await expect(nextGoalResponse(reader)).resolves.toMatchObject({
+        ok: true,
+        payload: { result: { action: "waiting_for_bot" } },
+      });
+      await expect(nextGoalResponse(reader)).resolves.toMatchObject({
+        ok: true,
+        payload: { result: { action: "waiting_for_bot" } },
+      });
+      await expect(nextGoalResponse(reader)).resolves.toMatchObject({
+        ok: false,
+        payload: { errorCode: "CONTROL_LINK_BACKPRESSURE" },
+      });
+    }
+
+    // 遗留回退：未配置 maxPendingGoals 时沿用 maxPendingStops，行为不变。
+    {
+      const { url } = await startServer({
+        goalPlanner: { planAndDispatch },
+        goalStore: testGoalStore(),
+        durableWaitingQueue: pinnedQueue("legacy"),
+        maxPendingStops: 1,
+      });
+      const { socket, reader } = await authenticate(url);
+      await readSnapshot(reader);
+      socket.send(JSON.stringify(goalFrame(10)));
+      socket.send(JSON.stringify(goalFrame(11)));
+      await expect(nextGoalResponse(reader)).resolves.toMatchObject({
+        ok: true,
+        payload: { result: { action: "waiting_for_bot" } },
+      });
+      await expect(nextGoalResponse(reader)).resolves.toMatchObject({
+        ok: false,
+        payload: { errorCode: "CONTROL_LINK_BACKPRESSURE" },
+      });
+    }
+
+    expect(planAndDispatch).not.toHaveBeenCalled();
+    rmSync(queueDir, { recursive: true, force: true });
+  });
+
   it("streams queued goal state through completion before acknowledging success", async () => {
     const operationId = testUuid(1100);
     const request = goalRequest(operationId, testUuid(1101));
@@ -1477,6 +1567,7 @@ async function startServer(
   overrides: Partial<{
     maxSessions: number;
     maxPendingStops: number;
+    maxPendingGoals: number;
     stopController: { requestStop: (...args: any[]) => Promise<any> };
     goalPlanner: { planAndDispatch: (...args: any[]) => Promise<any> };
     goalStore: GoalLifecycleStore;
@@ -1539,6 +1630,9 @@ async function startServer(
     ...(overrides.maxPendingStops === undefined
       ? {}
       : { maxPendingStops: overrides.maxPendingStops }),
+    ...(overrides.maxPendingGoals === undefined
+      ? {}
+      : { maxPendingGoals: overrides.maxPendingGoals }),
     ...(overrides.maxPendingTaskReads === undefined
       ? {}
       : { maxPendingTaskReads: overrides.maxPendingTaskReads }),
