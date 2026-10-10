@@ -152,6 +152,35 @@ describe("MineflayerBotClient lifecycle", () => {
     expect(onStateChanged).toHaveBeenCalledTimes(2);
   });
 
+  it("computes snapshot hasSafeFood with reserve and metadata gating (boolean short-circuit)", () => {
+    const makeBot = (
+      items: Array<{ name: string; type: number; count: number }>,
+      foodsByName: Record<string, { foodPoints: number; effectiveQuality?: number }>,
+    ) =>
+      Object.assign(new EventEmitter(), {
+        health: 20,
+        entity: { position: new Vec3(4, 65, 7), velocity: new Vec3(0, 0, 0) },
+        game: { dimension: "minecraft:overworld" },
+        inventory: { items: () => items, slots: [] },
+        getControlState: () => false,
+        registry: { foodsByName },
+      }) as unknown as Bot;
+    const hasSafeFoodOf = (bot: Bot) => new MineflayerBotClient(bot, "auto").snapshot().safety.hasSafeFood;
+
+    // 空背包与不可食用物品 → false。
+    expect(hasSafeFoodOf(makeBot([], {}))).toBe(false);
+    expect(hasSafeFoodOf(makeBot([{ name: "stone", type: 1, count: 8 }], {}))).toBe(false);
+    // 普通安全食物（非种子，储备不扣减）+ 有效元数据 → true。
+    expect(hasSafeFoodOf(makeBot([{ name: "bread", type: 1, count: 3 }], { bread: { foodPoints: 5, effectiveQuality: 6 } }))).toBe(true);
+    // 默认种子储备：唯一一根胡萝卜留给下一轮播种 → false；第二根才可吃。
+    expect(hasSafeFoodOf(makeBot([{ name: "carrot", type: 2, count: 1 }], { carrot: { foodPoints: 3, effectiveQuality: 3 } }))).toBe(false);
+    expect(hasSafeFoodOf(makeBot([{ name: "carrot", type: 2, count: 2 }], { carrot: { foodPoints: 3, effectiveQuality: 3 } }))).toBe(true);
+    // 元数据无效（foodPoints=0 / NaN / 缺项）→ false。
+    expect(hasSafeFoodOf(makeBot([{ name: "bread", type: 1, count: 3 }], { bread: { foodPoints: 0 } }))).toBe(false);
+    expect(hasSafeFoodOf(makeBot([{ name: "bread", type: 1, count: 3 }], { bread: { foodPoints: Number.NaN } }))).toBe(false);
+    expect(hasSafeFoodOf(makeBot([{ name: "bread", type: 1, count: 3 }], {}))).toBe(false);
+  });
+
   it("reports health decreases and interrupts ordinary movement actions", () => {
     const emitter = new EventEmitter();
     const pathfinder = { stop: vi.fn() };

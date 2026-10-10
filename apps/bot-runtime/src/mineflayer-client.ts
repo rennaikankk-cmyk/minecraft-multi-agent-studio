@@ -1082,7 +1082,7 @@ export class MineflayerBotClient implements BotClient {
           usedSlots: inventorySlots.filter((item) => item !== null).length,
           totalSlots: inventorySlots.length,
         },
-        hasSafeFood: this.safeFoodItems().length > 0,
+        hasSafeFood: this.hasSafeFoodItem(),
         movementRequested: (["forward", "back", "left", "right"] as const)
           .some((control) => this.bot.getControlState(control)),
       },
@@ -6327,8 +6327,28 @@ export class MineflayerBotClient implements BotClient {
       );
   }
 
+  /**
+   * snapshot().safety.hasSafeFood 的布尔短路：判定必须与 safeFoodItems()
+   * 完全一致（安全食物名 → 储备扣减 → 有效元数据 foodPoints>0），一次
+   * items() 遍历、不建数组不排序，命中即返回。评估链每拍都调它，只是
+   * 不需要排序后的完整清单。
+   */
+  private hasSafeFoodItem(): boolean {
+    const registry = this.bot.registry as unknown as FoodRegistry;
+    const items = this.bot.inventory.items();
+    const totals = new Map<string, number>();
+    for (const item of items) totals.set(item.name, (totals.get(item.name) ?? 0) + item.count);
+    for (const item of items) {
+      if (!SAFE_FOOD_NAMES.has(item.name)) continue;
+      if (this.foodReserves.available(item.name, totals.get(item.name) ?? item.count, true) <= 0) continue;
+      const metadata = registry.foodsByName?.[item.name];
+      if (metadata !== undefined && Number.isFinite(metadata.foodPoints) && metadata.foodPoints > 0) return true;
+    }
+    return false;
+  }
+
   private async forageSafeFood(signal?: AbortSignal): Promise<L0SafetyActionResult> {
-    if (this.safeFoodItems().length > 0) {
+    if (this.hasSafeFoodItem()) {
       return { outcome: "skipped", errorCode: "SAFE_FOOD_ALREADY_AVAILABLE" };
     }
     return this.forageRound(SAFE_FORAGE_TOTAL_BUDGET_MS, signal);

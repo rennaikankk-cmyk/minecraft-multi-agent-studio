@@ -36,7 +36,12 @@ type QueryPort = {
 type Cached = { identity: string; revision: number; capturedAtMs: number; request: WorldQueryRequest; result: SpatialResult };
 type Job = { key: string; request: WorldQueryRequest; context: WorldSyncQueryContext; identity: string; epoch: number;
   promise: Promise<WorldQueryView>; resolve(value: WorldQueryView): void };
-const identity = (context: WorldSyncQueryContext) => JSON.stringify([context.scope, context.sessionEpoch, context.dimensionEpoch]);
+// 复合键用 NUL 分隔：字段类型均为标识符/数字/三值枚举，不可能含 NUL，
+// 拼接与 JSON.stringify 等价无碰撞。identity/key 在评估链每拍多次调用，
+// 省掉小对象序列化。
+const identity = (context: WorldSyncQueryContext) =>
+  `${context.scope.selectorRevision}\u0000${context.scope.botSessionId}\u0000${context.scope.serverProfileId}` +
+  `\u0000${context.scope.dimension}\u0000${context.scope.minecraftVersion}\u0000${context.sessionEpoch}\u0000${context.dimensionEpoch}`;
 const canonical = (request: WorldQueryRequest): WorldQueryRequest => ({ ...request, origin: { ...request.origin,
   x: Math.floor(request.origin.x), y: Math.floor(request.origin.y), z: Math.floor(request.origin.z) } });
 
@@ -61,7 +66,11 @@ export class WorldQueryProvider {
   getMetrics() { return { ...this.metrics, queueDepth: this.queue.length, inFlight: this.active === null ? 0 : 1,
     cacheEntries: this.cache.size, lastFailure: this.lastFailure }; }
 
-  private key(request: WorldQueryRequest): string { return JSON.stringify(request); }
+  private key(request: WorldQueryRequest): string {
+    const { origin } = request;
+    return `${origin.x}\u0000${origin.y}\u0000${origin.z}\u0000${origin.dimension}\u0000${origin.serverProfileId}` +
+      `\u0000${request.radius}\u0000${request.count}\u0000${request.selectors}\u0000${request.matching}`;
+  }
 
   private unavailable(request: WorldQueryRequest, reason: WorldQueryReason, context = this.port.context()): WorldQueryView {
     return { status: reason === "incomplete" ? "INCOMPLETE" : context?.state === "desynced" || context?.state === "degraded" ? "DESYNCED" : "UNAVAILABLE",
