@@ -704,6 +704,64 @@ describe("Coordinator Control Link server", () => {
     expect(planAndDispatch).toHaveBeenCalledTimes(1);
   });
 
+  it("fails the goal request honestly when goalStore.begin throws (no unhandled rejection, no process crash)", async () => {
+    // begin 段的 GoalLifecycleStoreError 曾无 catch 逃逸到 void execution：
+    // 进程无 unhandledRejection 兜底 → Coordinator 整体崩溃；客户端只能等
+    // AI_TIMEOUT 误收场。回归断言三件事：失败帧诚实送达（BOT_UNAVAILABLE）、
+    // pendingGoals 排空（通道不被残留条目楔死）、错误如实落日志。
+    const begin = vi.fn(async () => {
+      throw new GoalLifecycleStoreError(
+        "BOT_UNAVAILABLE",
+        "The requested Bot has no current ServerProfile context.",
+      );
+    });
+    const planAndDispatch = vi.fn(async () => {
+      throw new Error("planner_must_not_be_reached");
+    });
+    const { registry, url, server } = await startServer({
+      goalPlanner: { planAndDispatch },
+      goalStore: { ...testGoalStore(), begin },
+    });
+    registry.ingest(statusMessage(1), NOW);
+    registry.ingest(catalogMessage(2), NOW);
+    const { socket, reader } = await authenticate(url);
+    await readSnapshot(reader);
+    const operationId = testUuid(987);
+    const goalMessage = controlLinkGoalRequestV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: testUuid(988),
+      timestamp: NOW.toISOString(),
+      type: "control.link.goal-request.v1",
+      payload: {
+        coordinatorInstanceId: "coordinator-test",
+        clientId: CLIENT_ID,
+        controlApiInstanceId: CONTROL_API_INSTANCE_ID,
+        operationId,
+        taskId: operationId,
+        botId: BOT_ID,
+        actorId: "operator-01",
+        operatorGoal: "采集附近的木材",
+        timeoutMs: 30_000,
+        issuedAt: NOW.toISOString(),
+        expiresAt: new Date(NOW.getTime() + 35_000).toISOString(),
+      },
+    });
+    socket.send(JSON.stringify(goalMessage));
+
+    await expect(nextGoalResponse(reader)).resolves.toMatchObject({
+      type: "control.link.goal-response.v1",
+      ok: false,
+      payload: { operationId, errorCode: "BOT_UNAVAILABLE" },
+    });
+    expect(logger.error).toHaveBeenCalledWith(
+      "coordinator_control_link_goal_begin_failed",
+      expect.objectContaining({ traceId: operationId, code: "BOT_UNAVAILABLE" }),
+    );
+    expect(planAndDispatch).not.toHaveBeenCalled();
+    const internals = server as unknown as { pendingGoals: Map<string, unknown> };
+    expect(internals.pendingGoals.size).toBe(0);
+  });
+
   it("streams queued goal state through completion before acknowledging success", async () => {
     const operationId = testUuid(1100);
     const request = goalRequest(operationId, testUuid(1101));

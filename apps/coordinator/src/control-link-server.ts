@@ -1370,6 +1370,30 @@ export class ControlLinkServer {
         throw new Error(timedOut ? "goal_timeout" : "goal_aborted");
       }
       await this.executeAcquiredGoal(pending, lease, timer);
+    } catch (cause) {
+      // begin 段失败：goalStore.begin 对 DB 故障（lifecycleError 包装为
+      // CONTROL_LINK_INTERNAL_ERROR）、BOT_UNAVAILABLE（goalExecutionReady
+      // 检查与 begin 之间注册表掉线）和 GOAL_ID_CONFLICT 一律 throw。本段
+      // 此前只有 try/finally 没有 catch，rejection 逃逸到 handleGoalRequest
+      // 的 void execution，而进程没有 unhandledRejection 兜底——一次常规
+      // 瞬时故障即崩溃整个 Coordinator（对照：resumeWaitingGoals 对同一
+      // 函数挂了 catch，唯独直连请求路径漏了）。此处诚实终结请求：错误码
+      // 走既有 mapGoalExecutionError 白名单映射，不新增错误面；lease 尚未
+      // 取得，无需 recordError / 释放。executeAcquiredGoal 自带完整 catch，
+      // 不会把错误抛到这里。
+      clearTimeout(timer);
+      const errorCode = mapGoalExecutionError(cause, timedOut, controller.signal.aborted);
+      if (!this.stopped) {
+        for (const responder of pending.responders.values()) {
+          this.sendGoalFailure(responder.session, request, errorCode, responder.requestMessageId);
+        }
+      }
+      safeLog(this.options.logger, "error", "coordinator_control_link_goal_begin_failed", {
+        traceId: request.payload.operationId,
+        taskId: request.payload.taskId,
+        botId: request.payload.botId,
+        code: errorCode,
+      });
     } finally {
       // parked goal 的 pendingGoals 条目是幂等多路复用与唤醒的锚点，不能清。
       if (!parked && this.pendingGoals.get(request.payload.operationId) === pending) {
