@@ -296,6 +296,23 @@ function addSkillInputSchemaIssue(
   if (issues.length < 32) issues.push({ path, message });
 }
 
+/** validateSkillInputSchema 尾段（字节预算 + zod 编译探针）的有界 memo。 */
+const SKILL_INPUT_SCHEMA_MEMO_MAX = 1_024;
+const skillInputSchemaEncoder = new TextEncoder();
+const skillInputSchemaMemo = new Map<
+  string,
+  Readonly<{ bytesWithinLimit: boolean; compiles: boolean }>
+>();
+
+function skillInputSchemaCompiles(value: unknown): boolean {
+  try {
+    z.fromJSONSchema(value as Parameters<typeof z.fromJSONSchema>[0]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function validateSkillInputSchema(value: unknown): SkillInputSchemaIssue[] {
   const issues: SkillInputSchemaIssue[] = [];
   if (!isSkillInputSchemaObject(value)) {
@@ -525,20 +542,36 @@ function validateSkillInputSchema(value: unknown): SkillInputSchemaIssue[] {
   };
 
   visit(value, [], 0);
+  let serialized: string;
   try {
-    const serialized = JSON.stringify(value);
-    if (serialized === undefined || new TextEncoder().encode(serialized).byteLength > SKILL_INPUT_SCHEMA_MAX_BYTES) {
-      addSkillInputSchemaIssue(issues, [], "Skill inputSchema exceeds the serialized byte limit.");
-    }
+    serialized = JSON.stringify(value);
   } catch {
     addSkillInputSchemaIssue(issues, [], "Skill inputSchema must be serializable JSON.");
+    return issues;
   }
-  if (issues.length === 0) {
-    try {
-      z.fromJSONSchema(value as Parameters<typeof z.fromJSONSchema>[0]);
-    } catch {
-      addSkillInputSchemaIssue(issues, [], "Skill inputSchema is not supported by Zod fromJSONSchema.");
+  // 字节预算与 fromJSONSchema 编译结果只取决于序列化内容（纯确定性函数），
+  // 按序列化键有界 memo：同一 schema（全集群 builtin 目录约 40+ 个，内容
+  // 相同）在 bot 自检、coordinator 对每个 bot 的 catalog 解析中反复命中，
+  // 不再每次重编译后即弃。visit（含 WeakSet 循环/共享引用检测与节点/
+  // 深度/属性预算）每次照跑——DAG 与同形树的判定不受缓存影响。
+  let memoEntry = skillInputSchemaMemo.get(serialized);
+  if (memoEntry === undefined) {
+    memoEntry = {
+      bytesWithinLimit:
+        skillInputSchemaEncoder.encode(serialized).byteLength <=
+        SKILL_INPUT_SCHEMA_MAX_BYTES,
+      compiles: skillInputSchemaCompiles(value),
+    };
+    if (skillInputSchemaMemo.size >= SKILL_INPUT_SCHEMA_MEMO_MAX) {
+      skillInputSchemaMemo.delete(skillInputSchemaMemo.keys().next().value!);
     }
+    skillInputSchemaMemo.set(serialized, memoEntry);
+  }
+  if (!memoEntry.bytesWithinLimit) {
+    addSkillInputSchemaIssue(issues, [], "Skill inputSchema exceeds the serialized byte limit.");
+  }
+  if (issues.length === 0 && !memoEntry.compiles) {
+    addSkillInputSchemaIssue(issues, [], "Skill inputSchema is not supported by Zod fromJSONSchema.");
   }
   return issues;
 }

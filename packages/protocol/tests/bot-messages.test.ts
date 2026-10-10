@@ -408,6 +408,54 @@ describe("BotSkillCatalogV1", () => {
     ).toBe(true);
   });
 
+  it("keeps validation deterministic across repeated parses of identical and distinct schemas (memo path)", () => {
+    // 尾段（字节预算 + zod 编译探针）按序列化键 memo：同 schema 反复解析、
+    // 不同 schema 各自判定、超限/坏 pattern 等失败在重复解析后结论一致。
+    const withInputSchema = (inputSchema: unknown) =>
+      botSkillCatalogV1Schema.safeParse({
+        ...catalog,
+        payload: {
+          ...catalog.payload,
+          skills: [{ ...catalog.payload.skills[0], inputSchema }],
+        },
+      }).success;
+
+    const valid = { type: "object", properties: { n: { type: "integer" } }, additionalProperties: false };
+    const badPattern = { type: "object", properties: { s: { type: "string", pattern: "[" } }, additionalProperties: false };
+    const oversized = {
+      type: "object",
+      properties: Object.fromEntries(
+        Array.from({ length: 512 }, (_, index) => [
+          `property${index}`,
+          { type: "string" },
+        ]),
+      ),
+      additionalProperties: false,
+    };
+
+    // 首轮（未命中）与二轮（命中）结论逐项一致。
+    for (let round = 0; round < 2; round += 1) {
+      expect(withInputSchema(valid)).toBe(true);
+      expect(withInputSchema(badPattern)).toBe(false);
+      expect(withInputSchema(oversized)).toBe(false);
+      // 同形但不同对象引用的 schema：visit 的共享引用检测每次照跑，
+      // 结论不因 memo 改变。
+      expect(withInputSchema({ ...valid })).toBe(true);
+    }
+
+    // memo 容量上限（1024）下的淘汰不改变判定：灌入超限数量的不同 schema
+    // 后，最早的 valid 仍应通过。
+    for (let index = 0; index < 1_100; index += 1) {
+      withInputSchema({
+        type: "object",
+        properties: { [`k${index}`]: { type: "string" } },
+        additionalProperties: false,
+      });
+    }
+    expect(withInputSchema(valid)).toBe(true);
+    expect(withInputSchema(badPattern)).toBe(false);
+  });
+
   it("rejects contradictory availability and duplicate entries", () => {
     expect(
       botSkillCatalogV1Schema.safeParse({
