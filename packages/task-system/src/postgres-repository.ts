@@ -1404,6 +1404,62 @@ export class PostgresTaskRepository {
     }
   }
 
+  /**
+   * 保留清扫（cancellation）：删除「任务已终态且请求已久」的取消请求行。
+   * 请求行是按 task_id 的持久幂等证据（首个取消操作不可覆盖）；任务进入
+   * 终态后取消消费不再发生（终态不可离开），行即为死数据。只动终态任务
+   * + requested_at 早于保留期的行；非终态任务的请求（等待租约所有者消费）
+   * 一律保留。TTL 后同 operation_id 重放会得到 TASK_TERMINAL 而非旧请求
+   * 回显——终态结论一致，属可接受的诚实过期（与 outbox 清扫同一口径）。
+   */
+  async purgeResolvedCancellations(input: {
+    requestedBeforeMs: number;
+    limit: number;
+  }): Promise<number> {
+    if (
+      !Number.isInteger(input.requestedBeforeMs) ||
+      input.requestedBeforeMs < MIN_OUTBOX_RETENTION_MS
+    ) {
+      throw new RangeError(
+        `Cancellation retention window must be at least ${MIN_OUTBOX_RETENTION_MS}ms.`,
+      );
+    }
+    if (
+      !Number.isInteger(input.limit) ||
+      input.limit < 1 ||
+      input.limit > MAX_OUTBOX_RETENTION_BATCH_SIZE
+    ) {
+      throw new RangeError(
+        `Cancellation retention batch limit must be between 1 and ${MAX_OUTBOX_RETENTION_BATCH_SIZE}.`,
+      );
+    }
+    const client = await this.pool.connect();
+    try {
+      const result = await client.query(
+        `WITH candidates AS (
+           SELECT request.request_id
+           FROM studio_task_cancellation_requests AS request
+           JOIN studio_tasks AS task ON task.task_id = request.task_id
+           WHERE task.status IN ('completed', 'failed', 'cancelled', 'expired')
+             AND request.requested_at <=
+               clock_timestamp() - ($1 * interval '1 millisecond')
+           ORDER BY request.requested_at ASC, request.request_id ASC
+           LIMIT $2
+         )
+         DELETE FROM studio_task_cancellation_requests AS request
+         USING candidates
+         WHERE request.request_id = candidates.request_id
+         RETURNING request.request_id`,
+        [input.requestedBeforeMs, input.limit],
+      );
+      return result.rowCount ?? 0;
+    } catch (error) {
+      throw this.persistenceError(error);
+    } finally {
+      client.release();
+    }
+  }
+
   async retryTaskOutbox(input: TaskOutboxRetryOptions): Promise<boolean> {
     const messageId = taskOutboxRecordSchema.shape.messageId.parse(
       input.messageId,

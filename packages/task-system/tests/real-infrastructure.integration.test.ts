@@ -856,6 +856,67 @@ describeReal.sequential(
       await expect(
         repository.purgeDeliveredOutbox({ deliveredBeforeMs: RETENTION_MS, limit: 0 }),
       ).rejects.toThrow(RangeError);
+
+      // cancellation 保留清扫同口径三对照：终态+超期（删）、终态+新近（留）、
+      // 非终态+超期（留——等待租约所有者消费）。
+      const seedCancellation = async (
+        taskId: string,
+        requestedAgoMs: number,
+      ): Promise<string> => {
+        const requestId = randomUUID();
+        await assertionPool.query(
+          `INSERT INTO studio_task_cancellation_requests (
+             request_id, task_id, operation_id, operation_fingerprint,
+             actor_id, reason_code, requested_at
+           ) VALUES (
+             $1, $2, $3, $4, 'retention-test', 'TASK_CANCELLED', $5::timestamptz
+           )`,
+          [
+            requestId,
+            taskId,
+            randomUUID(),
+            "a".repeat(64),
+            new Date(Date.now() - requestedAgoMs).toISOString(),
+          ],
+        );
+        return requestId;
+      };
+      const cancelledOldRequest = await seedCancellation(
+        terminalOld.taskId,
+        RETENTION_MS + 3_600_000,
+      );
+      const cancelledFreshRequest = await seedCancellation(
+        terminalFresh.taskId,
+        0,
+      );
+      const liveOldRequest = await seedCancellation(
+        liveOld.taskId,
+        RETENTION_MS + 3_600_000,
+      );
+
+      await expect(
+        repository.purgeResolvedCancellations({
+          requestedBeforeMs: RETENTION_MS,
+          limit: 100,
+        }),
+      ).resolves.toBe(1);
+
+      const remainingRequests = await assertionPool.query<{
+        request_id: string;
+      }>(
+        "SELECT request_id FROM studio_task_cancellation_requests WHERE request_id = ANY($1)",
+        [[cancelledOldRequest, cancelledFreshRequest, liveOldRequest]],
+      );
+      expect(
+        new Set(remainingRequests.rows.map(({ request_id }) => request_id)),
+      ).toEqual(new Set([cancelledFreshRequest, liveOldRequest]));
+
+      await expect(
+        repository.purgeResolvedCancellations({ requestedBeforeMs: 59_999, limit: 10 }),
+      ).rejects.toThrow(RangeError);
+      await expect(
+        repository.purgeResolvedCancellations({ requestedBeforeMs: RETENTION_MS, limit: 0 }),
+      ).rejects.toThrow(RangeError);
     }, REAL_TEST_TIMEOUT_MS);
 
     it("restores persistent execution FSM progress after a runtime restart", async () => {

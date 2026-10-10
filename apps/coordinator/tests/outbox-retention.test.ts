@@ -13,9 +13,13 @@ function logger(): AppLogger {
 }
 
 function repository(
-  purge: (input: { deliveredBeforeMs: number; limit: number }) => Promise<number>,
+  purgeOutbox: (input: { deliveredBeforeMs: number; limit: number }) => Promise<number>,
+  purgeCancellations: (input: { requestedBeforeMs: number; limit: number }) => Promise<number> = async () => 0,
 ) {
-  return { purgeDeliveredOutbox: vi.fn(purge) };
+  return {
+    purgeDeliveredOutbox: vi.fn(purgeOutbox),
+    purgeResolvedCancellations: vi.fn(purgeCancellations),
+  };
 }
 
 afterEach(() => {
@@ -33,7 +37,7 @@ describe("OutboxRetentionController", () => {
     expect(() => new OutboxRetentionController(base)).not.toThrow();
   });
 
-  it("purges with the configured retention window and batch size, logging only non-zero sweeps", async () => {
+  it("purges both tables with the configured window and batch size, logging only non-zero sweeps", async () => {
     const store = repository(async () => 0);
     const log = logger();
     const controller = new OutboxRetentionController({
@@ -43,38 +47,65 @@ describe("OutboxRetentionController", () => {
       batchSize: 5,
     });
 
-    await expect(controller.sweepOnce()).resolves.toEqual({ purged: 0 });
+    await expect(controller.sweepOnce()).resolves.toEqual({
+      purgedOutbox: 0,
+      purgedCancellations: 0,
+    });
     expect(store.purgeDeliveredOutbox).toHaveBeenCalledWith({
       deliveredBeforeMs: 86_400_000,
+      limit: 5,
+    });
+    expect(store.purgeResolvedCancellations).toHaveBeenCalledWith({
+      requestedBeforeMs: 86_400_000,
       limit: 5,
     });
     expect(log.info).not.toHaveBeenCalled();
 
     store.purgeDeliveredOutbox.mockResolvedValueOnce(7);
-    await expect(controller.sweepOnce()).resolves.toEqual({ purged: 7 });
+    store.purgeResolvedCancellations.mockResolvedValueOnce(2);
+    await expect(controller.sweepOnce()).resolves.toEqual({
+      purgedOutbox: 7,
+      purgedCancellations: 2,
+    });
     expect(log.info).toHaveBeenCalledWith(
-      "coordinator_outbox_retention_purged",
-      { purged: 7, retentionMs: 86_400_000 },
+      "coordinator_task_retention_purged",
+      { purgedOutbox: 7, purgedCancellations: 2, retentionMs: 86_400_000 },
     );
   });
 
-  it("survives repository failures with a stable error code and keeps sweeping", async () => {
-    const store = repository(async () => {
-      throw new TaskSystemError("TASK_PERSISTENCE_FAILED", "pg down");
-    });
+  it("survives repository failures with stable error codes and keeps sweeping", async () => {
+    const store = repository(
+      async () => {
+        throw new TaskSystemError("TASK_PERSISTENCE_FAILED", "pg down");
+      },
+      async () => {
+        throw new TaskSystemError("TASK_PERSISTENCE_FAILED", "pg down");
+      },
+    );
     const log = logger();
     const controller = new OutboxRetentionController({
       repository: store,
       logger: log,
     });
 
-    await expect(controller.sweepOnce()).resolves.toEqual({ purged: 0 });
+    await expect(controller.sweepOnce()).resolves.toEqual({
+      purgedOutbox: 0,
+      purgedCancellations: 0,
+    });
     expect(log.error).toHaveBeenCalledWith("coordinator_outbox_retention_failed", {
       code: "TASK_PERSISTENCE_FAILED",
     });
+    expect(log.error).toHaveBeenCalledWith(
+      "coordinator_cancellation_retention_failed",
+      { code: "TASK_PERSISTENCE_FAILED" },
+    );
 
     store.purgeDeliveredOutbox.mockResolvedValueOnce(3);
-    await expect(controller.sweepOnce()).resolves.toEqual({ purged: 3 });
+    store.purgeResolvedCancellations.mockResolvedValueOnce(1);
+    await expect(controller.sweepOnce()).resolves.toEqual({
+      purgedOutbox: 3,
+      purgedCancellations: 1,
+    });
   });
 
   it("never overlaps sweeps and stops cleanly", async () => {
@@ -97,7 +128,7 @@ describe("OutboxRetentionController", () => {
     expect(duplicate).toBe(first);
 
     release?.();
-    await expect(first).resolves.toEqual({ purged: 2 });
+    await expect(first).resolves.toEqual({ purgedOutbox: 2, purgedCancellations: 0 });
     expect(store.purgeDeliveredOutbox).toHaveBeenCalledTimes(1);
 
     controller.start();
