@@ -129,6 +129,29 @@ describe("MineflayerBotClient lifecycle", () => {
     expect(onStateChanged).toHaveBeenCalledTimes(1);
   });
 
+  it("coalesces move notifications trailing the same physics tick (one evaluation per tick)", async () => {
+    const emitter = new EventEmitter();
+    const bot = emitter as unknown as Bot;
+    const client = new MineflayerBotClient(bot, "auto");
+    const onStateChanged = vi.fn();
+    const onPhysicsTick = vi.fn();
+    client.setHandlers(handlers({ onStateChanged, onPhysicsTick }));
+
+    // mineflayer tickPhysics 的真实顺序：先 physicsTick，随后位置包 emit move。
+    emitter.emit("physicsTick");
+    expect(onPhysicsTick).toHaveBeenCalledTimes(1);
+    expect(onStateChanged).toHaveBeenCalledTimes(1);
+
+    // 同拍 move（<10ms 窗口内）：合并，不触发第二次完整评估链。
+    emitter.emit("move");
+    expect(onStateChanged).toHaveBeenCalledTimes(1);
+
+    // 窗口过期后的独立 move（服务器强制传送等场景）：照常通知。
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    emitter.emit("move");
+    expect(onStateChanged).toHaveBeenCalledTimes(2);
+  });
+
   it("reports health decreases and interrupts ordinary movement actions", () => {
     const emitter = new EventEmitter();
     const pathfinder = { stop: vi.fn() };

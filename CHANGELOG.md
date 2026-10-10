@@ -93,6 +93,7 @@
 
 ### 修复
 
+- 修复反射评估链同拍双触发：mineflayer 的 `tickPhysics` 每拍先 emit `physicsTick`、随后位置包 emit `move`，两个监听器都会走 `onStateChanged` → 完整状态评估链（快照→L0 安全→世界状态重建），bot 移动/转头时每拍评估两次（约 40 次/秒/Bot，集群线性放大，直接抬高事件循环延迟即 <50ms 反射指标）。现 `move` 落在 `physicsTick` 通知后 10ms 窗口内视为同拍重复直接合并，每拍恰好评估一次；物理拍间隔 50ms，最坏反射节奏不变；独立到达的 `move`（服务器强制传送等）与 health/path/inventory 等其他状态源通知行为完全不变。依据 mineflayer 4.39.0 `physics.js` 源码核实的事件顺序；新增回归测试覆盖同拍合并与独立 move 放行两条路径。
 - `scripts/build-pathfinder-rs.mjs` 在 Windows 无 MSVC 工具链（或 Git Bash coreutils `link.exe` 遮蔽 MSVC 链接器）的机器上自动回退：默认 `cargo build` 失败后，检测 rustup GNU 工具链与含真实 `dlltool.exe` 的 mingw-w64 目录（显式 `PATHFINDER_RS_MINGW_BIN` 优先，其次 MSYS2 mingw64/ucrt64、WinLibs 常见安装位），以 `RUSTUP_TOOLCHAIN` 指向 GNU 链接器重试；探测失败仍如实退出非零。Linux/macOS 与已有 MSVC 环境行为不变。已在无 MSVC 的 Windows + Git Bash + rustup GNU + MSYS2 机器上从干净状态全量验证：回退构建成功、`pathfinder_rs.node` 冒烟（同步/worker 双路径）通过。
 - 将 Next.js 间接依赖 PostCSS 从 8.5.18 精确覆盖到 8.5.23，修复发布前生产依赖审计发现的 `GHSA-fxqj-rqcc-2cmp`；版本与 npm 完整性哈希写入锁文件和安全文档。
 - 修复 Mineflayer CommonJS 包在原生 Node ESM 中使用命名导入导致生产构建无法加载的问题；Vitest 转换此前未暴露该错误。
