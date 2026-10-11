@@ -238,6 +238,49 @@ describe("L0SafetyController", () => {
     ).toThrowError(/Inventory/u);
   });
 
+  it("documents unknown-sensor behavior: null oxygen/velocity readings do not fire DROWNING/FALLING (characterization, not endorsement)", () => {
+    // 特征化测试：只固化现状，不背书语义。null 读数在生产真实出现
+    // （bot-runtime 的 mineflayer-client 对非整数/缺失的 oxygenLevel 与
+    // velocityY 返回 null）。当前 detectRisks 对 null 短路——判"无风险"
+    // 而非保守方向（fail-open）：
+    //   inWater 但氧量未知 → 不检出 DROWNING；
+    //   空中（非水/岩浆）且垂直速度未知 → 不检出 FALLING。
+    // 缓解：血量随后下跌时 LOW_HEALTH/CRITICAL_HEALTH 兜底仍会抢占
+    // （下方断言）。若运营决定改为"未知按风险处理"（fail-closed），
+    // 应同步修改 detectRisks 并更新本测试的两组现状断言。
+    const drowningUnknown = new L0SafetyController().evaluate(
+      snapshot({ inWater: true, oxygenLevel: null }),
+    );
+    expect(drowningUnknown.activeRisks).not.toContain("DROWNING");
+    expect(drowningUnknown.severity).toBe("none");
+
+    const fallingUnknown = new L0SafetyController().evaluate(
+      snapshot({ onGround: false, velocityY: null }),
+    );
+    expect(fallingUnknown.activeRisks).not.toContain("FALLING");
+    expect(fallingUnknown.severity).toBe("none");
+
+    // 对照：同样的状态、已知读数正常检出——null 短路是唯一差别。
+    expect(new L0SafetyController().evaluate(
+      snapshot({ inWater: true, oxygenLevel: 2 }),
+    ).activeRisks).toContain("DROWNING");
+    expect(new L0SafetyController().evaluate(
+      snapshot({ onGround: false, velocityY: -1 }),
+    ).activeRisks).toContain("FALLING");
+
+    // 兜底路径不受 null 影响：血量阈值照常检出并抢占普通任务。
+    const lowHealthUnknownOxygen = new L0SafetyController().evaluate(
+      snapshot({ inWater: true, oxygenLevel: null, health: 8 }),
+    );
+    expect(lowHealthUnknownOxygen.activeRisks).toContain("LOW_HEALTH");
+    expect(lowHealthUnknownOxygen.normalTasksPaused).toBe(true);
+    const criticalUnknownVelocity = new L0SafetyController().evaluate(
+      snapshot({ onGround: false, velocityY: null, health: 4 }),
+    );
+    expect(criticalUnknownVelocity.activeRisks).toContain("CRITICAL_HEALTH");
+    expect(criticalUnknownVelocity.severity).toBe("critical");
+  });
+
   it("self-heals a full inventory with a deterministic junk drop before pausing", () => {
     // 只暂停是必然死锁：没有任何上层会在暂停期间清背包。现在先丢垃圾，
     // 丢得动下一轮评估就解除风险；全是必需品时才维持暂停。
