@@ -80,6 +80,29 @@ describe("owner-safe slot operations (十一)", () => {
     expect(fr.markSlotOccupied(f.id, 0, "ws-1", { reservationOwner: BOT_A })).toBe(true);
     expect(f.slots[0]!.status).toBe("occupied");
   });
+
+  it("rejects reservation TTLs that could lock a slot beyond recovery (FACILITY_TTL_INVALID)", () => {
+    // TTL 此前完全无校验且经 RPC 直通（shared-state 的 optNum 只查有限数）：
+    // 巨大 TTL（如 24h）会让 expireReservations 永远无法回收该施工位，
+    // owner-safe 的释放又不能代执行——一次坏调用 = 设施永久损失该 slot。
+    // 与 workstation-registry 的 boundedTtl 同款纪律：[1, 120_000]。
+    const { fr, f } = setup();
+    const invalid = [Number.NaN, 0, -5, 120_001, 24 * 3_600_000, Number.POSITIVE_INFINITY];
+    // reserveSlot：planned 状态下越界 TTL 直接拒绝，且不留半套状态。
+    for (const ttl of invalid) {
+      expect(() => fr.reserveSlot(f.id, 0, BOT_A, ttl)).toThrowError("FACILITY_TTL_INVALID");
+    }
+    expect(f.slots[0]!.status).toBe("planned");
+    // renewSlotReservation：持有人预约后，越界 TTL 同样拒绝（预约保持原状）。
+    expect(fr.reserveSlot(f.id, 0, BOT_A, 120_000)).toBe(true);
+    for (const ttl of invalid) {
+      expect(() => fr.renewSlotReservation(f.id, 0, BOT_A, ttl)).toThrowError("FACILITY_TTL_INVALID");
+    }
+    expect(f.slots[0]!.status).toBe("placement_reserved");
+    // 合法粒度与缺省不受影响。
+    expect(fr.renewSlotReservation(f.id, 0, BOT_A, 1)).toBe(true);
+    expect(fr.reserveSlot(f.id, 1, BOT_B)).toBe(true); // 缺省 30s 不受影响
+  });
 });
 
 describe("temporarily_blocked backoff (五)", () => {

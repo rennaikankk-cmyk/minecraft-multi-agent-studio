@@ -514,14 +514,25 @@ export class FacilityRegistry implements FacilityRegistryPort {
     return facility.slots.find((slot) => slot.status === "planned") ?? null;
   }
 
+  /** 预约 TTL 纪律（与 workstation-registry 的 boundedTtl 同款）：有限、
+   *  ≥1ms、上界 120s。此前无任何校验——RPC 直通的巨大 TTL 会让
+   *  expireReservations 永远无法回收该施工位（owner-safe 的释放又不能
+   *  代执行），一次坏调用 = 设施永久损失该 slot。续租机制本就支持按需
+   *  延长，上界只约束单次粒度。 */
+  private boundedReservationTtl(ttlMs: number): number {
+    if (!Number.isFinite(ttlMs) || ttlMs < 1 || ttlMs > 120_000) throw new Error("FACILITY_TTL_INVALID");
+    return ttlMs;
+  }
+
   reserveSlot(facilityId: string, slotIndex: number, botId: string, ttlMs = 30_000): boolean {
     const slot = this.mutableSlot(facilityId, slotIndex);
     if (!slot) return false;
     if (!canTransition(slot.fields.status, "placement_reserved")) return false;
     if (slot.fields.status === "placement_reserved") return false; // 同状态不可重复 reserve
+    const ttl = this.boundedReservationTtl(ttlMs); // 先校验后变更：越界调用不留半套状态
     slot.fields.status = "placement_reserved";
     slot.fields.reservedBy = botId;
-    slot.fields.reservedUntilMs = this.now() + ttlMs;
+    slot.fields.reservedUntilMs = this.now() + ttl;
     slot.fields.statusReason = null;
     return true;
   }
@@ -544,7 +555,8 @@ export class FacilityRegistry implements FacilityRegistryPort {
     if (!slot) return false;
     if (slot.fields.status !== "placement_reserved") return false;
     if (slot.fields.reservedBy !== botId) return false;
-    slot.fields.reservedUntilMs = this.now() + ttlMs;
+    const ttl = this.boundedReservationTtl(ttlMs); // 先校验后变更
+    slot.fields.reservedUntilMs = this.now() + ttl;
     return true;
   }
 
