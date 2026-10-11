@@ -83,6 +83,35 @@ export async function reclaimStaleFixtures() {
       await docker(["rm", "-f", id], 30_000).catch(() => undefined);
       removed.push(name);
     }
+    // 回收孤儿 volume：有 e2e label 但无对应容器的（此前 volume 无 label，
+    // 失败 run 的 volume 连事后识别手段都没有）。
+    const volumes = await docker(["volume", "ls", "-q", "--filter", `label=${FIXTURE_LABEL}`], 20_000);
+    for (const volumeId of volumes.split("\n").filter(Boolean)) {
+      // 只回收超龄的（沿用容器的 RECLAIM_AGE_MS 纪律）
+      const volumeInfo = await docker(
+        ["volume", "inspect", "-f", "{{index .Labels \"studio.runId\"}}|{{.CreatedAt}}", volumeId],
+        10_000,
+      ).catch(() => null);
+      if (volumeInfo === null) continue;
+      const [, createdAt] = volumeInfo.split("|");
+      const createdMs = Date.parse(createdAt ?? "");
+      if (!Number.isFinite(createdMs) || now - createdMs < RECLAIM_AGE_MS) {
+        skipped.push(volumeId);
+        continue;
+      }
+      // 确认没有对应容器仍在使用该 volume（按 runId label 匹配）
+      const runId = volumeInfo.split("|")[0];
+      const inUse = await docker(
+        ["ps", "-aq", "--filter", `label=studio.runId=${runId}`],
+        10_000,
+      ).catch(() => "");
+      if (inUse.trim() !== "") {
+        skipped.push(volumeId);
+        continue;
+      }
+      await docker(["volume", "rm", "-f", volumeId], 30_000).catch(() => undefined);
+      removed.push(volumeId);
+    }
   } catch {
     // 无 docker / 无遗留：忽略
   }
@@ -118,7 +147,11 @@ export async function createE2EFixture() {
     }
   };
 
-  await docker(["volume", "create", volumeName], 15_000);
+  await docker(["volume", "create", "--label", "studio.serverKind=e2e_fixture", "--label", `studio.runId=${runId}`, volumeName], 15_000);
+  // docker run 失败（镜像拉取失败、daemon 抖动等）时 volume 会永久泄漏——
+  // cleanup 此前只在 withE2EFixture 的 finally 中被调用，而 createE2EFixture
+  // 在 run 抛出后直接向上冒异常，withE2EFixture 还没拿到 fixture 就先炸了。
+  try {
   await docker(
     [
       "run", "-d", "--name", containerName,
@@ -153,6 +186,10 @@ export async function createE2EFixture() {
     ],
     60_000,
   );
+  } catch (runError) {
+    await cleanup().catch(() => undefined); // cleanup 自身的失败不打断原始错误
+    throw runError;
+  }
 
   // 读取动态映射的宿主端口
   let port = 0;
