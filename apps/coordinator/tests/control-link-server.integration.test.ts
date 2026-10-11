@@ -766,6 +766,87 @@ describe("Coordinator Control Link server", () => {
     expect(internals.pendingGoals.size).toBe(0);
   });
 
+  it("terminates an acquired lease when the goal is aborted between begin and execution (cross-review #4)", async () => {
+    // 回归：begin 返回租约后、executeAcquiredGoal 前的中止 throw 点此前
+    // 不 recordError——store 侧留下无人负责的 running 租约，只能等
+    // ExpiredLeaseRecoveryController 兜底。现 catch 对 lease !== null 的
+    // 失败走与执行段同款的诚实终结。
+    const baseStore = testGoalStore();
+    let releaseBegin!: (value: Awaited<ReturnType<GoalLifecycleStore["begin"]>>) => void;
+    const begin = vi.fn(
+      () =>
+        new Promise<Awaited<ReturnType<GoalLifecycleStore["begin"]>>>((resolve) => {
+          releaseBegin = resolve;
+        }),
+    );
+    const terminalSnapshot: GoalLifecycleSnapshot = {
+      operationId: testUuid(997),
+      taskId: testUuid(997),
+      botId: BOT_ID,
+      fingerprint: "f".repeat(64),
+      title: "Submitted goal",
+      status: "cancelled",
+      startedAt: NOW.toISOString(),
+      updatedAt: NOW.toISOString(),
+      result: null,
+      errorCode: "CONTROL_LINK_STOPPED",
+    };
+    const recordError = vi.fn(async () => terminalSnapshot);
+    const planAndDispatch = vi.fn(async () => {
+      throw new Error("planner_must_not_be_reached");
+    });
+    const { registry, url, server } = await startServer({
+      goalPlanner: { planAndDispatch },
+      goalStore: { ...baseStore, begin, recordError },
+    });
+    registry.ingest(statusMessage(1), NOW);
+    registry.ingest(catalogMessage(2), NOW);
+    const { socket, reader } = await authenticate(url);
+    await readSnapshot(reader);
+    const operationId = testUuid(998);
+    socket.send(JSON.stringify(controlLinkGoalRequestV1Schema.parse({
+      schemaVersion: "1.0",
+      messageId: testUuid(999),
+      timestamp: NOW.toISOString(),
+      type: "control.link.goal-request.v1",
+      payload: {
+        coordinatorInstanceId: "coordinator-test",
+        clientId: CLIENT_ID,
+        controlApiInstanceId: CONTROL_API_INSTANCE_ID,
+        operationId,
+        taskId: operationId,
+        botId: BOT_ID,
+        actorId: "operator-01",
+        operatorGoal: "采集附近的木材",
+        timeoutMs: 30_000,
+        issuedAt: NOW.toISOString(),
+        expiresAt: new Date(NOW.getTime() + 35_000).toISOString(),
+      },
+    })));
+
+    // begin 进行中协调器停止：goal 的 controller 被 abort（responders 清空、
+    // stopped=true），随后 begin 返回租约——中止检查 throw，catch 必须终结租约。
+    // 注意 stop() 内部 allSettled 会等待该 goal 执行结算，必须先放行 begin
+    // 再 await stop 的 Promise（否则死锁）。
+    await vi.waitFor(() => expect(begin).toHaveBeenCalledTimes(1));
+    const stopping = server.stop();
+    releaseBegin({
+      kind: "execute",
+      lease: { taskId: operationId, leaseOwner: "goal-test-lease", revision: 2 },
+      snapshot: { ...terminalSnapshot, status: "running", errorCode: null },
+    });
+
+    await vi.waitFor(() => expect(recordError).toHaveBeenCalledTimes(1));
+    expect(recordError).toHaveBeenCalledWith(
+      { taskId: operationId, leaseOwner: "goal-test-lease", revision: 2 },
+      "CONTROL_LINK_STOPPED",
+      "cancelled",
+    );
+    expect(planAndDispatch).not.toHaveBeenCalled();
+    await stopping;
+    void reader;
+  });
+
   it("hands the durable-wait goal over on resume: terminal frame reaches the original responder and pendingGoals drains", async () => {
     // 回归：resumeWaitingGoals 重建的 pending 此前不接管 map 条目——
     // pendingGoals 永久泄漏（128 条后 goal 通道整体 BACKPRESSURE），

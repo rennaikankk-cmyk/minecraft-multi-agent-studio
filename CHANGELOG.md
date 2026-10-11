@@ -93,6 +93,7 @@
 
 ### 修复
 
+- 交叉复审加固 ④（executeGoal catch 的租约窗口）：begin 返回租约后、`executeAcquiredGoal` 前存在 throw 点（超时/中止检查、parkWaitingGoal 异常），原 catch 的"lease 尚未取得，无需 recordError"前提对该窗口为假——store 侧留下无人终结的 running 任务与活租约，只能等 `ExpiredLeaseRecoveryController` 兜底回收。现 catch 对 `lease !== null` 的失败走与执行段同款的诚实终结：`recordError`（AI_TIMEOUT→expired / 中止→cancelled / 其余→failed）+ 终态快照 + completedGoals 缓存；持久化失败可吞、记日志，不掩盖原始错误与失败帧。新增回归：begin 挂起期间协调器停止（controller abort）→ begin 返回租约 → recordError 以 `CONTROL_LINK_STOPPED`/`cancelled` 精确调用、planner 零调用；反向验证无修复时该测试超时失败。顺带修复 maxPendingGoals/maxPendingTaskReads 声明挤行（复审 #9）。
 - 交叉复审加固 ③（同拍合并的传送盲区）：时间窗口版（10ms）的同拍判定对服务器强制传送/rubberband 的 move 有 ~10/50 概率误吞——mineflayer 的 position 包处理器（含传送确认与 respawn 延迟路径）直接 emit move，**无 physicsTick 前导**且到达时刻与本地物理拍无关；被吞的传送评估要等下一物理拍（≤50ms），恰好压在 <50ms 反射预算上，而传送正是危险密集时刻。现改为「拍内标志」精确判定：physicsTick 同步段内置位、`queueMicrotask` 清除——物理拍内的 move（tickPhysics 同步段里紧跟 physicsTick 之后发出）被合并，独立到达的传送 move 必然在标志清除后的宏任务里、**零误吞**；同时消除了时间戳记录点晚于 onPhysicsTick 的次要问题（评估链耗时 >10ms 时同拍 move 反而落出窗口触发第三次评估）。新增传送盲区回归（物理拍后异步 move 必须立即评估），同拍合并测试同步更新为同步段语义。
 - 交叉复审加固 ①：AIRouter 健康缓存在 **generate 失败时立即失效**——此前失败路径不失效缓存，适配器在探测后宕机时 TTL 窗口内的重试继续打同一个死适配器（combat 档总预算 5s 恰等于 TTL，一次失败可吃光全部预算）；失效后重试重新探测并故障转移到下一个适配器。新增回归：探测成功→generate 抛错→缓存失效→重试重新探测（healthCalls=2）并转移到 fallback。
 - 交叉复审加固 ②：protocol skillInputSchema memo 的**键长上界**（4,096 字符）——此前条目上限只限条数（1024），键是完整序列化串且单条大小无界（coordinator 是全集群 catalog 汇聚解析点，1024 × ~200KB 可达数百 MB 常驻，可被异常 bot 的超长 catalog 触发）；超长键跳过缓存（判定每次照算，结论不变），常驻上限收敛到 ~4MB。新增超长键两轮解析结论一致的回归。
