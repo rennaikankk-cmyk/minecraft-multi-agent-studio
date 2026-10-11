@@ -497,7 +497,9 @@ export class ControlLinkServer {
       challengeNonce: challenge.payload.challengeNonce,
       handshakeTimer: setTimeout(() => {
         if (!session.authenticated) {
-          this.closeSession(session, 1008, "handshake_timeout");
+          // 1012（瞬态）：客户端事件循环被大快照/GC 阻塞 >5s 是可恢复的——
+          // 1008 会被 control-api 判为协议致命并永久失效（不再重连）。
+          this.closeSession(session, 1012, "handshake_timeout");
         }
       }, HANDSHAKE_TIMEOUT_MS),
       client: null,
@@ -558,7 +560,8 @@ export class ControlLinkServer {
       return;
     }
     if (!withinClockSkew(message.timestamp, validNow(this.now()))) {
-      this.closeSession(session, 1008, "message_time_invalid");
+      // 1012（瞬态）：NTP 时钟跳变可恢复，重连后重新握手即可。
+      this.closeSession(session, 1012, "message_time_invalid");
       return;
     }
     if (!session.authenticated) {
@@ -574,7 +577,9 @@ export class ControlLinkServer {
       return;
     }
     if (!session.ready || !this.matchesSession(session, message)) {
-      this.closeSession(session, 1008, "session_identity_mismatch");
+      // 1012（瞬态）：会话身份错配多来自重注册竞态，客户端重连即恢复；
+      // 协议策略类硬错（认证拒绝/未认证/重复认证/消息非法）仍为 1008。
+      this.closeSession(session, 1012, "session_identity_mismatch");
       return;
     }
     if (message.type === "control.link.stop-request.v1") {

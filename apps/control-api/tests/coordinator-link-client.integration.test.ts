@@ -707,6 +707,39 @@ describe("Control API Coordinator Link client", () => {
     await client.close();
   });
 
+  it("reconnects after the coordinator closes the session with a transient 1012", async () => {
+    // 跨包交互面审计候选 2：服务端的瞬态关闭（handshake_timeout /
+    // message_time_invalid / session_identity_mismatch）改用 1012——客户端
+    // 对非 1008 走退避重连；只有认证/协议策略类 1008 才永久失效。
+    const { client, server } = await startLinkPair({
+      coordinatorInstanceId: "coordinator-transient-close-test",
+    });
+    expect(client.isReady()).toBe(true);
+    const firstSocket = (client as unknown as { socket: WebSocket | null }).socket;
+    expect(firstSocket).not.toBeNull();
+
+    // 真实服务端路径：经 closeSession 以 1012 关闭（与 handshake_timeout
+    // 超时路径同一入口），客户端应断开后退避重连。
+    const internals = server as unknown as {
+      sessions: Set<{ socket: WebSocket; closing: boolean }>;
+      closeSession(session: { socket: WebSocket }, code: number, reason: string): void;
+    };
+    const session = [...internals.sessions].find((candidate) => !candidate.closing);
+    expect(session).toBeDefined();
+    internals.closeSession(session!, 1012, "handshake_timeout");
+    // 断言纯结果（ready 且 socket 已更换）：waitFor 整体重试到重连完成——
+    // 断开传播与 10ms 退避重连都是异步，中间态窗口极小，不做竞态断言。
+    await vi.waitFor(() => {
+      const current = (client as unknown as { socket: WebSocket | null }).socket;
+      expect(client.isReady()).toBe(true);
+      expect(current).not.toBe(firstSocket);
+    });
+    expect(
+      (client as unknown as { permanentlyFailed: boolean }).permanentlyFailed,
+    ).toBe(false);
+    await client.close();
+  });
+
   it("invalidates immediately on outbound backpressure and marks every pending stop unsent", async () => {
     const neverCompletes = new Promise<BotStopResultV1>(() => undefined);
     const requestStop = vi.fn(() => neverCompletes);

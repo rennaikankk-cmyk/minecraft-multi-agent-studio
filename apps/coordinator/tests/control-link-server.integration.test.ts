@@ -479,7 +479,7 @@ describe("Coordinator Control Link server", () => {
     await expect(closed).resolves.toBe(1003);
   });
 
-  it("rejects authenticated client frames outside the clock-skew window", async () => {
+  it("rejects authenticated client frames outside the clock-skew window with a transient close code", async () => {
     const { url } = await startServer();
     const { socket, reader } = await authenticate(url);
     await readSnapshot(reader);
@@ -492,7 +492,9 @@ describe("Coordinator Control Link server", () => {
         timestamp: new Date(NOW.getTime() - 31_000).toISOString(),
       }),
     );
-    await expect(closed).resolves.toBe(1008);
+    // 1012（瞬态）：时钟跳变可恢复——1008 会让 control-api 永久失效不再
+    // 重连（跨包交互面审计第 26 轮候选 2）。
+    await expect(closed).resolves.toBe(1012);
   });
 
   it("fails closed before a queued valid stop request can be dispatched", async () => {
