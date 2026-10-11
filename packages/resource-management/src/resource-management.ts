@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { resourceDemandSchema, resourceIdentitySchema, resourceLocationSchema, resourceObservationInputSchema,
-  resourcePermissionSchema, resourceReceiptSchema, resourceScopeSchema, resourceStateSchema,
+  resourcePermissionSchema, resourceReceiptSchema, resourceScopeSchema,
   type ResourceDemand, type ResourceIdentity, type ResourceLocation, type ResourceObservation,
   type ResourceObservationInput, type ResourcePermission, type ResourceReceipt, type ResourceScope,
   type ResourceState, type TransferOrder } from "./schema.js";
@@ -34,7 +34,9 @@ export class ResourceLedger {
   private mutate<T>(change: (state: ResourceState, now: number) => T): T {
     const state = this.store.load(), revision = state.revision;
     const result = change(state, this.now()); state.revision++;
-    this.store.save(resourceStateSchema.parse(state), revision);
+    // save 内部先做权威 schema 校验再落盘（Memory/File 两个实现皆然）——
+    // 此处不再重复 parse：校验失败时内存态/磁盘均不变，失败语义一致。
+    this.store.save(state, revision);
     return structuredClone(result);
   }
   snapshot(scope: ResourceScope): ResourceState {

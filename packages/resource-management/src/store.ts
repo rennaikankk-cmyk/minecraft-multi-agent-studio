@@ -28,6 +28,23 @@ export class FileResourceStateStore implements ResourceStateStore {
     try { return resourceStateSchema.parse(JSON.parse(readFileSync(this.filename, "utf8"))); }
     catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return emptyResourceState(); throw new Error("RESOURCE_STATE_READ_FAILED"); }
   }
+  /** CAS 复核只需 revision：同一事务的 load() 刚做过完整 schema 校验，复核
+   *  的目的是捕获并发写入者的 revision 变化。文件缺失按空状态（revision 0）；
+   *  JSON 损坏/非对象/revision 非法仍 fail-closed 抛 RESOURCE_STATE_READ_FAILED。 */
+  private readCurrentRevision(): number {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(this.filename, "utf8"));
+      const revision = typeof parsed === "object" && parsed !== null
+        ? (parsed as { revision?: unknown }).revision
+        : undefined;
+      if (typeof revision === "number" && Number.isSafeInteger(revision) && revision >= 0) {
+        return revision;
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    }
+    throw new Error("RESOURCE_STATE_READ_FAILED");
+  }
   save(input: ResourceState, expectedRevision: number): void {
     const state = resourceStateSchema.parse(input);
     if (state.revision !== expectedRevision + 1) throw new Error("RESOURCE_REVISION_CONFLICT");
@@ -36,7 +53,7 @@ export class FileResourceStateStore implements ResourceStateStore {
     try {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       try { lock = openSync(lockPath, "wx", 0o600); } catch { throw new Error("RESOURCE_STORE_BUSY"); }
-      if (this.load().revision !== expectedRevision) throw new Error("RESOURCE_REVISION_CONFLICT");
+      if (this.readCurrentRevision() !== expectedRevision) throw new Error("RESOURCE_REVISION_CONFLICT");
       file = openSync(temporary, "wx", 0o600); writeFileSync(file, JSON.stringify(state)); fsyncSync(file); closeSync(file); file = undefined;
       renameSync(temporary, this.filename);
       if (process.platform !== "win32") { file = openSync(dir, "r"); fsyncSync(file); closeSync(file); file = undefined; }
