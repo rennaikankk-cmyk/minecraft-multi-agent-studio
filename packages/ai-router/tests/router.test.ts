@@ -117,6 +117,73 @@ describe('AIRouter.generate', () => {
     await expect(router.generate(generateOptions())).rejects.toThrow('ECONNREFUSED');
     expect(healthy.generateCalls).toHaveLength(0);
   });
+
+  it('caches positive health results for a short TTL instead of probing per request', async () => {
+    let nowMs = 1_000;
+    const router = new AIRouter({ now: () => nowMs });
+    const adapter = new StubAdapter({ name: 'spark-vllm', available: true });
+    router.register(adapter);
+
+    await router.generate(generateOptions({ traceId: 'trace-a' }));
+    await router.generate(generateOptions({ traceId: 'trace-b' }));
+    await router.generate(generateOptions({ traceId: 'trace-c' }));
+
+    expect(adapter.healthCalls).toBe(1);
+    expect(adapter.generateCalls.map(({ traceId }) => traceId)).toEqual([
+      'trace-a',
+      'trace-b',
+      'trace-c',
+    ]);
+
+    // TTL 过期后重新探测。
+    nowMs += 5_001;
+    await router.generate(generateOptions({ traceId: 'trace-d' }));
+    expect(adapter.healthCalls).toBe(2);
+  });
+
+  it('does not cache negative health results', async () => {
+    const router = new AIRouter();
+    let available = false;
+    const flapping = new (class extends StubAdapter {
+      async health() {
+        this.healthCalls += 1;
+        return { available, latencyMs: 1 };
+      }
+    })({ name: 'flapping', available: true });
+    router.register(flapping);
+
+    await expect(router.generate(generateOptions())).rejects.toThrow('No available AI adapter');
+    available = true;
+    const result = await router.generate(generateOptions());
+    expect(result.content).toBe('reply-from-flapping');
+    expect(flapping.healthCalls).toBe(2);
+  });
+
+  it('does not cache thrown health probes and rethrows on the next request', async () => {
+    const router = new AIRouter();
+    const broken = new StubAdapter({
+      name: 'broken',
+      available: true,
+      healthError: new Error('ECONNREFUSED'),
+    });
+    router.register(broken);
+
+    await expect(router.generate(generateOptions())).rejects.toThrow('ECONNREFUSED');
+    await expect(router.generate(generateOptions())).rejects.toThrow('ECONNREFUSED');
+    expect(broken.healthCalls).toBe(2);
+  });
+
+  it('refreshes the cache from an explicit healthCheck sweep', async () => {
+    const router = new AIRouter();
+    const adapter = new StubAdapter({ name: 'spark-vllm', available: true });
+    router.register(adapter);
+
+    await router.healthCheck();
+    await router.generate(generateOptions());
+
+    expect(adapter.healthCalls).toBe(1);
+    expect(adapter.generateCalls).toHaveLength(1);
+  });
 });
 
 describe('AIRouter.healthCheck', () => {
