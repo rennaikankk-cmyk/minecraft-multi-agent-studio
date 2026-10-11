@@ -258,7 +258,10 @@ describe("SingleBotRuntime control path", () => {
     expect(bot.getState()).toBe("error");
   });
 
-  it("rejects reuse of one command ID with different parameters", async () => {
+  it("returns a rejected stop result on command ID reuse with different parameters (session preserved)", async () => {
+    // 交叉复审 8-1：stop 冲突此前直接 throw——runtime-link-client 对任何
+    // throw 一律 1008 拆已认证会话，冲突循环会耗尽重试并 fail-closed 停
+    // 整个 bot。现回 rejected 结果帧，会话保持。
     const client = new ControlTestClient();
     const bot = runtime(client);
     bot.start();
@@ -266,15 +269,16 @@ describe("SingleBotRuntime control path", () => {
     const expectedRuntime = bot.getRuntimeInstanceId();
     await bot.handleStopCommand(stopCommand(expectedRuntime), authorization());
 
-    expect(() =>
-      bot.handleStopCommand(
-        stopCommand(expectedRuntime, "Different stop operation."),
-        authorization(),
-      ),
-    ).toThrowError(
-      expect.objectContaining<Partial<RuntimeControlError>>({
-        code: "COMMAND_ID_CONFLICT",
-      }),
+    const conflict = await bot.handleStopCommand(
+      stopCommand(expectedRuntime, "Different stop operation."),
+      authorization(),
     );
+    expect(conflict.payload).toMatchObject({
+      outcome: "rejected",
+      errorCode: "COMMAND_ID_CONFLICT",
+      commandId: expect.any(String),
+    });
+    // 会话未拆：bot 仍在线（非 error 状态）。
+    expect(bot.getState()).not.toBe("error");
   });
 });

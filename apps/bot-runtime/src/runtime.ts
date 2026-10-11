@@ -833,9 +833,13 @@ export class SingleBotRuntime {
     const existing = this.stopExecutions.get(message.payload.commandId);
     if (existing) {
       if (existing.fingerprint !== fingerprint) {
-        throw new RuntimeControlError(
-          "COMMAND_ID_CONFLICT",
-          "The command ID was already used with different stop parameters.",
+        // 应用层幂等冲突（协调器复用 commandId 且参数不同）此前直接
+        // throw——runtime-link-client 对任何 throw 一律 1008 拆已认证会话，
+        // 冲突循环会耗尽重试并 fail-closed 停整个 bot（与 skill 路径的
+        // COMMAND_ID_CONFLICT 同类错误分层问题）。回 rejected 结果帧，
+        // 会话保持。
+        return Promise.resolve(
+          this.createStopResult(message, "rejected", "COMMAND_ID_CONFLICT"),
         );
       }
       return existing.result;
@@ -1013,6 +1017,16 @@ export class SingleBotRuntime {
         // bot。冲突是单次调用的可恢复错误：回 rejected 结果帧（协议既有
         // outcome/errorCode 路径），会话保持；仅 CONTROL_IDENTITY_MISMATCH
         // （安全事件）继续 throw 走拆会话路径。
+        this.dependencies.logger.warn(
+          "bot_runtime_skill_invocation_conflict",
+          this.logFields({
+            traceId: invocation.traceId,
+            taskId: invocation.taskId,
+            skillId: invocation.payload.skillId,
+            invocationId: invocation.payload.invocationId,
+            code: "COMMAND_ID_CONFLICT",
+          }),
+        );
         return Promise.resolve(
           skillExecutionResultV1Schema.parse({
             ...this.envelope("skill.result.v1"),
