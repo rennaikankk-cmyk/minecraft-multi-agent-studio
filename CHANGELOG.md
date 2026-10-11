@@ -93,6 +93,7 @@
 
 ### 修复
 
+- farm-production 写路径统一（技能执行器深扫候选 3）：`registerFoodProduction` 此前是四个 `metadata.production` 写点中唯一跳过 `farmProductionSchema.parse` 的（`{...production, sustain}` 裸 spread）——破坏"metadata.production 恒为 schema-valid"的不变量（当前内容恰好已 parse 未爆发）。现抽 `writeFarmProduction` 校验写 helper 统一全部四个写点（`recordFoodConsumption`/`registerCropProduction`/`registerFoodProduction`/`recordFarmProduction`），接受 `z.input` 类型（default 字段可省略，parse 填充）。farm-production 5 项既有用例全部通过。
 - FacilityExecutor slot 迭代的异常路径守卫 + 退避窗口（技能执行器深扫候选 2）：
   - **异常路径**：`adapter.invoke`/`adapter.readback` 此前无 try/catch——capability 调用 reject（bot 断线、能力抛错）时异常直接冒出，slot 卡在 `placement_reserved`（120s TTL 内无人 expire）、无 `markPlacementFailed`（failureCount 不增、退避不启动）、无 DEGRADED 转移、ledger 永停 BUILDING。现 per-slot try/catch：异常 → `markPlacementFailed` + DEGRADED + 返回 `{ok:false, blockedReason:"CAPABILITY_INVOCATION_CRASHED"}`。生产记账循环（`recordFacilityProduction` 可因畸形物品名抛 TypeError）同样纳入守卫（→ DEGRADED + 返回失败）。
   - **退避绕过**：`temporarily_blocked` slot 此前直接 `reserveSlot`——registry 的退避保护（10s·2^(n-1)，封顶 5 分钟）只在 `replanSlot` 里实施，executor 主路径使退避形同虚设（上层按秒级重试 run() 即可零退避锤服务器）。现 reserve 前检查 `lastFailureAtMs + placementBackoffMs(failureCount)` 未到期则跳过。

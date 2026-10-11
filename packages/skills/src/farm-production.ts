@@ -62,7 +62,7 @@ export function recordFoodConsumption(facility: Facility, consumedFood: number, 
   const index = samples.findIndex((sample) => sample.atMs === atMs);
   if (index < 0) return false;
   const nextSamples = samples.map((sample, i) => i === index ? { ...sample, consumedFood: consumedFood } : sample);
-  facility.metadata.production = farmProductionSchema.parse({ ...current, supplySamples: nextSamples });
+  writeFarmProduction(facility, { ...current, supplySamples: nextSamples });
   return true;
 }
 
@@ -77,6 +77,16 @@ export function readFarmProduction(facility: Facility): FarmProduction | null {
   return result.data;
 }
 
+/** 校验写：metadata.production 的唯一入口——四个写点此前中
+ *  registerFoodProduction（:97）是唯一跳过 schema.parse 的，破坏
+ *  "metadata.production 恒为 schema-valid"的不变量。统一走此 helper。
+ *  接受 z.input（default 字段可省略，parse 填充）。 */
+function writeFarmProduction(facility: Facility, next: z.input<typeof farmProductionSchema>): FarmProduction {
+  const validated = farmProductionSchema.parse(next);
+  facility.metadata.production = validated;
+  return validated;
+}
+
 export function registerCropProduction(registry: FacilityRegistry, baseId: string, raw: FarmMaintainInput): Facility {
   const input = farmMaintainInputSchema.parse(raw);
   const facility = registry.create({ facilityType: "crop_farm", baseId, serverProfileId: input.area.serverProfileId,
@@ -84,7 +94,7 @@ export function registerCropProduction(registry: FacilityRegistry, baseId: strin
   if (facility.baseId !== baseId) throw new Error("FARM_BASE_SCOPE_MISMATCH");
   const existing = readFarmProduction(facility);
   if (existing && JSON.stringify(existing.input) !== JSON.stringify(input)) throw new Error("FARM_CONFIGURATION_CONFLICT");
-  if (!existing) facility.metadata.production = farmProductionSchema.parse({ schemaVersion: "1.0", input,
+  if (!existing) writeFarmProduction(facility, { schemaVersion: "1.0", input,
     enabled: true, nextRunAtMs: 0, lastTaskId: null, lastObservedAt: null, status: "UNVERIFIED", reason: null, samples: [] });
   return facility;
 }
@@ -94,7 +104,7 @@ export function registerFoodProduction(registry: FacilityRegistry, baseId: strin
   const facility = registerCropProduction(registry, baseId, foodFarmMaintenance(sustain));
   const production = readFarmProduction(facility)!;
   if (production.sustain && JSON.stringify(production.sustain) !== JSON.stringify(sustain)) throw new Error("FARM_CONFIGURATION_CONFLICT");
-  facility.metadata.production = { ...production, sustain };
+  writeFarmProduction(facility, { ...production, sustain });
   return facility;
 }
 
@@ -137,7 +147,7 @@ export function recordFarmProduction(facility: Facility, taskId: string, output:
       }].slice(-32) : [];
     }
   }
-  facility.metadata.production = farmProductionSchema.parse(next);
+  writeFarmProduction(facility, next);
   facility.lastObservedAt = new Date(nowMs).toISOString();
 }
 
