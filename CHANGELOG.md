@@ -93,6 +93,10 @@
 
 ### 修复
 
+- FacilityExecutor slot 迭代的异常路径守卫 + 退避窗口（技能执行器深扫候选 2）：
+  - **异常路径**：`adapter.invoke`/`adapter.readback` 此前无 try/catch——capability 调用 reject（bot 断线、能力抛错）时异常直接冒出，slot 卡在 `placement_reserved`（120s TTL 内无人 expire）、无 `markPlacementFailed`（failureCount 不增、退避不启动）、无 DEGRADED 转移、ledger 永停 BUILDING。现 per-slot try/catch：异常 → `markPlacementFailed` + DEGRADED + 返回 `{ok:false, blockedReason:"CAPABILITY_INVOCATION_CRASHED"}`。生产记账循环（`recordFacilityProduction` 可因畸形物品名抛 TypeError）同样纳入守卫（→ DEGRADED + 返回失败）。
+  - **退避绕过**：`temporarily_blocked` slot 此前直接 `reserveSlot`——registry 的退避保护（10s·2^(n-1)，封顶 5 分钟）只在 `replanSlot` 里实施，executor 主路径使退避形同虚设（上层按秒级重试 run() 即可零退避锤服务器）。现 reserve 前检查 `lastFailureAtMs + placementBackoffMs(failureCount)` 未到期则跳过。
+  - 新增回归（共享注入时钟）：invoke 抛 → temporarily_blocked + failureCount=1 + lastFailureAtMs + DEGRADED 精确断言；退避窗口内 construct 零调用、到期后正常调用且 slot → occupied。
 - AutonomousDirector tick 内 farm-production 解析缓存：需求评估循环中 `readFarmProduction`（每次调用 safeParse + 2 次深比较 + 嵌套 re-parse 含 7×7 布局重建）此前被反复调用——filter 每 facility 一次、**sort 比较器每次比较两次（O(n·log n) 次全量解析）**、goal 构造再各一次、eligible 过滤每 need 每 facility 一次；单次回执 `recordProductionResult` 也要 3-4 次全量解析。该路径每 15s tick 一次 × 每 bot 一遍，是全仓库 `readFarmProduction` 最热点调用面。现按 facility.id 在 tick 内缓存一次（本段无 await，快照语义等价），filter/sort/goal 构造/eligible 过滤全部走缓存——sort 从 O(n·log n) 次降为 O(n) 次全量解析。autonomous-director 17 项既有需求选择用例全部通过（输出等价），不触碰安全语义。
 - 交叉复审加固 ⑦⑧（stop 路径冲突降级 + 冲突可观测）：
   - ⑧ stop 路径的幂等冲突（同 commandId、不同参数）此前仍 throw `COMMAND_ID_CONFLICT` → runtime-link-client 一律 1008 拆会话 → 冲突循环耗尽重试 → fail-closed 停整个 bot——即 b59656a 在 skill 路径修正的完整故障链在 stop 路径原样保留（可达性低：需 coordinator 重启后复用 randomUUID commandId 且参数变化，但一旦触发是最大爆炸半径）。现回 `rejected` stop 结果帧（`errorCode: "COMMAND_ID_CONFLICT"`），会话保持。既有测试从断言 throw 更新为断言 rejected 结果帧 + bot 状态非 error。

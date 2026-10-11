@@ -1,5 +1,6 @@
 import {
   FacilityRegistry,
+  placementBackoffMs,
   recordFacilityProduction,
   readFacilityProductionLedger,
   transitionFacilityOperationalState,
@@ -57,19 +58,38 @@ export class FacilityExecutor {
     if (readFacilityProductionLedger(facility).state === "PLANNED") transitionFacilityOperationalState(facility, "BUILDING", this.now(), "construction_started");
     for (const slot of facility.slots) {
       if (slot.status === "occupied") continue;
-      if (!this.registry.reserveSlot(facility.id, slot.index, `facility-executor:${facility.id}`, 120_000)) continue;
-      const result = await this.adapter.invoke({ skillId, facility, phase: "construct", slotIndex: slot.index });
-      if (!result.ok) {
-        this.registry.markPlacementFailed(facility.id, slot.index, result.blockedReason ?? "construction_failed", `facility-executor:${facility.id}`);
-        transitionFacilityOperationalState(facility, "DEGRADED", this.now(), result.blockedReason ?? "construction_failed");
-        return result;
+      // 退避窗口检查：temporarily_blocked 的 slot 在 lastFailureAtMs +
+      //  placementBackoffMs(failureCount) 未到期前跳过——registry 的退避
+      //  保护（10s·2^(n-1)，封顶 5 分钟）只在 replanSlot 里实施，此前
+      //  executor 主路径使退避形同虚设（上层按秒级重试 run() 即可零退避
+      //  锤服务器）。
+      if (slot.status === "temporarily_blocked" && slot.lastFailureAtMs !== null) {
+        const backoffUntil = slot.lastFailureAtMs + placementBackoffMs(slot.failureCount);
+        if (this.now() < backoffUntil) continue;
       }
-      const observed = await this.adapter.readback(facility);
-      const cell = observed.cells.find((entry) => entry.slotIndex === slot.index);
-      if (!cell?.blockPresent || (cell.blockName !== null && cell.blockName !== slot.workstationType) || !this.registry.markSlotOccupied(facility.id, slot.index, `${facility.id}#${slot.index}`, { reservationOwner: `facility-executor:${facility.id}` })) {
-        this.registry.markPlacementFailed(facility.id, slot.index, "server_readback_missing", `facility-executor:${facility.id}`);
-        transitionFacilityOperationalState(facility, "DEGRADED", this.now(), "server_readback_missing");
-        return { ok: false, blockedReason: "SERVER_READBACK_MISSING" };
+      if (!this.registry.reserveSlot(facility.id, slot.index, `facility-executor:${facility.id}`, 120_000)) continue;
+      // per-slot 守卫：capability 调用 reject（bot 断线、能力抛错）时此前
+      //  异常直接冒出——slot 卡在 placement_reserved（无自动 expire 调用
+      //  方）、无 markPlacementFailed（退避不启动）、无 DEGRADED 转移、
+      //  ledger 永停 BUILDING。现在异常 → fail + DEGRADED + 返回失败。
+      try {
+        const result = await this.adapter.invoke({ skillId, facility, phase: "construct", slotIndex: slot.index });
+        if (!result.ok) {
+          this.registry.markPlacementFailed(facility.id, slot.index, result.blockedReason ?? "construction_failed", `facility-executor:${facility.id}`);
+          transitionFacilityOperationalState(facility, "DEGRADED", this.now(), result.blockedReason ?? "construction_failed");
+          return result;
+        }
+        const observed = await this.adapter.readback(facility);
+        const cell = observed.cells.find((entry) => entry.slotIndex === slot.index);
+        if (!cell?.blockPresent || (cell.blockName !== null && cell.blockName !== slot.workstationType) || !this.registry.markSlotOccupied(facility.id, slot.index, `${facility.id}#${slot.index}`, { reservationOwner: `facility-executor:${facility.id}` })) {
+          this.registry.markPlacementFailed(facility.id, slot.index, "server_readback_missing", `facility-executor:${facility.id}`);
+          transitionFacilityOperationalState(facility, "DEGRADED", this.now(), "server_readback_missing");
+          return { ok: false, blockedReason: "SERVER_READBACK_MISSING" };
+        }
+      } catch (cause) {
+        this.registry.markPlacementFailed(facility.id, slot.index, cause instanceof Error ? cause.message.slice(0, 120) : "capability_invocation_crashed", `facility-executor:${facility.id}`);
+        transitionFacilityOperationalState(facility, "DEGRADED", this.now(), "capability_invocation_crashed");
+        return { ok: false, blockedReason: "CAPABILITY_INVOCATION_CRASHED" };
       }
     }
     if (readFacilityProductionLedger(facility).state === "BUILDING") transitionFacilityOperationalState(facility, "COMMISSIONING", this.now(), "structure_verified");
@@ -82,7 +102,11 @@ export class FacilityExecutor {
     const verification = await this.adapter.readback(facility);
     if (verification.blockedReason || verification.collectorFull) return this.degrade(facility, verification.blockedReason ?? "collector_full");
     if (!verification.output || Object.values(verification.output).every((count) => !Number.isSafeInteger(count) || count <= 0)) return this.degrade(facility, "NO_SERVER_OUTPUT");
-    for (const [item, count] of Object.entries(verification.output)) recordFacilityProduction(facility, item, count, this.now(), "produced");
+    try {
+      for (const [item, count] of Object.entries(verification.output)) recordFacilityProduction(facility, item, count, this.now(), "produced");
+    } catch {
+      return this.degrade(facility, "PRODUCTION_LEDGER_WRITE_FAILED");
+    }
     // 消耗只在各自拿到结果时记一次：entities 由 :77、activate 由 :80 的
     // recordConsumed() 登记。这里曾把 entityResult.consumed 再记一遍，
     // 而 recordFacilityProduction 是无幂等守卫的累加，于是实体阶段的消耗
