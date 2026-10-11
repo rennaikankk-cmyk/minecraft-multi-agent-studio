@@ -90,6 +90,45 @@ function optNum(args: Record<string, unknown>, key: string): number | undefined 
   return args[key] === undefined ? undefined : num(args, key);
 }
 
+function unitInterval(args: Record<string, unknown>, key: string): number {
+  const value = num(args, key);
+  if (value < 0 || value > 1) throw new Error(`arg ${key} must be within [0, 1]`);
+  return value;
+}
+
+/** fac.create 的 patternSlots 此前是全 dispatcher 中唯一不过 zod 的结构化参数
+ *  （裸类型断言直通 FacilityRegistry）——坏 slot（非整数偏移、缺失类型、
+ *  超长数组）可跨进程毒化共享注册表并立即持久化。 */
+const WORKSTATION_TYPES = [
+  "crafting_table",
+  "furnace",
+  "blast_furnace",
+  "smoker",
+  "anvil",
+  "enchanting_table",
+  "brewing_stand",
+  "stonecutter",
+  "smithing_table",
+  "grindstone",
+  "chest",
+  "barrel",
+] as const;
+// 编译期漂移防护：asset-policy 的 WorkstationType 新增成员而此枚举漏更时立即报错。
+type WorkstationTypeCoverage = Exclude<WorkstationType, typeof WORKSTATION_TYPES[number]> extends never ? true : never;
+
+const patternSlotSchema = z.object({
+  localOffset: z.object({
+    x: z.number().int(),
+    y: z.number().int(),
+    z: z.number().int(),
+  }).strict(),
+  workstationType: z.enum(WORKSTATION_TYPES),
+}).strict();
+const patternSlotsSchema = z.array(patternSlotSchema).max(256);
+// 覆盖完备时（WorkstationTypeCoverage === true）才可编译——枚举漏更即报错。
+const workstationTypeCoverageCheck: WorkstationTypeCoverage = true;
+void workstationTypeCoverageCheck;
+
 function pos(args: Record<string, unknown>, key = "position"): BlockPosition {
   const v = args[key] as Record<string, unknown> | undefined;
   if (!v || typeof v !== "object") throw new Error(`arg ${key} must be a position object`);
@@ -126,7 +165,7 @@ export function createSharedStateDispatcher(
     "ws.register": (a) =>
       workstations.register(
         str(a, "serverProfileId"), str(a, "dimension"), str(a, "type") as WorkstationType,
-        pos(a), a.confidence === undefined ? undefined : num(a, "confidence"),
+        pos(a), a.confidence === undefined ? undefined : unitInterval(a, "confidence"),
       ),
     "ws.get": (a) => workstations.get(str(a, "serverProfileId"), str(a, "dimension"), pos(a)),
     "ws.findCandidates": (a) =>
@@ -154,7 +193,7 @@ export function createSharedStateDispatcher(
         anchor: pos(a, "anchor"),
         orientation: str(a, "orientation") as Orientation,
         layoutVersion: str(a, "layoutVersion"),
-        patternSlots: (a.patternSlots as PatternSlot[] | undefined) ?? [],
+        patternSlots: patternSlotsSchema.parse(a.patternSlots ?? []),
         ...(a.discovery === undefined ? {} : { discovery: str(a, "discovery") as "planned" | "observed_existing" }),
         ...(a.baseId === undefined ? {} : { baseId: str(a, "baseId") }),
       }),

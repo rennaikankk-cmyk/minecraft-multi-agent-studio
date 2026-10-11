@@ -126,6 +126,51 @@ describe("SharedStateClient facility lifecycle (remote)", () => {
     expect(fr.get(facility.id)!.slots[0]!.status).toBe("planned");
   });
 
+  it("rejects malformed patternSlots instead of poisoning the shared registry (cross-audit round 26)", async () => {
+    // patternSlots 此前是全 dispatcher 中唯一不过 zod 的结构化参数（裸类型
+    // 断言直通 FacilityRegistry）——坏 slot（非整数偏移/缺失类型/未知字段/
+    // 超长数组）会跨进程毒化共享注册表并立即持久化。
+    const fr = new FacilityRegistry();
+    const client = makeClient(createSharedStateDispatcher(new InMemoryWorkstationRegistry(), fr));
+    const base = {
+      facilityType: "smelting_zone", serverProfileId: SERVER, dimension: DIM,
+      anchor: { x: 100, y: 64, z: 200 }, orientation: "north",
+      layoutVersion: "smelting_basic_v1",
+    };
+    const malformed: Array<unknown> = [
+      [{ localOffset: { x: 0.5, y: 0, z: 0 }, workstationType: "furnace" }], // 非整数偏移 → NaN 坐标风险
+      [{ localOffset: { x: 0, y: 0 }, workstationType: "furnace" }],          // 缺轴
+      [{ localOffset: { x: 0, y: 0, z: 0 } }],                                 // 缺 workstationType
+      [{ localOffset: { x: 0, y: 0, z: 0 }, workstationType: "jukebox" }],    // 非法类型枚举
+      [{ localOffset: { x: 0, y: 0, z: 0 }, workstationType: "furnace", extra: 1 }], // 未知字段
+      [{ localOffset: "0,0,0", workstationType: "furnace" }],                 // 字符串偏移
+      Array.from({ length: 257 }, () => ({ localOffset: { x: 0, y: 0, z: 0 }, workstationType: "furnace" })), // 超长
+    ];
+    for (const patternSlots of malformed) {
+      await expect(client.create({ ...base, patternSlots: patternSlots as never })).rejects.toThrow();
+      expect(fr.findCandidates(SERVER, DIM, "smelting_zone", { x: 100, y: 64, z: 200 })).toHaveLength(0);
+    }
+    // 合法 pattern 照常。
+    const ok = await client.create({ ...base, patternSlots: smeltingLinePattern(2) });
+    expect(fr.get(ok.id)!.slots).toHaveLength(2);
+  });
+
+  it("clamps ws.register confidence input to the [0, 1] unit interval or rejects", async () => {
+    // confidence 此前经 num() 无界直通——1e308 之类的值会永久扭曲
+    // decayedConfidence 与候选排序 sortKey。
+    const registry = new InMemoryWorkstationRegistry();
+    const client = makeClient(createSharedStateDispatcher(registry, new FacilityRegistry()));
+    await expect(
+      client.register(SERVER, DIM, "furnace", { x: 1, y: 2, z: 3 }, 1e308),
+    ).rejects.toThrow();
+    await expect(
+      client.register(SERVER, DIM, "furnace", { x: 1, y: 2, z: 3 }, -0.5),
+    ).rejects.toThrow();
+    await client.register(SERVER, DIM, "furnace", { x: 1, y: 2, z: 3 }, 0.9);
+    const entry = registry.get(SERVER, DIM, { x: 1, y: 2, z: 3 });
+    expect(entry?.confidence).toBe(0.9);
+  });
+
   it("getFacility + expireReservations over the wire", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-29T12:00:00Z"));

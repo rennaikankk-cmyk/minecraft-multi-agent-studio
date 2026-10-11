@@ -93,6 +93,7 @@
 
 ### 修复
 
+- shared-state `fac.create` 的 patternSlots schema 校验（跨包交互面审计首选）：patternSlots 此前是**全 dispatcher 中唯一不过 zod 的结构化参数**（裸类型断言直通 FacilityRegistry）——一次坏 RPC 可注入非整数偏移（参与 `toWorldPosition` 算术产生 NaN 坐标）、缺失/非法 workstationType、未知字段与超长数组（仅受 256KB body 上限约束），毒化**跨进程共享**的注册表并立即持久化（`fac.create` 不在持久化排除列表）、重启后恢复——与 facility TTL 修复前同类的"一次坏调用 = 注册表持久污染"。现以 strict schema 校验：偏移三轴均为安全整数、workstationType 枚举（附编译期漂移防护——asset-policy 的 WorkstationType 新增成员而枚举漏更时立即报错）、数组上限 256。顺带：`ws.register` 的 confidence 从无界 `num()` 直通收紧为 [0,1] 区间校验（1e308 类值会永久扭曲 decayedConfidence 与候选排序）。新增回归：7 类坏 slot 全部拒绝且注册表零污染、合法 pattern 照常、confidence 越界拒绝。
 - 交叉复审加固 ⑤⑥（低优先清理，两项合并）：
   - ⑤ 脱敏扫描窗口的边界前移泄漏闭合：深入分析后确认复审所述"窗口外内容被拉入"在现有"先截后扫"实现中不可能发生（可见内容永不出自扫描窗口内）；**真实残差**是跨 16k 窗口末端截断的令牌头段（部分形状、模式无法匹配），在前部内容被大量脱敏缩短后会被拉进最终可见的 500 字符。修复：原串超出扫描窗口时，从扫描串尾部剥除"疑似令牌前缀游程"（JWT 含段分隔点、gh/github_pat/sk/pk/xox 家族；窗口内的完整令牌不受影响、仍走正常 `[REDACTED]` 脱敏）。新增最小复现回归（2 个 7.9k Bearer 单元把跨界 JWT 头段拉进可见区）+ 窗口外密钥永不可见的不变量断言；反向验证无修复时该测试失败、窗口内完整令牌契约（round-17 用例）不回归。
   - ⑥ resource-management CAS 复核加 `schemaVersion` 廉价指纹：JSON 合法、revision 合法但 schemaVersion 缺失/不符的文件按损坏 fail-closed（`RESOURCE_STATE_READ_FAILED`），恢复"损坏文件不被静默覆盖"的旧全量 parse 口径；本 store 格式（"2.0"）照常。新增指纹回归。
