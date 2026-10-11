@@ -677,13 +677,26 @@ export class AutonomousDirector implements AutonomousTaskSource {
       }));
       this.options.persistBaseState?.();
     }
+    // readFarmProduction 每次调用做 safeParse + 2 次深比较 + 嵌套 re-parse
+    // （含 7×7 布局重建）——此前 filter/sort 比较器/goal 构造/eligible 过滤
+    // 各自独立调用，sort 比较器更是每比较两次（O(n·log n) 次全量解析）。
+    // 本段无 await，按 facility.id 缓存一次语义等价。
+    const productionCache = new Map<string, ReturnType<typeof readFarmProduction>>();
+    const cachedProduction = (facility: { id: string }) => {
+      let cached = productionCache.get(facility.id);
+      if (cached === undefined) {
+        cached = readFarmProduction(facility as never);
+        productionCache.set(facility.id, cached);
+      }
+      return cached;
+    };
     const farm = base ? this.options.facilityRegistry?.findByBase(base.id).filter((facility) => {
-      const production = readFarmProduction(facility);
+      const production = cachedProduction(facility);
       return production?.enabled && !this.productionRuns.has(facility.id) && production.nextRunAtMs <= nowMs &&
         facility.serverProfileId === record.serverProfileId && facility.dimension === base.dimension;
-    }).sort((a, b) => readFarmProduction(a)!.nextRunAtMs - readFarmProduction(b)!.nextRunAtMs || a.id.localeCompare(b.id))[0] : null;
-    if (farm && readFarmProduction(farm)?.sustain) {
-      const production = readFarmProduction(farm)!;
+    }).sort((a, b) => cachedProduction(a)!.nextRunAtMs - cachedProduction(b)!.nextRunAtMs || a.id.localeCompare(b.id))[0] : null;
+    if (farm && cachedProduction(farm)?.sustain) {
+      const production = cachedProduction(farm)!;
       const inventory = record.currentStatus?.inventory ?? [];
       const missing = /^FARM_MATERIAL_REQUIRED:(oak_fence|oak_fence_gate|torch|barrel|bucket)$/u.exec(production.reason ?? "")?.[1];
       const materialCount: Record<string, number> = { oak_fence: 24, oak_fence_gate: 1, torch: 4, barrel: 1, bucket: 1 };
@@ -695,7 +708,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
       needs.push({ key: "BASE_FARM_MAINTENANCE", score: 75, title: "维持食物设施", reason: production.reason ?? "food production inspection due", operatorGoal: goal, sourceBlock: null });
       needs.sort((a, b) => b.score - a.score);
     } else if (farm) {
-      const production = readFarmProduction(farm)!;
+      const production = cachedProduction(farm)!;
       const inventory = record.currentStatus?.inventory ?? [];
       const crop = production.input.plantEmpty;
       if (crop && ["carrots", "potatoes", "wheat", "beetroots"].includes(crop)) {
@@ -719,7 +732,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
     const eligible = needs.filter(
       (need) =>
         !(adopted && (BASE_BUILD_NEED_KEYS.has(need.key) || need.key === "BASE_SITE_SELECTION" || need.key === "SHELTER")) &&
-        !(need.key === "BASE_FACILITY_FARM" && base && this.options.facilityRegistry?.findByBase(base.id).some((f) => readFarmProduction(f)?.sustain)) &&
+        !(need.key === "BASE_FACILITY_FARM" && base && this.options.facilityRegistry?.findByBase(base.id).some((f) => cachedProduction(f)?.sustain)) &&
         !(need.key === "SHELTER" && build) &&
         !((need.key === "BASE_FACILITY_COBBLE" || need.key === "BASE_FACILITY_FARM") &&
           this.persistedBuild(record.botId, need.key)?.verification === "VERIFIED") &&

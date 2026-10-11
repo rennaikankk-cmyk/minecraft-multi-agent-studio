@@ -93,6 +93,7 @@
 
 ### 修复
 
+- AutonomousDirector tick 内 farm-production 解析缓存：需求评估循环中 `readFarmProduction`（每次调用 safeParse + 2 次深比较 + 嵌套 re-parse 含 7×7 布局重建）此前被反复调用——filter 每 facility 一次、**sort 比较器每次比较两次（O(n·log n) 次全量解析）**、goal 构造再各一次、eligible 过滤每 need 每 facility 一次；单次回执 `recordProductionResult` 也要 3-4 次全量解析。该路径每 15s tick 一次 × 每 bot 一遍，是全仓库 `readFarmProduction` 最热点调用面。现按 facility.id 在 tick 内缓存一次（本段无 await，快照语义等价），filter/sort/goal 构造/eligible 过滤全部走缓存——sort 从 O(n·log n) 次降为 O(n) 次全量解析。autonomous-director 17 项既有需求选择用例全部通过（输出等价），不触碰安全语义。
 - 交叉复审加固 ⑦⑧（stop 路径冲突降级 + 冲突可观测）：
   - ⑧ stop 路径的幂等冲突（同 commandId、不同参数）此前仍 throw `COMMAND_ID_CONFLICT` → runtime-link-client 一律 1008 拆会话 → 冲突循环耗尽重试 → fail-closed 停整个 bot——即 b59656a 在 skill 路径修正的完整故障链在 stop 路径原样保留（可达性低：需 coordinator 重启后复用 randomUUID commandId 且参数变化，但一旦触发是最大爆炸半径）。现回 `rejected` stop 结果帧（`errorCode: "COMMAND_ID_CONFLICT"`），会话保持。既有测试从断言 throw 更新为断言 rejected 结果帧 + bot 状态非 error。
   - ⑦ skill 冲突分支补 `bot_runtime_skill_invocation_conflict` warn 日志（traceId/taskId/skillId/invocationId）——此前 runtime 侧对该冲突零观测记录，排障时 bot 侧日志缺一角。
