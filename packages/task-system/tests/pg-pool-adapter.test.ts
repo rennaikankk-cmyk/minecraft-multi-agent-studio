@@ -156,4 +156,43 @@ describe("bounded PostgreSQL pool adapter", () => {
       errorCode: null,
     });
   });
+
+  it("preserves the original pg error as cause on every stable failure path", async () => {
+    // 稳定错误码/文案不变，但原始错误必须经 cause 保留——statement timeout、
+    // 约束冲突（23505）、语法错误等关键诊断信息不能被固定文案吞掉。
+    const adapter = new PgTaskPoolAdapter({});
+
+    pgMock.client.query.mockRejectedValueOnce(
+      Object.assign(new Error("duplicate key value violates unique constraint"), { code: "23505" }),
+    );
+    const client = await adapter.connect();
+    const queryFailure = await client.query("SELECT 1").then(
+      () => { throw new Error("expected failure"); },
+      (error: unknown) => error,
+    );
+    expect(queryFailure).toMatchObject({
+      code: "POSTGRES_QUERY_FAILED",
+      message: "PostgreSQL query failed.",
+    });
+    expect((queryFailure as { cause?: { message?: string; code?: string } }).cause)
+      .toMatchObject({ message: "duplicate key value violates unique constraint", code: "23505" });
+
+    pgMock.connect.mockRejectedValueOnce(new Error("ECONNREFUSED 127.0.0.1:5432"));
+    const connectFailure = await adapter.connect().then(
+      () => { throw new Error("expected failure"); },
+      (error: unknown) => error,
+    );
+    expect(connectFailure).toMatchObject({ code: "POSTGRES_CONNECTION_UNAVAILABLE" });
+    expect((connectFailure as { cause?: { message?: string } }).cause)
+      .toMatchObject({ message: "ECONNREFUSED 127.0.0.1:5432" });
+
+    pgMock.query.mockRejectedValueOnce(new Error("statement timeout"));
+    const readinessFailure = await adapter.verifyConnection().then(
+      () => { throw new Error("expected failure"); },
+      (error: unknown) => error,
+    );
+    expect(readinessFailure).toMatchObject({ code: "POSTGRES_READINESS_FAILED" });
+    expect((readinessFailure as { cause?: { message?: string } }).cause)
+      .toMatchObject({ message: "statement timeout" });
+  });
 });

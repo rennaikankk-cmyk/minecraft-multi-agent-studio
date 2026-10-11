@@ -55,8 +55,9 @@ export class PgPoolAdapterError extends Error {
   constructor(
     readonly code: PgPoolErrorCode,
     message: string,
+    options?: Readonly<{ cause: unknown }>,
   ) {
-    super(message);
+    super(message, options);
     this.name = "PgPoolAdapterError";
   }
 }
@@ -80,11 +81,12 @@ class PgClientAdapter implements PostgresClientLike {
         rows: result.rows as TRow[],
         rowCount: result.rowCount,
       };
-    } catch {
+    } catch (error) {
       this.recordFailure("POSTGRES_QUERY_FAILED");
       throw new PgPoolAdapterError(
         "POSTGRES_QUERY_FAILED",
         "PostgreSQL query failed.",
+        { cause: error },
       );
     }
   }
@@ -120,34 +122,39 @@ export class PgPoolAdapter implements PostgresPoolLike {
       return new PgClientAdapter(client, (code) => {
         this.setHealth("degraded", code);
       });
-    } catch {
+    } catch (error) {
       this.setHealth("degraded", "POSTGRES_CONNECTION_UNAVAILABLE");
       throw new PgPoolAdapterError(
         "POSTGRES_CONNECTION_UNAVAILABLE",
         "PostgreSQL connection is unavailable.",
+        { cause: error },
       );
     }
   }
 
   async verifyConnection(): Promise<void> {
+    // 就绪失败的两类来源（探针查询抛错 / 返回行不符）统一折叠为稳定错误，
+    // 但保留原始 cause 供诊断；健康状态只落稳定错误码。
+    let failure: unknown;
     try {
       const result = await this.pool.query<{ ready: number }>(
         "SELECT 1::integer AS ready",
       );
       if (result.rows[0]?.ready !== 1) {
-        throw new PgPoolAdapterError(
-          "POSTGRES_READINESS_FAILED",
-          "PostgreSQL readiness check failed.",
-        );
+        failure = new Error("readiness probe returned an unexpected row");
+      } else {
+        this.setHealth("ready", null);
+        return;
       }
-      this.setHealth("ready", null);
-    } catch {
-      this.setHealth("degraded", "POSTGRES_READINESS_FAILED");
-      throw new PgPoolAdapterError(
-        "POSTGRES_READINESS_FAILED",
-        "PostgreSQL readiness check failed.",
-      );
+    } catch (error) {
+      failure = error;
     }
+    this.setHealth("degraded", "POSTGRES_READINESS_FAILED");
+    throw new PgPoolAdapterError(
+      "POSTGRES_READINESS_FAILED",
+      "PostgreSQL readiness check failed.",
+      { cause: failure },
+    );
   }
 
   getHealthStatus(): PgPoolHealth {
@@ -158,11 +165,12 @@ export class PgPoolAdapter implements PostgresPoolLike {
     try {
       await this.pool.end();
       this.setHealth("closed", null);
-    } catch {
+    } catch (error) {
       this.setHealth("degraded", "POSTGRES_CLOSE_FAILED");
       throw new PgPoolAdapterError(
         "POSTGRES_CLOSE_FAILED",
         "PostgreSQL pool failed to close.",
+        { cause: error },
       );
     }
   }
