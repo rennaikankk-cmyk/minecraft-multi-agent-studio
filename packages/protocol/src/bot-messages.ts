@@ -296,8 +296,12 @@ function addSkillInputSchemaIssue(
   if (issues.length < 32) issues.push({ path, message });
 }
 
-/** validateSkillInputSchema 尾段（字节预算 + zod 编译探针）的有界 memo。 */
+/** validateSkillInputSchema 尾段（字节预算 + zod 编译探针）的有界 memo。
+ *  条目上限只限条数——键是完整序列化串，单条大小也必须有界（coordinator
+ *  是全集群 catalog 的汇聚解析点，超长键 ×1024 条可达数百 MB 常驻）。
+ *  超过键长上限的输入跳过缓存（判定每次照算，结论不变）。 */
 const SKILL_INPUT_SCHEMA_MEMO_MAX = 1_024;
+const SKILL_INPUT_SCHEMA_MEMO_MAX_KEY_LENGTH = 4_096;
 const skillInputSchemaEncoder = new TextEncoder();
 const skillInputSchemaMemo = new Map<
   string,
@@ -562,10 +566,14 @@ function validateSkillInputSchema(value: unknown): SkillInputSchemaIssue[] {
         SKILL_INPUT_SCHEMA_MAX_BYTES,
       compiles: skillInputSchemaCompiles(value),
     };
-    if (skillInputSchemaMemo.size >= SKILL_INPUT_SCHEMA_MEMO_MAX) {
-      skillInputSchemaMemo.delete(skillInputSchemaMemo.keys().next().value!);
+    // 超长键不入缓存：常驻内存按条数 × 键长有界（1024 × 4KB ≈ 4MB），
+    // 判定结论不受缓存缺失影响（每次照算）。
+    if (serialized.length <= SKILL_INPUT_SCHEMA_MEMO_MAX_KEY_LENGTH) {
+      if (skillInputSchemaMemo.size >= SKILL_INPUT_SCHEMA_MEMO_MAX) {
+        skillInputSchemaMemo.delete(skillInputSchemaMemo.keys().next().value!);
+      }
+      skillInputSchemaMemo.set(serialized, memoEntry);
     }
-    skillInputSchemaMemo.set(serialized, memoEntry);
   }
   if (!memoEntry.bytesWithinLimit) {
     addSkillInputSchemaIssue(issues, [], "Skill inputSchema exceeds the serialized byte limit.");

@@ -456,6 +456,42 @@ describe("BotSkillCatalogV1", () => {
     expect(withInputSchema(badPattern)).toBe(false);
   });
 
+  it("keeps verdicts deterministic for oversized keys that skip the memo (bounded entry size)", () => {
+    // 交叉复审 #3：memo 键是完整序列化串——超长键（>4096 字符）不入缓存
+    // （1024 × 无界键长可达数百 MB 常驻）。跳过路径的判定结论必须与缓存
+    // 路径一致：同一超长 schema 两轮解析结论相同。
+    const withInputSchema = (inputSchema: unknown) =>
+      botSkillCatalogV1Schema.safeParse({
+        ...catalog,
+        payload: {
+          ...catalog.payload,
+          skills: [{ ...catalog.payload.skills[0], inputSchema }],
+        },
+      }).success;
+
+    const oversizedValid = {
+      type: "object",
+      properties: Object.fromEntries(
+        Array.from({ length: 120 }, (_, index) => [
+          `propertyWithAVeryLongName${index}`,
+          { type: "string" },
+        ]),
+      ),
+      additionalProperties: false,
+    };
+    expect(JSON.stringify(oversizedValid).length).toBeGreaterThan(4_096);
+    const oversizedInvalid = {
+      ...oversizedValid,
+      properties: { ...oversizedValid.properties, bad: { type: "string", pattern: "[" } },
+    };
+    expect(JSON.stringify(oversizedInvalid).length).toBeGreaterThan(4_096);
+
+    for (let round = 0; round < 2; round += 1) {
+      expect(withInputSchema(oversizedValid)).toBe(true);
+      expect(withInputSchema(oversizedInvalid)).toBe(false);
+    }
+  });
+
   it("rejects contradictory availability and duplicate entries", () => {
     expect(
       botSkillCatalogV1Schema.safeParse({
