@@ -1,60 +1,34 @@
 "use client";
 
-// Bot Fleet 高密度表（真实 /api/bots 轮询 5s；行内状态色 + 链接 Incidents）。
-import { useCallback, useEffect, useMemo, useState } from "react";
+// Bot Fleet 高密度表（消费 useBotStore 的 SSE 实时流；行内状态色 + 链接 Incidents）。
+// 此前自带 5s fetch 轮询——与同页 BotDashboard 的 SSE 流构成双状态源
+// （10 bot ≈ 2.2 req/s 纯冗余上游扇出 + 同实体两份展示副本竞态）。
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { RefreshCw, Search } from "lucide-react";
 import type { PublicBotDetailV1 } from "@minecraft-studio/protocol";
 
 import { Badge, Card, CardContent, CardHeader, CardTitle, DataTable, Input, Td, Th, UiEmptyState } from "@/components/ui/primitives";
 import { Button } from "@/components/ui/button";
+import { useBotStore } from "@/stores/bot-store";
 
-interface BotRow {
-  botId: string;
-  username?: string;
-  connectionState: string;
-  health?: { current: number } | null;
-  food?: { level: number } | null;
-  position?: { x: number; y: number; z: number; dimension?: string } | null;
-  latencyMs?: number | null;
-  currentTask?: { title: string | null } | null;
-  lastMessageAt?: string;
-  armorSlots?: PublicBotDetailV1["armorSlots"];
-  performance?: PublicBotDetailV1["performance"];
-}
+type BotRow = PublicBotDetailV1 & { username?: string };
 
 export function BotFleetTable() {
-  const [bots, setBots] = useState<BotRow[] | null>(null);
+  const store = useBotStore();
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
-  const [pending, setPending] = useState(false);
-  const [failed, setFailed] = useState<string | null>(null);
-
-  const refresh = useCallback(async () => {
-    setPending(true);
-    try {
-      const response = await fetch("/api/bots", { cache: "no-store" });
-      const body = await response.json();
-      if (!response.ok || !Array.isArray(body?.data?.bots)) throw new Error(body?.error?.message ?? "机器人状态不可用");
-      setBots((body?.data?.bots ?? []) as BotRow[]);
-      setFailed(null);
-    } catch (error) {
-      setBots(null);
-      setFailed(error instanceof Error ? error.message : "unknown");
-    } finally {
-      setPending(false);
-    }
-  }, []);
 
   useEffect(() => {
-    void refresh();
-    const timer = setInterval(() => void refresh(), 5_000);
-    return () => clearInterval(timer);
-  }, [refresh]);
+    useBotStore.getState().startLive();
+    return () => useBotStore.getState().stopLive();
+  }, []);
 
+  const bots = store.bots as readonly BotRow[];
+  const failed = store.error?.message ?? null;
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return (bots ?? []).filter((bot) => {
+    return bots.filter((bot) => {
       if (q && !`${bot.botId} ${bot.username ?? ""}`.toLowerCase().includes(q)) return false;
       if (statusFilter && bot.connectionState !== statusFilter) return false;
       return true;
@@ -88,8 +62,8 @@ export function BotFleetTable() {
             <option value="offline">offline</option>
             <option value="error">error</option>
           </select>
-          <Button variant="ghost" size="icon" aria-label="刷新" onClick={() => void refresh()} disabled={pending}>
-            <RefreshCw className={pending ? "animate-spin" : undefined} />
+          <Button variant="ghost" size="icon" aria-label="刷新" onClick={() => void store.refresh()} disabled={store.refreshing}>
+            <RefreshCw className={store.refreshing ? "animate-spin" : undefined} />
           </Button>
         </div>
       </CardHeader>

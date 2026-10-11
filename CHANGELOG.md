@@ -93,6 +93,7 @@
 
 ### 修复
 
+- /bots 页双状态源收敛（dashboard 深扫候选 1）：`BotFleetTable` 此前完全无视 `useBotStore`，自带 5s `fetch("/api/bots")` 轮询并维护独立 `bots` state——与同页 `BotDashboard`（走 SSE live 的 store）构成双状态源：(a) 即使 SSE 健康直播，fleet 表仍每 5s 触发 1+ceil(N/10) 次上游 Control API 请求（10 bot ≈ 持续 **2.2 req/s 纯冗余流量**打到 coordinator）；(b) 同一 bot 实体在同一页面有两份状态副本，SSE 增量更新 store 时 fleet 表要等下一次轮询才跟上（连接状态列跳动/滞后）。现改为消费 `useBotStore`（挂载 `startLive()`/卸载 `stopLive()`，与 `bot-dashboard.tsx` 同模式），删除本地 fetch 循环；手动刷新走 `store.refresh()`；失败/空态复用 store 的 `error`/`bots`。上游扇出归零（同页唯一状态源），状态实时性从 5s 轮询提升为 SSE 实时。
 - farm-production 写路径统一（技能执行器深扫候选 3）：`registerFoodProduction` 此前是四个 `metadata.production` 写点中唯一跳过 `farmProductionSchema.parse` 的（`{...production, sustain}` 裸 spread）——破坏"metadata.production 恒为 schema-valid"的不变量（当前内容恰好已 parse 未爆发）。现抽 `writeFarmProduction` 校验写 helper 统一全部四个写点（`recordFoodConsumption`/`registerCropProduction`/`registerFoodProduction`/`recordFarmProduction`），接受 `z.input` 类型（default 字段可省略，parse 填充）。farm-production 5 项既有用例全部通过。
 - FacilityExecutor slot 迭代的异常路径守卫 + 退避窗口（技能执行器深扫候选 2）：
   - **异常路径**：`adapter.invoke`/`adapter.readback` 此前无 try/catch——capability 调用 reject（bot 断线、能力抛错）时异常直接冒出，slot 卡在 `placement_reserved`（120s TTL 内无人 expire）、无 `markPlacementFailed`（failureCount 不增、退避不启动）、无 DEGRADED 转移、ledger 永停 BUILDING。现 per-slot try/catch：异常 → `markPlacementFailed` + DEGRADED + 返回 `{ok:false, blockedReason:"CAPABILITY_INVOCATION_CRASHED"}`。生产记账循环（`recordFacilityProduction` 可因畸形物品名抛 TypeError）同样纳入守卫（→ DEGRADED + 返回失败）。
