@@ -87,15 +87,6 @@ import {
 
 const { goals } = pathfinderModule;
 
-/**
- * 同拍合并窗口（ms）：mineflayer 的 tickPhysics 先 emit physicsTick，再在
- * updatePosition 里发位置包并 emit move——移动/转头时同一拍背靠背触发两次
- * 完整状态评估链（快照→L0 安全→世界状态重建，每 Bot 约 40 次/秒）。move
- * 落在 physicsTick 通知之后的窗口内属同拍重复，直接合并。物理拍间隔 50ms，
- * 窗口取 10ms 只吃掉同拍场景；独立到达的 move（服务器强制传送等）不受影响。
- */
-const SAME_TICK_MOVE_COALESCE_WINDOW_MS = 10;
-
 const ACTION_LOCK_TTL_MS = 5 * 60_000;
 const MAX_UTILITY_STATION_PATH_ATTEMPTS = 4;
 
@@ -463,8 +454,8 @@ export class MineflayerBotClient implements BotClient {
   private readonly workstationDisconnected = new AbortController();
   private handlers: BotClientHandlers | null = null;
   private lastObservedHealth: number | null = null;
-  /** 最近一次 physicsTick 通知的单调时刻（ms），用于同拍合并 move 事件。 */
-  private lastPhysicsNotifyMonotonicMs: number | null = null;
+  /** physicsTick 同步段内为 true，queueMicrotask 清除——move 的精确同拍判定。 */
+  private physicsTickMoveWindow = false;
   private requestedStop = false;
   private kickedDetail: string | undefined;
   /** kick 阶段证据：login 前后 / spawn 前后（SERVER_KICK 结构化字段）。 */
@@ -783,20 +774,22 @@ export class MineflayerBotClient implements BotClient {
     });
     bot.on("breath", () => this.perfSink?.("event.breath.stateChanged"));
     bot.on("move", () => {
-      // move 总是紧跟同拍 physicsTick 之后（tickPhysics 先 emit physicsTick
-      // 再发位置包），见 SAME_TICK_MOVE_COALESCE_WINDOW_MS 注释。
-      if (
-        this.lastPhysicsNotifyMonotonicMs !== null &&
-        performance.now() - this.lastPhysicsNotifyMonotonicMs <
-          SAME_TICK_MOVE_COALESCE_WINDOW_MS
-      ) {
-        return;
-      }
+      // 精确同拍判定：mineflayer 的 tickPhysics 在同一同步段内先 emit
+      // physicsTick、随后 updatePosition 发位置包并 emit move——物理拍内
+      // 的 move 由「拍内标志」（physicsTick 设置、queueMicrotask 清除）
+      // 识别。服务器强制传送/rubberband 的 move 经网络包到达，必然在
+      // 标志清除之后的宏任务里，不会被误吞（时间窗口版有 ~10/50 的
+      // 概率吞掉传送确认——传送正是危险密集时刻，评估延迟直接吃
+      // <50ms 反射预算）。
+      if (this.physicsTickMoveWindow) return;
       this.perfSink?.("event.move.stateChanged");
     });
     bot.on("physicsTick", () => {
+      this.physicsTickMoveWindow = true;
+      queueMicrotask(() => {
+        this.physicsTickMoveWindow = false;
+      });
       this.handlers?.onPhysicsTick?.();
-      this.lastPhysicsNotifyMonotonicMs = performance.now();
       this.perfSink?.("tick.physics.stateChanged");
     });
     // 死亡不是断线：连接保持，但背包清空、位置漂移到重生点。先上报事实

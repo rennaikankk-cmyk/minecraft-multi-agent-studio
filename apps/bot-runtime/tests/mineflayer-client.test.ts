@@ -137,19 +137,36 @@ describe("MineflayerBotClient lifecycle", () => {
     const onPhysicsTick = vi.fn();
     client.setHandlers(handlers({ onStateChanged, onPhysicsTick }));
 
-    // mineflayer tickPhysics 的真实顺序：先 physicsTick，随后位置包 emit move。
+    // mineflayer tickPhysics 的真实顺序：先 physicsTick，随后位置包 emit move
+    // ——同一同步段内（微任务未排空），move 属同拍重复。
     emitter.emit("physicsTick");
     expect(onPhysicsTick).toHaveBeenCalledTimes(1);
     expect(onStateChanged).toHaveBeenCalledTimes(1);
 
-    // 同拍 move（<10ms 窗口内）：合并，不触发第二次完整评估链。
     emitter.emit("move");
     expect(onStateChanged).toHaveBeenCalledTimes(1);
 
-    // 窗口过期后的独立 move（服务器强制传送等场景）：照常通知。
-    await new Promise((resolve) => setTimeout(resolve, 15));
+    // 微任务排空 = 拍内标志清除：之后的 move 是独立事件，照常通知。
+    await Promise.resolve();
     emitter.emit("move");
     expect(onStateChanged).toHaveBeenCalledTimes(2);
+  });
+
+  it("never swallows a teleport/rubberband move that follows a physics tick asynchronously", async () => {
+    // 交叉复审 #2 回归：时间窗口版有 ~10/50 概率吞掉服务器强制传送的
+    // move（position 包处理器直接 emit move，无 physicsTick 前导，到达
+    // 时刻与本地物理拍无关）。拍内标志版按同步段精确判定：传送必然在
+    // 标志清除后的宏任务里到达，评估立即触发，不吃 <50ms 反射预算。
+    const emitter = new EventEmitter();
+    const bot = emitter as unknown as Bot;
+    const client = new MineflayerBotClient(bot, "auto");
+    const onStateChanged = vi.fn();
+    client.setHandlers(handlers({ onStateChanged }));
+
+    emitter.emit("physicsTick");
+    await Promise.resolve(); // 物理拍的同步段结束（微任务排空，标志清除）
+    emitter.emit("move"); // 服务器传送确认——紧跟物理拍之后但已跨任务边界
+    expect(onStateChanged).toHaveBeenCalledTimes(2); // physicsTick + 传送 move
   });
 
   it("computes snapshot hasSafeFood with reserve and metadata gating (boolean short-circuit)", () => {
