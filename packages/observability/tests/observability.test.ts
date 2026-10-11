@@ -213,6 +213,34 @@ describe("structured observability", () => {
   });
 
   /**
+   * 截断顺序：sanitizeString 此前先 slice(0,500) 再跑敏感模式——超 500 字符
+   * 的结构化令牌（大 claims 的 JWT、fine-grained PAT）被拦腰截断后脱离匹配
+   * 形状（JWT 模式要求三段完整），~470 字符的真实令牌材料（可解码的 claims）
+   * 直接落盘。现在先在预扫上限（16k）内脱敏、最后才截断展示长度。
+   */
+  it("redacts long (>500 char) tokens in full before the display truncation limit", () => {
+    const { logger, records } = loggerWithSink();
+    const longPayload = Buffer.from(
+      JSON.stringify({ sub: "operator-secret-subject", notes: "x".repeat(600) }),
+    ).toString("base64url");
+    const longJwt = `eyJhbGciOiJIUzI1NiJ9.${longPayload}.dozjgNryP4JcuCA2QIHX8qE3FYk9crJstYPODehqK9s`;
+    const longPat = `github_pat_${"A1b2c3d4e5f6g7h8".repeat(32)}`;
+    expect(longJwt.length).toBeGreaterThan(500);
+    expect(longPat.length).toBeGreaterThan(520);
+
+    logger.info("long_secret_event", {
+      body: `session rejected ${longJwt}`,
+      note: `denied ${longPat}`,
+    });
+
+    const serialized = JSON.stringify(records);
+    expect(serialized).not.toContain("eyJhbGciOiJIUzI1NiJ9"); // JWT 头（截断必存的前缀）
+    expect(serialized).not.toContain("operator-secret-subject"); // payload 内可解码声明
+    expect(serialized).not.toContain("github_pat_");
+    expect(serialized).toContain("[REDACTED]");
+  });
+
+  /**
    * 放宽值模式只能往"更保守"的方向走，不能顺手吃掉普通诊断文本：敏感词根出现
    * 在别的词里（disposition、maxTokens）、或敏感词后面跟的不是赋值/长串时，
    * 原文必须保留。过度脱敏是安静的错——日志里写着 [REDACTED]，看起来像保护生效。

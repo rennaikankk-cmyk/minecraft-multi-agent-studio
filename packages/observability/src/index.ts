@@ -374,12 +374,21 @@ function isSensitiveKey(key: string): boolean {
   return false;
 }
 
+/**
+ * 脱敏预扫上限：形状完整的敏感值（JWT 的 claims 段可远超 500 字符）必须
+ * 先于最终展示截断被模式匹配到——先截断会把长密钥拦腰切断、脱离匹配
+ * 形状后真实令牌材料落盘（本包的立场：漏一个 secret 的代价高于多脱敏
+ * 一条诊断）。预扫上限只为兜住超长字符串的正则成本，非安全边界。
+ */
+const REDACTION_SCAN_LIMIT = 16_000;
+
 function sanitizeString(value: string): string {
-  let sanitized = value.replace(/[\r\n\t]+/gu, " ").slice(0, 500);
+  const flattened = value.replace(/[\r\n\t]+/gu, " ");
+  let sanitized = flattened.slice(0, REDACTION_SCAN_LIMIT);
   for (const pattern of SENSITIVE_VALUE_PATTERNS) {
     sanitized = sanitized.replace(pattern, "[REDACTED]");
   }
-  return sanitized;
+  return sanitized.slice(0, 500);
 }
 
 function correlationValue(value: unknown, botIdentity = false): string | null {
