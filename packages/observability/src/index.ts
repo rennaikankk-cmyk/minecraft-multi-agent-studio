@@ -379,12 +379,25 @@ function isSensitiveKey(key: string): boolean {
  * 先于最终展示截断被模式匹配到——先截断会把长密钥拦腰切断、脱离匹配
  * 形状后真实令牌材料落盘（本包的立场：漏一个 secret 的代价高于多脱敏
  * 一条诊断）。预扫上限只为兜住超长字符串的正则成本，非安全边界。
+ *
+ * 边界闭合：先截后扫保证可见内容永不出自扫描窗口之外；唯一残差是
+ * 跨窗口末端截断的令牌头段（部分形状，模式无法匹配），在前部内容被
+ * 大量脱敏缩短后会被拉进可见区——从扫描串尾部剥除疑似令牌前缀游程。
  */
 const REDACTION_SCAN_LIMIT = 16_000;
+const TRAILING_PARTIAL_SECRET_PREFIX =
+  /(?:\beyJ[A-Za-z0-9_.-]*|\bgh[pousr]_[A-Za-z0-9_]*|\bgithub_pat_[A-Za-z0-9_]*|\b(?:sk|pk)[-_][A-Za-z0-9_-]*|\bxox[baprs]-[A-Za-z0-9-]*)$/u;
 
 function sanitizeString(value: string): string {
   const flattened = value.replace(/[\r\n\t]+/gu, " ");
+  // 窗口末端闭合：仅当原串超出扫描窗口（截断可能切在令牌中间）时，剥除
+  // 截断产生的部分令牌头段；窗口内的完整令牌仍走正常模式脱敏（保留
+  // [REDACTED] 标记的可见性契约）。
+  const cutByWindow = flattened.length > REDACTION_SCAN_LIMIT;
   let sanitized = flattened.slice(0, REDACTION_SCAN_LIMIT);
+  if (cutByWindow) {
+    sanitized = sanitized.replace(TRAILING_PARTIAL_SECRET_PREFIX, "");
+  }
   for (const pattern of SENSITIVE_VALUE_PATTERNS) {
     sanitized = sanitized.replace(pattern, "[REDACTED]");
   }

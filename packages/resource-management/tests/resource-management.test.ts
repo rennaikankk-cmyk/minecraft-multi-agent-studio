@@ -3,7 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { DurableResourceLedger, FileResourceStateStore, MemoryResourceStateStore, ResourceLedger,
+import { DurableResourceLedger, emptyResourceState, FileResourceStateStore, MemoryResourceStateStore, ResourceLedger,
   resourceObservationInputSchema, resourceIdentitySchema,
   type ResourceLocation, type ResourceReceipt, type TransferOrder } from "../src/index.js";
 
@@ -131,4 +131,19 @@ describe("durable resource transactions", () => {
     expect(() => store.save({ ...stale, revision: stale.revision + 1 }, stale.revision)).toThrow("RESOURCE_REVISION_CONFLICT");
     writeFileSync(file, "{}"); expect(() => restored.snapshot(scope)).toThrow("RESOURCE_STATE_READ_FAILED");
   });
+
+  it("fails closed when the CAS snapshot is not this store format (schemaVersion fingerprint)", () => {
+    // 交叉复审 #7：CAS 复核只读 revision 后，JSON 合法、revision 合法但其余
+    // 字段违反 schema 的文件会被静默覆盖（旧全量 parse 口径是拒绝）。加
+    // schemaVersion 廉价指纹：缺失/不符即非本 store 的文件，按损坏
+    // fail-closed，维持"损坏文件不被静默覆盖"的口径。
+    const dir = mkdtempSync(path.join(os.tmpdir(), "resource-cas-")); dirs.push(dir);
+    const file = path.join(dir, "state.json");
+    const store = new FileResourceStateStore(file);
+    writeFileSync(file, JSON.stringify({ schemaVersion: "9.9", revision: 3 }));
+    expect(() => store.save({ ...emptyResourceState(), revision: 4 }, 3)).toThrow("RESOURCE_STATE_READ_FAILED");
+    writeFileSync(file, JSON.stringify({ ...emptyResourceState(), revision: 3 }));
+    expect(() => store.save({ ...emptyResourceState(), revision: 4 }, 3)).not.toThrow();
+  });
 });
+

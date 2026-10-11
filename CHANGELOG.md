@@ -93,6 +93,9 @@
 
 ### 修复
 
+- 交叉复审加固 ⑤⑥（低优先清理，两项合并）：
+  - ⑤ 脱敏扫描窗口的边界前移泄漏闭合：深入分析后确认复审所述"窗口外内容被拉入"在现有"先截后扫"实现中不可能发生（可见内容永不出自扫描窗口内）；**真实残差**是跨 16k 窗口末端截断的令牌头段（部分形状、模式无法匹配），在前部内容被大量脱敏缩短后会被拉进最终可见的 500 字符。修复：原串超出扫描窗口时，从扫描串尾部剥除"疑似令牌前缀游程"（JWT 含段分隔点、gh/github_pat/sk/pk/xox 家族；窗口内的完整令牌不受影响、仍走正常 `[REDACTED]` 脱敏）。新增最小复现回归（2 个 7.9k Bearer 单元把跨界 JWT 头段拉进可见区）+ 窗口外密钥永不可见的不变量断言；反向验证无修复时该测试失败、窗口内完整令牌契约（round-17 用例）不回归。
+  - ⑥ resource-management CAS 复核加 `schemaVersion` 廉价指纹：JSON 合法、revision 合法但 schemaVersion 缺失/不符的文件按损坏 fail-closed（`RESOURCE_STATE_READ_FAILED`），恢复"损坏文件不被静默覆盖"的旧全量 parse 口径；本 store 格式（"2.0"）照常。新增指纹回归。
 - 交叉复审加固 ④（executeGoal catch 的租约窗口）：begin 返回租约后、`executeAcquiredGoal` 前存在 throw 点（超时/中止检查、parkWaitingGoal 异常），原 catch 的"lease 尚未取得，无需 recordError"前提对该窗口为假——store 侧留下无人终结的 running 任务与活租约，只能等 `ExpiredLeaseRecoveryController` 兜底回收。现 catch 对 `lease !== null` 的失败走与执行段同款的诚实终结：`recordError`（AI_TIMEOUT→expired / 中止→cancelled / 其余→failed）+ 终态快照 + completedGoals 缓存；持久化失败可吞、记日志，不掩盖原始错误与失败帧。新增回归：begin 挂起期间协调器停止（controller abort）→ begin 返回租约 → recordError 以 `CONTROL_LINK_STOPPED`/`cancelled` 精确调用、planner 零调用；反向验证无修复时该测试超时失败。顺带修复 maxPendingGoals/maxPendingTaskReads 声明挤行（复审 #9）。
 - 交叉复审加固 ③（同拍合并的传送盲区）：时间窗口版（10ms）的同拍判定对服务器强制传送/rubberband 的 move 有 ~10/50 概率误吞——mineflayer 的 position 包处理器（含传送确认与 respawn 延迟路径）直接 emit move，**无 physicsTick 前导**且到达时刻与本地物理拍无关；被吞的传送评估要等下一物理拍（≤50ms），恰好压在 <50ms 反射预算上，而传送正是危险密集时刻。现改为「拍内标志」精确判定：physicsTick 同步段内置位、`queueMicrotask` 清除——物理拍内的 move（tickPhysics 同步段里紧跟 physicsTick 之后发出）被合并，独立到达的传送 move 必然在标志清除后的宏任务里、**零误吞**；同时消除了时间戳记录点晚于 onPhysicsTick 的次要问题（评估链耗时 >10ms 时同拍 move 反而落出窗口触发第三次评估）。新增传送盲区回归（物理拍后异步 move 必须立即评估），同拍合并测试同步更新为同步段语义。
 - 交叉复审加固 ①：AIRouter 健康缓存在 **generate 失败时立即失效**——此前失败路径不失效缓存，适配器在探测后宕机时 TTL 窗口内的重试继续打同一个死适配器（combat 档总预算 5s 恰等于 TTL，一次失败可吃光全部预算）；失效后重试重新探测并故障转移到下一个适配器。新增回归：探测成功→generate 抛错→缓存失效→重试重新探测（healthCalls=2）并转移到 fallback。

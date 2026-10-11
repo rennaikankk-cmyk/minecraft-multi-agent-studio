@@ -241,6 +241,32 @@ describe("structured observability", () => {
   });
 
   /**
+   * 交叉复审 #6：先截后扫保证可见内容永不出自扫描窗口之外；唯一残差是
+   * 跨窗口末端截断的令牌头段（部分形状、模式无法匹配），在前部内容被
+   * 大量脱敏缩短后会被拉进可见区。从扫描串尾部剥除疑似令牌前缀游程后，
+   * 跨界令牌的头段必须不可见；完全处于窗口之外的密钥也永不进入可见区。
+   */
+  it("contains no secret material pulled forward from the scan-window boundary", () => {
+    const { logger, records } = loggerWithSink();
+    // 少量超长可脱敏单元（脱敏后 ~15800 → ~24 字符），把跨界 JWT 的头段
+    // 拉进最终可见的 500 字符内——这是"前移泄漏"的最小复现形态。
+    const bulkUnit = `Bearer ${"a".repeat(7_900)}  `;
+    const jwtPayload = Buffer.from(
+      JSON.stringify({ sub: "boundary-secret-subject", notes: "y".repeat(300) }),
+    ).toString("base64url");
+    const straddlingJwt = `eyJhbGciOiJIUzI1NiJ9.${jwtPayload}.dozjgNryP4JcuCA2QIHX8qE3FYk9crJstYPODehqK9s`;
+    logger.info("boundary_event", { body: bulkUnit.repeat(2) + straddlingJwt });
+
+    const serialized = JSON.stringify(records);
+    expect(serialized).not.toContain("eyJhbGciOiJIUzI1NiJ9"); // 跨界 JWT 的头段
+    expect(serialized).not.toContain("boundary-secret-subject");
+
+    // 完全处于窗口之外的密钥（先截后扫不变量）。
+    logger.info("beyond_event", { body: "b".repeat(17_000) + ` tail sk-${"c".repeat(30)}` });
+    expect(JSON.stringify(records)).not.toContain("sk-cccc");
+  });
+
+  /**
    * 放宽值模式只能往"更保守"的方向走，不能顺手吃掉普通诊断文本：敏感词根出现
    * 在别的词里（disposition、maxTokens）、或敏感词后面跟的不是赋值/长串时，
    * 原文必须保留。过度脱敏是安静的错——日志里写着 [REDACTED]，看起来像保护生效。

@@ -29,16 +29,23 @@ export class FileResourceStateStore implements ResourceStateStore {
     catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return emptyResourceState(); throw new Error("RESOURCE_STATE_READ_FAILED"); }
   }
   /** CAS 复核只需 revision：同一事务的 load() 刚做过完整 schema 校验，复核
-   *  的目的是捕获并发写入者的 revision 变化。文件缺失按空状态（revision 0）；
-   *  JSON 损坏/非对象/revision 非法仍 fail-closed 抛 RESOURCE_STATE_READ_FAILED。 */
+   *  的目的是捕获并发写入者的 revision 变化。schemaVersion 是本 store 自有
+   *  格式的廉价指纹——缺失/不符即非本 store 的文件，按损坏 fail-closed
+   *  （维持"损坏文件不被静默覆盖"的口径）。文件缺失按空状态（revision 0）；
+   *  JSON 损坏/非对象/revision 非法同样抛 RESOURCE_STATE_READ_FAILED。 */
   private readCurrentRevision(): number {
     try {
       const parsed: unknown = JSON.parse(readFileSync(this.filename, "utf8"));
-      const revision = typeof parsed === "object" && parsed !== null
-        ? (parsed as { revision?: unknown }).revision
+      const record = typeof parsed === "object" && parsed !== null
+        ? (parsed as { schemaVersion?: unknown; revision?: unknown })
         : undefined;
-      if (typeof revision === "number" && Number.isSafeInteger(revision) && revision >= 0) {
-        return revision;
+      if (
+        record?.schemaVersion === "2.0" &&
+        typeof record.revision === "number" &&
+        Number.isSafeInteger(record.revision) &&
+        record.revision >= 0
+      ) {
+        return record.revision;
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
