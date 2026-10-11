@@ -48,7 +48,16 @@ export class AIRouter {
       const available = await this.probeHealth(adapter);
       throwIfAborted(opts.signal);
       if (available) {
-        return adapter.generate(opts);
+        try {
+          return await adapter.generate(opts);
+        } catch (error) {
+          // generate 失败立即失效健康结论：适配器可能在探测后宕机——TTL
+          // 窗口内的重试若仍走缓存会继续打同一个死适配器（combat 档总
+          // 预算 5s 恰等于 TTL，一次失败可吃光全部预算）。失效后重试会
+          // 重新探测并故障转移到下一个适配器。
+          this.healthCache.delete(adapter);
+          throw error;
+        }
       }
     }
     throw new Error('No available AI adapter');

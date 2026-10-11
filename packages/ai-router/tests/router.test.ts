@@ -184,6 +184,47 @@ describe('AIRouter.generate', () => {
     expect(adapter.healthCalls).toBe(1);
     expect(adapter.generateCalls).toHaveLength(1);
   });
+
+  it('invalidates the cached healthy verdict when generate fails, restoring failover', async () => {
+    // 交叉复审 #1：generate 失败此前不失效健康缓存——适配器在探测后宕机时，
+    // TTL 窗口内的重试继续打同一个死适配器（combat 档 5s 预算恰等于 TTL，
+    // 可被一次失败吃光）。失败即失效：重试重新探测并转移到下一个适配器。
+    const router = new AIRouter();
+    let generateFails = false;
+    let flappingHealthy = true;
+    const flapping = new (class extends StubAdapter {
+      async health() {
+        this.healthCalls += 1;
+        return { available: flappingHealthy, latencyMs: 1 };
+      }
+      async generate(opts: GenerateOptions): Promise<GenerateResult> {
+        super.generate(opts);
+        if (generateFails) throw new Error('ECONNRESET after health probe');
+        return { content: 'reply-from-flapping' };
+      }
+    })({ name: 'flapping', available: true });
+    const fallback = new StubAdapter({ name: 'fallback', available: true });
+    router.register(flapping);
+    router.register(fallback);
+
+    await router.generate(generateOptions()); // 探测 flapping（缓存 5s）
+    generateFails = true;
+    flappingHealthy = false; // flapping 在探测后宕机：真实探测将返回不可用
+    let failure: unknown = null;
+    try {
+      await router.generate(generateOptions());
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({ message: 'ECONNRESET after health probe' });
+
+    // 缓存已失效：下一次 generate 重新探测 flapping（healthCalls=2）、
+    // 发现不可用并转移到 fallback。
+    const viaFailover = await router.generate(generateOptions());
+    expect(viaFailover.content).toBe('reply-from-fallback');
+    expect(flapping.healthCalls).toBe(2);
+    expect(fallback.generateCalls).toHaveLength(1);
+  });
 });
 
 describe('AIRouter.healthCheck', () => {
