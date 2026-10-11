@@ -84,6 +84,37 @@ describe('AIRequestScheduler', () => {
     expect(order).toEqual(['high-1', 'high-2', 'low']);
   });
 
+  it('clears the per-bot fairness entry once the bot has no running or queued work', async () => {
+    // 公平序号 Map 此前只写不删——fleet 增删 bot 时慢性无界增长。清理
+    // 时机与 runningByBot 对齐：bot 既无运行也无排队条目才删；仍有排队
+    // 条目时必须保留（调度年龄是公平性的依据）。
+    const scheduler = new AIRequestScheduler({ maxConcurrency: 1 });
+    const firstGate = deferred<string>();
+    const secondGate = deferred<string>();
+    const first = scheduler.schedule(request('first', 'bot-a', () => firstGate.promise));
+    const second = scheduler.schedule(request('second', 'bot-a', () => secondGate.promise));
+    await flush();
+
+    const internals = scheduler as unknown as {
+      queue: Array<{ request: { botId: string } }>;
+      lastDispatchSequenceByBot: Map<string, number>;
+    };
+    expect(internals.lastDispatchSequenceByBot.has('bot-a')).toBe(true);
+
+    firstGate.resolve('first');
+    await first;
+    await flush();
+    // first 完成，但 second 仍在排队——公平条目必须保留。
+    expect(internals.lastDispatchSequenceByBot.has('bot-a')).toBe(true);
+
+    secondGate.resolve('second');
+    await second;
+    await flush();
+    // bot 无运行无排队——条目清理。
+    expect(internals.lastDispatchSequenceByBot.has('bot-a')).toBe(false);
+    expect(scheduler.snapshot().bots).toEqual([]); // 快照层同样不再出现
+  });
+
   it('enforces global and per-bot concurrency while exposing a consistent snapshot', async () => {
     const scheduler = new AIRequestScheduler({ maxConcurrency: 2, perBotConcurrency: 1 });
     const gates = [deferred<string>(), deferred<string>(), deferred<string>()];

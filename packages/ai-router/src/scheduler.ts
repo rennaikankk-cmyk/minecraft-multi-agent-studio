@@ -527,8 +527,23 @@ export class AIRequestScheduler {
     } finally {
       this.running -= 1;
       const botRunning = (this.runningByBot.get(entry.request.botId) ?? 1) - 1;
-      if (botRunning <= 0) this.runningByBot.delete(entry.request.botId);
-      else this.runningByBot.set(entry.request.botId, botRunning);
+      if (botRunning <= 0) {
+        this.runningByBot.delete(entry.request.botId);
+        // 公平序号随 bot 生命周期清理：该 bot 既无运行也无排队条目时即为
+        // 死数据（fleet 经 studio 管理器增删 botId 时 Map 无界增长）。队列
+        // 非空时不得删——排队中的 bot 的调度年龄必须保留，否则下次选择会
+        // 按"最久未调度"获得不正当优势。队列有界（maxQueue ≤10k），全扫
+        // 成本可接受。
+        if (
+          !this.queue.some(
+            (queued) => queued.request.botId === entry.request.botId,
+          )
+        ) {
+          this.lastDispatchSequenceByBot.delete(entry.request.botId);
+        }
+      } else {
+        this.runningByBot.set(entry.request.botId, botRunning);
+      }
       this.drain();
     }
   }
