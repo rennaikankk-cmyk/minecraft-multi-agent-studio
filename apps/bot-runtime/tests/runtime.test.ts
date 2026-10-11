@@ -1240,6 +1240,36 @@ describe("SingleBotRuntime", () => {
       payload: { outcome: "completed", skillId: "movement.goto" },
     });
     expect(client.capabilityCalls).toHaveLength(1);
+
+    // 幂等冲突（同 invocationId、不同参数）此前 throw——runtime-link-client
+    // 对任何 throw 一律 1008 拆会话，冲突循环会耗尽重试并 fail-closed 停
+    // bot。现在回 rejected 结果帧：单次调用失败、会话保持。
+    const conflicting = {
+      ...invocation,
+      payload: {
+        ...invocation.payload,
+        input: {
+          ...invocation.payload.input,
+          target: { ...invocation.payload.input.target, x: 999 },
+        },
+      },
+    };
+    const conflictResult = await runtime.handleCoordinatorSkillInvocation(
+      conflicting,
+      invocation.source.instanceId,
+    );
+    expect(conflictResult).toMatchObject({
+      traceId: invocation.traceId,
+      taskId: invocation.taskId,
+      payload: {
+        invocationId: invocation.payload.invocationId,
+        outcome: "rejected",
+        errorCode: "COMMAND_ID_CONFLICT",
+      },
+    });
+    // 冲突不消耗能力调用，也不影响既有执行的去重（仍是同一次）。
+    expect(client.capabilityCalls).toHaveLength(1);
+
     expect(() =>
       runtime.handleCoordinatorSkillInvocation(invocation, "coordinator-forged")
     ).toThrowError(expect.objectContaining({ code: "CONTROL_IDENTITY_MISMATCH" }));

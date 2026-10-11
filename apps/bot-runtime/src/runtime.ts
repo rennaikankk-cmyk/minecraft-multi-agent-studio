@@ -24,6 +24,7 @@ import {
   parseSkillCancellation,
   parseSkillInvocation,
   resolveGameplayPolicy,
+  skillExecutionResultV1Schema,
   skillJsonValueSchema,
   type BotDisconnectedV1,
   type BotHeartbeatV1,
@@ -1006,9 +1007,27 @@ export class SingleBotRuntime {
     const existing = this.skillExecutions.get(invocation.payload.invocationId);
     if (existing) {
       if (existing.fingerprint !== fingerprint) {
-        throw new RuntimeControlError(
-          "COMMAND_ID_CONFLICT",
-          "The invocation ID was already used with different skill parameters.",
+        // 应用层幂等冲突（协调器复用 invocationId 且参数不同）此前直接
+        // throw——runtime-link-client 对任何 throw 一律 1008 拆已认证会话 →
+        // 重连 → 协调器重试再冲突 → 循环至重试耗尽触发 fail-closed 停整个
+        // bot。冲突是单次调用的可恢复错误：回 rejected 结果帧（协议既有
+        // outcome/errorCode 路径），会话保持；仅 CONTROL_IDENTITY_MISMATCH
+        // （安全事件）继续 throw 走拆会话路径。
+        return Promise.resolve(
+          skillExecutionResultV1Schema.parse({
+            ...this.envelope("skill.result.v1"),
+            traceId: invocation.traceId,
+            taskId: invocation.taskId,
+            payload: {
+              invocationId: invocation.payload.invocationId,
+              skillId: invocation.payload.skillId,
+              skillVersion: invocation.payload.skillVersion,
+              completedAt: this.now().toISOString(),
+              outcome: "rejected",
+              attempts: 0,
+              errorCode: "COMMAND_ID_CONFLICT",
+            },
+          }),
         );
       }
       return existing.result;
