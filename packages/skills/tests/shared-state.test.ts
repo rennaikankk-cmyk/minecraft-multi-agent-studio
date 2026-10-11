@@ -127,9 +127,9 @@ describe("SharedStateClient facility lifecycle (remote)", () => {
   });
 
   it("rejects malformed patternSlots instead of poisoning the shared registry (cross-audit round 26)", async () => {
-    // patternSlots 此前是全 dispatcher 中唯一不过 zod 的结构化参数（裸类型
+    // patternSlots 此前是全 shared-state dispatcher 中唯一不过 zod 的结构化参数（裸
     // 断言直通 FacilityRegistry）——坏 slot（非整数偏移/缺失类型/未知字段/
-    // 超长数组）会跨进程毒化共享注册表并立即持久化。
+    // 超长数组/非安全整数/超幅值）会跨进程毒化共享注册表并立即持久化。
     const fr = new FacilityRegistry();
     const client = makeClient(createSharedStateDispatcher(new InMemoryWorkstationRegistry(), fr));
     const base = {
@@ -144,6 +144,8 @@ describe("SharedStateClient facility lifecycle (remote)", () => {
       [{ localOffset: { x: 0, y: 0, z: 0 }, workstationType: "jukebox" }],    // 非法类型枚举
       [{ localOffset: { x: 0, y: 0, z: 0 }, workstationType: "furnace", extra: 1 }], // 未知字段
       [{ localOffset: "0,0,0", workstationType: "furnace" }],                 // 字符串偏移
+      [{ localOffset: { x: 2 ** 53, y: 0, z: 0 }, workstationType: "furnace" }], // 非安全整数（zod .int() 放行）
+      [{ localOffset: { x: 1_000_001, y: 0, z: 0 }, workstationType: "furnace" }], // 超幅值
       Array.from({ length: 257 }, () => ({ localOffset: { x: 0, y: 0, z: 0 }, workstationType: "furnace" })), // 超长
     ];
     for (const patternSlots of malformed) {
@@ -153,6 +155,45 @@ describe("SharedStateClient facility lifecycle (remote)", () => {
     // 合法 pattern 照常。
     const ok = await client.create({ ...base, patternSlots: smeltingLinePattern(2) });
     expect(fr.get(ok.id)!.slots).toHaveLength(2);
+  });
+
+  it("restorableSlots: restore()/absorb() filter out facilities with poisoned slots (cross-review 6-1)", async () => {
+    // 持久化恢复路径不走 dispatcher——durableSchema 的 .passthrough() 不校验
+    // localOffset/workstationType，修复前已落盘的坏数据会照常恢复。现
+    // restore/absorb 增加形状守卫，坏 slot 的 facility 被丢弃而非毒化注册表。
+    const legit = smeltingLinePattern(2);
+    const snapshot = {
+      facilities: [
+        { id: "fac-ok", serverProfileId: SERVER, dimension: DIM, facilityType: "smelting_zone",
+          anchor: { x: 0, y: 64, z: 0 }, orientation: "north", layoutVersion: "v1",
+          slots: legit.map((slot, i) => ({
+            index: i, slotId: `fac-ok#${i}`, localOffset: slot.localOffset,
+            worldPosition: { x: slot.localOffset.x, y: 64, z: slot.localOffset.z },
+            workstationType: slot.workstationType, status: "planned",
+            reservedBy: null, reservedUntilMs: null, workstationEntryKey: null,
+            lastVerifiedAtMs: null, statusReason: null, failureCount: 0,
+          })),
+        },
+        { id: "fac-bad-float", serverProfileId: SERVER, dimension: DIM, facilityType: "smelting_zone",
+          anchor: { x: 0, y: 64, z: 0 }, orientation: "north", layoutVersion: "v1",
+          slots: [{ index: 0, slotId: "fac-bad-float#0", localOffset: { x: 0.5, y: 0, z: 0 },
+            worldPosition: { x: 0, y: 64, z: 0 }, workstationType: "furnace", status: "planned",
+            reservedBy: null, reservedUntilMs: null, workstationEntryKey: null,
+            lastVerifiedAtMs: null, statusReason: null, failureCount: 0 }],
+        },
+        { id: "fac-bad-huge", serverProfileId: SERVER, dimension: DIM, facilityType: "smelting_zone",
+          anchor: { x: 0, y: 64, z: 0 }, orientation: "north", layoutVersion: "v1",
+          slots: [{ index: 0, slotId: "fac-bad-huge#0", localOffset: { x: 2 ** 53, y: 0, z: 0 },
+            worldPosition: { x: 0, y: 64, z: 0 }, workstationType: "furnace", status: "planned",
+            reservedBy: null, reservedUntilMs: null, workstationEntryKey: null,
+            lastVerifiedAtMs: null, statusReason: null, failureCount: 0 }],
+        },
+      ],
+    };
+    const restored = FacilityRegistry.restore(snapshot);
+    expect(restored.get("fac-ok")).not.toBeNull();
+    expect(restored.get("fac-bad-float")).toBeNull();
+    expect(restored.get("fac-bad-huge")).toBeNull();
   });
 
   it("clamps ws.register confidence input to the [0, 1] unit interval or rejects", async () => {

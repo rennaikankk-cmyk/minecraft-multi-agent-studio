@@ -397,6 +397,32 @@ export function placementBackoffMs(failureCount: number): number {
   return Math.min(PLACEMENT_BACKOFF_MAX_MS, ms);
 }
 
+/**
+ * 持久化恢复/合并时的 slot 形状守卫：durableSchema 的 .passthrough() 不
+ * 校验 localOffset/workstationType，修复前已落盘的坏数据若不经此过滤
+ * 会原样进入共享注册表（NaN/荒谬坐标毒化 facility-executor）。
+ */
+const WORKSTATION_TYPE_VALUES = new Set<string>([
+  "crafting_table", "furnace", "blast_furnace", "smoker", "anvil",
+  "enchanting_table", "brewing_stand", "stonecutter", "smithing_table",
+  "grindstone", "chest", "barrel",
+]);
+function restorableSlot(slot: unknown): boolean {
+  if (!slot || typeof slot !== "object") return false;
+  const s = slot as { localOffset?: unknown; workstationType?: unknown };
+  const off = s.localOffset;
+  if (!off || typeof off !== "object") return false;
+  const o = off as { x?: unknown; y?: unknown; z?: unknown };
+  if (![o.x, o.y, o.z].every((v) =>
+    typeof v === "number" && Number.isSafeInteger(v) && Math.abs(v) <= 1_000_000,
+  )) return false;
+  return typeof s.workstationType === "string" && WORKSTATION_TYPE_VALUES.has(s.workstationType);
+}
+function restorableSlots(slots: readonly unknown[]): boolean {
+  // 空数组合法（crop_farm 等无工作位的设施用空 pattern 注册）。
+  return slots.every(restorableSlot);
+}
+
 export class FacilityRegistry implements FacilityRegistryPort {
   private readonly facilities = new Map<string, Facility>();
   private readonly maxPerServer: number;
@@ -754,6 +780,7 @@ export class FacilityRegistry implements FacilityRegistryPort {
     const root = snapshot as { facilities?: Facility[] };
     for (const facility of root?.facilities ?? []) {
       if (!facility || typeof facility.id !== "string" || !Array.isArray(facility.slots)) continue;
+      if (!restorableSlots(facility.slots)) continue;
       reg.facilities.set(facility.id, facility);
     }
     return reg;
@@ -764,6 +791,7 @@ export class FacilityRegistry implements FacilityRegistryPort {
     let merged = 0;
     for (const facility of other.serialize().facilities) {
       if (!facility || typeof facility.id !== "string" || !Array.isArray(facility.slots)) continue;
+      if (!restorableSlots(facility.slots)) continue;
       this.facilities.set(facility.id, facility);
       merged += 1;
     }

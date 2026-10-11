@@ -116,11 +116,17 @@ const WORKSTATION_TYPES = [
 // 编译期漂移防护：asset-policy 的 WorkstationType 新增成员而此枚举漏更时立即报错。
 type WorkstationTypeCoverage = Exclude<WorkstationType, typeof WORKSTATION_TYPES[number]> extends never ? true : never;
 
+/** 偏移幅值上限：正常 pattern 的 local offset 不超过 ±1e6 格；zod 的
+ *  .int() 只查 Number.isInteger，2^53 或 1e100 等非安全整数会放行。 */
+const patternOffset = z.number().int().refine(
+  (value) => Number.isSafeInteger(value) && Math.abs(value) <= 1_000_000,
+  { message: "offset must be a safe integer within ±1,000,000" },
+);
 const patternSlotSchema = z.object({
   localOffset: z.object({
-    x: z.number().int(),
-    y: z.number().int(),
-    z: z.number().int(),
+    x: patternOffset,
+    y: patternOffset,
+    z: patternOffset,
   }).strict(),
   workstationType: z.enum(WORKSTATION_TYPES),
 }).strict();
