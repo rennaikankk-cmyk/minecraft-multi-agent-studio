@@ -202,8 +202,9 @@ export function assessSurvivalNeeds(
     needs.push(foodNeed(FOOD_TARGET, 34, safeFood, "target"));
   }
 
-  // ---- 死亡点回收：装备掉在原地，走过去就自动拾取（MC 的掉落物靠
-  // 碰撞拾取）。15 分钟内、8 格外、未回收过的死亡点是最有价值的单目标。
+  // ---- 死亡点回收：装备掉在原地。目标文本必须走 recover.drops，
+  // 走近并确认 6 格内没有剩余掉落物才算捡回。15 分钟内、未回收过、
+  // 还没站到死亡点上的同维度死亡点才进入需求。
   const lastDeath = status?.lastDeath ?? null;
   if (
     lastDeath &&
@@ -250,7 +251,7 @@ export function assessSurvivalNeeds(
           score: 85,
           reason: assessment.reason,
           title: "回收死亡掉落",
-          operatorGoal: `移动到坐标 x=${lastDeath.x} y=${lastDeath.y} z=${lastDeath.z} 附近，回收死亡掉落物`,
+          operatorGoal: `移动到坐标 x=${Math.round(lastDeath.x)} y=${Math.round(lastDeath.y)} z=${Math.round(lastDeath.z)} 附近，回收死亡掉落物`,
           sourceBlock: null,
         });
       }

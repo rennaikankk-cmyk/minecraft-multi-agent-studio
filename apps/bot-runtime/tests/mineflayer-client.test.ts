@@ -3008,3 +3008,126 @@ describe("P5-D2c WorldMirror 灰度门（STUDIO_WORLD_MIRROR_SYNC）", () => {
     delete process.env.STUDIO_WORLD_MIRROR_SYNC;
   });
 });
+
+describe("MineflayerBotClient recover.drops", () => {
+  function request(extra: Record<string, unknown> = {}) {
+    return {
+      invocationId: "invocation-recover",
+      traceId: "trace-recover",
+      taskId: "task-recover",
+      botId: "bot-recover",
+      skillId: "recover.drops",
+      skillVersion: "1.0.0",
+      capability: "bot.move" as const,
+      operation: "drops.recover-safe",
+      signal: new AbortController().signal,
+      input: {
+        target: {
+          x: 4,
+          y: 64,
+          z: 0,
+          dimension: "minecraft:overworld",
+          serverProfileId: "isolated-test-profile",
+        },
+        ...extra,
+      },
+    };
+  }
+
+  it("reports an empty pickup when the death point has no item entities", async () => {
+    const emitter = new EventEmitter();
+    const bot = emitter as unknown as Bot;
+    const pathfinder = {
+      setMovements: vi.fn(),
+      thinkTimeout: 0,
+      tickTimeout: 0,
+      stop: vi.fn(),
+      goto: vi.fn(async () => {
+        bot.entity.position = new Vec3(4, 64, 0);
+      }),
+    };
+    Object.assign(bot, {
+      game: { dimension: "overworld" },
+      entity: { position: new Vec3(0, 64, 0) },
+      pathfinder,
+      inventory: { items: () => [] },
+      entities: {},
+      clearControlStates: vi.fn(),
+    });
+    const client = new MineflayerBotClient(bot, "auto", "isolated-test-profile");
+    await expect(client.invokeSkillCapability(request())).resolves.toMatchObject({
+      reached: true,
+      recovered: [],
+      stillNearby: 0,
+      expectedMissing: [],
+    });
+    expect(pathfinder.goto).toHaveBeenCalledTimes(1);
+  });
+
+  it("counts items that enter the inventory and disappear from the ground", async () => {
+    const stacks: Array<{ name: string; count: number }> = [];
+    const entities: Record<string, unknown> = {
+      drop: { name: "item", isValid: true, position: new Vec3(4.2, 64, 0.2) },
+    };
+    const emitter = new EventEmitter();
+    const bot = emitter as unknown as Bot;
+    const pathfinder = {
+      setMovements: vi.fn(),
+      thinkTimeout: 0,
+      tickTimeout: 0,
+      stop: vi.fn(),
+      goto: vi.fn(async () => {
+        bot.entity.position = new Vec3(4, 64, 0);
+        stacks.push({ name: "diamond", count: 2 });
+        delete entities.drop;
+      }),
+    };
+    Object.assign(bot, {
+      game: { dimension: "overworld" },
+      entity: { position: new Vec3(0, 64, 0) },
+      pathfinder,
+      inventory: { items: () => stacks.map((item) => ({ ...item })) },
+      entities,
+      clearControlStates: vi.fn(),
+    });
+    const client = new MineflayerBotClient(bot, "auto", "isolated-test-profile");
+    await expect(client.invokeSkillCapability(request({
+      expectedItems: [{ itemId: "diamond", count: 3 }, { itemId: "totem_of_undying", count: 1 }],
+    }))).resolves.toMatchObject({
+      recovered: [{ itemId: "diamond", count: 2 }],
+      stillNearby: 0,
+      expectedMissing: [
+        { itemId: "diamond", count: 1 },
+        { itemId: "totem_of_undying", count: 1 },
+      ],
+    });
+  });
+
+  it("fails when the bot is standing on an item that never enters the inventory", async () => {
+    const emitter = new EventEmitter();
+    const bot = emitter as unknown as Bot;
+    const pathfinder = {
+      setMovements: vi.fn(),
+      thinkTimeout: 0,
+      tickTimeout: 0,
+      stop: vi.fn(),
+      goto: vi.fn(async () => {
+        bot.entity.position = new Vec3(4, 64, 0);
+      }),
+    };
+    Object.assign(bot, {
+      game: { dimension: "overworld" },
+      entity: { position: new Vec3(0, 64, 0) },
+      pathfinder,
+      inventory: { items: () => [] },
+      entities: {
+        drop: { name: "item", isValid: true, position: new Vec3(4, 64, 0) },
+      },
+      clearControlStates: vi.fn(),
+    });
+    const client = new MineflayerBotClient(bot, "auto", "isolated-test-profile");
+    await expect(client.invokeSkillCapability(request())).rejects.toMatchObject({
+      code: "DROPS_STILL_PRESENT",
+    });
+  });
+});

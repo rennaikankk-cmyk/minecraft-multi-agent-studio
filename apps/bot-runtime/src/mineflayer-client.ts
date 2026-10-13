@@ -33,7 +33,7 @@ import type {
   L0SafetyAction,
   L0SafetyActionResult,
 } from "@minecraft-studio/safety";
-import { armorEquipCapabilityInputSchema, armorEquipCapabilityOutputSchema, armorSnapshotCapabilityInputSchema, armorSnapshotCapabilityOutputSchema, ACTION_FAMILIES, collectBlockCapabilityInputSchema, collectBlockCapabilityOutputSchema, containerTransferCapabilityInputSchema, containerTransferCapabilityOutputSchema, craftItemCapabilityInputSchema, craftItemCapabilityOutputSchema, inventorySnapshotCapabilityInputSchema, inventorySnapshotCapabilityOutputSchema, placeBlockCapabilityInputSchema, placeBlockCapabilityOutputSchema, smeltItemCapabilityInputSchema, smeltItemCapabilityOutputSchema, MOVEMENT_PRIORITIES, MovementController, ServerBehaviorObserver, farmMaintainInputSchema, farmMaintainOutputSchema, farmSustainInputSchema, farmSustainOutputSchema, foodFarmLayout, foodFarmMaintenance, cropRules, navigationGoalInputSchema, navigationGoalOutputSchema, followEntityInputSchema, followEntityOutputSchema, getToBlockInputSchema, getToBlockOutputSchema, exploreInputSchema, exploreOutputSchema, clearAreaInputSchema, clearAreaOutputSchema, elytraInputSchema, elytraOutputSchema, type MovementLease, SAFE_PATH_MAX_DISTANCE, SkillFault, SkillRefusal, ActionLockError, ActionLockManager, type ActionLockKind, resolveMovementProfile, type ServerPolicyLimits, safeMovementGotoCapabilityInputSchema, safeMovementGotoCapabilityOutputSchema, travelRouteCapabilityInputSchema, tradeVillagerCapabilityInputSchema, tradeVillagerCapabilityOutputSchema, ALL_EDIBLE_ITEMS, scanBlocksCapabilityInputSchema, scanBlocksCapabilityOutputSchema, secureFoodCapabilityInputSchema, secureFoodCapabilityOutputSchema, siteObserveCapabilityInputSchema, siteObserveCapabilityOutputSchema, shelterDigCapabilityInputSchema, shelterDigCapabilityOutputSchema, mineBranchCapabilityInputSchema, mineBranchCapabilityOutputSchema, mineVeinCapabilityInputSchema, mineVeinCapabilityOutputSchema, buildBlueprintCapabilityInputSchema, buildBlueprintCapabilityOutputSchema, blueprintSchema, blueprintWorksetObservationSchema, orderBlueprintCells, SharedStateClient, type MaybeAsyncWorkstationRegistryPort, type BehaviorSignalEvent, type FamilyWindowStats, type SkillCapabilityRequest, type SkillCompatibilityEnvironment, type SkillResourceKind, animalBreedCapabilityInputSchema, animalBreedCapabilityOutputSchema, fluidPlaceCapabilityInputSchema, fluidPlaceCapabilityOutputSchema, inventoryDropCapabilityInputSchema, inventoryDropCapabilityOutputSchema, portalIgniteInputSchema, portalIgniteOutputSchema, portalUseInputSchema, portalUseOutputSchema, ascendInputSchema, ascendOutputSchema, bridgeInputSchema, bridgeOutputSchema, bucketFillCapabilityInputSchema, bucketFillCapabilityOutputSchema, foodEatCapabilityInputSchema, foodEatCapabilityOutputSchema, sleepBedCapabilityInputSchema, sleepBedCapabilityOutputSchema, assessBedUse, pickFood, foodEntryFor, hungerStateSchema, projectEat, sleepableWindow, type SleepWeather } from '@minecraft-studio/skills';
+import { armorEquipCapabilityInputSchema, armorEquipCapabilityOutputSchema, armorSnapshotCapabilityInputSchema, armorSnapshotCapabilityOutputSchema, ACTION_FAMILIES, collectBlockCapabilityInputSchema, collectBlockCapabilityOutputSchema, containerTransferCapabilityInputSchema, containerTransferCapabilityOutputSchema, craftItemCapabilityInputSchema, craftItemCapabilityOutputSchema, inventorySnapshotCapabilityInputSchema, inventorySnapshotCapabilityOutputSchema, placeBlockCapabilityInputSchema, placeBlockCapabilityOutputSchema, smeltItemCapabilityInputSchema, smeltItemCapabilityOutputSchema, MOVEMENT_PRIORITIES, MovementController, ServerBehaviorObserver, farmMaintainInputSchema, farmMaintainOutputSchema, farmSustainInputSchema, farmSustainOutputSchema, foodFarmLayout, foodFarmMaintenance, cropRules, navigationGoalInputSchema, navigationGoalOutputSchema, followEntityInputSchema, followEntityOutputSchema, getToBlockInputSchema, getToBlockOutputSchema, exploreInputSchema, exploreOutputSchema, clearAreaInputSchema, clearAreaOutputSchema, elytraInputSchema, elytraOutputSchema, type MovementLease, SAFE_PATH_MAX_DISTANCE, SkillFault, SkillRefusal, ActionLockError, ActionLockManager, type ActionLockKind, resolveMovementProfile, type ServerPolicyLimits, safeMovementGotoCapabilityInputSchema, safeMovementGotoCapabilityOutputSchema, safeMovementGotoOutputSchema, recoverDropsInputSchema, recoverDropsOutputSchema, travelRouteCapabilityInputSchema, tradeVillagerCapabilityInputSchema, tradeVillagerCapabilityOutputSchema, ALL_EDIBLE_ITEMS, scanBlocksCapabilityInputSchema, scanBlocksCapabilityOutputSchema, secureFoodCapabilityInputSchema, secureFoodCapabilityOutputSchema, siteObserveCapabilityInputSchema, siteObserveCapabilityOutputSchema, shelterDigCapabilityInputSchema, shelterDigCapabilityOutputSchema, mineBranchCapabilityInputSchema, mineBranchCapabilityOutputSchema, mineVeinCapabilityInputSchema, mineVeinCapabilityOutputSchema, buildBlueprintCapabilityInputSchema, buildBlueprintCapabilityOutputSchema, blueprintSchema, blueprintWorksetObservationSchema, orderBlueprintCells, SharedStateClient, type MaybeAsyncWorkstationRegistryPort, type BehaviorSignalEvent, type FamilyWindowStats, type SkillCapabilityRequest, type SkillCompatibilityEnvironment, type SkillResourceKind, animalBreedCapabilityInputSchema, animalBreedCapabilityOutputSchema, fluidPlaceCapabilityInputSchema, fluidPlaceCapabilityOutputSchema, inventoryDropCapabilityInputSchema, inventoryDropCapabilityOutputSchema, portalIgniteInputSchema, portalIgniteOutputSchema, portalUseInputSchema, portalUseOutputSchema, ascendInputSchema, ascendOutputSchema, bridgeInputSchema, bridgeOutputSchema, bucketFillCapabilityInputSchema, bucketFillCapabilityOutputSchema, foodEatCapabilityInputSchema, foodEatCapabilityOutputSchema, sleepBedCapabilityInputSchema, sleepBedCapabilityOutputSchema, assessBedUse, pickFood, foodEntryFor, hungerStateSchema, projectEat, sleepableWindow, type SleepWeather } from '@minecraft-studio/skills';
 import { authorizeHarvest, withinWorkArea, workScopeSchema, type WorkPosition, type WorkArea, type WorkstationType } from '@minecraft-studio/asset-policy';
 import type {
   CombatActionAcknowledgement,
@@ -1721,6 +1721,12 @@ export class MineflayerBotClient implements BotClient {
       request.operation === "pathfinder.goto-safe"
     ) {
       return this.invokeMovementGoto(request);
+    }
+    if (
+      request.capability === "bot.move" &&
+      request.operation === "drops.recover-safe"
+    ) {
+      return this.invokeRecoverDrops(request);
     }
     if (
       request.capability === "inventory.read" &&
@@ -3430,6 +3436,104 @@ export class MineflayerBotClient implements BotClient {
     }
   }
 
+  /**
+   * 死亡点回收：先走到死亡方块，再把 6 格内仍在的掉落物走近。
+   * 成功条件是现场不再有物品实体；背包增量只作为捡回了什么的证据。
+   * 人已经站在物品上但它还在，就失败，避免原地空转把死亡记成已回收。
+   */
+  private async invokeRecoverDrops(
+    request: SkillCapabilityRequest,
+  ): Promise<unknown> {
+    const input = recoverDropsInputSchema.safeParse(request.input);
+    if (!input.success) throw new SkillFault("SKILL_CAPABILITY_INPUT_INVALID");
+    const before = this.inventoryCountMap();
+    const arrived = safeMovementGotoOutputSchema.parse(
+      await this.invokeMovementGoto({
+        ...request,
+        input: { target: input.data.target, radius: 1 },
+      }),
+    );
+    const deathBlock = new Vec3(input.data.target.x, input.data.target.y, input.data.target.z);
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      if (request.signal.aborted) throw new SkillFault("SKILL_CANCELLED");
+      const drop = this.nearestDroppedItemPosition(deathBlock);
+      if (drop === null) break;
+      const alreadyThere = this.bot.entity.position.distanceTo(drop) <= 1.25;
+      if (!alreadyThere) {
+        const block = drop.floored();
+        try {
+          await this.invokeMovementGoto({
+            ...request,
+            invocationId: `${request.invocationId}:pickup:${attempt}`,
+            input: {
+              target: {
+                ...input.data.target,
+                x: block.x,
+                y: block.y,
+                z: block.z,
+              },
+              radius: 1,
+            },
+          });
+        } catch (error) {
+          if (!(error instanceof SkillFault)) throw error;
+          if (
+            error.code === "SKILL_CANCELLED" ||
+            error.code === "TARGET_DIMENSION_MISMATCH" ||
+            error.code === "TARGET_SERVER_PROFILE_MISMATCH"
+          ) {
+            throw error;
+          }
+        }
+        continue;
+      }
+      await this.settleProbeDelay(request.signal);
+      break;
+    }
+    if (this.droppedItemPositions(deathBlock).length > 0) {
+      throw new SkillFault("DROPS_STILL_PRESENT");
+    }
+    const recovered = this.inventoryIncreases(before);
+    const expectedMissing = (input.data.expectedItems ?? []).flatMap((item) => {
+      const gained = recovered.find((row) => row.itemId === item.itemId)?.count ?? 0;
+      return gained < item.count ? [{ itemId: item.itemId, count: item.count - gained }] : [];
+    });
+    return recoverDropsOutputSchema.parse({
+      reached: true,
+      finalPosition: arrived.finalPosition,
+      distanceToTarget: arrived.distanceToTarget,
+      recovered,
+      stillNearby: 0,
+      expectedMissing,
+    });
+  }
+
+  private inventoryCountMap(): Map<string, number> {
+    const inventory = this.bot.inventory;
+    if (!inventory || typeof inventory.items !== "function") {
+      throw new SkillFault("SKILL_CAPABILITY_UNAVAILABLE");
+    }
+    const totals = new Map<string, number>();
+    for (const item of inventory.items()) {
+      if (!item || typeof item.name !== "string" || typeof item.count !== "number") continue;
+      if (!/^[a-z0-9_]+$/u.test(item.name) || !Number.isSafeInteger(item.count) || item.count <= 0) continue;
+      totals.set(item.name, (totals.get(item.name) ?? 0) + item.count);
+    }
+    return totals;
+  }
+
+  private inventoryIncreases(
+    before: ReadonlyMap<string, number>,
+  ): Array<{ itemId: string; count: number }> {
+    const rows: Array<{ itemId: string; count: number }> = [];
+    for (const [itemId, count] of this.inventoryCountMap()) {
+      const gained = count - (before.get(itemId) ?? 0);
+      if (gained > 0) rows.push({ itemId, count: gained });
+    }
+    rows.sort((left, right) => (left.itemId < right.itemId ? -1 : left.itemId > right.itemId ? 1 : 0));
+    return rows;
+  }
+
   private assertServerProfileMatch(requestedProfileId: string): void {
     if (requestedProfileId !== this.serverProfileId) {
       throw new SkillFault("TARGET_SERVER_PROFILE_MISMATCH");
@@ -4560,8 +4664,8 @@ export class MineflayerBotClient implements BotClient {
     }
   }
 
-  private nearestDroppedItemPosition(target: Vec3): Vec3 | null {
-    const drops = Object.values(this.bot.entities ?? {})
+  private droppedItemPositions(target: Vec3): Vec3[] {
+    return Object.values(this.bot.entities ?? {})
       .map((entity) => entity as unknown as {
         name?: unknown;
         displayName?: unknown;
@@ -4578,11 +4682,15 @@ export class MineflayerBotClient implements BotClient {
           entity.position.distanceTo(target) <= 6
         );
       })
+      .map((entity) => entity.position!)
       .sort((left, right) =>
-        this.bot.entity.position.distanceTo(left.position!) -
-        this.bot.entity.position.distanceTo(right.position!),
+        this.bot.entity.position.distanceTo(left) -
+        this.bot.entity.position.distanceTo(right),
       );
-    return drops[0]?.position ?? null;
+  }
+
+  private nearestDroppedItemPosition(target: Vec3): Vec3 | null {
+    return this.droppedItemPositions(target)[0] ?? null;
   }
 
   /**

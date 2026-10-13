@@ -7,6 +7,7 @@ import { containerTransferSkill } from "./container-transfer.js";
 import { craftItemSkill } from "./craft-item.js";
 import { equipArmorSkill } from "./equip-armor.js";
 import { movementGotoSkill } from "./movement-goto.js";
+import { recoverDropsSkill } from "./recover-drops.js";
 import { placeBlockSkill } from "./place-block.js";
 import { scanBlocksSkill } from "./scan-blocks.js";
 import { secureFoodSkill } from "./secure-food.js";
@@ -53,6 +54,7 @@ export type AnySkillDefinition = SkillDefinition<never, unknown, never>;
 
 export const builtinSkills: readonly AnySkillDefinition[] = Object.freeze([
   movementGotoSkill,
+  recoverDropsSkill,
   travelRouteSkill,
   equipArmorSkill,
   combatEngageSkill,

@@ -177,11 +177,11 @@ export class DeathStreakTracker {
 // 确定性 recovery goal 生成
 // ---------------------------------------------------------------------------
 
-/** 生成走 movement.goto 的 recovery goal 文本（确定性模板）。 */
+/** 生成 recover.drops 的确定性目标文本。坐标取整，才能通过技能的整数输入。 */
 export function buildDropRecoveryGoal(input: {
   deathX: number;
   deathY: number;
   deathZ: number;
 }): string {
-  return `移动到坐标 x=${input.deathX} y=${input.deathY} z=${input.deathZ} 附近，回收死亡掉落物`;
+  return `移动到坐标 x=${Math.round(input.deathX)} y=${Math.round(input.deathY)} z=${Math.round(input.deathZ)} 附近，回收死亡掉落物`;
 }

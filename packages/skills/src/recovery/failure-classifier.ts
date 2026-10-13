@@ -295,6 +295,9 @@ const EXPLICIT: Readonly<Record<string, FailureCategory>> = Object.freeze({
   // 所以下一步是重新观察。没有这条显式项它会落到 UNKNOWN，把"走近了但不够近"
   // 当成未知故障升级给人工。
   PATH_TARGET_NOT_REACHED: "STALE_WORLD",
+  // 人已经站到掉落物旁边，实体还在：原样再走一次同一个停点没有新信息。
+  DROPS_STILL_PRESENT: "STALE_WORLD",
+  DROPS_NOT_CONFIRMED: "STALE_WORLD",
   // A* 搜完了、确实没有路（pathfinder 的 `NoPath`）。这不是抖动：把同一个
   // goal 原样重投只会再搜一次同样的空，所以走 REOBSERVE 而不是 RETRY_SAME。
   // 它与下面的 COLLECT_PATH_SEARCH_EXHAUSTED 必须分开——后者根本没搜完，

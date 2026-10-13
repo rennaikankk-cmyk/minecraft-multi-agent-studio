@@ -4,6 +4,7 @@ import {
   parseAcquisitionGoal,
   parseDeterministicGoal,
   parseFoodGoal,
+  parseDropRecoveryGoal,
   parseMovementGoal,
   parseScanGoal,
   parseShelterGoal,
@@ -62,6 +63,23 @@ describe("deterministic goal parsing", () => {
     expect(parseAcquisitionGoal("Equip the best armor already in inventory.", BINDABLE)).toBeNull();
     expect(parseAcquisitionGoal("获取 oak_log 和 dirt", BINDABLE)).toBeNull();
     expect(parseAcquisitionGoal("获取 unknown_item", BINDABLE)).toBeNull();
+  });
+
+  it("parses death-drop recovery before a generic move", () => {
+    expect(parseDropRecoveryGoal("移动到坐标 x=120 y=64 z=-80 附近，回收死亡掉落物")).toEqual({
+      kind: "recover-drops",
+      x: 120,
+      y: 64,
+      z: -80,
+    });
+    expect(parseDeterministicGoal("移动到坐标 x=120 y=64 z=-80 附近，回收死亡掉落物", BINDABLE)).toEqual({
+      kind: "recover-drops",
+      x: 120,
+      y: 64,
+      z: -80,
+    });
+    expect(parseDropRecoveryGoal("移动到坐标 x=12 y=64 z=-6 附近，继续观察 oak_log 方块")).toBeNull();
+    expect(parseDropRecoveryGoal("移动到坐标 x=1.5 y=64 z=-6 附近，回收死亡掉落物")).toBeNull();
   });
 
   it("parses the coordinator movement template with exactly one coordinate triple", () => {

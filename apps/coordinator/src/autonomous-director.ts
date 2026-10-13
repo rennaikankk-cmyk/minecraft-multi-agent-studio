@@ -6,7 +6,7 @@ import {
   identifierSchema,
   type PublicBotDetailV1,
 } from "@minecraft-studio/protocol";
-import { scanBlocksOutputSchema, siteAssessOutputSchema, farmMaintainInputSchema, farmSustainInputSchema, cropRules, readFarmProduction, registerCropProduction, registerFoodProduction, farmProductionReady, recordFarmProduction } from '@minecraft-studio/skills';
+import { scanBlocksOutputSchema, siteAssessOutputSchema, farmMaintainInputSchema, farmSustainInputSchema, cropRules, readFarmProduction, registerCropProduction, registerFoodProduction, farmProductionReady, recordFarmProduction, recoverDropsOutputSchema } from '@minecraft-studio/skills';
 import { plannedBlueprintAnchor, type BaseRegistry } from '@minecraft-studio/base-management';
 import { type FacilityRegistry } from '@minecraft-studio/asset-policy';
 import type { FacilityLease, FacilityLeaseAuthority } from "@minecraft-studio/skills";
@@ -147,6 +147,18 @@ type ActiveRun = Readonly<{
 type AutonomousPlanResult = Awaited<
   ReturnType<CoordinatorLocalPlanner["planAndDispatch"]>
 >;
+
+/**
+ * 死亡回收只有 recover.drops 回报“已到达且 6 格内没有剩余掉落物”才算完成。
+ * movement.goto 走到附近也会 completed，不能据此把装备记成已经捡回。
+ */
+export function deathRecoveryConfirmed(result: AutonomousPlanResult): boolean {
+  if (result.action !== "skill_result") return false;
+  if (result.invocation.payload.skillId !== "recover.drops") return false;
+  if (result.result.payload.outcome !== "completed") return false;
+  const parsed = recoverDropsOutputSchema.safeParse(result.result.payload.output);
+  return parsed.success && parsed.data.stillNearby === 0;
+}
 
 /**
  * 沿矿脉继续开掘比换区更优的源方块（与 collect.block 的楼梯回退配合）：
@@ -1322,7 +1334,16 @@ export class AutonomousDirector implements AutonomousTaskSource {
       }
       // 施工进度提取（失败批也提取：失败前已完成的格也是真进度）。
       this.updateBaseBuildProgress(record.botId, goal.needKey, goal.operatorGoal, result);
-      this.finishTask(record.botId, taskId, goal, status, keepGoal, failureCode);
+      let reportedFailure = failureCode;
+      if (
+        goal.needKey === "DEATH_RECOVERY" &&
+        status === "completed" &&
+        !deathRecoveryConfirmed(result)
+      ) {
+        status = "failed";
+        reportedFailure = "DROPS_NOT_CONFIRMED";
+      }
+      this.finishTask(record.botId, taskId, goal, status, keepGoal, reportedFailure);
       this.log("info", "coordinator_autonomous_goal_finished", {
         botId: record.botId,
         taskId,

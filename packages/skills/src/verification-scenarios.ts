@@ -132,6 +132,7 @@ function scenario(
  */
 const baseInputs: Readonly<Record<string, z.infer<typeof skillJsonValueSchema>>> = {
   "movement.goto": { target: { x: 4, y: 64, z: 0, dimension, serverProfileId: server }, radius: 1 },
+  "recover.drops": { target: { x: 4, y: 64, z: 0, dimension, serverProfileId: server } },
   "travel.route": { destination: { x: 4, y: 64, z: 0 }, dimension, serverProfileId: server, maxSegments: 1, corridorPolicy: "pathfinder" },
   "combat.engage": { serverProfileId: server },
   "combat.disengage": { serverProfileId: server },

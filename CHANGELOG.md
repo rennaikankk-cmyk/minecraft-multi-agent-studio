@@ -6,6 +6,7 @@
 
 ### 新增
 
+- 新增 `recover.drops@1.0.0`：死亡回收不再把 `movement.goto` 半径 2 的到达当成已经捡回装备。技能走到死亡方块，接近 6 格内的掉落物，用背包增量报告捡回内容；现场仍有物品时返回 `DROPS_STILL_PRESENT`。自主层只有该技能回报 `stillNearby=0` 才把这次死亡记入已回收。离线单测与 Runtime 夹具已覆盖，隔离服真实掉落场景尚未执行。
 - 增加通用第二阶段目标主机门禁与 ARM64 普通核心回退测试，允许使用 DGX Spark 完成前期 Supervisor、IPC、崩溃恢复和合成性能验证，同时明确不把 ARM64 双簇猜测为 Intel P/E Core。
 - 新增 Bot Process Supervisor：按部署等级隔离正式、灰度、测试和批处理故障域，支持一至三个 Bot 共用一个 `child_process.fork` 子进程，并保留旧单 Bot 启动入口。
 - 新增严格 Supervisor IPC v1：固定子入口、双向 HMAC challenge、Profile SHA-256 复验、最多三个 Bot 的启动清单、有界消息/队列、单调生命周期序列和认证停止命令。

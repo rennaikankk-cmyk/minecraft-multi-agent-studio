@@ -85,6 +85,7 @@ const PLANNER_REACHABILITY: Readonly<Record<string, PlannerReachability>> = Obje
   "farm.maintain": "llm", "farm.sustain": "both", "movement.goal": "llm", "movement.follow": "llm", "movement.get-to-block": "llm",
   "world.explore": "both", "build.clear-area": "llm", "movement.elytra": "llm",
   "movement.goto": "both",
+  "recover.drops": "deterministic",
   "world.scan": "both",
   "food.secure": "both",
   "shelter.dig": "both",
@@ -114,6 +115,7 @@ const FAMILY: Readonly<Record<string, string>> = Object.freeze({
   "farm.maintain": "production", "farm.sustain": "production", "movement.goal": "movement", "movement.follow": "movement", "movement.get-to-block": "movement",
   "world.explore": "observation", "build.clear-area": "build", "movement.elytra": "movement",
   "movement.goto": "movement",
+  "recover.drops": "survival",
   "travel.route": "movement",
   "movement.profile": "movement",
   "world.scan": "observation",
@@ -144,6 +146,7 @@ const OWNER_MODULE: Readonly<Record<string, string>> = Object.freeze({
   "farm.sustain": "packages/skills/src/farm-sustain.ts",
   ...Object.fromEntries(["movement.goal", "movement.follow", "movement.get-to-block", "world.explore", "build.clear-area", "movement.elytra"].map((id) => [id, "packages/skills/src/baritone-processes.ts"])),
   "movement.goto": "packages/skills/src/builtin/movement-goto.ts",
+  "recover.drops": "packages/skills/src/builtin/recover-drops.ts",
   "travel.route": "packages/skills/src/builtin/travel-route.ts",
   "inventory.equip-armor": "packages/skills/src/builtin/equip-armor.ts",
   "combat.engage": "packages/skills/src/builtin/combat-control.ts",
@@ -182,7 +185,12 @@ const LIMITATIONS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   "movement.elytra": ["Isolated-test only: bounded takeoff, non-explosive rocket readback, waypoints, cruise and emergency landing controller.", "Full flight and airborne cancellation require isolated-server validation; no obstacle detour planner."],
   "movement.goto": [
     "完成半径 ~4 格（模板锚点按停点动态折算）",
-    "死亡掉落回收依赖 coordinator DEATH_RECOVERY goal（同维度、15 分钟窗口）",
+    "死亡掉落回收不再把走到附近当成捡回，见 recover.drops",
+  ],
+  "recover.drops": [
+    "只在 64 格安全寻路内接近死亡方块，并要求 6 格内不再有掉落物实体。",
+    "背包增量是捡回证据；现场仍有物品时失败，协调器不得把该次死亡记成已回收。",
+    "尚未在隔离服跑过真实掉落场景。",
   ],
   "build.blueprint": [
     "File blueprints and durable cell journals are connected; bounded workset batches re-read server blocks and materials.",

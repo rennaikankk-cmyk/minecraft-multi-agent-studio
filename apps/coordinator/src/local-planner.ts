@@ -3966,6 +3966,27 @@ function deterministicSkillDecision(
         crops: [parsed.crop], plantEmpty: parsed.crop, prepareSoil: true, replant: true, seedReserve: 1, maxActions: 32, maxBonemeal: 0 },
       reasonCode: "DETERMINISTIC_FARM_MAINTENANCE" };
   }
+  if (parsed.kind === "recover-drops") {
+    const skillVersion = advertisedVersion("recover.drops");
+    if (skillVersion === null) return null;
+    return {
+      action: "invoke_skill",
+      botId: request.botId,
+      taskId: request.taskId,
+      skillId: "recover.drops",
+      skillVersion,
+      input: {
+        target: {
+          x: parsed.x,
+          y: parsed.y,
+          z: parsed.z,
+          dimension,
+          serverProfileId: TRUSTED_SERVER_PROFILE_PLACEHOLDER,
+        },
+      },
+      reasonCode: "DETERMINISTIC_RECOVER_DROPS",
+    };
+  }
   if (parsed.kind === "move-to") {
     const skillVersion = advertisedVersion("movement.goto");
     if (skillVersion === null) return null;

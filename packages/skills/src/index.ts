@@ -31,6 +31,14 @@ export {
   combatEngageSkill,
 } from "./builtin/combat-control.js";
 export {
+  RECOVER_DROPS_MAX_DISTANCE,
+  RECOVER_DROPS_TIMEOUT_MS,
+  recoverDropsInputSchema,
+  recoverDropsOutputSchema,
+  recoverDropsSkill,
+  recoverDropsStateSchema,
+} from "./builtin/recover-drops.js";
+export {
   movementGotoSkill,
   SAFE_PATH_MAX_DISTANCE,
   SAFE_PATH_TIMEOUT_MS,

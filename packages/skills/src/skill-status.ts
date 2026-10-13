@@ -138,7 +138,7 @@ export type SkillStatusEntry = Readonly<{
 /**
  * 每个内建技能的证据位。**只允许在这里改布尔值，且改之前那道闸必须真的跑过。**
  *
- * 当前注册表包含四十八技能；证据中的 runtime-wiring=true 条目为 Partial，其余
+ * 当前注册表包含四十九技能；证据中的 runtime-wiring=true 条目为 Partial，其余
  * 规划/策略条目为 Experimental。唯一的例外是 stock.levels：纯函数技能（无
  * capability、state 被 strip 成 {}、无前置条件），L0 暂停对它按设计不生效，
  * 在为这类只读计算技能定义豁免语义之前它的 runtime-wiring 保持 false。
@@ -153,6 +153,10 @@ const EVIDENCE: Readonly<Record<string, SkillEvidence>> = Object.freeze({
   "movement.goto": {
     offlineTests: true, runtimeWiring: true,
     isolatedServerScenarios: true, crossVersionMatrix: false, knownDefects: [],
+  },
+  "recover.drops": {
+    offlineTests: true, runtimeWiring: true,
+    isolatedServerScenarios: false, crossVersionMatrix: false, knownDefects: [],
   },
   "travel.route": {
     offlineTests: true, runtimeWiring: true,

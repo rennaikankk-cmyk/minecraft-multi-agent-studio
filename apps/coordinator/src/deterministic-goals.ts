@@ -68,6 +68,13 @@ export type ParsedMovementGoal = Readonly<{
   z: number;
 }>;
 
+export type ParsedDropRecoveryGoal = Readonly<{
+  kind: "recover-drops";
+  x: number;
+  y: number;
+  z: number;
+}>;
+
 export type ParsedScanGoal = Readonly<{
   kind: "scan-block";
   blockName: string;
@@ -190,6 +197,7 @@ export type DeterministicGoal =
   | Readonly<{ kind: "explore-chunks"; x: number; z: number; radius: number }>
   | Readonly<{ kind: "maintain-farm"; crop: "carrots" | "potatoes" | "wheat" | "beetroots"; min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number } }>
   | ParsedAcquisitionGoal
+  | ParsedDropRecoveryGoal
   | ParsedMovementGoal
   | ParsedScanGoal
   | ParsedFoodGoal
@@ -221,6 +229,8 @@ export function parseDeterministicGoal(
     max: { x: Number(farm[5]), y: Number(farm[6]), z: Number(farm[7]) } };
   const acquisition = parseAcquisitionGoal(operatorGoal, plannedItemNames);
   if (acquisition !== null) return acquisition;
+  const recovery = parseDropRecoveryGoal(operatorGoal);
+  if (recovery !== null) return recovery;
   const movement = parseMovementGoal(operatorGoal);
   if (movement !== null) return movement;
   const scan = parseScanGoal(operatorGoal);
@@ -349,6 +359,26 @@ function boundedCount(value: number): number {
  * 协调器恢复模板："移动到坐标 x=A y=B z=C 附近"（尾部可带"继续观察 …"）。
  * 恰好一个坐标三元组才接受——多个坐标意味着语义不唯一，交回模型分支。
  */
+/**
+ * 死亡回收模板："移动到坐标 x=A y=B z=C 附近，回收死亡掉落物"。
+ * 必须先于普通移动模板识别，否则会被 movement.goto 的半径 2 停点吞掉。
+ * 坐标只接受整数：生存层下发前会四舍五入到方块。
+ */
+export function parseDropRecoveryGoal(operatorGoal: string): ParsedDropRecoveryGoal | null {
+  const match =
+    /^移动到坐标 x=(-?\d+) y=(-?\d+) z=(-?\d+) 附近，回收死亡掉落物$/u.exec(
+      operatorGoal.trim(),
+    );
+  if (match === null) return null;
+  const x = Number(match[1]);
+  const y = Number(match[2]);
+  const z = Number(match[3]);
+  if (![x, y, z].every((value) => Number.isSafeInteger(value))) return null;
+  if (y < -2_048 || y > 2_048) return null;
+  if (Math.abs(x) > 30_000_000 || Math.abs(z) > 30_000_000) return null;
+  return { kind: "recover-drops", x, y, z };
+}
+
 export function parseMovementGoal(operatorGoal: string): ParsedMovementGoal | null {
   if (!/移动到坐标/.test(operatorGoal)) return null;
   const triples = coordinateTriples(operatorGoal);

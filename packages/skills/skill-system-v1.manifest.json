@@ -1,12 +1,12 @@
 {
   "schemaVersion": "1.0",
   "generatedFrom": "packages/skills/src/v1-manifest.ts",
-  "totalSkills": 48,
+  "totalSkills": 49,
   "maturitySummary": {
     "L0": 0,
     "L1": 0,
     "L2": 6,
-    "L3": 38,
+    "L3": 39,
     "L4": 4,
     "L5": 0
   },
@@ -63,9 +63,56 @@
       ],
       "limitations": [
         "完成半径 ~4 格（模板锚点按停点动态折算）",
-        "死亡掉落回收依赖 coordinator DEATH_RECOVERY goal（同维度、15 分钟窗口）"
+        "死亡掉落回收不再把走到附近当成捡回，见 recover.drops"
       ],
       "ownerModule": "packages/skills/src/builtin/movement-goto.ts"
+    },
+    {
+      "skillId": "recover.drops",
+      "schemaVersion": "1.0.0",
+      "family": "survival",
+      "status": "Partial",
+      "maturityLevel": "L3",
+      "plannerReachability": "deterministic",
+      "runtimeCapabilities": [
+        "bot.move"
+      ],
+      "gameplayProfiles": [
+        "anarchy_first",
+        "standard"
+      ],
+      "minecraftRequirements": [],
+      "verifiedMinecraftVersions": [],
+      "progressContract": "RECOVERING",
+      "postconditionKind": null,
+      "recoveryStrategies": [
+        "REOBSERVE_THEN_RETRY",
+        "MOVE_CLOSER_THEN_RETRY",
+        "WAIT_FOR_SAFETY_CLEAR",
+        "ESCALATE_TO_OPERATOR",
+        "ABORT"
+      ],
+      "failureCodes": [
+        "BOT_NOT_ONLINE",
+        "BOT_POSITION_UNAVAILABLE",
+        "NORMAL_ACTIONS_PAUSED",
+        "TARGET_DIMENSION_MISMATCH",
+        "TARGET_OUT_OF_SAFE_RANGE",
+        "TARGET_SERVER_PROFILE_MISMATCH"
+      ],
+      "incidentHooks": [
+        "onFault->Incident(primary=root-cause)"
+      ],
+      "unitTested": true,
+      "runtimeWired": true,
+      "realScenarioIds": [],
+      "evidenceRefs": [],
+      "limitations": [
+        "只在 64 格安全寻路内接近死亡方块，并要求 6 格内不再有掉落物实体。",
+        "背包增量是捡回证据；现场仍有物品时失败，协调器不得把该次死亡记成已回收。",
+        "尚未在隔离服跑过真实掉落场景。"
+      ],
+      "ownerModule": "packages/skills/src/builtin/recover-drops.ts"
     },
     {
       "skillId": "travel.route",
