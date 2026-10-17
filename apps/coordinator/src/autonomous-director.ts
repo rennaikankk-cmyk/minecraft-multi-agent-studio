@@ -6,7 +6,7 @@ import {
   identifierSchema,
   type PublicBotDetailV1,
 } from "@minecraft-studio/protocol";
-import { scanBlocksOutputSchema, siteAssessOutputSchema, farmMaintainInputSchema, farmSustainInputSchema, cropRules, readFarmProduction, registerCropProduction, registerFoodProduction, farmProductionReady, recordFarmProduction, recoverDropsOutputSchema } from '@minecraft-studio/skills';
+import { scanBlocksOutputSchema, siteAssessOutputSchema, farmMaintainInputSchema, farmSustainInputSchema, cropRules, readFarmProduction, registerCropProduction, registerFoodProduction, farmProductionReady, recordFarmProduction, recoverDropsInputSchema, recoverDropsOutputSchema } from '@minecraft-studio/skills';
 import { plannedBlueprintAnchor, type BaseRegistry } from '@minecraft-studio/base-management';
 import { type FacilityRegistry } from '@minecraft-studio/asset-policy';
 import type { FacilityLease, FacilityLeaseAuthority } from "@minecraft-studio/skills";
@@ -148,6 +148,12 @@ type AutonomousPlanResult = Awaited<
   ReturnType<CoordinatorLocalPlanner["planAndDispatch"]>
 >;
 
+type DeathRecoveryAttempt = Readonly<
+  Pick<BotRegistryRecord, "botId" | "serverProfileId" | "runtimeInstanceId"> & {
+    death: NonNullable<NonNullable<BotRegistryRecord["currentStatus"]>["lastDeath"]>;
+  }
+>;
+
 /**
  * 死亡回收只有 recover.drops 回报“已到达且 6 格内没有剩余掉落物”才算完成。
  * movement.goto 走到附近也会 completed，不能据此把装备记成已经捡回。
@@ -279,8 +285,8 @@ export class AutonomousDirector implements AutonomousTaskSource {
   private readonly recentFailureKeys = new Map<string, string[]>();
   /** 聊天指挥队列：一次一条，作为自由目标下发（走模型分支）。 */
   private readonly chatQueue = new Map<string, Readonly<{ speaker: string; message: string; receivedAtMs: number }>>();
-  /** 已完成回收的死亡时间戳（diedAt），防止反复回同一个死点。 */
-  private readonly recoveredDeaths = new Map<string, Set<string>>();
+  /** 每 Bot 只需保存最近一次确认；保留服务器/维度，禁止跨世界复用回执。 */
+  private readonly recoveredDeaths = new Map<string, DeathRecoveryAttempt>();
   private readonly recoveryMemory = new SurvivalRecoveryMemory();
   private readonly productionRuns = new Map<string, string>();
   private readonly facilityLeases = new Map<string, FacilityLease>();
@@ -653,6 +659,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
     nowMs: number,
   ): AutonomousGoal | null {
     const focus = this.currentFocus.get(record.botId);
+    const recovered = this.recoveredDeaths.get(record.botId);
     const needs = [...assessSurvivalNeeds({
       record,
       now: new Date(nowMs),
@@ -661,9 +668,9 @@ export class AutonomousDirector implements AutonomousTaskSource {
       // 基地阶段真值（Phase 1）：BASE_* 需求的顺序门。快照恒供给——
       // 门全 false 时 survival-needs 整段静默（语义同未传入）。
       basePhase: this.basePhase.snapshotFor(record.botId),
-      recoveredDeaths: [
-        ...(this.recoveredDeaths.get(record.botId) ?? []),
-      ],
+      recoveredDeaths: recovered?.serverProfileId === record.serverProfileId &&
+        recovered.death.dimension === record.currentStatus?.lastDeath?.dimension
+        ? [recovered.death.diedAt] : [],
       // 战略评审给出的重心只做加权（score 上限钳到 95，不越过饿肚子级的
       // 硬需求），确保模型最多改变"先做什么"，永远改不掉"必须活着"。
       focusBoosts: focus ? FOCUS_NEED_BOOSTS[focus] : undefined,
@@ -1260,6 +1267,12 @@ export class AutonomousDirector implements AutonomousTaskSource {
     controller: AbortController,
   ): Promise<void> {
     const startedAt = validDate(this.now()).toISOString();
+    // 在任何 await 之前固定本次死亡，旧任务回执不能结算等待期间发生的新死亡。
+    const death = record.currentStatus?.lastDeath;
+    const recoveryAttempt: DeathRecoveryAttempt | null = goal.needKey === "DEATH_RECOVERY" && death
+      ? { botId: record.botId, serverProfileId: record.serverProfileId,
+        runtimeInstanceId: record.runtimeInstanceId, death: { ...death } }
+      : null;
     // 标题带"为什么"：Dashboard 里直接能看到 WOOD_RESERVE 3/16 这种依据，
     // 而不是一行 walking。
     const taskTitle = `自主任务: ${goal.title}（${goal.reason}）`;
@@ -1338,7 +1351,7 @@ export class AutonomousDirector implements AutonomousTaskSource {
       if (
         goal.needKey === "DEATH_RECOVERY" &&
         status === "completed" &&
-        !deathRecoveryConfirmed(result)
+        !this.confirmDeathRecovery(recoveryAttempt, taskId, result)
       ) {
         status = "failed";
         reportedFailure = "DROPS_NOT_CONFIRMED";
@@ -1705,6 +1718,51 @@ export class AutonomousDirector implements AutonomousTaskSource {
     });
   }
 
+  private confirmDeathRecovery(
+    attempt: DeathRecoveryAttempt | null,
+    taskId: string,
+    result: AutonomousPlanResult,
+  ): boolean {
+    if (!attempt || result.action !== "skill_result" || !deathRecoveryConfirmed(result)) return false;
+    const now = validDate(this.now());
+    const latest = this.options.registry.get(attempt.botId, now);
+    const death = latest?.currentStatus?.lastDeath;
+    if (
+      !latest || !death || latest.connectionState !== "online" ||
+      latest.serverProfileId !== attempt.serverProfileId ||
+      latest.runtimeInstanceId !== attempt.runtimeInstanceId ||
+      latest.currentStatus?.position.dimension !== attempt.death.dimension ||
+      death.diedAt !== attempt.death.diedAt || death.dimension !== attempt.death.dimension ||
+      death.x !== attempt.death.x || death.y !== attempt.death.y || death.z !== attempt.death.z
+    ) return false;
+
+    const invoked = result.invocation;
+    const returned = result.result;
+    if (returned.payload.outcome !== "completed") return false;
+    const input = recoverDropsInputSchema.safeParse(invoked.payload.input);
+    const output = recoverDropsOutputSchema.safeParse(returned.payload.output);
+    if (!input.success || !output.success) return false;
+    const target = input.data.target;
+    // 回收动作与结果必须属于派发的这一次任务和死亡位置，不能只看 completed。
+    if (
+      invoked.botId !== attempt.botId || returned.botId !== attempt.botId ||
+      invoked.taskId !== taskId || returned.taskId !== taskId ||
+      returned.source.instanceId !== attempt.runtimeInstanceId ||
+      returned.payload.skillId !== "recover.drops" ||
+      invoked.payload.invocationId !== returned.payload.invocationId ||
+      invoked.payload.skillVersion !== returned.payload.skillVersion ||
+      target.serverProfileId !== attempt.serverProfileId || target.dimension !== attempt.death.dimension ||
+      target.x !== Math.round(attempt.death.x) || target.y !== Math.round(attempt.death.y) ||
+      target.z !== Math.round(attempt.death.z) ||
+      output.data.finalPosition.serverProfileId !== attempt.serverProfileId ||
+      output.data.finalPosition.dimension !== attempt.death.dimension
+    ) return false;
+
+    this.recoveredDeaths.set(attempt.botId, attempt);
+    this.recoveryMemory.observe(latest, now.getTime(), true);
+    return true;
+  }
+
   private finishTask(
     botId: string,
     taskId: string,
@@ -1765,15 +1823,6 @@ export class AutonomousDirector implements AutonomousTaskSource {
               phase: gated,
             });
           }
-        }
-      }
-      if (goal.needKey === "DEATH_RECOVERY") {
-        const record = this.options.registry.get(botId, validDate(this.now()));
-        const diedAt = record?.currentStatus?.lastDeath?.diedAt;
-        if (diedAt) {
-          const set = this.recoveredDeaths.get(botId) ?? new Set<string>();
-          set.add(diedAt);
-          this.recoveredDeaths.set(botId, set);
         }
       }
     } else if (status === "failed") {

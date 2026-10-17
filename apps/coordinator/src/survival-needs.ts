@@ -154,7 +154,7 @@ const DIAMOND_PICKAXE_RESERVE = 3;
 export class SurvivalRecoveryMemory {
   private readonly entries = new Map<string, { seen: string; deaths: number[] }>();
 
-  observe(record: BotRegistryRecord, nowMs: number, arrived: boolean): number {
+  observe(record: BotRegistryRecord, nowMs: number, recoveryConfirmed: boolean): number {
     const diedAt = record.currentStatus?.lastDeath?.diedAt;
     if (!diedAt) return 0;
     const key = JSON.stringify([record.serverProfileId, record.botId]);
@@ -165,14 +165,12 @@ export class SurvivalRecoveryMemory {
       entry.deaths.push(at);
     }
     entry.seen = diedAt;
-    if (arrived) entry.deaths = [];
+    if (recoveryConfirmed) entry.deaths = [];
     this.entries.set(key, entry);
     return entry.deaths.length;
   }
 }
 const DEATH_RECOVERY_WINDOW_MS = 15 * 60_000;
-/** 距死点多近算"已到达"（掉落物碰撞拾取半径外扩）。 */
-const DEATH_RECOVERY_ARRIVAL_BLOCKS = 6;
 
 import { PICKAXE_BY_TIER } from "@minecraft-studio/skills";
 const PICKAXE_TIERS = ["wooden_pickaxe", "stone_pickaxe", "iron_pickaxe", "diamond_pickaxe"] as const;
@@ -203,13 +201,18 @@ export function assessSurvivalNeeds(
   }
 
   // ---- 死亡点回收：装备掉在原地。目标文本必须走 recover.drops，
-  // 走近并确认 6 格内没有剩余掉落物才算捡回。15 分钟内、未回收过、
-  // 还没站到死亡点上的同维度死亡点才进入需求。
+  // 走近并确认 6 格内没有剩余掉落物才算处理完成。距离再近也需要回收
+  // 回执；到达、背包满或寻路中断都不能清零连续死亡计数。
   const lastDeath = status?.lastDeath ?? null;
+  const recoveryConfirmed = lastDeath !== null &&
+    (input.recoveredDeaths ?? []).includes(lastDeath.diedAt);
+  const deathStreak = input.recoveryMemory?.observe(
+    input.record, now.getTime(), recoveryConfirmed,
+  ) ?? 1;
   if (
     lastDeath &&
     status?.position &&
-    !(input.recoveredDeaths ?? []).includes(lastDeath.diedAt)
+    !recoveryConfirmed
   ) {
     const deathAgeMs = Date.parse(lastDeath.diedAt);
     // P0-A7: 跨维度不导航——下界坐标拿到主世界走是致命错误
@@ -219,15 +222,11 @@ export function assessSurvivalNeeds(
       status.position.y - lastDeath.y,
       status.position.z - lastDeath.z,
     ) : Infinity;
-    // streak 接线：新死亡记一次；到达死点（已捡回）则清零。
-    const deathStreak = input.recoveryMemory?.observe(input.record, now.getTime(),
-      sameDimension && distance <= DEATH_RECOVERY_ARRIVAL_BLOCKS) ?? 1;
     if (
       sameDimension &&
       Number.isFinite(deathAgeMs) &&
       now.getTime() >= deathAgeMs &&
-      now.getTime() - deathAgeMs <= DEATH_RECOVERY_WINDOW_MS &&
-      distance > DEATH_RECOVERY_ARRIVAL_BLOCKS
+      now.getTime() - deathAgeMs <= DEATH_RECOVERY_WINDOW_MS
     ) {
       // Phase 1d：用 assessDropRecovery 做价值/风险/streak 评估。
       // 门禁 3：优先用死亡时刻快照（droppedItems/xpPoints）；快照缺失

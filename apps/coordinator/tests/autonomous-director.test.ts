@@ -9,6 +9,133 @@ import { applyOperatorBaseAssignments } from "../src/operator-base-assignments.j
 const NOW = new Date("2026-08-28T00:00:00.000Z");
 
 describe("AutonomousDirector", () => {
+  it("requires a pickup receipt even when the Bot is already near its death point", async () => {
+    const fixture = deathRecoveryFixture();
+    fixture.setRecord({ ...fixture.record(), currentStatus: {
+      ...fixture.record().currentStatus!, position: { x: 19, y: 64, z: 0, dimension: "minecraft:overworld" },
+    } });
+    fixture.director.start();
+    try {
+      await flushDirector();
+      expect(fixture.planAndDispatch).toHaveBeenCalledTimes(1);
+      expect(fixture.planAndDispatch.mock.calls[0]?.[0].operatorGoal).toContain("回收死亡掉落物");
+      fixture.finish();
+      await flushDirector();
+      expect(fixture.director.getCurrentTask(fixture.record().botId)?.status).toBe("completed");
+      fixture.kick();
+      await flushDirector();
+      expect(fixture.planAndDispatch.mock.calls[1]?.[0].operatorGoal).not.toContain("回收死亡掉落物");
+    } finally {
+      await fixture.director.stop();
+    }
+  });
+
+  it.each(["death", "runtime", "server", "dimension"] as const)(
+    "rejects a late pickup receipt after the %s changes and keeps recovery pending",
+    async (change) => {
+      const fixture = deathRecoveryFixture();
+      fixture.director.start();
+      try {
+        await flushDirector();
+        const previous = fixture.record();
+        if (change === "death") {
+          fixture.setRecord({ ...previous, currentStatus: { ...previous.currentStatus!, lastDeath: {
+            ...previous.currentStatus!.lastDeath!, x: 24, diedAt: NOW.toISOString(),
+          } } });
+        } else if (change === "runtime") {
+          fixture.setRecord({ ...previous, runtimeInstanceId: "new-runtime" });
+        } else if (change === "server") {
+          fixture.setRecord({ ...previous, serverProfileId: "other-server" });
+        } else {
+          fixture.setRecord({ ...previous, currentStatus: { ...previous.currentStatus!, position: {
+            ...previous.currentStatus!.position, dimension: "minecraft:the_nether",
+          } } });
+        }
+        fixture.finish();
+        await flushDirector();
+        expect(fixture.director.getCurrentTask(previous.botId)?.status).toBe("failed");
+        if (change === "dimension") fixture.setRecord(previous);
+        fixture.kick();
+        await flushDirector();
+        expect(fixture.planAndDispatch.mock.calls[1]?.[0].operatorGoal).toContain("回收死亡掉落物");
+      } finally {
+        await fixture.director.stop();
+      }
+    },
+  );
+
+  it.each(["target", "task", "bot", "runtime", "invocation", "version", "output-scope", "skill", "remaining-drops"] as const)(
+    "does not accept a pickup receipt with a mismatched %s",
+    async (mismatch) => {
+      const fixture = deathRecoveryFixture((receipt) => {
+        if (mismatch === "target") receipt.invocation.payload.input.target.x += 1;
+        else if (mismatch === "task") receipt.result.taskId = "other-task";
+        else if (mismatch === "bot") receipt.result.botId = "other-bot";
+        else if (mismatch === "runtime") receipt.result.source.instanceId = "other-runtime";
+        else if (mismatch === "invocation") receipt.result.payload.invocationId = "other-invocation";
+        else if (mismatch === "version") receipt.result.payload.skillVersion = "2.0.0";
+        else if (mismatch === "output-scope") receipt.result.payload.output.finalPosition.serverProfileId = "other-server";
+        else if (mismatch === "skill") receipt.result.payload.skillId = "movement.goto";
+        else receipt.result.payload.output.stillNearby = 1;
+      });
+      fixture.director.start();
+      try {
+        await flushDirector();
+        fixture.finish();
+        await flushDirector();
+        expect(fixture.director.getCurrentTask(fixture.record().botId)?.status).toBe("failed");
+        fixture.kick();
+        await flushDirector();
+        expect(fixture.planAndDispatch.mock.calls[1]?.[0].operatorGoal).toContain("回收死亡掉落物");
+      } finally {
+        await fixture.director.stop();
+      }
+    },
+  );
+
+  it.each(["server", "dimension"] as const)("scopes a confirmed death to its %s", async (scope) => {
+    const fixture = deathRecoveryFixture();
+    fixture.director.start();
+    try {
+      await flushDirector();
+      fixture.finish();
+      await flushDirector();
+      expect(fixture.director.getCurrentTask(fixture.record().botId)?.status).toBe("completed");
+      const previous = fixture.record();
+      fixture.setRecord(scope === "server"
+        ? { ...previous, serverProfileId: "other-server" }
+        : { ...previous, currentStatus: { ...previous.currentStatus!,
+          position: { ...previous.currentStatus!.position, dimension: "minecraft:the_nether" },
+          lastDeath: { ...previous.currentStatus!.lastDeath!, dimension: "minecraft:the_nether" },
+        } });
+      fixture.kick();
+      await flushDirector();
+      expect(fixture.planAndDispatch.mock.calls[1]?.[0].operatorGoal).toContain("回收死亡掉落物");
+    } finally {
+      await fixture.director.stop();
+    }
+  });
+
+  it("resets the streak on a valid receipt before the next death is observed", async () => {
+    const fixture = deathRecoveryFixture();
+    fixture.director.start();
+    try {
+      await flushDirector();
+      fixture.finish();
+      await flushDirector();
+      const previous = fixture.record();
+      fixture.setRecord({ ...previous, currentStatus: { ...previous.currentStatus!, lastDeath: {
+        ...previous.currentStatus!.lastDeath!, diedAt: NOW.toISOString(),
+        droppedItems: [{ itemId: "iron_pickaxe", count: 1 }],
+      } } });
+      fixture.kick();
+      await flushDirector();
+      expect(fixture.planAndDispatch.mock.calls[1]?.[0].operatorGoal).toContain("回收死亡掉落物");
+    } finally {
+      await fixture.director.stop();
+    }
+  });
+
   it("assigns one farmer per facility, persists receipts, and rechecks after growth", async () => {
     const records = [readyRecord("farmer-1"), readyRecord("farmer-2")];
     for (const record of records) {
@@ -836,6 +963,55 @@ describe("AutonomousDirector", () => {
 async function flushDirector(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
   await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+function recoveryReceipt(record: BotRegistryRecord, taskId: string) {
+  const death = record.currentStatus!.lastDeath!;
+  const target = { x: Math.round(death.x), y: Math.round(death.y), z: Math.round(death.z),
+    dimension: death.dimension, serverProfileId: record.serverProfileId };
+  return {
+    action: "skill_result" as const, reasonCode: "DETERMINISTIC_RECOVER_DROPS", ai: null,
+    invocation: { botId: record.botId, taskId, payload: {
+      skillId: "recover.drops", skillVersion: "1.0.0", invocationId: "pickup-test",
+      input: { target },
+    } },
+    result: { botId: record.botId, taskId, source: { instanceId: record.runtimeInstanceId }, payload: {
+      skillId: "recover.drops", skillVersion: "1.0.0", invocationId: "pickup-test", outcome: "completed" as const,
+      output: { reached: true as const, finalPosition: { ...target }, distanceToTarget: 0,
+        recovered: [{ itemId: "diamond", count: 2 }], stillNearby: 0, expectedMissing: [] },
+    } },
+  };
+}
+
+function deathRecoveryFixture(mutate?: (receipt: ReturnType<typeof recoveryReceipt>) => void) {
+  let current = readyRecord("recover-bot");
+  current.currentStatus!.lastDeath = { x: 20, y: 64, z: 0, dimension: "minecraft:overworld",
+    diedAt: new Date(NOW.getTime() - 10_000).toISOString(),
+    droppedItems: [{ itemId: "diamond", count: 10 }],
+  };
+  let nowMs = NOW.getTime();
+  let finish: (() => void) | undefined;
+  let first = true;
+  const registry = { list: () => [current], get: () => current, subscribe: vi.fn(() => () => undefined) };
+  const planAndDispatch = vi.fn(async (request: { operatorGoal: string; taskId: string; signal?: AbortSignal }) => {
+    if (!first) return noopPlanResult();
+    first = false;
+    const receipt = recoveryReceipt(current, request.taskId);
+    mutate?.(receipt);
+    await new Promise<void>((resolve) => {
+      finish = resolve;
+      request.signal?.addEventListener("abort", () => resolve(), { once: true });
+    });
+    return receipt as never;
+  });
+  const director = new AutonomousDirector({ registry, planner: { planAndDispatch }, intervalMs: 60_000,
+    goalTimeoutMs: 60_000, failureCooldownMs: 5_000, terminalRetentionMs: 10_000,
+    now: () => new Date(nowMs), randomId: uuidSequence() });
+  return { director, planAndDispatch, record: () => current,
+    setRecord: (record: BotRegistryRecord) => { current = record; },
+    finish: () => { finish?.(); },
+    kick: () => { nowMs += 61_000; registrySubscribeKick(registry, current); },
+  };
 }
 
 function noopPlanResult(): never {
