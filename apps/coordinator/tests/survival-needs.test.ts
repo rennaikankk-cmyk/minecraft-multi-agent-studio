@@ -218,7 +218,7 @@ describe("assessSurvivalNeeds", () => {
     });
   });
 
-  it("drops death recovery once the bot has reached the drop point", () => {
+  it("keeps death recovery near the drop point until pickup is confirmed", () => {
     const diedAt = new Date(Date.now() - 2 * 60_000).toISOString();
     const needs = assess({
       inventory: [],
@@ -226,7 +226,43 @@ describe("assessSurvivalNeeds", () => {
       position: { x: 118, y: 64, z: -78 },
       lastDeath: { x: 120, y: 64, z: -80, dimension: "minecraft:overworld", diedAt },
     });
-    expect(needs.find((n) => n.key === "DEATH_RECOVERY")).toBeUndefined();
+    expect(needs.find((n) => n.key === "DEATH_RECOVERY")).toBeDefined();
+  });
+
+  it("does not reset the death streak merely by standing near the drops", () => {
+    const memory = new SurvivalRecoveryMemory();
+    const bot = record([], 20, 0, { x: 0, y: 64, z: 0 });
+    for (let i = 1; i <= 3; i++) {
+      bot.currentStatus = { ...bot.currentStatus!, lastDeath: {
+        x: 2, y: 64, z: 0, dimension: "minecraft:overworld",
+        diedAt: new Date(NOW.getTime() - 10_000 + i).toISOString(),
+        droppedItems: [{ itemId: "diamond", count: 10 }],
+      } };
+      const needs = assessSurvivalNeeds({ record: bot, shelterBuilt: true, now: NOW, recoveryMemory: memory });
+      expect(memory.observe(bot, NOW.getTime(), false)).toBe(i);
+      expect(needs.some((n) => n.key === "DEATH_RECOVERY")).toBe(i < 3);
+    }
+  });
+
+  it("resets the streak only after a confirmed recovery and permits a later death", () => {
+    const memory = new SurvivalRecoveryMemory();
+    const bot = record([], 20, 0);
+    const diedAt = new Date(NOW.getTime() - 1_000).toISOString();
+    bot.currentStatus = { ...bot.currentStatus!, lastDeath: {
+      x: 20, y: 64, z: 0, dimension: "minecraft:overworld", diedAt,
+    } };
+    expect(memory.observe(bot, NOW.getTime(), false)).toBe(1);
+    const needs = assessSurvivalNeeds({ record: bot, shelterBuilt: true, now: NOW,
+      recoveryMemory: memory, recoveredDeaths: [diedAt] });
+    expect(needs.some((n) => n.key === "DEATH_RECOVERY")).toBe(false);
+    expect(memory.observe(bot, NOW.getTime(), false)).toBe(0);
+    bot.currentStatus = { ...bot.currentStatus!, lastDeath: {
+      ...bot.currentStatus!.lastDeath!, diedAt: NOW.toISOString(),
+    } };
+    const nextNeeds = assessSurvivalNeeds({ record: bot, shelterBuilt: true, now: NOW,
+      recoveryMemory: memory, recoveredDeaths: [diedAt] });
+    expect(nextNeeds.some((n) => n.key === "DEATH_RECOVERY")).toBe(true);
+    expect(memory.observe(bot, NOW.getTime(), false)).toBe(1);
   });
 
   it("values the death-time snapshot over the emptied post-respawn inventory", () => {
