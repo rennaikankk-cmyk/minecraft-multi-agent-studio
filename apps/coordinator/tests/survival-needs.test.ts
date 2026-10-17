@@ -37,12 +37,12 @@ describe("assessSurvivalNeeds", () => {
     const bot = record([], 20, 0);
     for (let i = 1; i <= 3; i++) {
       bot.currentStatus = { ...bot.currentStatus!, lastDeath: { x: 100, y: 64, z: 0, dimension: "minecraft:overworld", diedAt: new Date(NOW.getTime() - 10_000 + i).toISOString() } };
-      expect(memory.observe(bot, NOW.getTime(), false)).toBe(i);
+      expect(memory.observe(bot, NOW.getTime())).toBe(i);
     }
-    expect(memory.observe({ ...bot, botId: "second" }, NOW.getTime(), false)).toBe(1);
-    expect(memory.observe({ ...bot, serverProfileId: "second-server" }, NOW.getTime(), false)).toBe(1);
-    expect(memory.observe(bot, NOW.getTime(), false)).toBe(3);
-    expect(memory.observe(bot, NOW.getTime() + 300_000, false)).toBe(0);
+    expect(memory.observe({ ...bot, botId: "second" }, NOW.getTime())).toBe(1);
+    expect(memory.observe({ ...bot, serverProfileId: "second-server" }, NOW.getTime())).toBe(1);
+    expect(memory.observe(bot, NOW.getTime())).toBe(3);
+    expect(memory.observe(bot, NOW.getTime() + 300_000)).toBe(0);
   });
   it("bootstraps a fresh spawn onto the tool ladder before food topping-up", () => {
     const needs = assess({ inventory: [], foodLevel: 20 });
@@ -218,7 +218,7 @@ describe("assessSurvivalNeeds", () => {
     });
   });
 
-  it("drops death recovery once the bot has reached the drop point", () => {
+  it("keeps death recovery near the drop until a verified receipt confirms it", () => {
     const diedAt = new Date(Date.now() - 2 * 60_000).toISOString();
     const needs = assess({
       inventory: [],
@@ -226,7 +226,32 @@ describe("assessSurvivalNeeds", () => {
       position: { x: 118, y: 64, z: -78 },
       lastDeath: { x: 120, y: 64, z: -80, dimension: "minecraft:overworld", diedAt },
     });
-    expect(needs.find((n) => n.key === "DEATH_RECOVERY")).toBeUndefined();
+    expect(needs.find((n) => n.key === "DEATH_RECOVERY")).toBeDefined();
+    const bot = record([], 20, 0, { x: 120, y: 64, z: -80 }, {
+      x: 120, y: 64, z: -80, dimension: "minecraft:overworld", diedAt,
+    });
+    expect(assessSurvivalNeeds({ record: bot, shelterBuilt: false })
+      .some((need) => need.key === "DEATH_RECOVERY")).toBe(true);
+    expect(assessSurvivalNeeds({ record: bot, shelterBuilt: false, recoveredDeaths: [diedAt] })
+      .some((need) => need.key === "DEATH_RECOVERY")).toBe(false);
+  });
+
+  it("does not erase repeated deaths when respawning near the death point", () => {
+    const memory = new SurvivalRecoveryMemory();
+    const bot = record([], 20, 0, { x: 4, y: 64, z: 0 });
+    for (let i = 1; i <= 3; i++) {
+      bot.currentStatus!.lastDeath = {
+        x: 4, y: 64, z: 0, dimension: "minecraft:overworld",
+        diedAt: new Date(NOW.getTime() - 10_000 + i).toISOString(),
+        droppedItems: [{ itemId: "diamond", count: 10 }],
+      };
+      const needs = assessSurvivalNeeds({ record: bot, shelterBuilt: false, recoveryMemory: memory, now: NOW });
+      expect(needs.some((need) => need.key === "DEATH_RECOVERY")).toBe(i < 3);
+    }
+    // 离开死亡点也不能绕过连续死亡保护。
+    bot.currentStatus!.position.x = 20;
+    expect(assessSurvivalNeeds({ record: bot, shelterBuilt: false, recoveryMemory: memory, now: NOW })
+      .some((need) => need.key === "DEATH_RECOVERY")).toBe(false);
   });
 
   it("values the death-time snapshot over the emptied post-respawn inventory", () => {

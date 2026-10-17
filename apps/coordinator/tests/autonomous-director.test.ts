@@ -241,6 +241,91 @@ describe("AutonomousDirector", () => {
     );
   });
 
+  it("retries a failed pickup at the death point and stops only after confirmation", async () => {
+    const record = readyRecord("recovery-bot");
+    record.currentStatus!.lastDeath = {
+      x: 12, y: 64, z: 0, dimension: "minecraft:overworld", diedAt: NOW.toISOString(),
+    };
+    const registry = { list: () => [record], get: () => record, subscribe: vi.fn(() => () => undefined) };
+    let nowMs = NOW.getTime();
+    let attempts = 0;
+    const planAndDispatch = vi.fn(async ({ operatorGoal, taskId }: { operatorGoal: string; taskId: string }) => {
+      if (!operatorGoal.includes("回收死亡掉落物")) return noopPlanResult();
+      record.currentStatus!.position.x = 12;
+      if (++attempts === 1) return failedPlanResult("DROPS_STILL_PRESENT");
+      return recoveryPlanResult(record, taskId);
+    });
+    const director = new AutonomousDirector({ registry, planner: { planAndDispatch },
+      intervalMs: 60_000, goalTimeoutMs: 60_000, failureCooldownMs: 5_000,
+      terminalRetentionMs: 10_000, now: () => new Date(nowMs), randomId: uuidSequence() });
+    try {
+      director.start();
+      await flushDirector();
+      expect(director.getCurrentTask(record.botId)?.status).toBe("failed");
+      nowMs += 11_000;
+      registrySubscribeKick(registry, record);
+      await flushDirector();
+      expect(attempts).toBe(2);
+      expect(director.getCurrentTask(record.botId)?.status).toBe("completed");
+      nowMs += 11_000;
+      registrySubscribeKick(registry, record);
+      await flushDirector();
+      expect(attempts).toBe(2);
+    } finally {
+      await director.stop();
+    }
+  });
+
+  it.each(["new-death", "other-server", "other-dimension"] as const)(
+    "does not let an old recovery receipt suppress %s", async (change) => {
+      const record = readyRecord("recovery-bot");
+      record.currentStatus!.lastDeath = {
+        x: 12, y: 64, z: 0, dimension: "minecraft:overworld", diedAt: NOW.toISOString(),
+        droppedItems: [{ itemId: "diamond", count: 10 }],
+      };
+      const registry = { list: () => [record], get: () => record, subscribe: vi.fn(() => () => undefined) };
+      let nowMs = NOW.getTime();
+      let finish: (() => void) | undefined;
+      const planAndDispatch = vi.fn(async ({ operatorGoal, taskId }: { operatorGoal: string; taskId: string }) => {
+        if (!operatorGoal.includes("回收死亡掉落物")) return noopPlanResult();
+        if (finish) return failedPlanResult("DROPS_STILL_PRESENT");
+        const receipt = recoveryPlanResult(record, taskId);
+        await new Promise<void>((resolve) => { finish = resolve; });
+        return receipt;
+      });
+      const director = new AutonomousDirector({ registry, planner: { planAndDispatch },
+        intervalMs: 60_000, goalTimeoutMs: 60_000, failureCooldownMs: 5_000,
+        terminalRetentionMs: 10_000, now: () => new Date(nowMs), randomId: uuidSequence() });
+      try {
+        director.start();
+        await flushDirector();
+        expect(planAndDispatch).toHaveBeenCalledTimes(1);
+        // 模拟 await 期间同一个 registry 对象被新遥测更新。
+        if (change === "new-death") {
+          record.currentStatus!.lastDeath = { ...record.currentStatus!.lastDeath!, x: 24,
+            diedAt: new Date(nowMs + 1_000).toISOString() };
+        } else if (change === "other-server") {
+          record.serverProfileId = "another-isolated-server";
+          record.currentStatus!.serverProfileId = record.serverProfileId;
+        } else {
+          record.currentStatus!.lastDeath = { ...record.currentStatus!.lastDeath!, dimension: "minecraft:the_nether" };
+          record.currentStatus!.position.dimension = "minecraft:the_nether";
+        }
+        finish!();
+        await flushDirector();
+        nowMs += 11_000;
+        registrySubscribeKick(registry, record);
+        await flushDirector();
+        expect(planAndDispatch).toHaveBeenCalledTimes(2);
+        expect(planAndDispatch.mock.calls[1]![0].operatorGoal).toContain("回收死亡掉落物");
+        if (change === "new-death") expect(planAndDispatch.mock.calls[1]![0].operatorGoal).toContain("x=24");
+      } finally {
+        finish?.();
+        await director.stop();
+      }
+    },
+  );
+
   it("schedules a healthy Bot when max health is unknown in live telemetry", async () => {
     const record = readyRecord("studio-bot-01", null);
     const registry = {
@@ -866,6 +951,16 @@ function completedPlanResult(skillId: string, output: unknown, context?: { recor
       payload: { skillId, invocationId: "test-invocation", skillVersion: "1.0.0", outcome: "completed", output } },
     ai: {},
   } as never;
+}
+
+function recoveryPlanResult(record: BotRegistryRecord, taskId: string): never {
+  const death = record.currentStatus!.lastDeath!;
+  const target = { x: Math.round(death.x), y: Math.round(death.y), z: Math.round(death.z),
+    dimension: death.dimension, serverProfileId: record.serverProfileId };
+  return completedPlanResult("recover.drops", {
+    reached: true, finalPosition: target, distanceToTarget: 0,
+    recovered: [{ itemId: "diamond", count: 2 }], stillNearby: 0, expectedMissing: [],
+  }, { record, taskId, input: { target } });
 }
 
 /** Every survival need satisfied except SHELTER (memory-gated, starts false). */
